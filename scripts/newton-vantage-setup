@@ -1,0 +1,1070 @@
+#!/usr/bin/env bash
+# Install and verify Newton's restricted scan identity on a vantage host.
+set -euo pipefail
+
+PATH=${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}
+export PATH
+
+INVENTORY=${NEWTON_INVENTORY:-/var/lib/newton/devices.toml}
+SCAN_SOURCE=${NEWTON_SCAN_SOURCE:-/opt/newton/scripts/newton-scan}
+CHECK_SOURCE=${NEWTON_VANTAGE_CHECK_SOURCE:-/opt/newton/scripts/newton-vantage-check}
+ASKPASS=
+CHECK_DIR=
+ZONE_RECORDS=
+ZONE_COUNT=0
+TARGET_RECORDS=
+TARGET_COUNT=0
+
+cleanup() {
+	[[ -z $ASKPASS ]] || rm -f -- "$ASKPASS"
+	[[ -z $CHECK_DIR ]] || rm -rf -- "$CHECK_DIR"
+}
+trap cleanup EXIT HUP INT TERM
+
+die() {
+	printf 'error: %s\n' "$*" >&2
+	exit 2
+}
+
+usage() {
+	printf 'usage: newton-vantage-setup <vantage> install|check|install-client-checks|check-client-checks\n' >&2
+	exit 2
+}
+
+[[ $# -eq 2 ]] || usage
+VANTAGE=$1
+ACTION=$2
+[[ $VANTAGE =~ ^[a-z][a-z0-9-]{0,31}$ ]] || die "bad vantage: $VANTAGE"
+case $ACTION in
+	install|check|install-client-checks|check-client-checks) ;;
+	*) usage ;;
+esac
+
+load_inventory() {
+	local out line key value
+	if ! out=$(python3 - "$INVENTORY" "$VANTAGE" <<'PYEOF'
+import os
+import re
+import stat
+import sys
+import tomllib
+
+inventory, name = sys.argv[1], sys.argv[2]
+
+def fail(message):
+    print("error: " + message, file=sys.stderr)
+    raise SystemExit(2)
+
+# Same checks as mcp/newton_mcp/inventory_file.py, with the same wording,
+# so an operator sees one set of messages.  A missing file is not a refusal
+# here: the read below keeps its own "cannot read inventory" message.
+try:
+    info = os.lstat(inventory)
+except FileNotFoundError:
+    info = None
+except OSError as exc:
+    fail("inventory file cannot be inspected: {}".format(exc.strerror))
+
+if info is not None:
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        fail("inventory file must be a regular file, not a symlink")
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        fail("inventory file must not be group- or world-writable (run: chmod go-w {})".format(inventory))
+    if info.st_uid != os.geteuid():
+        fail("inventory file must be owned by the user running the MCP server")
+
+try:
+    with open(inventory, "rb") as handle:
+        data = tomllib.load(handle)
+except Exception as exc:
+    fail("cannot read inventory {}: {}".format(inventory, exc))
+
+vantages = data.get("vantages", {})
+if not isinstance(vantages, dict) or name not in vantages:
+    fail("unknown vantage: {}".format(name))
+entry = vantages[name]
+if not isinstance(entry, dict):
+    fail("vantage {} is not a table".format(name))
+
+allowed = {
+    "host", "user", "key_file", "known_hosts", "proxy_command", "role",
+    "devices", "admin_key", "admin_password_file", "zones", "check_targets",
+}
+unknown = sorted(set(entry) - allowed)
+if unknown:
+    fail("unknown keys for {}: {}".format(name, ", ".join(unknown)))
+
+host = entry.get("host")
+if not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9._:-]+", host):
+    fail("bad host for {}".format(name))
+user = entry.get("user")
+if not isinstance(user, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", user):
+    fail("bad user for {}".format(name))
+
+path_re = re.compile(r"[A-Za-z0-9_./-]+")
+def path(name_):
+    value = entry.get(name_, "")
+    if not isinstance(value, str) or (value and not path_re.fullmatch(value)):
+        fail("bad {} for {}".format(name_, name))
+    return value
+
+key_file = path("key_file")
+known_hosts = path("known_hosts")
+admin_key = path("admin_key")
+admin_password_file = path("admin_password_file")
+if not key_file or not known_hosts:
+    fail("key_file and known_hosts are required for {}".format(name))
+if bool(admin_key) == bool(admin_password_file):
+    fail("exactly one of admin_key and admin_password_file is required for {}".format(name))
+
+proxy = entry.get("proxy_command", "")
+if not isinstance(proxy, str) or "\n" in proxy or "\r" in proxy or len(proxy) > 1024:
+    fail("bad proxy_command for {}".format(name))
+# Same allowlist as newton_mcp.adapters.ssh_cli.PROXY_COMMAND_RE: the value
+# reaches ssh as -o ProxyCommand=<value>, so anything a shell could act on
+# is refused.
+if proxy and not re.fullmatch(r"[A-Za-z0-9 _./:@%~=,+-]{1,512}", proxy):
+    fail("bad proxy_command for {}".format(name))
+role = entry.get("role")
+if role not in ("inside", "outside"):
+    fail("bad role for {}".format(name))
+devices = entry.get("devices")
+if (
+    not isinstance(devices, list)
+    or not 1 <= len(devices) <= 64
+    or any(not isinstance(item, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", item) for item in devices)
+    or len(set(devices)) != len(devices)
+):
+    fail("bad devices for {}".format(name))
+
+for key, value in (
+    ("host", host), ("user", user), ("key_file", key_file),
+    ("known_hosts", known_hosts), ("proxy", proxy), ("role", role),
+    ("devices", ",".join(devices)), ("admin_key", admin_key),
+    ("admin_password_file", admin_password_file),
+):
+    print(key + "=" + value)
+
+# The client checks need the zones this vantage can answer for and the
+# networks its forced command may probe.  Both are optional: a vantage
+# that only scans has neither.
+ZONE_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
+IFACE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}")
+NETNS_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+OCTET_RE = re.compile(r"0|[1-9][0-9]{0,2}")
+DEFAULT_CHECK_TARGETS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"]
+
+
+def valid_ipv4(value):
+    if not isinstance(value, str):
+        return False
+    parts = value.split(".")
+    if len(parts) != 4:
+        return False
+    for part in parts:
+        if not OCTET_RE.fullmatch(part) or int(part) > 255:
+            return False
+    return True
+
+
+def valid_cidr(value):
+    if not isinstance(value, str) or value.count("/") != 1:
+        return False
+    addr, prefix = value.split("/")
+    if not valid_ipv4(addr):
+        return False
+    if not re.fullmatch(r"(?:[89]|[1-9][0-9])", prefix):
+        return False
+    return 8 <= int(prefix) <= 32
+
+
+zones = entry.get("zones", [])
+if not isinstance(zones, list) or len(zones) > 16:
+    fail("bad zones for {}".format(name))
+seen_zones = set()
+for zone in zones:
+    if not isinstance(zone, dict):
+        fail("bad zones for {}".format(name))
+    unknown_zone = sorted(set(zone) - {"name", "src", "canary", "iface", "netns"})
+    if unknown_zone:
+        fail("bad zones for {}".format(name))
+    zone_name = zone.get("name")
+    if (
+        not isinstance(zone_name, str)
+        or not ZONE_RE.fullmatch(zone_name)
+        or zone_name in seen_zones
+    ):
+        fail("bad zones for {}".format(name))
+    seen_zones.add(zone_name)
+    if not valid_ipv4(zone.get("src")):
+        fail("bad zones for {}".format(name))
+    canary = zone.get("canary")
+    if not isinstance(canary, str) or canary.count(":") != 1:
+        fail("bad zones for {}".format(name))
+    canary_ip, canary_port = canary.split(":")
+    if not valid_ipv4(canary_ip):
+        fail("bad zones for {}".format(name))
+    if not re.fullmatch(r"[1-9][0-9]{0,4}", canary_port):
+        fail("bad zones for {}".format(name))
+    if not 1 <= int(canary_port) <= 65535:
+        fail("bad zones for {}".format(name))
+    iface = zone.get("iface", "")
+    if not isinstance(iface, str) or (iface and not IFACE_RE.fullmatch(iface)):
+        fail("bad zones for {}".format(name))
+    netns = zone.get("netns", "")
+    if not isinstance(netns, str) or (netns and not NETNS_RE.fullmatch(netns)):
+        fail("bad zones for {}".format(name))
+
+check_targets = entry.get("check_targets", DEFAULT_CHECK_TARGETS)
+if not isinstance(check_targets, list) or len(check_targets) > 32:
+    fail("bad check_targets for {}".format(name))
+if len(set(check_targets)) != len(check_targets):
+    fail("bad check_targets for {}".format(name))
+for target in check_targets:
+    if not valid_cidr(target):
+        fail("bad check_targets for {}".format(name))
+
+print("zone_count={}".format(len(zones)))
+for zone in zones:
+    canary_ip, canary_port = zone["canary"].split(":")
+    print("zone={}|{}|{}|{}|{}|{}".format(
+        zone["name"],
+        zone["src"],
+        canary_ip,
+        canary_port,
+        zone.get("iface", ""),
+        zone.get("netns", ""),
+    ))
+print("target_count={}".format(len(check_targets)))
+for target in check_targets:
+    print("target={}".format(target))
+PYEOF
+	); then
+		exit 2
+	fi
+	while IFS= read -r line; do
+		key=${line%%=*}
+		value=${line#*=}
+		case $key in
+			host) HOST=$value ;;
+			user) USER_NAME=$value ;;
+			key_file) KEY_FILE=$value ;;
+			known_hosts) KNOWN_HOSTS=$value ;;
+			proxy) PROXY_COMMAND=$value ;;
+			role|devices) ;;
+			admin_key) ADMIN_KEY=$value ;;
+			admin_password_file) ADMIN_PASSWORD_FILE=$value ;;
+			zone) ZONE_RECORDS="${ZONE_RECORDS}${value}
+" ;;
+			zone_count) ZONE_COUNT=$value ;;
+			target) TARGET_RECORDS="${TARGET_RECORDS}${value}
+" ;;
+			target_count) TARGET_COUNT=$value ;;
+			*) die "inventory parser returned an unknown field" ;;
+		esac
+	done <<<"$out"
+}
+
+load_inventory
+[[ -s $KNOWN_HOSTS ]] || die "known_hosts is missing or empty: $KNOWN_HOSTS"
+DESTINATION="${USER_NAME}@${HOST}"
+# The client checks use a second key: the scan key may only scan, the
+# check key may only run the client checks.
+CHECK_KEY_FILE="${KEY_FILE}-check"
+
+base_options() {
+	SSH_OPTIONS=(
+		-F /dev/null
+		-o ConnectTimeout=8
+		-o ServerAliveInterval=5
+		-o ServerAliveCountMax=2
+		-o ControlMaster=no
+		-o ControlPath=none
+		-o GlobalKnownHostsFile=/dev/null
+		-o "UserKnownHostsFile=$KNOWN_HOSTS"
+		-o StrictHostKeyChecking=yes
+	)
+	[[ -z $PROXY_COMMAND ]] || SSH_OPTIONS+=(-o "ProxyCommand=$PROXY_COMMAND")
+}
+
+admin_options() {
+	if [[ -n $ADMIN_KEY ]]; then
+		[[ -f $ADMIN_KEY ]] || die "admin_key is missing: $ADMIN_KEY"
+		AUTH_OPTIONS=(
+			-i "$ADMIN_KEY" -o IdentitiesOnly=yes -o BatchMode=yes
+			-o PreferredAuthentications=publickey -o PasswordAuthentication=no
+		)
+		return
+	fi
+	[[ -f $ADMIN_PASSWORD_FILE ]] || die "admin_password_file is missing: $ADMIN_PASSWORD_FILE"
+	[[ $(stat -c '%a' -- "$ADMIN_PASSWORD_FILE") == 600 ]] \
+		|| die "admin_password_file must have mode 0600"
+	if [[ -z $ASKPASS ]]; then
+		ASKPASS=$(mktemp "${TMPDIR:-/tmp}/newton-vantage-askpass.XXXXXXXX")
+		chmod 700 -- "$ASKPASS"
+		cat >"$ASKPASS" <<'EOF'
+#!/bin/sh
+exec /bin/cat "$NEWTON_ADMIN_PASSWORD_FILE"
+EOF
+	fi
+	# shellcheck disable=SC2054
+	AUTH_OPTIONS=(
+		-o IdentitiesOnly=yes -o BatchMode=no
+		-o PreferredAuthentications=password,keyboard-interactive
+		-o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1
+	)
+}
+
+admin_ssh() {
+	local remote_command=$1
+	base_options
+	admin_options
+	if [[ -n $ADMIN_KEY ]]; then
+		ssh "${SSH_OPTIONS[@]}" "${AUTH_OPTIONS[@]}" "$DESTINATION" "$remote_command"
+	else
+		NEWTON_ADMIN_PASSWORD_FILE="$ADMIN_PASSWORD_FILE" \
+			SSH_ASKPASS="$ASKPASS" SSH_ASKPASS_REQUIRE=force DISPLAY=newton \
+			ssh "${SSH_OPTIONS[@]}" "${AUTH_OPTIONS[@]}" "$DESTINATION" "$remote_command"
+	fi
+}
+
+key_options() {
+	base_options
+	KEY_OPTIONS=(
+		-i "$1" -o IdentitiesOnly=yes -o BatchMode=yes
+		-o PreferredAuthentications=publickey -o PasswordAuthentication=no
+	)
+}
+
+# check_state_dir_parent_sticky <dir> -- return non-zero (and print one line
+# to stderr) when <dir>'s PARENT (one level up) is group- or world-writable
+# without the sticky bit, so a local user could swap the directory we are
+# about to create.  A parent that does not exist yet cannot be inspected:
+# the mkdir below lays it down mode 0700, and a parent we just made is ours
+# alone.  Same rule as mcp/newton_mcp/receipts.py check_state_dir_parent:
+# stat -c %a prints the mode as 3 or 4 octal digits (a leading 1/2/4 is
+# sticky/setgid/setuid), so read it as base 8.
+check_state_dir_parent_sticky() {
+	local dir=$1 label=$2 parent mode
+	parent=$(dirname -- "$dir") || return 1
+	[[ -d $parent ]] || return 0
+	mode=$(stat -c %a -- "$parent") || return 1
+	if (( (8#$mode & 022) && !(8#$mode & 01000) )); then
+		printf 'error: state directory parent %s of %s (%s) is group- or world-writable without the sticky bit\n' \
+			"$parent" "$label" "$dir" >&2
+		return 1
+	fi
+	return 0
+}
+
+ensure_key() {
+	local key_path=$1 key_dir
+	key_dir=$(dirname -- "$key_path")
+	check_state_dir_parent_sticky "$key_dir" "the vantage keys dir" \
+		|| die "refusing to create a keys directory under a group- or world-writable parent"
+	mkdir -p -- "$key_dir"
+	chmod 700 -- "$key_dir"
+	if [[ ! -f $key_path ]]; then
+		ssh-keygen -q -t ed25519 -N '' -C "newton-vantage-${VANTAGE}" -f "$key_path"
+	fi
+	[[ -s ${key_path}.pub ]] || die "public key is missing: ${key_path}.pub"
+}
+
+action_install() {
+	local key_type key_blob missing probe_rc tools scan_digest
+	[[ -f $SCAN_SOURCE ]] || die "newton-scan source is missing: $SCAN_SOURCE"
+	ensure_key "$KEY_FILE"
+	IFS=' ' read -r key_type key_blob _ <"${KEY_FILE}.pub"
+	[[ $key_type == ssh-ed25519 && $key_blob =~ ^[A-Za-z0-9+/=]+$ ]] \
+		|| die "bad public key: ${KEY_FILE}.pub"
+	# compute the SHA-256 of $SCAN_SOURCE here on the host.  The
+	# digest is sent as a third header line on the install ssh stdin
+	# (after the key header and the vantage name) so the remote can
+	# verify the bytes it actually receives match the bytes the host
+	# intended to send -- a truncated / corrupted payload on the ssh
+	# channel is then refused BEFORE any filesystem change on the
+	# vantage, with the working forced command left in place.
+	scan_digest=$(sha256sum -- "$SCAN_SOURCE" | awk '{print $1}')
+	[[ $scan_digest =~ ^[0-9a-f]{64}$ ]] \
+		|| die "sha256sum of \$SCAN_SOURCE is not 64 lowercase hex: $scan_digest"
+	# the forced command on the vantage runs `timeout 300 nmap ...`,
+	# so `nmap` and `timeout` must be on the vantage's PATH.  R9: the
+	# remote also has to `sha256sum` the bytes it received, so it is
+	# added to the same probe.  Probe over the admin path with
+	# `command -v`, so a missing tool never reaches the forced command
+	# or the post-cat digest check.
+	probe_rc=0
+	missing=$(admin_ssh 'set -eu
+missing=
+for tool in nmap timeout sha256sum; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    missing="$missing $tool"
+  fi
+done
+if [ -n "$missing" ]; then
+  printf "missing:%s\\n" "$missing"
+  exit 2
+fi
+printf "ok\\n"' 2>&1) || probe_rc=$?
+	if [[ $probe_rc -ne 0 && $missing != "missing:"* ]]; then
+		die "could not probe vantage for nmap, timeout and sha256sum (admin ssh exit $probe_rc)"
+	fi
+	if [[ $missing == "missing:"* ]]; then
+		tools=${missing#missing:}
+		die "vantage is missing the scan tool(s):$tools; install on OpenWrt with 'apk add nmap coreutils-timeout coreutils-sha256sum' or on Debian with 'apt install nmap coreutils'"
+	fi
+	# the host only ships the validated key type+blob, the vantage
+	# name, and the exact bytes of newton-scan.  The remote side picks
+	# the install directory (root gets /usr/local/libexec, a non-root
+	# user gets $HOME/.local/libexec), writes it through its own mktemp
+	# inside that directory, and composes the restricted line itself,
+	# so the host never composes an untrusted path.  F2: the remote
+	# side uses POSIX mkdir/cp/chmod instead of the busybox-missing
+	# 'install' applet.  R8: the host no longer stages newton-scan via
+	# scp to /tmp/newton-scan.newton-setup on the vantage, because (a)
+	# a refusal would leave the staged file in a world-writable dir
+	# and (b) on a root vantage a local user could pre-plant a symlink
+	# there and redirect the root scp write.  R9: a THIRD header line
+	# is the SHA-256 of $SCAN_SOURCE so a truncated or corrupted
+	# payload on the ssh channel is detected by the remote before any
+	# filesystem change on the vantage.  Everything rides the install
+	# ssh call's stdin: line 1 is the key header ("ssh-ed25519
+	# <blob>"), line 2 is the vantage name, line 3 is the digest, and
+	# the rest is the exact bytes of $SCAN_SOURCE.
+	{ printf '%s %s\n%s\n%s\n' "$key_type" "$key_blob" "$VANTAGE" "$scan_digest"; cat "$SCAN_SOURCE"; } \
+		| admin_ssh 'set -eu
+# read the two header lines FIRST (before any change on the vantage)
+# and validate them and the paths as now.  Refusing on a bad header or a
+# bad HOME must leave the vantage completely untouched.  R9: a THIRD
+# header line carries the digest of $SCAN_SOURCE; it is validated as 64
+# lowercase hex BEFORE any change, so a bad header leaves the vantage
+# (and its working forced command, if any) completely untouched.
+IFS= read -r key_header || { printf "error: missing key header on stdin\\n" >&2; exit 2; }
+IFS= read -r name || { printf "error: missing vantage name on stdin\\n" >&2; exit 2; }
+IFS= read -r scan_digest || { printf "error: missing scan digest on stdin\\n" >&2; exit 2; }
+case $key_header in
+	"ssh-ed25519 "*)
+		key_blob=${key_header#"ssh-ed25519 "}
+		;;
+	*)
+		printf "error: bad key header on stdin\\n" >&2
+		exit 2
+		;;
+esac
+case $key_blob in
+	"")
+		printf "error: empty key blob on stdin\\n" >&2
+		exit 2
+		;;
+	*[!A-Za-z0-9+/=]*)
+		printf "error: bad key blob on stdin\\n" >&2
+		exit 2
+		;;
+esac
+case $name in
+	"")
+		printf "error: empty vantage name on stdin\\n" >&2
+		exit 2
+		;;
+	[!a-z]*|*[!a-z0-9-]*)
+		printf "error: bad vantage name on stdin\\n" >&2
+		exit 2
+		;;
+esac
+case $scan_digest in
+	"")
+		printf "error: empty scan digest on stdin\\n" >&2
+		exit 2
+		;;
+	# 64 lowercase hex characters.  Anything else (wrong length,
+	# uppercase, non-hex) refuses BEFORE any filesystem change.
+	[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+		;;
+	*)
+		printf "error: scan digest on stdin is not 64 lowercase hex\\n" >&2
+		exit 2
+		;;
+esac
+# Decide bin_dir and auth_keys path BEFORE any change so an unset HOME
+# refuses cleanly (R7 N1) instead of aborting under set -u after the
+# binary has already been moved.
+home_unset=0
+if [ -z "${HOME:-}" ]; then
+	home_unset=1
+fi
+if [ "$(id -u)" = 0 ]; then
+	bin_dir=/usr/local/libexec
+else
+	if [ "$home_unset" = 1 ]; then
+		printf "error: HOME is unset; cannot determine bin_dir or authorized_keys\\n" >&2
+		exit 2
+	fi
+	bin_dir="$HOME/.local/libexec"
+fi
+case $bin_dir in
+	*[!A-Za-z0-9_./-]*)
+		printf "error: vantage install dir has forbidden characters: %s\\n" "$bin_dir" >&2
+		exit 2
+		;;
+esac
+case $bin_dir in
+	/*) ;;
+	*)
+		printf "error: vantage install dir must be absolute: %s\\n" "$bin_dir" >&2
+		exit 2
+		;;
+esac
+# on OpenWrt, dropbear reads root authorized_keys from
+# /etc/dropbear/authorized_keys (NOT $HOME/.ssh/authorized_keys).  An
+# OpenWrt root vantage therefore keeps the restricted line in
+# /etc/dropbear/authorized_keys.  Debian (sshd) and non-root vantages
+# keep using $HOME/.ssh/authorized_keys.  N2: `ls -d` (not `[ -d ]`)
+# because the test sandbox rewrites paths passed to stubbed tools, and
+# `[` is a shell builtin whose args are not rewritten.
+if [ "$(id -u)" = 0 ] && ls -d /etc/dropbear >/dev/null 2>&1; then
+	auth_keys=/etc/dropbear/authorized_keys
+else
+	if [ "$home_unset" = 1 ]; then
+		printf "error: HOME is unset; cannot determine authorized_keys path\\n" >&2
+		exit 2
+	fi
+	auth_keys="$HOME/.ssh/authorized_keys"
+fi
+case $auth_keys in
+	/*) ;;
+	*)
+		printf "error: vantage authorized_keys path must be absolute: %s\\n" "$auth_keys" >&2
+		exit 2
+		;;
+esac
+case $auth_keys in
+	*[!A-Za-z0-9_./-]*)
+		printf "error: vantage authorized_keys path has forbidden characters: %s\\n" "$auth_keys" >&2
+		exit 2
+		;;
+esac
+# Create the .ssh dir only after the path above passed validation.
+[ "$auth_keys" = /etc/dropbear/authorized_keys ] || mkdir -p -m 0700 -- "${auth_keys%/*}"
+# B1 (R7): mkdir -p leaves an existing dir at whatever mode it had; on
+# a shared host a 0777 /usr/local/libexec (or $HOME/.local/libexec)
+# would let another local user replace newton-scan, which the
+# restricted key runs.  Tighten, then verify with `ls -ld` (in busybox
+# AND coreutils) that neither the bin dir nor the final binary is
+# group/other writable, and refuse if it is.
+mkdir -p -- "$bin_dir"
+if [ "$(id -u)" = 0 ]; then
+	bin_mode=0755
+	bin_pattern="drwxr-xr-x"
+else
+	bin_mode=0700
+	bin_pattern="drwx------"
+fi
+chmod "$bin_mode" -- "$bin_dir"
+dir_perm=$(ls -ld -- "$bin_dir")
+dir_perm=${dir_perm%% *}
+case $dir_perm in
+	"$bin_pattern"|"$bin_pattern".) ;; # a trailing . is an SELinux context, not a permission
+	*)
+		printf "error: vantage install dir has unsafe mode %s: %s\\n" "$dir_perm" "$bin_dir" >&2
+		exit 2
+		;;
+esac
+# Atomic replace via mktemp inside $bin_dir (busybox and coreutils both
+# have mktemp); the predictable "$bin_dir.newton-tmp.$$" name would let
+# another local user pre-create the path.  R8: the temp file lives
+# inside $bin_dir; nothing is staged under /tmp on the vantage.
+tmp_file=$(mktemp "$bin_dir/.newton-scan.XXXXXX")
+cat >"$tmp_file"
+if [ ! -s "$tmp_file" ]; then
+	rm -f -- "$tmp_file"
+	printf "error: scan payload from stdin is empty\\n" >&2
+	exit 2
+fi
+# verify the bytes the remote actually received match the digest
+# the host sent in the third header line.  sha256sum is in busybox and
+# coreutils (probed above) so this is portable.  A mismatch (truncated
+# or corrupted bytes on the ssh channel) is refused BEFORE the mv and
+# BEFORE authorized_keys is touched, so the previously installed
+# forced command -- if any -- stays in place.
+actual_digest=$(sha256sum -- "$tmp_file" | awk "{print \$1}")
+if [ "$actual_digest" != "$scan_digest" ]; then
+	rm -f -- "$tmp_file"
+	printf "error: scan payload sha256 mismatch (got %s, expected %s)\\n" "$actual_digest" "$scan_digest" >&2
+	exit 2
+fi
+# refuse anything that is not a POSIX shell script.  This stops a
+# vantage that somehow receives a wrong blob from running an arbitrary
+# binary on every signed-out scan.  Use the temp file as the source
+# (not stdin again) because stdin has already been fully consumed.
+first_line=$(head -n 1 -- "$tmp_file")
+case $first_line in
+	"#!/bin/sh"|"#!/bin/sh"*)
+		;;
+	*)
+		rm -f -- "$tmp_file"
+		printf "error: scan payload does not start with #!/bin/sh\\n" >&2
+		exit 2
+		;;
+esac
+chmod 0755 "$tmp_file"
+mv -f "$tmp_file" "$bin_dir/newton-scan"
+file_perm=$(ls -l -- "$bin_dir/newton-scan")
+file_perm=${file_perm%% *}
+case $file_perm in
+	-rwxr-xr-x|-rwxr-xr-x.) ;;
+	*)
+		printf "error: forced command has unsafe mode %s: %s\\n" "$file_perm" "$bin_dir/newton-scan" >&2
+		exit 2
+		;;
+esac
+umask 077
+touch "$auth_keys"
+# B2 (R7): if the file is non-empty and its last byte is not a newline,
+# append one before tee -a so the new line does not glue onto the old.
+# tail -c 1 returns the last byte when non-newline, and command
+# substitution strips a final newline, so the same check also confirms
+# the file is non-empty (tail fails or prints nothing on an empty file).
+last_byte=$(tail -c 1 "$auth_keys" 2>/dev/null || true)
+if [ -n "$last_byte" ]; then
+	printf "\\n" | tee -a "$auth_keys" >/dev/null
+fi
+newton_line="restrict,command=\"$bin_dir/newton-scan\" ssh-ed25519 $key_blob newton-vantage-$name"
+case $newton_line in
+	"restrict,command=\"/"*"newton-scan\" ssh-ed25519 "*" newton-vantage-"*)
+		;;
+	*)
+		printf "error: composed restricted line failed the shape guard\\n" >&2
+		exit 2
+		;;
+esac
+grep -Fqx -- "$newton_line" "$auth_keys" || printf "%s\n" "$newton_line" | tee -a "$auth_keys" >/dev/null
+chmod 600 "$auth_keys"'
+	printf 'DONE install %s\n' "$VANTAGE"
+}
+
+run_key_ssh() {
+	key_options "$KEY_FILE"
+	ssh "${SSH_OPTIONS[@]}" "${KEY_OPTIONS[@]}" "$@"
+}
+
+run_check_key_ssh() {
+	key_options "$CHECK_KEY_FILE"
+	ssh "${SSH_OPTIONS[@]}" "${KEY_OPTIONS[@]}" "$@"
+}
+
+action_check() {
+	local output rc stdout_file stderr_file
+	[[ -f $KEY_FILE ]] || die "key_file is missing: $KEY_FILE"
+	# pass -T so OpenSSH never tries to allocate a pty.  Without
+	# -T, the real client prints "Pseudo-terminal will not be allocated
+	# because stdin is not a terminal." on stderr when no command is
+	# given and stdin is not a tty, which mixes with the forced
+	# command's "newton-scan: refused" and breaks the exact-string
+	# comparison below.
+	rc=0
+	output=$(run_key_ssh -T "$DESTINATION" </dev/null 2>&1) || rc=$?
+	if [[ $rc -ne 2 || $output != 'newton-scan: refused' ]]; then
+		printf 'FAIL empty command was not refused (got rc=%s); the scan key is not forced to newton-scan. If the vantage is OpenWrt with no root password, dropbear lets any login in: set a root password.\n' "$rc" >&2
+		exit 1
+	fi
+	printf 'PASS empty command refused\n'
+
+	rc=0
+	key_options "$KEY_FILE"
+	timeout 10 ssh "${SSH_OPTIONS[@]}" "${KEY_OPTIONS[@]}" -T -N \
+		-o ExitOnForwardFailure=yes -R 0:127.0.0.1:1 "$DESTINATION" \
+		</dev/null >/dev/null 2>&1 || rc=$?
+	if [[ $rc -ne 255 ]]; then
+		printf 'FAIL forwarding was not blocked\n' >&2
+		exit 1
+	fi
+	printf 'PASS forwarding blocked\n'
+
+	# real sshd/dropbear with `restrict` (no-pty) prints
+	# "PTY allocation request failed on channel 0" on stderr and the
+	# forced command still runs, so the exit status is the forced
+	# command's (2 with "newton-scan: refused" on stderr), not 255.
+	# Some clients or servers may still return 255 with that stderr;
+	# accept either.  What the check rejects is a pty that is granted
+	# (rc 0, or any other output on stdout).
+	CHECK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/newton-vantage-check.XXXXXXXX")
+	stdout_file=$CHECK_DIR/stdout
+	stderr_file=$CHECK_DIR/stderr
+	rc=0
+	run_key_ssh -tt "$DESTINATION" </dev/null >"$stdout_file" 2>"$stderr_file" || rc=$?
+	# N3 (R7): compare stdout exactly -- a pty may send CR/LF after the
+	# refusal, so allow at most one trailing CR/LF.  `tr -d '[:space:]'`
+	# would silently accept e.g. "newton- scan: refused".
+	normalized=
+	if [[ -s $stdout_file ]]; then
+		# The x keeps every trailing LF; then strip at most one LF and one CR.
+		normalized=$(cat "$stdout_file"; printf x)
+		normalized=${normalized%x}
+		normalized=${normalized%$'\n'}
+		normalized=${normalized%$'\r'}
+	fi
+	if [[ $rc -ne 2 && $rc -ne 255 ]] \
+		|| [[ -n $normalized && $normalized != 'newton-scan: refused' ]] \
+		|| ! grep -Fq 'PTY allocation request failed' "$stderr_file"; then
+		printf 'FAIL pty was not blocked\n' >&2
+		exit 1
+	fi
+	printf 'PASS pty blocked\n'
+	printf 'DONE check %s\n' "$VANTAGE"
+}
+
+# ---- the client checks: the second (check) identity on the vantage ----
+
+# compose_allow_list: the allow-list the forced command reads, built from
+# the validated inventory fields only.  The fields are separated by "|"
+# in the loader's output, so no zone name, address or interface can carry
+# a newline into the file.
+compose_allow_list() {
+	local out='' record name src canary_ip canary_port iface netns target
+	local zones=0 targets=0
+	while IFS= read -r record; do
+		[[ -n $record ]] || continue
+		IFS='|' read -r name src canary_ip canary_port iface netns <<<"$record"
+		out+="zone ${name} src ${src} canary ${canary_ip} ${canary_port}"
+		[[ -z $iface ]] || out+=" iface ${iface}"
+		[[ -z $netns ]] || out+=" netns ${netns}"
+		out+=$'\n'
+		zones=$((zones + 1))
+	done <<<"$ZONE_RECORDS"
+	while IFS= read -r target; do
+		[[ -n $target ]] || continue
+		out+="target ${target}"$'\n'
+		targets=$((targets + 1))
+	done <<<"$TARGET_RECORDS"
+	[[ $zones -eq ${ZONE_COUNT:-0} ]] \
+		|| die "the inventory loader returned an inconsistent zone count"
+	[[ $targets -eq ${TARGET_COUNT:-0} ]] \
+		|| die "the inventory loader returned an inconsistent check_targets count"
+	printf '%s' "$out"
+}
+
+action_install_client_checks() {
+	local key_type key_blob missing probe_rc tools script_digest
+	local allow_text allow_digest allow_b64
+	[[ -f $CHECK_SOURCE ]] || die "newton-vantage-check source is missing: $CHECK_SOURCE"
+	[[ ${ZONE_COUNT:-0} -gt 0 ]] \
+		|| die "no zones are configured for $VANTAGE; add zones to the inventory"
+	ensure_key "$CHECK_KEY_FILE"
+	IFS=' ' read -r key_type key_blob _ <"${CHECK_KEY_FILE}.pub"
+	[[ $key_type == ssh-ed25519 && $key_blob =~ ^[A-Za-z0-9+/=]+$ ]] \
+		|| die "bad public key: ${CHECK_KEY_FILE}.pub"
+	# The forced command and its allow-list travel as one payload: five
+	# header lines (the key, the vantage name, the digest of the script,
+	# the base64 of the allow-list and the digest of the allow-list) and
+	# then the exact bytes of the script.  The remote verifies BOTH
+	# digests before it changes anything, so a truncated or corrupted
+	# payload leaves the vantage untouched.
+	script_digest=$(sha256sum -- "$CHECK_SOURCE" | awk '{print $1}')
+	[[ $script_digest =~ ^[0-9a-f]{64}$ ]] \
+		|| die "sha256sum of \$CHECK_SOURCE is not 64 lowercase hex: $script_digest"
+	allow_text=$(compose_allow_list)$'\n'
+	allow_digest=$(printf '%s' "$allow_text" | sha256sum | awk '{print $1}')
+	[[ $allow_digest =~ ^[0-9a-f]{64}$ ]] \
+		|| die "sha256sum of the allow-list is not 64 lowercase hex: $allow_digest"
+	allow_b64=$(printf '%s' "$allow_text" | base64 | tr -d '\n')
+	[[ $allow_b64 =~ ^[A-Za-z0-9+/=]+$ ]] \
+		|| die "the allow-list did not base64 encode cleanly"
+	# The forced command needs bash (the /dev/tcp connect), timeout (the
+	# probe deadlines), sha256sum and base64 (the install itself).
+	probe_rc=0
+	missing=$(admin_ssh 'set -eu
+missing=
+for tool in bash timeout sha256sum base64; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    missing="$missing $tool"
+  fi
+done
+if [ -n "$missing" ]; then
+  printf "missing:%s\\n" "$missing"
+  exit 2
+fi
+printf "ok\\n"' 2>&1) || probe_rc=$?
+	if [[ $probe_rc -ne 0 && $missing != "missing:"* ]]; then
+		die "could not probe vantage for bash, timeout, sha256sum and base64 (admin ssh exit $probe_rc)"
+	fi
+	if [[ $missing == "missing:"* ]]; then
+		tools=${missing#missing:}
+		die "vantage is missing the client-check tool(s):$tools; install on OpenWrt with 'apk add coreutils-timeout coreutils-sha256sum coreutils-base64' or on Debian with 'apt install coreutils'"
+	fi
+	{ printf '%s %s\n%s\n%s\n%s\n%s\n' "$key_type" "$key_blob" "$VANTAGE" \
+		"$script_digest" "$allow_b64" "$allow_digest"; cat "$CHECK_SOURCE"; } \
+		| admin_ssh 'set -eu
+# Every header is read and validated BEFORE any change on the vantage.
+IFS= read -r key_header || { printf "error: missing key header on stdin\\n" >&2; exit 2; }
+IFS= read -r name || { printf "error: missing vantage name on stdin\\n" >&2; exit 2; }
+IFS= read -r script_digest || { printf "error: missing script digest on stdin\\n" >&2; exit 2; }
+IFS= read -r allow_b64 || { printf "error: missing allow-list payload on stdin\\n" >&2; exit 2; }
+IFS= read -r allow_digest || { printf "error: missing allow-list digest on stdin\\n" >&2; exit 2; }
+case $key_header in
+	"ssh-ed25519 "*)
+		key_blob=${key_header#"ssh-ed25519 "}
+		;;
+	*)
+		printf "error: bad key header on stdin\\n" >&2
+		exit 2
+		;;
+esac
+case $key_blob in
+	"")
+		printf "error: empty key blob on stdin\\n" >&2
+		exit 2
+		;;
+	*[!A-Za-z0-9+/=]*)
+		printf "error: bad key blob on stdin\\n" >&2
+		exit 2
+		;;
+esac
+case $name in
+	"")
+		printf "error: empty vantage name on stdin\\n" >&2
+		exit 2
+		;;
+	[!a-z]*|*[!a-z0-9-]*)
+		printf "error: bad vantage name on stdin\\n" >&2
+		exit 2
+		;;
+esac
+case $script_digest in
+	"")
+		printf "error: empty script digest on stdin\\n" >&2
+		exit 2
+		;;
+	[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+		;;
+	*)
+		printf "error: script digest on stdin is not 64 lowercase hex\\n" >&2
+		exit 2
+		;;
+esac
+case $allow_digest in
+	"")
+		printf "error: empty allow-list digest on stdin\\n" >&2
+		exit 2
+		;;
+	[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+		;;
+	*)
+		printf "error: allow-list digest on stdin is not 64 lowercase hex\\n" >&2
+		exit 2
+		;;
+esac
+case $allow_b64 in
+	"")
+		printf "error: empty allow-list payload on stdin\\n" >&2
+		exit 2
+		;;
+	*[!A-Za-z0-9+/=]*)
+		printf "error: bad allow-list payload on stdin\\n" >&2
+		exit 2
+		;;
+esac
+# The install dir and the authorized_keys path are decided and validated
+# BEFORE any change, exactly as the scan install does it.
+home_unset=0
+if [ -z "${HOME:-}" ]; then
+	home_unset=1
+fi
+if [ "$(id -u)" = 0 ]; then
+	bin_dir=/usr/local/libexec
+else
+	if [ "$home_unset" = 1 ]; then
+		printf "error: HOME is unset; cannot determine bin_dir or authorized_keys\\n" >&2
+		exit 2
+	fi
+	bin_dir="$HOME/.local/libexec"
+fi
+case $bin_dir in
+	*[!A-Za-z0-9_./-]*)
+		printf "error: vantage install dir has forbidden characters: %s\\n" "$bin_dir" >&2
+		exit 2
+		;;
+esac
+case $bin_dir in
+	/*) ;;
+	*)
+		printf "error: vantage install dir must be absolute: %s\\n" "$bin_dir" >&2
+		exit 2
+		;;
+esac
+if [ "$(id -u)" = 0 ] && ls -d /etc/dropbear >/dev/null 2>&1; then
+	auth_keys=/etc/dropbear/authorized_keys
+else
+	if [ "$home_unset" = 1 ]; then
+		printf "error: HOME is unset; cannot determine authorized_keys path\\n" >&2
+		exit 2
+	fi
+	auth_keys="$HOME/.ssh/authorized_keys"
+fi
+case $auth_keys in
+	/*) ;;
+	*)
+		printf "error: vantage authorized_keys path must be absolute: %s\\n" "$auth_keys" >&2
+		exit 2
+		;;
+esac
+case $auth_keys in
+	*[!A-Za-z0-9_./-]*)
+		printf "error: vantage authorized_keys path has forbidden characters: %s\\n" "$auth_keys" >&2
+		exit 2
+		;;
+esac
+[ "$auth_keys" = /etc/dropbear/authorized_keys ] || mkdir -p -m 0700 -- "${auth_keys%/*}"
+mkdir -p -- "$bin_dir"
+if [ "$(id -u)" = 0 ]; then
+	bin_mode=0755
+	bin_pattern="drwxr-xr-x"
+else
+	bin_mode=0700
+	bin_pattern="drwx------"
+fi
+chmod "$bin_mode" -- "$bin_dir"
+dir_perm=$(ls -ld -- "$bin_dir")
+dir_perm=${dir_perm%% *}
+case $dir_perm in
+	"$bin_pattern"|"$bin_pattern".) ;;
+	*)
+		printf "error: vantage install dir has unsafe mode %s: %s\\n" "$dir_perm" "$bin_dir" >&2
+		exit 2
+		;;
+esac
+# The allow-list: base64 in, a file with the exact bytes out.  The
+# digest is checked before the script is written.
+tmp_allow=$(mktemp "$bin_dir/.newton-vantage-check.allow.XXXXXX")
+if ! printf "%s\\n" "$allow_b64" | base64 -d >"$tmp_allow" 2>/dev/null; then
+	rm -f -- "$tmp_allow"
+	printf "error: allow-list payload is not valid base64\\n" >&2
+	exit 2
+fi
+actual_allow=$(sha256sum -- "$tmp_allow" | awk "{print \$1}")
+if [ "$actual_allow" != "$allow_digest" ]; then
+	rm -f -- "$tmp_allow"
+	printf "error: allow-list payload sha256 mismatch (got %s, expected %s)\\n" "$actual_allow" "$allow_digest" >&2
+	exit 2
+fi
+tmp_file=$(mktemp "$bin_dir/.newton-vantage-check.XXXXXX")
+cat >"$tmp_file"
+if [ ! -s "$tmp_file" ]; then
+	rm -f -- "$tmp_file"
+	printf "error: check payload from stdin is empty\\n" >&2
+	exit 2
+fi
+actual=$(sha256sum -- "$tmp_file" | awk "{print \$1}")
+if [ "$actual" != "$script_digest" ]; then
+	rm -f -- "$tmp_file"
+	printf "error: check payload sha256 mismatch (got %s, expected %s)\\n" "$actual" "$script_digest" >&2
+	exit 2
+fi
+first_line=$(head -n 1 -- "$tmp_file")
+case $first_line in
+	"#!/bin/sh"|"#!/bin/sh"*)
+		;;
+	*)
+		rm -f -- "$tmp_file"
+		printf "error: check payload does not start with #!/bin/sh\\n" >&2
+		exit 2
+		;;
+esac
+chmod 0755 "$tmp_file"
+mv -f "$tmp_file" "$bin_dir/newton-vantage-check"
+file_perm=$(ls -l -- "$bin_dir/newton-vantage-check")
+file_perm=${file_perm%% *}
+case $file_perm in
+	-rwxr-xr-x|-rwxr-xr-x.) ;;
+	*)
+		printf "error: forced command has unsafe mode %s: %s\\n" "$file_perm" "$bin_dir/newton-vantage-check" >&2
+		exit 2
+		;;
+esac
+chmod 0644 "$tmp_allow"
+mv -f "$tmp_allow" "$bin_dir/newton-vantage-check.allow"
+umask 077
+touch "$auth_keys"
+last_byte=$(tail -c 1 "$auth_keys" 2>/dev/null || true)
+if [ -n "$last_byte" ]; then
+	printf "\\n" | tee -a "$auth_keys" >/dev/null
+fi
+newton_line="restrict,command=\"$bin_dir/newton-vantage-check\" ssh-ed25519 $key_blob newton-vantage-check-$name"
+case $newton_line in
+	"restrict,command=\"/"*"newton-vantage-check\" ssh-ed25519 "*" newton-vantage-check-"*)
+		;;
+	*)
+		printf "error: composed restricted line failed the shape guard\\n" >&2
+		exit 2
+		;;
+esac
+grep -Fqx -- "$newton_line" "$auth_keys" || printf "%s\\n" "$newton_line" | tee -a "$auth_keys" >/dev/null
+chmod 600 "$auth_keys"'
+	printf 'DONE install-client-checks %s\n' "$VANTAGE"
+}
+
+action_check_client_checks() {
+	local output rc stdout_file stderr_file record zone_name
+	[[ -f $CHECK_KEY_FILE ]] || die "check key_file is missing: $CHECK_KEY_FILE"
+	[[ ${ZONE_COUNT:-0} -gt 0 ]] \
+		|| die "no zones are configured for $VANTAGE; add zones to the inventory"
+	record=${ZONE_RECORDS%%$'\n'*}
+	zone_name=${record%%|*}
+	# The same three confinement checks as the scan key, but with the
+	# client-check key and the newton-vantage-check refusal text.
+	rc=0
+	output=$(run_check_key_ssh -T "$DESTINATION" </dev/null 2>&1) || rc=$?
+	if [[ $rc -ne 2 || $output != 'newton-vantage-check: refused' ]]; then
+		printf 'FAIL empty command was not refused (got rc=%s); the client-check key is not forced to newton-vantage-check.\n' "$rc" >&2
+		exit 1
+	fi
+	printf 'PASS empty command refused\n'
+
+	rc=0
+	key_options "$CHECK_KEY_FILE"
+	timeout 10 ssh "${SSH_OPTIONS[@]}" "${KEY_OPTIONS[@]}" -T -N \
+		-o ExitOnForwardFailure=yes -R 0:127.0.0.1:1 "$DESTINATION" \
+		</dev/null >/dev/null 2>&1 || rc=$?
+	if [[ $rc -ne 255 ]]; then
+		printf 'FAIL forwarding was not blocked\n' >&2
+		exit 1
+	fi
+	printf 'PASS forwarding blocked\n'
+
+	CHECK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/newton-vantage-check.XXXXXXXX")
+	stdout_file=$CHECK_DIR/stdout
+	stderr_file=$CHECK_DIR/stderr
+	rc=0
+	run_check_key_ssh -tt "$DESTINATION" </dev/null >"$stdout_file" 2>"$stderr_file" || rc=$?
+	normalized=
+	if [[ -s $stdout_file ]]; then
+		normalized=$(cat "$stdout_file"; printf x)
+		normalized=${normalized%x}
+		normalized=${normalized%$'\n'}
+		normalized=${normalized%$'\r'}
+	fi
+	if [[ $rc -ne 2 && $rc -ne 255 ]] \
+		|| [[ -n $normalized && $normalized != 'newton-vantage-check: refused' ]] \
+		|| ! grep -Fq 'PTY allocation request failed' "$stderr_file"; then
+		printf 'FAIL pty was not blocked\n' >&2
+		exit 1
+	fi
+	printf 'PASS pty blocked\n'
+
+	# The canary check of the first zone: the vantage must be able to
+	# reach the zone's router address from inside the zone.
+	rc=0
+	output=$(run_check_key_ssh -T "$DESTINATION" "check ${zone_name} canary" </dev/null 2>&1) || rc=$?
+	if [[ $rc -ne 0 || $output != 'RESULT PASS reached' ]]; then
+		printf 'FAIL canary check of zone %s did not pass (got rc=%s: %s)\n' "$zone_name" "$rc" "$output" >&2
+		exit 1
+	fi
+	printf 'PASS canary\n'
+	printf 'DONE check-client-checks %s\n' "$VANTAGE"
+}
+
+case $ACTION in
+	install) action_install ;;
+	check) action_check ;;
+	install-client-checks) action_install_client_checks ;;
+	check-client-checks) action_check_client_checks ;;
+esac

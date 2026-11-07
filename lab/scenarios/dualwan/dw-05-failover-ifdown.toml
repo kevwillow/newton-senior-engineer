@@ -1,0 +1,52 @@
+name = "dw-05-failover-ifdown"
+description = "DW-05: a link-down on lab-isp (an `ifdown ispa` on lab-isp) is the second fault mode the tool must handle. Same UCI batch and counters as dw-01, same probe target. The effect [[effect]] (timeout 150) confirms the baseline (via ISP-A), calls the lib's `nwdown_on` (`ifdown ispa` on lab-isp), waits up to 60 s for the first connection that leaves via ISP-B while ISP-A stays at its baseline, and prints `failover_seconds=N` and `via=B`. The trap calls `nwdown_off` (`ifup ispa`) on EXIT. BEFORE the change the service is not running, so nothing demotes wan, wait_via B times out, and the effect fails -- that is what makes this scenario a real test of the change. OBSERVATION: lab-isp nft counters (eth3 rise = traffic over ISP-B)."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 180
+setup = ["dw_wanhealth_install", "dw_isp_target_on", "dw_isp_count_on"]
+cleanup = ["dw_isp_count_off", "dw_isp_target_off", "dw_cut_clear"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "client_internet", "client_dns", "client_dhcp"]
+probes = [["uci-equals", "newton_wanhealth.main.enabled", "1"]]
+batch = '''
+set newton_wanhealth.main=settings
+set newton_wanhealth.main.enabled='1'
+set newton_wanhealth.main.interval='3'
+set newton_wanhealth.main.timeout='1'
+set newton_wanhealth.main.down_after='3'
+set newton_wanhealth.main.up_after='2'
+add_list newton_wanhealth.main.target='198.51.100.9'
+add_list newton_wanhealth.main.iface='wan'
+add_list newton_wanhealth.main.iface='wan2'
+'''
+
+[[effect]]
+device = "local"
+timeout = 150
+cmd = '''
+. lab/dualwan-lib.sh
+WH_INTERVAL=3
+WH_TIMEOUT=1
+WH_DOWN_AFTER=3
+WH_UP_AFTER=2
+WH_TARGETS=1
+B=$(wh_budget "$WH_DOWN_AFTER" "$WH_INTERVAL" "$WH_TIMEOUT" "$WH_TARGETS")
+nwcut_off 2>/dev/null; nwdown_off 2>/dev/null
+fail() { echo "dw-05-failover-ifdown: $1" >&2; nwdown_off; exit 1; }
+trap 'nwdown_off' EXIT
+wait_via A 20 || fail "baseline: not via ISP-A"
+nwdown_on
+RESULT=$(wait_via B 60) || fail "failover: timeout"
+echo "$RESULT"
+N=${RESULT#*seconds=}
+[ "$N" -le "$B" ] || fail "failover over budget: $N s > $B s"
+echo "failover_seconds=$N"
+echo "via=B"
+echo "budget_seconds=$B"
+'''
+expect_stdout = '^failover_seconds=[0-9]+$'
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get newton_wanhealth.main.iface | tr '\n' ' '; echo"
+expect_stdout = '^wan wan2 $'

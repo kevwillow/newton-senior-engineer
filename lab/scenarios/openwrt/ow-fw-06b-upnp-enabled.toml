@@ -1,0 +1,49 @@
+name = "ow-fw-06b-upnp-enabled"
+description = "OW-FW-06 variant for the open tier (UPnP allowed, opt-in): with miniupnpd-nftables installed (setup step, shipped enabled=0), upnpd.config.enabled='1'. Effects: lab-r1 gets a udp 1900 listener owned by miniupnpd, and lab-client gets an SSDP reply to a unicast M-SEARCH sent to the router's mgmt address (the package's internal_iface is lan, and lab-client's eth1 is on that network). Both fail before. Port mapping itself cannot be tested: miniupnpd logs 'Reserved / private IP address on ext interface: Port forwarding is impossible' because the lab's WAN is RFC1918. The default regression must still pass with the miniupnpd nft hooks loaded."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on", "miniupnpd_install"]
+regression = "default"
+approval = true
+probes = [["listen", "udp", "any", "1900", "miniupnpd", "present"]]
+batch = '''
+set upnpd.config.enabled='1'
+'''
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+l=$(netstat -lunp | grep ':1900 ' | grep -c miniupnpd); echo "udp 1900 listeners owned by miniupnpd=$l"; [ "$l" -ge 1 ]
+'''
+expect_stdout = '^udp 1900 listeners owned by miniupnpd=[1-9]'
+
+[[effect]]
+device = "lab-client"
+timeout = 30
+cmd = '''
+python3 - <<'PYEOF'
+import socket, sys
+msg = 'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: "ssdp:discover"\r\nMX: 1\r\nST: upnp:rootdevice\r\n\r\n'.encode()
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(1.5)
+s.bind(('10.109.0.50', 0))
+for i in range(3):
+    s.sendto(msg, ('10.109.0.11', 1900))
+    try:
+        data, addr = s.recvfrom(2048)
+    except (socket.timeout, ConnectionRefusedError):
+        continue
+    hdr = dict(l.split(':', 1) for l in data.decode(errors='replace').split('\r\n')[1:] if ':' in l)
+    print('ssdp reply from %s: %s' % (addr[0], ' | '.join('%s=%s' % (k.strip().upper(), v.strip()) for k, v in hdr.items() if k.strip().upper() in ('SERVER', 'LOCATION'))))
+    sys.exit(0)
+print('no ssdp reply from 10.109.0.11:1900')
+sys.exit(1)
+PYEOF
+'''
+expect_stdout = '^ssdp reply from 10\.109\.0\.11: .*MiniUPnPd'
+
+[[post]]
+device = "lab-r1"
+cmd = "echo \"enabled=$(uci -q get upnpd.config.enabled)\""
+expect_stdout = '^enabled=1$'

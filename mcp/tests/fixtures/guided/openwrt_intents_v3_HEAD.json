@@ -1,0 +1,140 @@
+[
+  {
+    "audit": [],
+    "control_id": null,
+    "doc": "",
+    "explanation": "no guidance for openwrt yet",
+    "guidance": "none",
+    "id": "INT-MGMT-SRC",
+    "ledger": ""
+  },
+  {
+    "audit": [
+      "listeners",
+      "services"
+    ],
+    "control_id": null,
+    "doc": "",
+    "explanation": "telnet absent from admin_access; audit listeners and services for plain-text admin ports.",
+    "guidance": "audit",
+    "id": "INT-MGMT-NO-TELNET",
+    "ledger": ""
+  },
+  {
+    "audit": [],
+    "control_id": null,
+    "doc": "",
+    "explanation": "no guidance for openwrt yet",
+    "guidance": "none",
+    "id": "INT-SNMP-OFF",
+    "ledger": ""
+  },
+  {
+    "audit": [],
+    "control_id": null,
+    "doc": "",
+    "explanation": "no guidance for openwrt yet",
+    "guidance": "none",
+    "id": "INT-MGMT-NO-WEB",
+    "ledger": ""
+  },
+  {
+    "audit": [],
+    "control_id": null,
+    "doc": "",
+    "explanation": "no guidance for openwrt yet",
+    "guidance": "none",
+    "id": "INT-MGMT-NO-API",
+    "ledger": ""
+  },
+  {
+    "audit": [
+      "listeners"
+    ],
+    "control_id": "OW-MGMT-04",
+    "doc": "profiles/openwrt/manifest.toml",
+    "explanation": "Disable SSH password login after a key login is proven.",
+    "guidance": "control",
+    "id": "INT-SSH-KEYS-ONLY",
+    "ledger": ""
+  },
+  {
+    "audit": [
+      "port_forwards",
+      "upnp"
+    ],
+    "control_id": null,
+    "doc": "",
+    "explanation": "No inbound services; audit port_forwards and upnp so nothing leaks in.",
+    "guidance": "audit",
+    "id": "INT-INBOUND-NONE",
+    "ledger": ""
+  },
+  {
+    "audit": [
+      "upnp"
+    ],
+    "control_id": "OW-FW-06",
+    "doc": "profiles/openwrt/manifest.toml",
+    "explanation": "Keep UPnP off; the miniupnpd-nftables package may still need removing.",
+    "guidance": "control",
+    "id": "INT-UPNP-OFF",
+    "ledger": ""
+  },
+  {
+    "audit": [
+      "wifi"
+    ],
+    "control_id": "OW-WIFI-01",
+    "doc": "profiles/openwrt/manifest.toml",
+    "explanation": "Run Wi-Fi in WPA3-only mode; older Wi-Fi devices cannot join.",
+    "guidance": "control",
+    "id": "INT-WIFI-WPA3-ONLY",
+    "ledger": ""
+  },
+  {
+    "audit": [],
+    "control_id": "OW-V6-03",
+    "doc": "profiles/openwrt/manifest.toml",
+    "explanation": "Disable IPv6 across the router.",
+    "guidance": "control",
+    "id": "INT-V6-OFF",
+    "ledger": ""
+  },
+  {
+    "audit": [],
+    "control_id": null,
+    "doc": "",
+    "explanation": "no guidance for openwrt yet",
+    "guidance": "none",
+    "id": "INT-VPN-NONE",
+    "ledger": ""
+  },
+  {
+    "audit": [],
+    "control_id": null,
+    "doc": "",
+    "explanation": "no guidance for openwrt yet",
+    "guidance": "none",
+    "id": "INT-LOG-REMOTE",
+    "ledger": ""
+  },
+  {
+    "audit": [],
+    "control_id": null,
+    "doc": "",
+    "explanation": "no guidance for openwrt yet",
+    "guidance": "none",
+    "id": "INT-NTP-SERVERS",
+    "ledger": ""
+  },
+  {
+    "audit": [],
+    "control_id": "OW-UPD-02",
+    "doc": "profiles/openwrt/manifest.toml",
+    "explanation": "Add a read-only firmware-update availability check.",
+    "guidance": "control",
+    "id": "INT-FW-UPDATE-CHECK",
+    "ledger": ""
+  }
+]

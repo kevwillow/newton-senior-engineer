@@ -1,0 +1,22 @@
+name = "06-port-forward-from-isp"
+description = "Forward WAN:2222 to client SSH; expect confirmed; verify SSH banner reachable from lab-isp."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 90
+approval = true
+probes = [["nft-rule", "inet", "fw4", "ruleset", "present", "dport 2222"]]
+batch = """set firewall.fwd_ssh_client=redirect
+set firewall.fwd_ssh_client.name='ssh to client'
+set firewall.fwd_ssh_client.src='wan'
+set firewall.fwd_ssh_client.src_dport='2222'
+set firewall.fwd_ssh_client.dest='lab'
+set firewall.fwd_ssh_client.dest_ip='{client_lab_ip}'
+set firewall.fwd_ssh_client.dest_port='22'
+set firewall.fwd_ssh_client.proto='tcp'
+set firewall.fwd_ssh_client.target='DNAT'"""
+
+[[post]]
+device = "lab-isp"
+cmd = "(nc {r1_wan_ip} 2222 </dev/null > /tmp/b 2>/dev/null &) ; sleep 3; head -c 7 /tmp/b; rm -f /tmp/b"
+expect_stdout = "^SSH-2\\.0"

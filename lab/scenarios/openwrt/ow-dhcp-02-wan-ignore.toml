@@ -1,0 +1,45 @@
+name = "ow-dhcp-02-wan-ignore"
+description = "OW-DHCP-02 (rogue DHCP guard): dhcp.wan.ignore='1' is already the stock value, so the plan stages nothing and the expected outcome is noop. The posts prove that the guard is really in place. State: the uci options, and the conf the running dnsmasq was started with (found through its -C argument) has no-dhcp-interface for the WAN device (read from `ifstatus wan`) and its only dhcp-range is the client LAN's (set:lab). Behaviour: lab-isp runs busybox udhcpc as a probe on its two lab-facing interfaces (ispa/eth2 towards lab-r1's wan, ispb/eth3 towards wan2): 3 DISCOVERs each, and the post passes only when no OFFER came back (udhcpc prints 'broadcasting select for' as soon as it gets one, so an OFFER that is never ACKed also fails the post), so no lease is taken from anyone. lab-isp's own dnsmasq never sees these DISCOVERs (udhcpc sends from a raw packet socket on the same host) and lab-isp's lease file is untouched. wan2 (eth2 on lab-r1) has no dhcp section at all and is not served either: the init script only builds a dhcp-range for interfaces with proto static, and wan2, like wan, is a DHCP client. Three further layers stop a rogue DHCP server on a WAN, which the posts do not isolate: the wan zone's input policy REJECT (udp 67 is not allowed in input_wan), the init rule just described, and the init script's own dhcp_check, which runs `udhcpc -n -q -t 1` on every interface it would serve and refuses to serve one where another DHCP server answers (the result is cached in /var/run/dnsmasq.<id>.<if>.dhcp; `option force 1` in the dhcp section overrides it). By hand on wan2 only (the segment with lab VMs and nothing else; vmbr100 carries Pulsar, so no DHCP server was planted on wan): with wan2 made static, a dhcp section without ignore and udp 67 opened in input_wan, lab-isp's probe got an OFFER and a lease from lab-r1; with ignore='1' (no-dhcp-interface=eth2) it got none (results file). That is the proof that the behaviour post can fail."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "noop"
+setup = ["portfwd_on"]
+regression = "default"
+batch = '''
+set dhcp.wan.ignore='1'
+'''
+
+[[post]]
+device = "lab-r1"
+cmd = "echo \"ignore=$(uci -q get dhcp.wan.ignore) interface=$(uci -q get dhcp.wan.interface)\""
+expect_stdout = '^ignore=1 interface=wan$'
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+c=; for p in $(pidof dnsmasq); do c=$(tr '\0' ' ' < /proc/$p/cmdline | sed -n 's/.*dnsmasq -C \([^ ]*\).*/\1/p'); [ -n "$c" ] && break; done
+[ -f "$c" ] || { echo "no conf found for the running dnsmasq"; exit 1; }
+d=$(ifstatus wan | jsonfilter -e '@.l3_device')
+n=$(grep -c "^no-dhcp-interface=$d\$" "$c")
+r=$(grep '^dhcp-range=' "$c" | cut -d, -f1 | sed 's/^dhcp-range=//' | tr '\n' ' ')
+echo "wan device $d: no-dhcp-interface lines=$n; dhcp ranges served: $r"
+[ -n "$d" ] && [ "$n" = 1 ] && [ "$r" = "set:lab " ]
+'''
+expect_stdout = '^wan device eth1: no-dhcp-interface lines=1; dhcp ranges served: set:lab $'
+
+[[post]]
+device = "lab-isp"
+timeout = 90
+cmd = '''
+for i in $(uci -q get network.ispa.device) $(uci -q get network.ispb.device); do
+  o=$(udhcpc -i $i -n -q -f -t 3 -T 3 -s /bin/true 2>&1)
+  n=$(echo "$o" | grep -c 'broadcasting discover')
+  case "$o" in
+    *"lease of"*) echo "$i: $n DISCOVERs sent, LEASE TAKEN: $(echo "$o" | grep 'lease of')";;
+    *"select for"*) echo "$i: $n DISCOVERs sent, an OFFER came back (udhcpc went on to select it): $(echo "$o" | grep 'select for' | head -1)";;
+    *"no lease"*) echo "$i: $n DISCOVERs sent, no OFFER";;
+    *) echo "$i: unexpected udhcpc output: $o";;
+  esac
+done
+'''
+expect_stdout = '^eth2: 3 DISCOVERs sent, no OFFER\neth3: 3 DISCOVERs sent, no OFFER$'

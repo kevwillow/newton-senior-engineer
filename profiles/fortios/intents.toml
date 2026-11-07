@@ -1,0 +1,107 @@
+# FortiOS intent -> revert-wrapped snippet mapping.
+#
+# Audit ids name the enabled getters of this platform
+# (``mcp/newton_mcp/adapters/fortios/getters.toml``); every getter ships
+# disabled today, so every ``audit`` list is ``[]``. The lab has not yet
+# measured a single FortiOS getter on a real FortiGate-VM, so no
+# snippet is shipped either (the wrapper stays unchanged until a
+# lab-verified body exists). Every snippet shipped
+# later will still be UNVERIFIED until a lab run confirms it on a
+# FortiGate-VM lab (none exists here yet).
+#
+# Keys of an [[intent]] entry, in this order:
+#   id, explanation, doc, ledger, audit, check, good, snippet, confirm.
+# Reserved keys refused by the loader: control_id, tier, form_of.
+# Only the four service-off intents may carry ``snippet`` / ``confirm``.
+#
+# Intents not listed here are returned by ``recommend()`` with
+# guidance "none" and explanation "no guidance for <platform> yet".
+[[intent]]
+id = 'INT-MGMT-SRC'
+explanation = 'Decide which source prefixes may reach the admin plane on the FortiGate; store the chosen prefix list per device.'
+doc = 'profiles/fortios/notes.md'
+ledger = ''
+audit = []
+check = 'Confirm the chosen source restriction is applied at the admin boundary (the trusthost knob is release-specific and the lab has not yet proven the field name) before any admin is reachable from outside it.'
+good = 'Admin reachability on every enabled service is constrained to the recorded source set; nothing else responds.'
+
+[[intent]]
+id = 'INT-MGMT-NO-TELNET'
+explanation = 'No snippet is shipped for telnet on FortiOS; the lab has not yet measured an exec channel, so the wrapper would have no body the lab has proven.'
+doc = 'profiles/fortios/notes.md'
+ledger = ''
+audit = []
+check = 'Check the running configuration on the device console for telnet listeners; no enabled getter shows it yet.'
+good = 'No telnet listener answers on the admin plane; the device accepts only ssh for admin access.'
+
+[[intent]]
+id = 'INT-MGMT-NO-WEB'
+explanation = 'No snippet is shipped for the web UI on FortiOS; the lab has not yet measured an exec channel, so the wrapper would have no body the lab has proven.'
+doc = 'profiles/fortios/notes.md'
+ledger = ''
+audit = []
+check = 'Check the running configuration on the device console for the HTTPS admin listener; no enabled getter shows it yet.'
+good = 'No HTTPS admin listener answers on the admin plane; the device accepts only ssh for admin access.'
+
+[[intent]]
+id = 'INT-MGMT-NO-API'
+explanation = 'No snippet is shipped for the API on FortiOS; the lab has not yet measured an exec channel, so the wrapper would have no body the lab has proven.'
+doc = 'profiles/fortios/notes.md'
+ledger = ''
+audit = []
+check = 'Check the running configuration on the device console for JSON-RPC or REST admin listeners; no enabled getter shows it yet.'
+good = 'No HTTP API listener answers on the admin plane; the device accepts only ssh for admin access.'
+
+[[intent]]
+id = 'INT-SNMP-V3-ONLY'
+explanation = 'When SNMP is needed, run it on v3 with auth + priv; never advertise a community string.'
+doc = 'profiles/fortios/notes.md'
+ledger = ''
+audit = []
+check = 'Check the running configuration on the device console for the SNMP stanza; no enabled getter shows it yet.'
+good = 'SNMP, when present, responds to v3 requests with auth+priv only; no v1/v2 community line remains.'
+
+[[intent]]
+id = 'INT-SNMP-OFF'
+explanation = 'No snippet is shipped for SNMP on FortiOS; the lab has not yet measured an exec channel, so the wrapper would have no body the lab has proven.'
+doc = 'profiles/fortios/notes.md'
+ledger = ''
+audit = []
+check = 'Check the running configuration on the device console for an SNMP listener; no enabled getter shows it yet.'
+good = 'No SNMP listener answers on UDP/161 from any subnet.'
+
+[[intent]]
+id = 'INT-SSH-KEYS-ONLY'
+explanation = 'Disable SSH password login after a key login is proven on the FortiOS admin account.'
+doc = 'profiles/fortios/notes.md'
+ledger = ''
+audit = []
+check = 'Audit the admin entry for the SSH public key and the absence of a password-only auth method.'
+good = 'The admin authenticates only with a key; passwords are not accepted on ssh.'
+
+[[intent]]
+id = 'INT-INBOUND-NONE'
+explanation = 'No inbound services; firewall policy and VIP rules should not accept anything from outside the WAN.'
+doc = 'profiles/fortios/notes.md'
+ledger = ''
+audit = []
+check = 'No enabled getter exists on this platform; the audit list is empty until a lab-verified getter ships.'
+good = 'firewall policy and VIP hold no inbound accept; nothing from outside reaches a LAN port.'
+
+[[intent]]
+id = 'INT-LOG-REMOTE'
+explanation = 'Forward FortiOS logs to a syslog server; the device keeps an on-box log too.'
+doc = 'profiles/fortios/notes.md'
+ledger = ''
+audit = []
+check = 'No enabled getter exists on this platform; the audit list is empty until a lab-verified getter ships.'
+good = 'logs reach the configured syslog endpoint; the on-box log reflects the same events.'
+
+[[intent]]
+id = 'INT-NTP-SERVERS'
+explanation = 'List the NTP servers FortiOS syncs against; the device clock must be right for every auth check.'
+doc = 'profiles/fortios/notes.md'
+ledger = ''
+audit = []
+check = 'No enabled getter exists on this platform; the audit list is empty until a lab-verified getter ships.'
+good = 'At least one configured NTP server is reachable and the device reports its clock as synchronised.'

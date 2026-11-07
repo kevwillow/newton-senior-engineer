@@ -1,0 +1,30 @@
+name = "ev-05-dns-upstream-change"
+description = "Restrict lab-r1's dnsmasq to lab-isp's dnsmasq on 10.100.0.1 (its ispa-side address) as its single upstream: dhcp.@dnsmasq[0].noresolv='1' (ignore /etc/resolv.conf) and add lab-isp's address to the server list. The stock path already forwards through lab-isp, and lab-isp's dnsmasq answers, so DNS keeps resolving openwrt.org through the real internet (lab-isp -> Quasar). Before the apply the generated dnsmasq conf has no no-resolv line, so the effect fails; after the confirmed apply the conf holds no-resolv and exactly one server= line, 10.100.0.1, and a client still resolves openwrt.org through 192.168.150.1 (in [[post]], not as an effect, because that lookup also passes before the change, and an effect must fail before). No firewall change, so no approval."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 60
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "client_internet", "client_dns", "client_dhcp"]
+probes = [["conf-has", "dnsmasq", "line", "present", "server=10.100.0.1"], ["conf-has", "dnsmasq", "line", "present", "no-resolv"]]
+batch = """
+set dhcp.@dnsmasq[0].noresolv='1'
+add_list dhcp.@dnsmasq[0].server='10.100.0.1'
+"""
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+f=/var/etc/dnsmasq.conf.*
+servers=$(grep '^server=' $f | sed 's/^server=//' | xargs)
+n=$(echo "$servers" | grep -c .)
+noresolv=$(grep -cx 'no-resolv' $f)
+echo "upstreams: $servers ; no-resolv: $([ "$noresolv" -ge 1 ] && echo yes || echo no)"
+[ "$n" = 1 ] && [ "$servers" = "10.100.0.1" ] && [ "$noresolv" -ge 1 ]
+'''
+expect_stdout = '^upstreams: 10\.100\.0\.1 ; no-resolv: yes$'
+
+[[post]]
+device = "lab-client"
+timeout = 15
+cmd = "host -W 5 -t A openwrt.org 192.168.150.1 | tail -1"
+expect_stdout = '^openwrt\.org has address '

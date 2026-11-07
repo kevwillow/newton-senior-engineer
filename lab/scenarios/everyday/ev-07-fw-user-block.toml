@@ -1,0 +1,30 @@
+name = "ev-07-fw-user-block"
+description = "A user firewall rule on lab-r1 blocks a LAN client from one outside destination. The destination is lab-isp at 10.100.0.1 port 22 (lab-isp is the lab's ISP-side test machine and runs dropbear), not the internet; the rule is firewall.ev_block_isp22 (src lab, dest wan, dest_ip 10.100.0.1, proto tcp, dest_port 22, target REJECT). Before the change lab-client can ssh-port-open 10.100.0.1:22 through lab-r1 NAT, so the effect fails; after the confirmed apply the same connect is refused at once by the REJECT rule, so the effect passes. A REJECT rule needs no approval (the first live run with approval = true failed: the router says not-required)."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 60
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "client_internet", "client_dns", "client_dhcp", "client_isp_ssh"]
+breaks = ["client_isp_ssh"]
+probes = [["nft-rule", "inet", "fw4", "ruleset", "present", "10.100.0.1"]]
+batch = '''
+set firewall.ev_block_isp22=rule
+set firewall.ev_block_isp22.name='ev-block-isp-ssh'
+set firewall.ev_block_isp22.src='lab'
+set firewall.ev_block_isp22.dest='wan'
+set firewall.ev_block_isp22.dest_ip='10.100.0.1'
+set firewall.ev_block_isp22.proto='tcp'
+set firewall.ev_block_isp22.dest_port='22'
+set firewall.ev_block_isp22.target='REJECT'
+'''
+
+[[effect]]
+device = "lab-client"
+timeout = 30
+cmd = "timeout 6 bash -c 'exec 3<>/dev/tcp/10.100.0.1/22' && echo open || echo blocked"
+expect_stdout = '^blocked$'
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get firewall.ev_block_isp22.target; uci -q get firewall.ev_block_isp22.dest_ip"
+expect_stdout = '^REJECT\n10\.100\.0\.1$'

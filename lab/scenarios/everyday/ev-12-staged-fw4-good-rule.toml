@@ -1,0 +1,21 @@
+name = "ev-12-staged-fw4-good-rule"
+description = "a good staged firewall rule passes the router's check-staged: the plan output carries 'STAGEDCHECK fw4 pass' (the approval text says 'fw4 passed on the staged config'), then the change is approved and confirmed."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+plan_match = "^STAGEDCHECK fw4 pass$"
+timeout = 90
+approval = true
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "client_internet", "client_dns", "client_dhcp"]
+probes = [["nft-rule", "inet", "fw4", "ruleset", "present", "dport 8443"]]
+batch = """set firewall.ev12_ok=rule
+set firewall.ev12_ok.name='ev12-ok'
+set firewall.ev12_ok.src='wan'
+set firewall.ev12_ok.proto='tcp'
+set firewall.ev12_ok.dest_port='8443'
+set firewall.ev12_ok.target='ACCEPT'"""
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get firewall.ev12_ok.target"
+expect_stdout = '^ACCEPT$'

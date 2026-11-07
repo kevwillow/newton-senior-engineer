@@ -1,0 +1,9 @@
+# recorded lab:chr:7.24.5:2026-10-18
+Flags: * - DEFAULT
+Columns: TOPICS, ACTION
+#   TOPICS    ACTION
+0 * info      memory
+1 * error     memory
+2 * warning   memory
+3 * critical  echo  
+

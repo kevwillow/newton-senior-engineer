@@ -1,0 +1,19 @@
+# recorded lab:chr:7.24.5:2026-10-18
+                   uptime: 7m6s                                      
+                  version: 7.24.5 (stable)                           
+               build-time: 2026-09-29 14:21:27                       
+          minimum-version: 7.1                                       
+              free-memory: 52.7MiB                                   
+             total-memory: 256.0MiB                                  
+                      cpu: Common                                    
+                cpu-count: 1                                         
+            cpu-frequency: 2591MHz                                   
+                 cpu-load: 0%                                        
+           free-hdd-space: 69.1MiB                                   
+          total-hdd-space: 89.2MiB                                   
+  write-sect-since-reboot: 920                                       
+         write-sect-total: 920                                       
+        architecture-name: x86_64                                    
+               board-name: CHR QEMU Standard PC (i440FX + PIIX, 1996)
+                 platform: MikroTik                                  
+

@@ -1,0 +1,24 @@
+# PORT of ow-ref-05-leash-wrong-token. Changed: lab-r1 -> pulsar, r1_wan_ip -> p_wan_ip, regression list -> pulsar's default list (pulsar checks come from the local config); no other change.
+name = "p-ow-ref-05-leash-wrong-token"
+description = "Negative scenario for design 5.1: a leash-flagged batch (set dropbear.@dropbear[0].IdleTimeout='600' fires mgmt-config, design 5.2 code table) is refused at apply when the approval token is wrong (does not match the HMAC of the sealed digest, design 5.4). The router returns 'error bad-approval' (device/openwrt/newton-router/tests/test_approval.py test_apply_prod_wrong_ingredient_token_bad_approval and the flip-of-digit tests), and scripts/owrt-change.sh's apply branch wraps that as 'apply refused, nothing applied: error bad-approval'. The session is destroyed (single use); uci changes stays empty, the live dropbear config is unchanged. approval = 'wrong' tells the runner to pass a 64-hex token that does not match the digest. The refuse_match regex pins both the wrapper and the router's reason so a future change to either fails the test."
+target = "pulsar"
+reset = ["pulsar"]
+timeout = 60
+setup = ["portfwd_on"]
+regression = "default"
+expect = "refused"
+refuse_match = "apply refused, nothing applied: .* bad-approval"
+batch = '''
+set dropbear.@dropbear[0].IdleTimeout='600'
+'''
+approval = "wrong"
+
+[[post]]
+device = "pulsar"
+cmd = "uci changes | wc -l"
+expect_stdout = "^0$"
+
+[[post]]
+device = "pulsar"
+cmd = "uci -q get dropbear.@dropbear[0].IdleTimeout || true"
+expect_stdout = "^$"

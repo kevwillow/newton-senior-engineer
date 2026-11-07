@@ -1,0 +1,5 @@
+# synthetic
+ 0  R  name=ether1 mtu=1500
+ 1  R  name=ether2 mtu=1500
+ 2  R  name=sfp1   mtu=1500
+ 3  R  name=bridge1 mtu=1500

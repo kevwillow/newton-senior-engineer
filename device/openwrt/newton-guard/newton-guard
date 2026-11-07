@@ -1,0 +1,1341 @@
+#!/bin/sh
+# shellcheck disable=SC3043
+set -u
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+LC_ALL=C
+export LC_ALL
+umask 077
+
+R=${NEWTON_GUARD_ROOT:-}
+if [ -n "$R" ] && { [ "${R#/}" = "$R" ] || [ ! -d "$R" ]; }; then
+	echo "error bad-root"
+	exit 2
+fi
+
+CFG=$R/etc/config
+NG=$R/etc/newton
+INIT=$R/etc/init.d/newton-guard
+DF=${R:+$R/bin/}df
+RELOAD=${R:+$R/sbin/}reload_config
+LOGGER=${R:+$R/usr/bin/}logger
+CP=${R:+$R/bin/}cp
+MV=${R:+$R/bin/}mv
+SYNC=${R:+$R/bin/}sync
+RM=${R:+$R/bin/}rm
+MKTEMP=${R:+$R/bin/}mktemp
+SLEEP=${R:+$R/bin/}sleep
+CRASH_COUNT=0
+CRASH_TARGET=${NEWTON_GUARD_CRASH_AT:-}
+BOOT_MODE=0
+RECOVER_QDIR=
+SCRATCH=
+RETRY_GAP=15
+
+# BusyBox ash provides local variables for function hygiene.
+
+crash_point() {
+	[ -n "$R" ] || return 0
+	case "$CRASH_TARGET" in
+		''|*[!0-9]*|0) return 0 ;;
+	esac
+	CRASH_COUNT=$((CRASH_COUNT + 1))
+	[ "$CRASH_COUNT" -ne "$CRASH_TARGET" ] || kill -KILL $$
+}
+
+usage() {
+	echo "usage: newton-guard {arm TXN TIMEOUT|confirm TXN|restore REASON|recover [restore TXN]|status|boot|tick|timer}" >&2
+	echo "error usage"
+	exit 2
+}
+
+valid_txn() {
+	[ "${#1}" -ge 8 ] && [ "${#1}" -le 64 ] || return 1
+	case "$1" in ''|*[!a-z0-9-]*) return 1 ;; esac
+	return 0
+}
+
+valid_timeout() {
+	case "$1" in ''|0*|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 60 ] 2>/dev/null && [ "$1" -le 900 ] 2>/dev/null
+}
+
+valid_reason() {
+	[ "${#1}" -ge 1 ] && [ "${#1}" -le 32 ] || return 1
+	case "$1" in *[!a-z0-9-]*) return 1 ;; esac
+	return 0
+}
+
+valid_name() {
+	case "$1" in
+		''|*[!A-Za-z0-9_-]*) return 1 ;;
+	esac
+	return 0
+}
+
+escape_name() {
+	local rest="$1" char hex
+	ESCAPED=
+	while [ -n "$rest" ]; do
+		char=${rest%"${rest#?}"}
+		rest=${rest#?}
+		case "$char" in
+			[A-Za-z0-9._-]) ESCAPED=$ESCAPED$char ;;
+			*)
+				hex=$(printf '\\x%02x' "\"$char")
+				ESCAPED=$ESCAPED$hex
+				;;
+		esac
+	done
+}
+
+skipped_line() {
+	local entry name line=skipped found=0
+	for entry in "$CFG"/*; do
+		name=${entry##*/}
+		valid_name "$name" && continue
+		[ -e "$entry" ] || [ -L "$entry" ] || continue
+		escape_name "$name"
+		line="$line $ESCAPED"
+		found=1
+	done
+	[ "$found" -eq 0 ] || printf '%s\n' "$line"
+}
+
+valid_uint() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	return 0
+}
+
+lock_state() {
+	# The state lock lives in the root-only state directory, not in tmp: a
+	# local non-root user could pre-plant a file or a symlink at a fixed name
+	# in tmp, but never inside $NG (design 3, DEV-02). Opened for flock only,
+	# never written.
+	mkdir -p "$NG"
+	exec 9>>"$NG/guard.lock"
+	flock 9
+}
+
+unlock_state() {
+	flock -u 9
+}
+
+scratch_cleanup() {
+	[ -z "$SCRATCH" ] || rm -rf "$SCRATCH"
+	SCRATCH=
+}
+
+scratch_dir() {
+	# One private mode-700 directory per process; its name is unpredictable, so nothing planted in tmp is followed.
+	if [ -n "$SCRATCH" ] && [ -d "$SCRATCH" ] && [ ! -L "$SCRATCH" ]; then
+		return 0
+	fi
+	mkdir -p "$R/tmp" || return 1
+	# BusyBox ash skips the EXIT trap when a signal ends the shell, so the three terminating signals clean up too.
+	trap scratch_cleanup EXIT
+	trap 'scratch_cleanup; exit 1' HUP INT TERM
+	SCRATCH=$("$MKTEMP" -d "$R/tmp/newton-guard.XXXXXX" 2>/dev/null) || {
+		SCRATCH=
+		return 1
+	}
+	return 0
+}
+
+uptime_read() {
+	UP_RAW=0
+	UP_NOW=0
+	if IFS=' ' read -r UP_RAW _ < "$R/proc/uptime"; then
+		UP_NOW=${UP_RAW%%.*}
+		valid_uint "$UP_NOW" || UP_NOW=0
+	fi
+}
+
+boot_id_read() {
+	BOOT_ID=-
+	IFS= read -r BOOT_ID < "$R/proc/sys/kernel/random/boot_id" || BOOT_ID=-
+}
+
+atomic_write_path() {
+	# The rename is the durability boundary for one-line state.
+	local path="$1" value="$2" dir name tmp
+	dir=${path%/*}
+	name=${path##*/}
+	tmp=$dir/.$name.tmp
+	if ! printf '%s\n' "$value" > "$tmp"; then
+		rm -f "$tmp"
+		return 1
+	fi
+	crash_point
+	if ! "$SYNC"; then
+		rm -f "$tmp"
+		return 1
+	fi
+	crash_point
+	if ! "$MV" -f "$tmp" "$path"; then
+		rm -f "$tmp"
+		return 1
+	fi
+	crash_point
+	"$SYNC" || return 1
+	crash_point
+	return 0
+}
+
+atomic_write() {
+	atomic_write_path "$NG/$1" "$2"
+}
+
+valid_sha256() {
+	[ "${#1}" -eq 64 ] || return 1
+	case "$1" in *[!0-9a-f]*) return 1 ;; esac
+	return 0
+}
+
+sha256_of() {
+	local out
+	out=$(sha256sum "$1") || return 1
+	SHA=${out%% *}
+	valid_sha256 "$SHA"
+}
+
+log_event() {
+	local level="$1" message="$2" size
+	mkdir -p "$NG"
+	uptime_read
+	printf '%s %s %s\n' "$UP_RAW" "$(date +%Y-%m-%dT%H:%M:%S)" "$message" >> "$NG/guard.log"
+	size=$(wc -c < "$NG/guard.log")
+	if [ "$size" -gt 16384 ]; then
+		tail -n 100 "$NG/guard.log" > "$NG/.guard.log.tmp"
+		"$MV" -f "$NG/.guard.log.tmp" "$NG/guard.log"
+	fi
+	"$LOGGER" -t newton-guard -p "daemon.$level" "$message" >/dev/null 2>&1 || :
+	if [ "$BOOT_MODE" -eq 1 ] || [ "$level" != info ]; then
+		{ printf '<3>newton-guard: %s\n' "$message" >> "$R/dev/kmsg"; } 2>/dev/null || :
+	fi
+}
+
+read_pending() {
+	P_TXN=
+	P_DEADLINE=
+	P_BOOT=
+	P_EXTRA=
+	[ -f "$NG/pending" ] || return 1
+	IFS=' ' read -r P_TXN P_DEADLINE P_BOOT P_EXTRA < "$NG/pending" || return 2
+	valid_txn "$P_TXN" || return 2
+	valid_uint "$P_DEADLINE" || return 2
+	[ -n "$P_BOOT" ] && [ -z "$P_EXTRA" ] || return 2
+	return 0
+}
+
+read_failed() {
+	F_TXN=-
+	F_WHY=unknown
+	[ -f "$NG/failed" ] || return 1
+	IFS=' ' read -r F_TXN F_WHY _ < "$NG/failed" || :
+}
+
+pending_expired() {
+	uptime_read
+	boot_id_read
+	[ "$P_BOOT" != "$BOOT_ID" ] || [ "$UP_NOW" -ge "$P_DEADLINE" ]
+}
+
+status_line() {
+	local pending_rc
+	if [ -f "$NG/pending" ] && read_failed; then
+		echo "failed $F_TXN $F_WHY"
+		return
+	fi
+	read_pending
+	pending_rc=$?
+	if [ "$pending_rc" -eq 0 ]; then
+		uptime_read
+		boot_id_read
+		if [ "$P_BOOT" != "$BOOT_ID" ] || [ "$UP_NOW" -ge "$P_DEADLINE" ]; then
+			LEFT=0
+		else
+			LEFT=$((P_DEADLINE - UP_NOW))
+		fi
+		echo "pending $P_TXN $LEFT"
+		return
+	fi
+	if [ "$pending_rc" -eq 2 ]; then
+		echo "failed - pending-corrupt"
+		return
+	fi
+	if [ -f "$NG/last_revert" ]; then
+		L_TXN=-
+		L_REASON=unknown
+		IFS=' ' read -r L_TXN L_REASON _ < "$NG/last_revert" || :
+		echo "restored $L_TXN $L_REASON"
+		return
+	fi
+	echo "idle"
+}
+
+status_cmd() {
+	status_line
+	skipped_line
+}
+
+file_hash() {
+	HASH=$(md5sum "$1") || return 1
+	HASH=${HASH%% *}
+	return 0
+}
+
+file_attrs() {
+	local attrs
+	attrs=$(ls -ln "$1") || return 1
+	IFS=' ' read -r ATTR_MODE _ ATTR_UID ATTR_GID _ <<EOF
+$attrs
+EOF
+	[ -n "$ATTR_MODE" ] && valid_uint "$ATTR_UID" && valid_uint "$ATTR_GID"
+}
+
+fail_restore() {
+	local txn="$1" why="$2"
+	if ! atomic_write failed "$txn $why"; then
+		log_event crit "failed marker write failed txn=$txn why=$why"
+	fi
+	log_event crit "restore failed txn=$txn why=$why"
+	echo "failed $txn $why"
+	return 1
+}
+
+manifest_valid() {
+	local dir="$1" hash name extra actual
+	while IFS=' ' read -r hash name extra; do
+		[ -n "$hash" ] && [ -n "$name" ] && [ -z "$extra" ] || return 1
+		valid_name "$name" || return 1
+		[ -f "$dir/$name" ] && [ ! -L "$dir/$name" ] || return 1
+		file_hash "$dir/$name" || return 1
+		actual=$HASH
+		[ "$actual" = "$hash" ] || return 1
+	done < "$dir/.manifest"
+	return 0
+}
+
+lkg_verify() {
+	# A sealed LKG is complete: the seal binds the manifest bytes, the row
+	# count, the sorted name list and the directory entries together.
+	local dir="$1" seal_sha seal_count seal_names manifest_sha
+	local row_hash row_name row_extra row_names row_count entry entry_name dir_names dir_count
+	LKG_WHY=lkg-unsealed
+	if [ -L "$dir/.seal" ] || [ ! -f "$dir/.seal" ]; then
+		return 1
+	fi
+	if ! IFS=' ' read -r seal_sha seal_count seal_names < "$dir/.seal"; then
+		return 1
+	fi
+	LKG_WHY=lkg-corrupt
+	valid_sha256 "$seal_sha" || return 1
+	valid_uint "$seal_count" || return 1
+	[ "$seal_count" -ge 1 ] || return 1
+	[ -n "$seal_names" ] || return 1
+	if [ -L "$dir/.manifest" ] || [ ! -f "$dir/.manifest" ]; then
+		return 1
+	fi
+	sha256_of "$dir/.manifest" || return 1
+	manifest_sha=$SHA
+	[ "$manifest_sha" = "$seal_sha" ] || return 1
+	row_names=
+	row_count=0
+	while IFS=' ' read -r row_hash row_name row_extra; do
+		[ -n "$row_hash" ] && [ -n "$row_name" ] && [ -z "$row_extra" ] || return 1
+		valid_name "$row_name" || return 1
+		row_names="$row_names $row_name"
+		row_count=$((row_count + 1))
+	done < "$dir/.manifest"
+	[ "$row_count" -eq "$seal_count" ] || return 1
+	[ "$row_names" = " $seal_names" ] || return 1
+	dir_names=
+	dir_count=0
+	for entry in "$dir"/*; do
+		[ -e "$entry" ] || [ -L "$entry" ] || continue
+		entry_name=${entry##*/}
+		dir_names="$dir_names $entry_name"
+		dir_count=$((dir_count + 1))
+	done
+	[ "$dir_count" -eq "$seal_count" ] || return 1
+	[ "$dir_names" = " $seal_names" ] || return 1
+	manifest_valid "$dir"
+}
+
+lkg_write_abort() {
+	rm -rf "$1"
+	echo "error lkg-write-failed"
+}
+
+restore_io_failure() {
+	local txn="$1" n=0 old_txn old_n
+	rm -f "$CFG"/.newton-tmp.*
+	if [ -f "$NG/restore_attempts" ]; then
+		old_txn=
+		old_n=0
+		IFS=' ' read -r old_txn old_n _ < "$NG/restore_attempts" || :
+		if [ "$old_txn" = "$txn" ] && valid_uint "$old_n"; then
+			n=$old_n
+		fi
+	fi
+	n=$((n + 1))
+	if [ "$n" -ge 3 ]; then
+		fail_restore "$txn" verify-failed
+		return 1
+	fi
+	if ! atomic_write restore_attempts "$txn $n"; then
+		fail_restore "$txn" verify-failed
+		return 1
+	fi
+	log_event err "restore io failure txn=$txn why=verify-failed attempt=$n"
+	echo "retry $txn verify-failed $n"
+	return 1
+}
+
+manifest_has() {
+	local manifest="$1" wanted="$2" hash name extra
+	while IFS=' ' read -r hash name extra; do
+		[ "$name" = "$wanted" ] && return 0
+	done < "$manifest"
+	return 1
+}
+
+protected_lkg() {
+	local wanted="$1"
+	if read_pending && [ "$P_TXN" = "$wanted" ]; then
+		return 0
+	fi
+	if read_failed && [ "$F_TXN" = "$wanted" ]; then
+		return 0
+	fi
+	return 1
+}
+
+prune_lkg() {
+	local dir txn seq count unsorted sorted
+	[ -d "$NG/lkg" ] || return 0
+	scratch_dir || return 0
+	unsorted=$SCRATCH/prune.unsorted
+	sorted=$SCRATCH/prune.sorted
+	: > "$unsorted"
+	for dir in "$NG"/lkg/*; do
+		[ -d "$dir" ] || continue
+		txn=${dir##*/}
+		if [ ! -f "$dir/.manifest" ]; then
+			protected_lkg "$txn" || rm -rf "$dir"
+			continue
+		fi
+		seq=0
+		IFS= read -r seq < "$dir/.seq" 2>/dev/null || seq=0
+		valid_uint "$seq" || seq=0
+		printf '%020d %s\n' "$seq" "$txn" >> "$unsorted"
+	done
+	sort -r "$unsorted" > "$sorted"
+	count=0
+	while IFS=' ' read -r seq txn; do
+		[ -n "$txn" ] || continue
+		count=$((count + 1))
+		if protected_lkg "$txn"; then
+			continue
+		fi
+		[ "$count" -le 5 ] || rm -rf "$NG/lkg/$txn"
+	done < "$sorted"
+	rm -f "$unsorted" "$sorted"
+}
+
+quarantine_seq_read() {
+	# A directory without a valid .seq counts as the oldest (0).
+	SEQ=0
+	{ IFS= read -r SEQ < "$1/.seq"; } 2>/dev/null || SEQ=0
+	valid_uint "$SEQ" || SEQ=0
+}
+
+quarantine_latest_recover() {
+	# Find the recover directory with the highest persistent sequence.
+	local dir name latest_seq=0 found=0
+	RECOVER_QDIR=
+	[ -d "$NG/quarantine" ] || return 0
+	for dir in "$NG"/quarantine/recover-*; do
+		[ -d "$dir" ] || continue
+		name=${dir##*/}
+		quarantine_seq_read "$dir"
+		if [ "$found" -eq 0 ] || [ "$SEQ" -gt "$latest_seq" ]; then
+			latest_seq=$SEQ
+			RECOVER_QDIR=$name
+			found=1
+		fi
+	done
+}
+
+quarantine_dir_new() {
+	# Create a fresh quarantine directory stamped with the next .seq counter,
+	# so pruning order never depends on the wall clock or mtimes.
+	local name="$1" dir max_seq=0
+	mkdir -p "$NG/quarantine/$name" || return 1
+	crash_point
+	for dir in "$NG"/quarantine/*; do
+		[ -d "$dir" ] || continue
+		quarantine_seq_read "$dir"
+		[ "$SEQ" -le "$max_seq" ] || max_seq=$SEQ
+	done
+	atomic_write_path "$NG/quarantine/$name/.seq" "$((max_seq + 1))"
+}
+
+prune_quarantine() {
+	# Best effort: keeps the newest 5 directories and at most 256 KiB in
+	# total (oldest first); ACTIVE and PROTECTED2 are never removed.
+	local active="$1" protected2="$2" dir name seq kb count total
+	local unsorted sorted sizes
+	[ -d "$NG/quarantine" ] || return 0
+	scratch_dir || return 0
+	unsorted=$SCRATCH/qprune.unsorted
+	sorted=$SCRATCH/qprune.sorted
+	sizes=$SCRATCH/qprune.sizes
+	: > "$unsorted" 2>/dev/null || return 0
+	for dir in "$NG"/quarantine/*; do
+		[ -d "$dir" ] || continue
+		name=${dir##*/}
+		quarantine_seq_read "$dir"
+		printf '%020d %s\n' "$SEQ" "$name" >> "$unsorted"
+	done
+	sort -r "$unsorted" > "$sorted" || :
+	count=0
+	while IFS=' ' read -r seq name; do
+		[ -n "$name" ] || continue
+		count=$((count + 1))
+		case "$name" in
+			"$active"|"$protected2") continue ;;
+		esac
+		if [ "$count" -gt 5 ]; then
+			rm -rf "$NG/quarantine/$name" || :
+			log_event info "pruned quarantine dir=$name rule=count"
+		fi
+	done < "$sorted"
+	: > "$sizes" 2>/dev/null || { rm -f "$unsorted" "$sorted"; return 0; }
+	total=0
+	while IFS=' ' read -r seq name; do
+		[ -n "$name" ] || continue
+		[ -d "$NG/quarantine/$name" ] || continue
+		kb=$(du -sk "$NG/quarantine/$name" 2>/dev/null) || continue
+		kb=${kb%%[!0-9]*}
+		valid_uint "$kb" || continue
+		total=$((total + kb))
+		printf '%s %s %s\n' "$seq" "$name" "$kb" >> "$sizes"
+	done < "$sorted"
+	sort "$sizes" > "$unsorted" || :
+	while IFS=' ' read -r seq name kb; do
+		[ "$total" -le 256 ] && break
+		[ -n "$name" ] || continue
+		[ -d "$NG/quarantine/$name" ] || continue
+		case "$name" in
+			"$active"|"$protected2") continue ;;
+		esac
+		if rm -rf "$NG/quarantine/$name"; then
+			total=$((total - kb))
+			log_event info "pruned quarantine dir=$name rule=size"
+		fi
+	done < "$unsorted"
+	rm -f "$unsorted" "$sorted" "$sizes"
+	return 0
+}
+
+quarantine_one() {
+	local txn="$1" source="$2" name dest suffix
+	name=${source##*/}
+	if [ ! -d "$NG/quarantine/$txn" ]; then
+		quarantine_dir_new "$txn" || return 1
+	fi
+	dest=$NG/quarantine/$txn/$name
+	suffix=0
+	while [ -e "$dest" ] || [ -L "$dest" ]; do
+		suffix=$((suffix + 1))
+		dest=$NG/quarantine/$txn/$name.$suffix
+	done
+	"$MV" "$source" "$dest" || return 1
+	crash_point
+}
+
+clear_failure_state() {
+	local source="$1"
+	rm -f "$NG/failed" "$NG/boot_attempts" "$NG/restore_attempts"
+	crash_point
+	"$SYNC"
+	crash_point
+	log_event info "cleared stale failure state source=$source"
+}
+
+restore_core() {
+	local reason="$1" reload_mode="$2" dir manifest hash name extra source dest actual
+	local changed=0 quarantined=0 entry txn source_mode source_uid source_gid
+	if ! read_pending; then
+		fail_restore - pending-corrupt
+		return 1
+	fi
+	txn=$P_TXN
+	dir=$NG/lkg/$txn
+	manifest=$dir/.manifest
+	if [ ! -f "$manifest" ]; then
+		fail_restore "$txn" lkg-missing
+		return 1
+	fi
+	if ! lkg_verify "$dir"; then
+		fail_restore "$txn" "$LKG_WHY"
+		return 1
+	fi
+	log_event info "restore start txn=$txn reason=$reason"
+	while IFS=' ' read -r hash name extra; do
+		source=$dir/$name
+		dest=$CFG/$name
+		if ! file_attrs "$source"; then
+			restore_io_failure "$txn"
+			return 1
+		fi
+		source_mode=$ATTR_MODE
+		source_uid=$ATTR_UID
+		source_gid=$ATTR_GID
+		if { [ -e "$dest" ] || [ -L "$dest" ]; } && { [ ! -f "$dest" ] || [ -L "$dest" ]; }; then
+			if ! quarantine_one "$txn" "$dest"; then
+				restore_io_failure "$txn"
+				return 1
+			fi
+			quarantined=$((quarantined + 1))
+		fi
+		if [ -f "$dest" ] && [ ! -L "$dest" ]; then
+			file_hash "$dest" || HASH=
+			actual=$HASH
+			if file_attrs "$dest" && [ "$actual" = "$hash" ] &&
+				[ "$ATTR_MODE" = "$source_mode" ] && [ "$ATTR_UID" = "$source_uid" ] &&
+				[ "$ATTR_GID" = "$source_gid" ]; then
+				continue
+			fi
+		fi
+		if ! "$CP" -p "$source" "$CFG/.newton-tmp.$name"; then
+			restore_io_failure "$txn"
+			return 1
+		fi
+		crash_point
+		if ! "$MV" -f "$CFG/.newton-tmp.$name" "$dest"; then
+			restore_io_failure "$txn"
+			return 1
+		fi
+		crash_point
+		changed=$((changed + 1))
+	done < "$manifest"
+	for entry in "$CFG"/*; do
+		name=${entry##*/}
+		valid_name "$name" || continue
+		[ -e "$entry" ] || [ -L "$entry" ] || continue
+		if ! manifest_has "$manifest" "$name"; then
+			if ! quarantine_one "$txn" "$entry"; then
+				restore_io_failure "$txn"
+				return 1
+			fi
+			quarantined=$((quarantined + 1))
+		fi
+	done
+	# Hidden restore temporaries are never UCI config entries.
+	rm -f "$CFG"/.newton-tmp.*
+	crash_point
+	"$SYNC"
+	crash_point
+	while IFS=' ' read -r hash name extra; do
+		[ -f "$CFG/$name" ] && [ ! -L "$CFG/$name" ] || {
+			restore_io_failure "$txn"
+			return 1
+		}
+		file_hash "$CFG/$name" || HASH=
+		[ "$HASH" = "$hash" ] || {
+			restore_io_failure "$txn"
+			return 1
+		}
+		file_attrs "$dir/$name" || {
+			restore_io_failure "$txn"
+			return 1
+		}
+		source_mode=$ATTR_MODE
+		source_uid=$ATTR_UID
+		source_gid=$ATTR_GID
+		file_attrs "$CFG/$name" || {
+			restore_io_failure "$txn"
+			return 1
+		}
+		[ "$ATTR_MODE" = "$source_mode" ] && [ "$ATTR_UID" = "$source_uid" ] &&
+			[ "$ATTR_GID" = "$source_gid" ] || {
+			restore_io_failure "$txn"
+			return 1
+		}
+	done < "$manifest"
+	if [ "$reload_mode" = reload ]; then
+		if ! "$RELOAD" >/dev/null 2>&1; then
+			log_event warning "reload failed txn=$txn"
+		fi
+		crash_point
+	fi
+	if ! atomic_write last_revert "$txn $reason"; then
+		restore_io_failure "$txn"
+		return 1
+	fi
+	rm -f "$NG/boot_attempts" "$NG/failed"
+	crash_point
+	"$SYNC"
+	crash_point
+	if ! "$RM" -f "$NG/pending"; then
+		restore_io_failure "$txn"
+		return 1
+	fi
+	rm -f "$NG/restore_attempts"
+	crash_point
+	"$SYNC"
+	crash_point
+	prune_lkg
+	prune_quarantine "$txn" "$RECOVER_QDIR"
+	log_event info "restore done txn=$txn reason=$reason changed=$changed quarantined=$quarantined"
+	echo "restored $txn $reason"
+	return 0
+}
+
+build_lkg() {
+	# Build one candidate LKG in DIR. Return 0 when it is complete and
+	# verified, 3 when the live config changed while copying (BUILD_NAME
+	# names the culprit, DIR is removed, nothing is printed), and 1 on an
+	# I/O problem (error lkg-write-failed has been printed, DIR is removed).
+	local dir="$1" entry name src_hash copy_hash
+	local max_seq=0 seq hash copied_names='' copied_count=0 seal_value
+	if [ -e "$dir" ]; then
+		rm -rf "$dir"
+		crash_point
+	fi
+	mkdir -p "$dir"
+	crash_point
+	for entry in "$CFG"/*; do
+		name=${entry##*/}
+		valid_name "$name" || continue
+		if [ ! -f "$entry" ] || [ -L "$entry" ]; then
+			rm -rf "$dir"
+			crash_point
+			BUILD_NAME=$name
+			return 3
+		fi
+		if ! file_hash "$entry"; then
+			rm -rf "$dir"
+			BUILD_NAME=$name
+			return 3
+		fi
+		src_hash=$HASH
+		if ! "$CP" -p "$entry" "$dir/$name"; then
+			lkg_write_abort "$dir"
+			return 1
+		fi
+		crash_point
+		file_hash "$dir/$name" || HASH=
+		copy_hash=$HASH
+		if [ "$src_hash" != "$copy_hash" ]; then
+			rm -rf "$dir"
+			crash_point
+			BUILD_NAME=$name
+			return 3
+		fi
+		copied_names="$copied_names $name"
+		copied_count=$((copied_count + 1))
+	done
+	for entry in "$NG"/lkg/*; do
+		[ -d "$entry" ] && [ -f "$entry/.manifest" ] || continue
+		seq=0
+		IFS= read -r seq < "$entry/.seq" 2>/dev/null || seq=0
+		valid_uint "$seq" || seq=0
+		[ "$seq" -le "$max_seq" ] || max_seq=$seq
+	done
+	seq=$((max_seq + 1))
+	if ! printf '%s\n' "$seq" > "$dir/.seq"; then
+		lkg_write_abort "$dir"
+		return 1
+	fi
+	crash_point
+	if ! "$SYNC"; then
+		lkg_write_abort "$dir"
+		return 1
+	fi
+	crash_point
+	if ! {
+		for entry in "$dir"/*; do
+			[ -f "$entry" ] || continue
+			name=${entry##*/}
+			file_hash "$entry"
+			hash=$HASH
+			printf '%s  %s\n' "$hash" "$name"
+		done
+	} > "$dir/.manifest.tmp"; then
+		lkg_write_abort "$dir"
+		return 1
+	fi
+	crash_point
+	if ! "$SYNC"; then
+		lkg_write_abort "$dir"
+		return 1
+	fi
+	crash_point
+	# The seal is written before the manifest is renamed into place, so an
+	# existing .manifest always implies a complete, sealed LKG.
+	if ! sha256_of "$dir/.manifest.tmp"; then
+		lkg_write_abort "$dir"
+		return 1
+	fi
+	seal_value="$SHA $copied_count$copied_names"
+	if ! atomic_write_path "$dir/.seal" "$seal_value"; then
+		lkg_write_abort "$dir"
+		return 1
+	fi
+	if ! "$MV" -f "$dir/.manifest.tmp" "$dir/.manifest"; then
+		lkg_write_abort "$dir"
+		return 1
+	fi
+	crash_point
+	if ! "$SYNC"; then
+		lkg_write_abort "$dir"
+		return 1
+	fi
+	crash_point
+	if ! lkg_verify "$dir"; then
+		lkg_write_abort "$dir"
+		return 1
+	fi
+	return 0
+}
+
+live_check() {
+	# One pass over the live config after the candidate is complete: the
+	# complete set of (name, md5) must equal the candidate manifest rows,
+	# in the same order. Modes and owners are not compared. Return 1 and
+	# set CHANGED_NAME to the first name that differs (- if none can be
+	# named). FIFOs and other non-regular entries are never read.
+	local dir="$1" entry name rows_file m_line l_line mrc lrc
+	CHANGED_NAME=-
+	rows_file=$SCRATCH/live.rows
+	: > "$rows_file" || return 1
+	for entry in "$CFG"/*; do
+		name=${entry##*/}
+		valid_name "$name" || continue
+		[ -e "$entry" ] || [ -L "$entry" ] || continue
+		if [ ! -f "$entry" ] || [ -L "$entry" ]; then
+			CHANGED_NAME=$name
+			rm -f "$rows_file"
+			return 1
+		fi
+		if ! file_hash "$entry"; then
+			CHANGED_NAME=$name
+			rm -f "$rows_file"
+			return 1
+		fi
+		printf '%s  %s\n' "$HASH" "$name" >> "$rows_file" || {
+			CHANGED_NAME=-
+			rm -f "$rows_file"
+			return 1
+		}
+	done
+	mrc=0
+	lrc=0
+	exec 3< "$dir/.manifest" 4< "$rows_file"
+	while [ "$mrc" -eq 0 ] || [ "$lrc" -eq 0 ]; do
+		mrc=1
+		if IFS= read -r m_line <&3; then mrc=0; fi
+		lrc=1
+		if IFS= read -r l_line <&4; then lrc=0; fi
+		if [ "$mrc" -ne 0 ] && [ "$lrc" -ne 0 ]; then
+			break
+		fi
+		if [ "$mrc" -ne 0 ]; then
+			CHANGED_NAME=${l_line##* }
+		elif [ "$lrc" -ne 0 ]; then
+			CHANGED_NAME=${m_line##* }
+		elif [ "$m_line" != "$l_line" ]; then
+			CHANGED_NAME=${m_line##* }
+		else
+			continue
+		fi
+		exec 3<&- 4<&-
+		rm -f "$rows_file"
+		return 1
+	done
+	exec 3<&- 4<&-
+	rm -f "$rows_file"
+	return 0
+}
+
+arm_cmd() {
+	local txn="$1" timeout_s="$2" entry name total_bytes=0 size need_kb avail_kb
+	local df_out df_last pending_value pending_line pending_extra first_rc second_rc
+	local dir attempt build_rc
+	valid_txn "$txn" || { echo "error bad-txn"; return 2; }
+	valid_timeout "$timeout_s" || { echo "error bad-timeout"; return 2; }
+	lock_state
+	mkdir -p "$NG/lkg"
+	if [ ! -f "$NG/pending" ] && { [ -f "$NG/failed" ] || [ -f "$NG/boot_attempts" ] || [ -f "$NG/restore_attempts" ]; }; then
+		clear_failure_state arm
+	fi
+	if read_failed; then
+		echo "refused failed $F_TXN"
+		return 3
+	fi
+	if read_pending; then
+		echo "refused pending $P_TXN"
+		return 3
+	fi
+	if [ -f "$NG/pending" ]; then
+		echo "refused pending -"
+		return 3
+	fi
+	if ! "$INIT" enabled >/dev/null 2>&1; then
+		echo "refused boot-hook-disabled"
+		return 3
+	fi
+	CONFIG_COUNT=0
+	for entry in "$CFG"/*; do
+		name=${entry##*/}
+		valid_name "$name" || continue
+		[ -e "$entry" ] || [ -L "$entry" ] || continue
+		CONFIG_COUNT=$((CONFIG_COUNT + 1))
+		if [ ! -f "$entry" ] || [ -L "$entry" ]; then
+			echo "refused bad-config-entry $name"
+			return 3
+		fi
+		size=$(wc -c < "$entry")
+		total_bytes=$((total_bytes + size))
+	done
+	if [ "$CONFIG_COUNT" -eq 0 ]; then
+		echo "refused no-config"
+		return 3
+	fi
+	need_kb=$((2 * ((total_bytes + 1023) / 1024) + 256))
+	scratch_dir || { echo "error scratch-failed"; return 1; }
+	df_out=$SCRATCH/df.out
+	df_last=$SCRATCH/df.last
+	if ! "$DF" -Pk "$R/etc" > "$df_out"; then
+		rm -f "$df_out"
+		echo "error df-failed"
+		return 1
+	fi
+	tail -n 1 "$df_out" > "$df_last"
+	{
+		IFS=' ' read -r _ _ _ avail_kb _ _ || avail_kb=
+	} < "$df_last"
+	rm -f "$df_out" "$df_last"
+	if ! valid_uint "$avail_kb"; then
+		echo "error df-failed"
+		return 1
+	fi
+	if [ "$avail_kb" -lt "$need_kb" ]; then
+		echo "refused low-space $avail_kb $need_kb"
+		return 3
+	fi
+	dir=$NG/lkg/$txn
+	if [ -f "$dir/.manifest" ]; then
+		echo "refused txn-used"
+		return 3
+	fi
+	# The snapshot must be consistent across files: build a candidate,
+	# re-check the whole live set against its manifest, and take at most
+	# one fresh snapshot before refusing.
+	attempt=1
+	while :; do
+		build_lkg "$dir"
+		build_rc=$?
+		if [ "$build_rc" -eq 1 ]; then
+			return 1
+		fi
+		if [ "$build_rc" -eq 0 ]; then
+			if live_check "$dir"; then
+				break
+			fi
+			rm -rf "$dir"
+			crash_point
+			build_rc=3
+			BUILD_NAME=$CHANGED_NAME
+		fi
+		if [ "$attempt" -eq 2 ]; then
+			echo "refused config-changed $BUILD_NAME"
+			return 3
+		fi
+		attempt=2
+	done
+	rm -f "$NG/last_revert" "$NG/boot_attempts" "$NG/restore_attempts"
+	crash_point
+	uptime_read
+	boot_id_read
+	DEADLINE=$((UP_NOW + 1 + timeout_s))
+	pending_value="$txn $DEADLINE $BOOT_ID"
+	if ! atomic_write pending "$pending_value"; then
+		rm -f "$NG/pending" "$NG/.pending.tmp"
+		rm -rf "$dir"
+		echo "error pending-write-failed"
+		return 1
+	fi
+	pending_line=
+	pending_extra=
+	{
+		IFS= read -r pending_line
+		first_rc=$?
+		IFS= read -r pending_extra
+		second_rc=$?
+	} < "$NG/pending"
+	if [ "$first_rc" -ne 0 ] || [ "$pending_line" != "$pending_value" ] ||
+		[ "$second_rc" -eq 0 ] || [ -n "$pending_extra" ]; then
+		rm -f "$NG/pending" "$NG/.pending.tmp"
+		rm -rf "$dir"
+		echo "error pending-mismatch"
+		return 1
+	fi
+	"$INIT" start >/dev/null 2>&1 || :
+	RUNNING=0
+	CHECK=1
+	while [ "$CHECK" -le 5 ]; do
+		if "$INIT" running timer >/dev/null 2>&1; then
+			RUNNING=1
+			break
+		fi
+		[ "$CHECK" -eq 5 ] || sleep 1
+		CHECK=$((CHECK + 1))
+	done
+	if [ "$RUNNING" -eq 0 ]; then
+		rm -f "$NG/pending"
+		"$SYNC"
+		log_event err "timer not running txn=$txn"
+		echo "refused timer-not-running"
+		return 3
+	fi
+	log_event info "armed txn=$txn deadline=$DEADLINE timeout=$timeout_s"
+	echo "armed $txn $DEADLINE $timeout_s"
+}
+
+confirm_cmd() {
+	local txn="$1" pending_rc
+	valid_txn "$txn" || { echo "error bad-txn"; return 2; }
+	lock_state
+	read_pending
+	pending_rc=$?
+	if [ "$pending_rc" -eq 1 ]; then
+		echo "refused nothing-pending"
+		return 3
+	fi
+	if [ "$pending_rc" -eq 2 ]; then
+		echo "refused pending-corrupt"
+		return 3
+	fi
+	if [ "$P_TXN" != "$txn" ]; then
+		echo "refused txn-mismatch $P_TXN"
+		return 3
+	fi
+	if read_failed && [ "$F_TXN" = "$txn" ]; then
+		:
+	else
+		read_pending
+		if pending_expired; then
+			echo "refused expired"
+			return 3
+		fi
+	fi
+	if ! "$RM" -f "$NG/pending"; then
+		log_event err "confirm failed txn=$txn pending-not-removed"
+		echo "error confirm-failed"
+		return 1
+	fi
+	crash_point
+	"$SYNC"
+	crash_point
+	rm -f "$NG/boot_attempts" "$NG/failed" "$NG/restore_attempts"
+	crash_point
+	"$INIT" stop >/dev/null 2>&1 || :
+	prune_lkg
+	prune_quarantine "$txn" ""
+	log_event info "confirmed txn=$txn"
+	echo "confirmed $txn"
+}
+
+restore_cmd() {
+	local reason="$1" rc
+	valid_reason "$reason" || { echo "error bad-reason"; return 2; }
+	lock_state
+	if [ ! -f "$NG/pending" ]; then
+		echo "nothing-pending"
+		return 0
+	fi
+	if [ -f "$NG/failed" ] || [ -f "$NG/boot_attempts" ] || [ -f "$NG/restore_attempts" ]; then
+		clear_failure_state restore
+	fi
+	if restore_core "$reason" reload; then
+		"$INIT" stop >/dev/null 2>&1 || :
+		return 0
+	else
+		rc=$?
+		return "$rc"
+	fi
+}
+
+boot_cmd() {
+	local n=0 old_txn old_n txn
+	BOOT_MODE=1
+	lock_state
+	if [ ! -f "$NG/pending" ]; then
+		if [ -f "$NG/failed" ] || [ -f "$NG/boot_attempts" ] || [ -f "$NG/restore_attempts" ]; then
+			clear_failure_state boot
+		fi
+		for TMP_ENTRY in "$CFG"/.newton-tmp.*; do
+			[ -e "$TMP_ENTRY" ] || continue
+			rm -f "$TMP_ENTRY"
+		done
+		status_line
+		return 0
+	fi
+	if read_failed; then
+		log_event crit "boot restore not retried txn=$F_TXN why=$F_WHY"
+		status_line
+		return 0
+	fi
+	if ! read_pending; then
+		restore_core boot noreload || :
+		return 0
+	fi
+	txn=$P_TXN
+	if [ -f "$NG/boot_attempts" ]; then
+		old_txn=
+		old_n=0
+		IFS=' ' read -r old_txn old_n _ < "$NG/boot_attempts" || :
+		if [ "$old_txn" = "$txn" ] && valid_uint "$old_n"; then
+			n=$old_n
+		fi
+	fi
+	n=$((n + 1))
+	if ! atomic_write boot_attempts "$txn $n"; then
+		log_event warning "boot attempts write failed txn=$txn attempts=$n"
+	fi
+	if [ "$n" -gt 3 ]; then
+		if ! atomic_write failed "$txn boot-loop"; then
+			log_event crit "failed marker write failed txn=$txn why=boot-loop"
+		fi
+		log_event crit "boot loop txn=$txn attempts=$n"
+		echo "failed $txn boot-loop"
+		return 0
+	fi
+	restore_core boot noreload || :
+	return 0
+}
+
+tick_core() {
+	local emit="$1" initial_txn reason pending_rc locked=0
+	if [ -f "$NG/failed" ]; then
+		[ "$emit" -eq 0 ] || status_line
+		return 0
+	fi
+	read_pending
+	pending_rc=$?
+	if [ "$pending_rc" -eq 1 ]; then
+		[ "$emit" -eq 0 ] || status_line
+		return 0
+	fi
+	if [ "$pending_rc" -eq 2 ]; then
+		lock_state
+		locked=1
+		read_pending
+		pending_rc=$?
+		if [ "$pending_rc" -eq 1 ]; then
+			[ "$emit" -eq 0 ] || status_line
+			return 0
+		fi
+		if [ "$pending_rc" -eq 2 ]; then
+			restore_core deadline reload
+			return $?
+		fi
+	fi
+	initial_txn=$P_TXN
+	if ! pending_expired; then
+		[ "$emit" -eq 0 ] || status_line
+		return 0
+	fi
+	if [ "$P_BOOT" = "$BOOT_ID" ]; then reason=deadline; else reason=reboot; fi
+	[ "$locked" -eq 1 ] || lock_state
+	if [ ! -f "$NG/pending" ]; then
+		[ "$emit" -eq 0 ] || status_line
+		return 0
+	fi
+	if ! read_pending; then
+		restore_core "$reason" reload
+		return $?
+	fi
+	if [ "$P_TXN" != "$initial_txn" ]; then
+		[ "$emit" -eq 0 ] || status_line
+		return 0
+	fi
+	if ! pending_expired; then
+		[ "$emit" -eq 0 ] || status_line
+		return 0
+	fi
+	if [ "$P_BOOT" = "$BOOT_ID" ]; then reason=deadline; else reason=reboot; fi
+	restore_core "$reason" reload
+}
+
+retry_outstanding() {
+	# True while a failed restore attempt of the expired pending transaction waits for its next try.
+	local r_txn r_n
+	[ -f "$NG/pending" ] && [ ! -f "$NG/failed" ] && [ -f "$NG/restore_attempts" ] || return 1
+	read_pending || return 1
+	pending_expired || return 1
+	IFS=' ' read -r r_txn r_n _ < "$NG/restore_attempts" || return 1
+	[ "$r_txn" = "$P_TXN" ] && valid_uint "$r_n"
+}
+
+timer_cmd() {
+	local tick_failed=0
+	while :; do
+		# Wait before every retry: after a failed tick (the counter file may not be writable) and when a
+		# boot left a counted attempt outstanding.
+		if [ "$tick_failed" -eq 1 ] || retry_outstanding; then "$SLEEP" "$RETRY_GAP"; fi
+		if tick_core 0; then tick_failed=0; else tick_failed=1; fi
+		unlock_state 2>/dev/null || :
+		if [ ! -f "$NG/pending" ] || [ -f "$NG/failed" ]; then
+			lock_state
+			if [ ! -f "$NG/pending" ] || [ -f "$NG/failed" ]; then
+				scratch_cleanup
+				"$INIT" stop >/dev/null 2>&1 || :
+				return 0
+			fi
+			unlock_state
+			continue
+		fi
+		"$SLEEP" 1
+	done
+}
+
+quarantine_recover() {
+	local base name suffix=0 item
+	base=recover-$(date +%Y%m%dT%H%M%S)
+	name=$base
+	while [ -e "$NG/quarantine/$name" ] || [ -L "$NG/quarantine/$name" ]; do
+		suffix=$((suffix + 1))
+		name=$base.$suffix
+	done
+	if ! quarantine_dir_new "$name"; then
+		echo "error recover-failed"
+		return 1
+	fi
+	RECOVER_QDIR=$name
+	for item in pending failed boot_attempts restore_attempts; do
+		if [ -e "$NG/$item" ] || [ -L "$NG/$item" ]; then
+			if ! "$MV" "$NG/$item" "$NG/quarantine/$name/$item"; then
+				echo "error recover-failed"
+				return 1
+			fi
+			crash_point
+		fi
+	done
+	return 0
+}
+
+recover_cmd() {
+	local pending_rc
+	lock_state
+	read_pending
+	pending_rc=$?
+	if [ "$pending_rc" -eq 0 ] && [ ! -f "$NG/failed" ]; then
+		echo "refused pending $P_TXN"
+		return 3
+	fi
+	if [ "$pending_rc" -eq 1 ]; then
+		echo "nothing-to-recover"
+		return 0
+	fi
+	quarantine_recover || return 1
+	"$SYNC"
+	"$INIT" stop >/dev/null 2>&1 || :
+	log_event info "recovered dir=$RECOVER_QDIR"
+	echo "recovered $RECOVER_QDIR"
+	return 0
+}
+
+recover_restore_cmd() {
+	local txn="$1" pending_rc dir rc resume=0
+	valid_txn "$txn" || { echo "error bad-txn"; return 2; }
+	lock_state
+	read_pending
+	pending_rc=$?
+	if [ "$pending_rc" -eq 0 ] && [ ! -f "$NG/failed" ]; then
+		# A live pending blocks, except the expired one an interrupted
+		# `recover restore` of this same txn left behind: that resumes.
+		if [ "$P_TXN" = "$txn" ] && [ "$P_DEADLINE" = 0 ]; then
+			resume=1
+		else
+			echo "refused pending $P_TXN"
+			return 3
+		fi
+	fi
+	# Preflight the LKG exactly like restore_core, changing nothing on refusal.
+	dir=$NG/lkg/$txn
+	if [ ! -f "$dir/.manifest" ]; then
+		echo "refused lkg-missing $txn"
+		return 3
+	fi
+	if ! lkg_verify "$dir"; then
+		echo "refused $LKG_WHY $txn"
+		return 3
+	fi
+	if [ "$resume" -eq 1 ]; then
+		rm -f "$NG/boot_attempts" "$NG/restore_attempts"
+		quarantine_latest_recover
+	else
+		quarantine_recover || return 1
+		boot_id_read
+		if ! atomic_write pending "$txn 0 $BOOT_ID"; then
+			echo "error recover-failed"
+			return 1
+		fi
+	fi
+	restore_core recover reload
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		"$INIT" stop >/dev/null 2>&1 || :
+	fi
+	return "$rc"
+}
+
+cmd=${1:-}
+case "$cmd" in
+	arm)
+		[ "$#" -eq 3 ] || usage
+		arm_cmd "$2" "$3"
+		;;
+	confirm)
+		[ "$#" -eq 2 ] || usage
+		confirm_cmd "$2"
+		;;
+	restore)
+		[ "$#" -eq 2 ] || usage
+		restore_cmd "$2"
+		;;
+	recover)
+		if [ "$#" -eq 1 ]; then
+			recover_cmd
+		elif [ "$#" -eq 3 ] && [ "$2" = restore ]; then
+			recover_restore_cmd "$3"
+		else
+			usage
+		fi
+		;;
+	status)
+		[ "$#" -eq 1 ] || usage
+		status_cmd
+		;;
+	boot)
+		[ "$#" -eq 1 ] || usage
+		boot_cmd
+		exit 0
+		;;
+	tick)
+		[ "$#" -eq 1 ] || usage
+		tick_core 1
+		;;
+	timer)
+		[ "$#" -eq 1 ] || usage
+		timer_cmd
+		;;
+	*) usage ;;
+esac

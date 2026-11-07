@@ -1,0 +1,33 @@
+# PORT of ow-proto-02-ipset-timeout-change-rolls-back. Changed: lab-r1 -> pulsar, r1_wan_ip -> p_wan_ip, regression -> pulsar's default list. fw_ipset_on is the cloned step.
+name = "p-ow-proto-02-ipset-timeout-change-rolls-back"
+description = "Named nft sets, the case a restart cannot load: the existing ipset nw_block (setup, live) gets timeout='600'. A set's timeout, flags or match type cannot be changed in place: the apply's firewall reload fails as a whole (nft: 'Could not process rule: File exists'; for a match change 'existing set lacks interval flag') while `fw4 reload` exits 0, so nothing of the new ruleset goes live, and `/etc/init.d/firewall restart` refuses too, because its pre-check (`nft -c`) runs against the live set ('The rendered ruleset contains errors, not doing firewall restart.'); only `fw4 stop` then `fw4 start` loads it (all measured by hand). With the default check (`true`) the earlier protocol CONFIRMS this change while the live set has no timeout. Newton now restarts the firewall for an ipset change, sees the restart refused, does not confirm (no verify round runs) and lets the change roll back; after the rollback window it restarts the firewall again, which passes (config and live set agree again). Expect rolled_back with the default check, so the rollback comes from Newton itself. The [[effect]] (the live set has a timeout) fails before and must fail after; the posts show the config and the live set unchanged. Whether Newton should instead load such a change (fw4 stop and start: a window with no firewall and no pre-check; or one nft transaction that deletes and re-creates the table) is an open design question."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "rolled_back"
+timeout = 60
+setup = ["portfwd_on", "fw_ipset_on"]
+regression = "default"
+approval = true
+batch = '''
+set firewall.nw_block.timeout='600'
+'''
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+nft list set inet fw4 nw_block | grep -q 'timeout' && echo "live set nw_block has a timeout"
+'''
+expect_stdout = '^live set nw_block has a timeout$'
+
+[[post]]
+device = "pulsar"
+cmd = "echo \"uci timeout=$(uci -q get firewall.nw_block.timeout) entries=$(uci -q get firewall.nw_block.entry)\""
+expect_stdout = '^uci timeout= entries=192\.0\.2\.1 192\.0\.2\.2$'
+
+[[post]]
+device = "pulsar"
+cmd = '''
+s=$(nft list set inet fw4 nw_block | tr -d ' \t\n')
+echo "live set nw_block: $(echo "$s" | sed -n 's/.*{\(type[^}]*}\).*/\1/p')"
+'''
+expect_stdout = '^live set nw_block: typeipv4_addrelements=\{192\.0\.2\.1,192\.0\.2\.2\}$'

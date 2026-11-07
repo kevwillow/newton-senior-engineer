@@ -1,0 +1,27 @@
+name = "ow-mgmt-09-luci-session-time"
+description = "OW-MGMT-09: luci.sauth.sessiontime='600' (stock 3600). Effect: a real LuCI login through the dispatcher (POST to /cgi-bin/luci/ from lab-client over the mgmt network) creates an rpcd session whose timeout is 600 (3600 before); the probe reads the timeout with ubus on lab-r1 and destroys its session. The lab password is read at run time from ~/.config/newton/lab-root.pw by a local python3 that writes the form body into the ssh pipe to lab-client's curl (stdin): it is never in a command line, an output or a file."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+batch = '''
+set luci.sauth.sessiontime='600'
+'''
+
+[[effect]]
+device = "local"
+timeout = 90
+cmd = '''
+sshd() { timeout 30 ssh -o BatchMode=yes -o IdentitiesOnly=yes -i "$LAB_SSH_KEY" -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" "$@"; }
+sid=$(python3 -c 'import sys,urllib.parse;print("luci_username=root&luci_password="+urllib.parse.quote(open(sys.argv[1]).read().rstrip("\n"),safe=""),end="")' ~/.config/newton/lab-root.pw | sshd {client_lab_user}@10.109.0.50 'curl -sk -D - -o /dev/null --max-time 10 --data-binary @- https://10.109.0.11/cgi-bin/luci/' | tr -d '\r' | sed -nE 's/^set-cookie: sysauth_(https|http)=([0-9a-f]{32}).*/\2/Ip')
+[ "${#sid}" -eq 32 ] || { echo "no LuCI session cookie: the dispatcher login failed"; exit 1; }
+t=$(sshd root@10.109.0.11 "ubus call session list '{\"ubus_rpc_session\":\"$sid\"}' | jsonfilter -e '@.timeout'; ubus call session destroy '{\"ubus_rpc_session\":\"$sid\"}' >/dev/null")
+echo "luci-session-timeout=$t"
+'''
+expect_stdout = '^luci-session-timeout=600$'
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get luci.sauth.sessiontime"
+expect_stdout = '^600$'

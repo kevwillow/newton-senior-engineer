@@ -1,0 +1,31 @@
+{
+  "valid": [
+    "dhcp",
+    "network",
+    "UPPER_lower-09",
+    "-lead",
+    "_lead",
+    "a",
+    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "0"
+  ],
+  "invalid": [
+    "foo.bak",
+    "bad name",
+    ".hidden",
+    "a~",
+    "a+b",
+    "a:b",
+    "a,b",
+    "a@b",
+    "a\\b",
+    "a'b",
+    "a\"b",
+    "a$b",
+    "a;b",
+    "a*b",
+    "a?b",
+    "a#b",
+    "a=b"
+  ]
+}

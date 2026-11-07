@@ -1,0 +1,29 @@
+name = "n-06-port-forward-from-isp"
+description = "No-install: an owner script forwards WAN tcp 2222 to the agent host; the owner types keep; confirmed; lab-isp reaches the agent's ssh; the restore plan takes it out again. (no-install port of p-06)"
+target = "pulsar"
+access = "no-install"
+expect = "none"
+setup = ["agent_masq_on"]
+cleanup = ["agent_masq_off"]
+
+[[post]]
+device = "local"
+timeout = 900
+cmd = '{ni_env} {ni_py} -I {ni_shape} n06 {agent_ip}'
+expect_stdout = '== END fails=0'
+
+[[post]]
+device = "lab-isp"
+cmd = '''(nc {p_wan_ip} 2222 </dev/null > /tmp/b 2>/dev/null &) ; sleep 3; head -c 7 /tmp/b; rm -f /tmp/b'''
+expect_stdout = '^SSH-2\.0'
+
+[[post]]
+device = "local"
+timeout = 900
+cmd = '{ni_env} {ni_py} -I {ni_shape} n06-restore'
+expect_stdout = '== END fails=0'
+
+[[post]]
+device = "local"
+cmd = '''{pr} 'uci -q get firewall.ni_fwd; echo rc=$?''''
+expect_stdout = '^rc=1$'

@@ -1,0 +1,13 @@
+name = "07-wan-down-isolation"
+description = "Disable both uplinks; the default internet probe must fail and trigger rollback."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "rolled_back"
+timeout = 60
+batch = """set network.wan.disabled='1'
+set network.wan2.disabled='1'"""
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get network.wan.disabled; echo rc=$?"
+expect_stdout = "rc=1"

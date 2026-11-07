@@ -1,0 +1,26 @@
+name = "ow-proto-03-service-crash-rolls-back"
+description = "uhttpd main.home=/nonexistent was selected because lab-r1 procd keeps uhttpd/instance1 present with running=false after the invalid directory makes uhttpd exit 1, while ping, DNS and DHCP remain healthy. The health check must catch that otherwise invisible service crash and rollback must restore uhttpd."
+target = "lab-r1"
+reset = ["lab-r1"]
+setup = ["portfwd_on"]
+expect = "rolled_back"
+timeout = 60
+regression = "default"
+approval = true
+batch = '''
+set uhttpd.main.home='/nonexistent'
+'''
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+ubus call service list '{"name":"uhttpd"}' | jsonfilter -e '@.uhttpd.instances.instance1.running' | grep -qx true && echo 'uhttpd instance1 running after rollback'
+'''
+expect_stdout = '^uhttpd instance1 running after rollback$'
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+[ "$(uci -q get uhttpd.main.home)" = /www ] && echo 'uhttpd home restored to /www'
+'''
+expect_stdout = '^uhttpd home restored to /www$'

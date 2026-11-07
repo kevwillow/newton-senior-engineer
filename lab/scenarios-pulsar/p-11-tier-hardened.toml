@@ -1,0 +1,16 @@
+name = "p-11-tier-hardened"
+description = "PULSAR PORT of 11-tier-hardened: only target, reset device and the post device changed (lab vars fw_wan_zone and fw_allow_ping resolve on pulsar in the local config). The tier file skips lab-bound blocks, so only portable controls apply. Original text: Live proof of the hardened tier: restore pulsar from the baseline sysupgrade archive, apply every batch of profiles/openwrt/hardened.uci in order through the same splitter newton_plan_tier uses (cap 16 so the live proof runs several small ordered batches instead of one large one), then reboot the router and re-run every batch's sealed probes plus the rollback-hash check. Hardened needs the WAN firewall zone id AND the Allow-Ping rule id; values come from lab.toml [vars] fw_wan_zone and fw_allow_ping."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+timeout = 180
+tier = "hardened"
+tier_reboot = true
+tier_batch_lines = 16
+tier_fail_probe = ["conf-has", "dnsmasq", "substr", "present", "newton-tier-rollback-marker-never-present"]
+tier_values = { fw_wan_zone = "{fw_wan_zone}", fw_allow_ping = "{fw_allow_ping}" }
+
+[[post]]
+device = "pulsar"
+cmd = "uci changes | wc -l"
+expect_stdout = "^0$"

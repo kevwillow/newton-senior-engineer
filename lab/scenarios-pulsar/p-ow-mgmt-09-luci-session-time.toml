@@ -1,0 +1,28 @@
+# PORT of ow-mgmt-09. Changed: lab-r1 -> pulsar; local ssh goes direct to 192.168.1.1 with the admin key and pulsar known_hosts (no proxy); the LuCI login POST is a curl from the agent host instead of lab-client.
+name = "p-ow-mgmt-09-luci-session-time"
+description = "OW-MGMT-09: luci.sauth.sessiontime='600' (stock 3600). Effect: a real LuCI login through the dispatcher (POST to /cgi-bin/luci/ from lab-client over the mgmt network) creates an rpcd session whose timeout is 600 (3600 before); the probe reads the timeout with ubus on pulsar and destroys its session. The lab password is read at run time from {pulsar_root_pw} by a local python3 that writes the form body into the ssh pipe to lab-client's curl (stdin): it is never in a command line, an output or a file."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+batch = '''
+set luci.sauth.sessiontime='600'
+'''
+
+[[effect]]
+device = "local"
+timeout = 90
+cmd = '''
+sshd() { timeout 30 ssh -o BatchMode=yes -o IdentitiesOnly=yes -i {pulsar_admin_key} -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR "$@"; }
+sid=$(python3 -c 'import sys,urllib.parse;print("luci_username=root&luci_password="+urllib.parse.quote(open(sys.argv[1]).read().rstrip("\n"),safe=""),end="")' {pulsar_root_pw} | curl -sk -D - -o /dev/null --max-time 10 --data-binary @- https://192.168.1.1/cgi-bin/luci/ | tr -d '\r' | sed -nE 's/^set-cookie: sysauth_(https|http)=([0-9a-f]{32}).*/\2/Ip')
+[ "${#sid}" -eq 32 ] || { echo "no LuCI session cookie: the dispatcher login failed"; exit 1; }
+t=$(sshd root@192.168.1.1 "ubus call session list '{\"ubus_rpc_session\":\"$sid\"}' | jsonfilter -e '@.timeout'; ubus call session destroy '{\"ubus_rpc_session\":\"$sid\"}' >/dev/null")
+echo "luci-session-timeout=$t"
+'''
+expect_stdout = '^luci-session-timeout=600$'
+
+[[post]]
+device = "pulsar"
+cmd = "uci -q get luci.sauth.sessiontime"
+expect_stdout = '^600$'

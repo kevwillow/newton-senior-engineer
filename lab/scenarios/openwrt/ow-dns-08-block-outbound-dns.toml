@@ -1,0 +1,39 @@
+name = "ow-dns-08-block-outbound-dns"
+description = "OW-DNS-08: rule Block-DNS-WAN, src lab, dest wan, proto 'tcp udp', dest_port 53, target REJECT: no client may use an outside resolver. The router's own queries leave on the output hook and the clients' queries to the router are input traffic, so neither is forwarded traffic and neither is touched. breaks = [client_ext_dns]: the check passes before (openwrt.org via 1.1.1.1) and must fail after. Effects: forward_lab holds the two reject rules (tcp 53, udp 53); a query from lab-client to 1.1.1.1 fails at once with 'connection refused', over udp and over tcp (a REJECT, not a silent drop), while the same lookup through the router (192.168.150.1) and plain tcp 443 to 1.1.1.1 still work. Regression: the default list, which already includes client_dns, the client's lookup through dnsmasq on the router, and client_internet. Scope: tcp 853 (DoT) is not touched, that is OW-DNS-07."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+breaks = ["client_ext_dns"]
+probes = [["nft-rule", "inet", "fw4", "forward_lab", "eq:2", "dport 53 ", "jump reject_to_wan"]]
+batch = '''
+set firewall.block_dns=rule
+set firewall.block_dns.name='Block-DNS-WAN'
+set firewall.block_dns.src='lab'
+set firewall.block_dns.dest='wan'
+set firewall.block_dns.proto='tcp udp'
+set firewall.block_dns.dest_port='53'
+set firewall.block_dns.target='REJECT'
+'''
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+t=$(nft list chain inet fw4 forward_lab | grep -c 'tcp dport 53 .*jump reject_to_wan'); u=$(nft list chain inet fw4 forward_lab | grep -c 'udp dport 53 .*jump reject_to_wan')
+echo "forward_lab: tcp 53 reject rules=$t udp 53 reject rules=$u"; [ "$t" = 1 ] && [ "$u" = 1 ]
+'''
+expect_stdout = '^forward_lab: tcp 53 reject rules=1 udp 53 reject rules=1$'
+
+[[effect]]
+device = "lab-client"
+timeout = 45
+cmd = '''
+u=$(LC_ALL=C host -W 5 -t A openwrt.org 1.1.1.1 2>&1 | grep -c 'connection refused')
+t=$(LC_ALL=C host -W 5 -T -t A openwrt.org 1.1.1.1 2>&1 | grep -c 'connection refused')
+r=$(host -W 5 -t A openwrt.org 192.168.150.1 | tail -1)
+if timeout 8 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null; then b=open; else b=closed; fi
+echo "udp 53 to 1.1.1.1 refused lines=$u; tcp 53 to 1.1.1.1 refused lines=$t; via the router: $r; tcp 443: $b"
+[ "$u" -ge 1 ] && [ "$t" -ge 1 ] && [ "$b" = open ] && case "$r" in *"has address "*) true;; *) false;; esac
+'''
+expect_stdout = '^udp 53 to 1\.1\.1\.1 refused lines=[1-9]\d*; tcp 53 to 1\.1\.1\.1 refused lines=[1-9]\d*; via the router: openwrt\.org has address \S+; tcp 443: open$'

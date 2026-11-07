@@ -1,0 +1,14 @@
+name = "04-commit-smuggling"
+description = "Try to smuggle a commit verb; plan must reject."
+target = "lab-r1"
+reset = []
+expect = "rejected"
+reject_match = 'only set/add/add_list/del_list/delete/rename/reorder are allowed, got: commit system'
+timeout = 60
+batch = """set system.@system[0].description='x'
+commit system"""
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get system.@system[0].description; echo rc=$?"
+expect_stdout = "rc=1"

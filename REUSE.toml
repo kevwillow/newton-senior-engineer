@@ -1,0 +1,29 @@
+version = 1
+
+# Newton's own files are MIT; the annotations after the first override it for
+# the third-party material under references/ (the last matching one wins).
+# Details and obligations: NOTICE.md.
+
+[[annotations]]
+path = "**"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Kev"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = ["references/openwrt/**"]
+precedence = "closest"
+SPDX-FileCopyrightText = "OpenWrt contributors"
+SPDX-License-Identifier = "CC-BY-SA-4.0"
+
+[[annotations]]
+path = ["references/nftables/**"]
+precedence = "closest"
+SPDX-FileCopyrightText = "nftables wiki contributors"
+SPDX-License-Identifier = "GFDL-1.3-or-later"
+
+[[annotations]]
+path = ["references/networking-concepts/**"]
+precedence = "closest"
+SPDX-FileCopyrightText = "Larry Peterson and Bruce Davie (source); condensed by an AI model"
+SPDX-License-Identifier = "CC-BY-4.0"

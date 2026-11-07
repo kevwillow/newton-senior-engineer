@@ -1,0 +1,17 @@
+# PORT of ow-00-baseline. Changed: lab-r1 -> pulsar, r1_wan_ip -> p_wan_ip, regression list -> pulsar's default list (pulsar checks come from the local config) plus p_radios_off; no other change.
+# The regression is spelled out instead of `regression = "default"` because an earlier change added one check to it:
+# p_radios_off (Pulsar's radios are off again: radio1 disabled=1 with the stock ssid and every `interfaces`
+# list in `wifi status` empty). The runner runs a scenario's regression as its BEFORE probes and its AFTER
+# probes, both before reset_after, so a Wi-Fi scenario cannot carry it (its own radio is on after its apply).
+# Each of those five runs it from its after_reset, straight after its own reset_after; it runs here too:
+# in a full run's order this scenario comes after p-ev-09-wifi-radio and before the four p-ow-wifi-* ones,
+# and every scenario resets pulsar at its start, so its BEFORE probe is a second, independent reading of
+# the state the previous reset_after left behind. It is the regression, so it also runs again after this
+# scenario's (empty) batch.
+name = "p-ow-00-baseline"
+description = "Baseline: with the WAN port forward on, every default regression check passes before and after; nothing is changed. Since P7 the list also holds p_radios_off, which proves that the previous scenario (a Wi-Fi one, if it was one) left Pulsar's radios off."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "none"
+setup = ["portfwd_on"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen", "portfwd", "p_client_on_pulsar", "p_radios_off"]

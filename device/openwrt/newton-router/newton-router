@@ -1,0 +1,5141 @@
+#!/bin/sh
+# shellcheck disable=SC3043
+# shellcheck disable=SC2034  # tool variables for later rounds are fixed now, per design 3.1 step 4
+# shellcheck disable=SC2329  # on_exit runs from the EXIT trap; boot_id, crash_point, lock_take and sha256_of_stdin are called by later rounds
+# shellcheck disable=SC2100  # status word/last-rpcd tokens carry hyphens (applied-pending-confirm, rpcd-timer-lost, ...) by design
+set -u
+set -f
+umask 077
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+LC_ALL=C
+export LC_ALL
+PROG_PID=$$
+
+# ---- 1. start-up (design 3.1 steps 1 to 6) ----
+
+CALLER=root
+ROLE=change
+DOOR=root
+FORCED=0
+CMD_NAME=-
+LOG_SID=-
+RC=0
+REJ=
+REQ_LEN=0
+REQ_TOKENS=
+SCRATCH=
+OUT=
+ERR=
+FROM_ADDR=-
+UP_NOW=0
+UP_STAMP=
+UBUS_OUT=
+HELLO_MISSING=0
+CRASH_COUNT=0
+CRASH_TARGET=0
+MODE_STR='test'
+STDIN_TTY=0
+[ -t 0 ] && STDIN_TTY=1
+# rpcd status codes as the shell sees them (256 - status), measured on lab-r1 in G0: 251 (No response, UBUS_STATUS_NO_DATA) for confirm and rollback with an unknown, malformed or no-grant session; 250 permission denied; 4 object not found. 251 does not separate a lost timer from a session without a uci grant, so RPCD_LOST stays empty (guard-only confirm path off, fail-safe). Measured after a real apply plus an rpcd reload and restart (G0 item 32, G4 report): confirm for the lost session still returns 251, the same code as an unknown or no-grant session, so a change that reloads or restarts rpcd stays rollback-only (decision 2026-10-14)
+RPCD_LOST=''
+
+if [ "$0" = /usr/libexec/newton/newton-router ]; then
+	PROD=1
+else
+	PROD=0
+fi
+
+if [ "$PROD" -eq 1 ]; then
+	R=
+	unset NEWTON_LOCK NEWTON_CONFIG_DIR NEWTON_UPTIME_FILE NEWTON_FIREWALL_INIT NEWTON_GUARD_ROOT NEWTON_GUARD_CRASH_AT NEWTON_ROUTER_ROOT NEWTON_ROUTER_CRASH_AT ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH
+	UCI='uci'
+	UBUS='ubus'
+	JSONFILTER='jsonfilter'
+	NFT='nft'
+	FW4='fw4'
+	IFSTATUS='ifstatus'
+	NETSTAT='netstat'
+	PIDOF='pidof'
+	PING='ping'
+	NSLOOKUP='nslookup'
+	TRACEROUTE='traceroute'
+	LOGREAD='logread'
+	LOGGER='logger'
+	TAR='tar'
+	IWINFO='iwinfo'
+	IP='ip'
+	APK='apk'
+	WIFI='wifi'
+	DF='df'
+	FREE='free'
+	UPTIME='uptime'
+	UNAME='uname'
+	FLOCK='flock'
+	SLEEP='sleep'
+	DATE='date'
+	MODE_STR='prod'
+else
+	ROOTVAR=${NEWTON_ROUTER_ROOT-}
+	R=
+	case "$ROOTVAR" in
+		/) ;;
+		/*)
+			if [ -d "$ROOTVAR" ]; then
+				R=$ROOTVAR
+			else
+				printf 'error bad-root\n' >&2
+				exit 2
+			fi
+			;;
+		*)
+			printf 'error bad-root\n' >&2
+			exit 2
+			;;
+	esac
+	CRASH_TARGET=${NEWTON_ROUTER_CRASH_AT:-0}
+	UCI=$R/bin/uci
+	UBUS=$R/bin/ubus
+	JSONFILTER=$R/bin/jsonfilter
+	NFT=$R/bin/nft
+	FW4=$R/bin/fw4
+	IFSTATUS=$R/bin/ifstatus
+	NETSTAT=$R/bin/netstat
+	PIDOF=$R/bin/pidof
+	PING=$R/bin/ping
+	NSLOOKUP=$R/bin/nslookup
+	TRACEROUTE=$R/bin/traceroute
+	LOGREAD=$R/bin/logread
+	LOGGER=$R/bin/logger
+	TAR=$R/bin/tar
+	IWINFO=$R/bin/iwinfo
+	IP=$R/bin/ip
+	APK=$R/bin/apk
+	WIFI=$R/bin/wifi
+	DF=$R/bin/df
+	FREE=$R/bin/free
+	UPTIME=$R/bin/uptime
+	UNAME=$R/bin/uname
+	FLOCK=$R/bin/flock
+	SLEEP=$R/bin/sleep
+	DATE=$R/bin/date
+fi
+
+HELPER=$R/usr/libexec/newton/newton-safe-apply
+GUARD=$R/usr/libexec/newton-guard
+LOCK=$R/tmp/owrt-safe-apply.lock
+
+if [ -n "$R" ]; then
+	NEWTON_GUARD_ROOT=$R
+	export NEWTON_GUARD_ROOT
+fi
+
+# ---- 2. output and logging helpers (design 3.7, 3.11) ----
+
+# fail CODE EXIT [DETAIL...]: one stderr line, never exit 255 (design 3.7).
+fail() {
+	local code="$1" st="$2" detail
+	shift 2
+	detail="$*"
+	if [ -n "$detail" ]; then
+		detail=$(printf '%s' "$detail" | tr -d '\000-\037\177' | cut -c 1-120)
+	fi
+	if [ -n "$detail" ]; then
+		printf 'error %s %s\n' "$code" "$detail" >&2
+	else
+		printf 'error %s\n' "$code" >&2
+	fi
+	[ "$st" -ne 255 ] || st=1
+	RC=$st
+	exit "$st"
+}
+
+# The scratch directory is created and checked before anything reads or
+# writes it (design 3, DEV-01): a local non-root daemon can create
+# /tmp/newton after boot and chmod never changes the owner, so the mode is not
+# a check. The order is the design one: a symlink is refused before any mkdir,
+# the directory is made mode 700 without -p (a directory of ours that already
+# exists is fine; $R/tmp always exists), a symlink or a non-directory is
+# refused again, the owner must be the user running this program, and only
+# then is the mode tightened. Nothing inside the directory is written or
+# chmodded before every check has passed, and no EXIT trap is armed yet, so a
+# refusal is one stderr line and nothing else. Stock BusyBox has no stat
+# applet, so ls -ldn gives the type in the first field and the uid in the
+# third, padded with spaces (the guard reads the same way).
+if [ -h "$R/tmp/newton" ]; then
+	fail internal 1 tmp-owner
+fi
+mkdir -m 700 "$R/tmp/newton" 2>/dev/null
+if [ -h "$R/tmp/newton" ] || [ ! -d "$R/tmp/newton" ]; then
+	fail internal 1 tmp-owner
+fi
+TMP_MODE=
+TMP_UID=
+IFS=' ' read -r TMP_MODE _ TMP_UID _ <<EOF
+$(ls -ldn "$R/tmp/newton" 2>/dev/null)
+EOF
+case "$TMP_MODE" in
+	d*) ;;
+	*) fail internal 1 tmp-owner ;;
+esac
+case "$TMP_UID" in
+	''|*[!0-9]*) fail internal 1 tmp-owner ;;
+esac
+[ "$TMP_UID" = "$(id -u)" ] || fail internal 1 tmp-owner
+chmod 700 "$R/tmp/newton"
+
+# refuse CODE EXIT [DETAIL...]: a refusal while the request is parsed or
+# checked; the log line uses the rejected= form (design 3.11).
+refuse() {
+	local code="$1" st="$2"
+	shift 2
+	REJ=$code
+	fail "$code" "$st" "$@"
+}
+
+# on_exit: scratch cleanup plus the one syslog line per call (design 3.11).
+on_exit() {
+	local f line
+	for f in $SCRATCH; do
+		rm -f "$f"
+	done
+	if [ -n "$REJ" ]; then
+		line="caller=$CALLER door=$DOOR cmd=- rejected=$REJ len=$REQ_LEN from=$FROM_ADDR"
+	else
+		line="caller=$CALLER door=$DOOR cmd=$CMD_NAME sid=$LOG_SID rc=$RC from=$FROM_ADDR"
+	fi
+	"$LOGGER" -t newton-router -p daemon.info "$line" >/dev/null 2>&1 </dev/null
+}
+
+trap on_exit EXIT
+
+# sig_exit CODE: a signal ends the call through the EXIT trap, so the scratch files go and the syslog line carries the status (128 plus the
+# signal number). ash does not run the EXIT trap when a signal kills it. The commands that must finish set a no-op trap for HUP and PIPE
+# themselves (design 3.4); that later trap replaces the HUP and PIPE lines below for them.
+sig_exit() {
+	RC=$1
+	exit "$1"
+}
+trap 'sig_exit 129' HUP
+trap 'sig_exit 130' INT
+trap 'sig_exit 143' TERM
+trap 'sig_exit 141' PIPE
+
+# compute_from: the from= address, first field of SSH_CLIENT (design 2.6).
+compute_from() {
+	local fc f
+	FROM_ADDR=-
+	fc=${SSH_CLIENT-}
+	[ -n "$fc" ] || return 0
+	f=${fc%% *}
+	case "$f" in
+		''|*[!0-9a-fA-F.:]*) return 0 ;;
+	esac
+	if [ "${#f}" -ge 2 ] && [ "${#f}" -le 45 ]; then
+		FROM_ADDR=$f
+	fi
+}
+
+# ---- 3. mode and request (design 2.5, 3.2) ----
+
+# valid_label: an authorized_keys caller label (design 2.4). The label root
+# is reserved: the ownership rules read CALLER=root as the router's root,
+# which only direct mode may be.
+valid_label() {
+	case "$1" in
+		root|[!a-z]*|*[!a-z0-9-]*) return 1 ;;
+	esac
+	[ "${#1}" -ge 2 ] && [ "${#1}" -le 32 ]
+}
+
+# detect_mode: forced, rpcd or direct, in the design 2.5 order.
+detect_mode() {
+	local lbl
+	if [ "$#" -eq 2 ]; then
+		case "$1" in
+			--caller=*)
+				lbl=${1#--caller=}
+				case "$2" in
+					--role=change|--role=read)
+						if valid_label "$lbl"; then
+							CALLER=$lbl
+							ROLE=${2#--role=}
+							DOOR=ssh
+							FORCED=1
+							return 0
+						fi
+						;;
+				esac
+				;;
+		esac
+	fi
+	case "${1-}" in
+		--caller=*|--role=*) refuse bad-key-line 2 ;;
+		--rpcd) refuse door-not-built 2 ;;
+	esac
+	return 0
+}
+
+# read_request: forced mode; the only reader of SSH_ORIGINAL_COMMAND (design 3.2).
+read_request() {
+	local req joined t
+	req=${SSH_ORIGINAL_COMMAND-}
+	REQ_LEN=${#req}
+	[ -n "$req" ] || refuse empty-request 2
+	[ "${#req}" -le 1024 ] || refuse request-too-long 2
+	case "$req" in *[!][A-Za-z0-9\ ._:/@+-]*) refuse bad-character 2 ;; esac
+	case "$req" in ' '*|*' '|*'  '*) refuse bad-spacing 2 ;; esac
+	IFS=' '
+	# shellcheck disable=SC2086  # word splitting is the point (design 3.2 step 5)
+	set -- $req
+	unset IFS
+	[ "$#" -le 16 ] || refuse too-many-tokens 2
+	if [ "${1-}" = /usr/libexec/newton/newton-router ]; then
+		shift
+	fi
+	[ "$#" -ge 1 ] || refuse unknown-subcommand 2
+	joined=$1
+	shift
+	for t in "$@"; do
+		joined="$joined $t"
+	done
+	REQ_TOKENS=$joined
+}
+
+# check_argv_request: direct-mode limits (design 3.2).
+check_argv_request() {
+	local joined="$*" t
+	REQ_LEN=${#joined}
+	[ "$#" -ge 1 ] || refuse empty-request 2
+	[ "$#" -le 16 ] || refuse too-many-tokens 2
+	[ "$REQ_LEN" -le 1024 ] || refuse request-too-long 2
+	for t in "$@"; do
+		[ -n "$t" ] || refuse bad-spacing 2
+		[ "${#t}" -le 255 ] || refuse request-too-long 2
+		case "$t" in *[!][A-Za-z0-9._:/@+-]*) refuse bad-character 2 ;; esac
+	done
+}
+
+# ---- 4. argument classes (design 3.3, whole token) ----
+
+# is_sid: 32 lowercase hex.
+is_sid() {
+	[ "${#1}" -eq 32 ] || return 1
+	case "$1" in ''|*[!0-9a-f]*) return 1 ;; esac
+	return 0
+}
+
+# is_t: 60..600, two or three digits, no leading zero.
+is_t() {
+	case "$1" in
+		[1-9][0-9]|[1-9][0-9][0-9]) ;;
+		*) return 1 ;;
+	esac
+	[ "$1" -ge 60 ] && [ "$1" -le 600 ]
+}
+
+# is_dhcp: 0, 1 or 2.
+is_dhcp() {
+	case "$1" in 0|1|2) return 0 ;; esac
+	return 1
+}
+
+# is_fw: 0 or 1.
+is_fw() {
+	case "$1" in 0|1) return 0 ;; esac
+	return 1
+}
+
+# is_hcmode: the one health-check mode word.
+is_hcmode() {
+	case "$1" in after-rollback) return 0 ;; esac
+	return 1
+}
+
+# is_nonce: 16 to 64 lowercase hex.
+is_nonce() {
+	[ "${#1}" -ge 16 ] && [ "${#1}" -le 64 ] || return 1
+	case "$1" in ''|*[!0-9a-f]*) return 1 ;; esac
+	return 0
+}
+
+# is_token: none or 64 lowercase hex.
+is_token() {
+	case "$1" in none) return 0 ;; esac
+	[ "${#1}" -eq 64 ] || return 1
+	case "$1" in ''|*[!0-9a-f]*) return 1 ;; esac
+	return 0
+}
+
+# is_epoch: 0 or exactly 10 decimal digits starting with 1-9.
+is_epoch() {
+	case "$1" in
+		0) return 0 ;;
+		[1-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) return 0 ;;
+	esac
+	return 1
+}
+
+# is_cfg: 1 to 32 of [a-z0-9_-].
+is_cfg() {
+	[ "${#1}" -le 32 ] || return 1
+	case "$1" in ''|*[!a-z0-9_-]*) return 1 ;; esac
+	return 0
+}
+
+# is_section: a named section or an @type[index] selector (design 3.3).
+is_section() {
+	local s="$1" rest name idx
+	case "$s" in
+		@*)
+			rest=${s#@}
+			case "$rest" in
+				*\[*\]*) ;;
+				*) return 1 ;;
+			esac
+			name=${rest%%\[*}
+			idx=${rest#*\[}
+			case "$idx" in
+				*]) ;;
+				*) return 1 ;;
+			esac
+			idx=${idx%]}
+			case "$idx" in
+				*'['*|*']'*) return 1 ;;
+			esac
+			case "$name" in
+				''|*[!A-Za-z0-9_-]*) return 1 ;;
+			esac
+			[ "${#name}" -le 32 ] || return 1
+			case "$idx" in
+				[0-9]|[0-9][0-9]|[0-9][0-9][0-9]) return 0 ;;
+				-[0-9]|-[0-9][0-9]|-[0-9][0-9][0-9]) return 0 ;;
+				*) return 1 ;;
+			esac
+			;;
+		*)
+			case "$s" in
+				''|*[!A-Za-z0-9_]*) return 1 ;;
+			esac
+			[ "${#s}" -le 64 ] || return 1
+			return 0
+			;;
+	esac
+}
+
+# is_option: 1 to 64 of [A-Za-z0-9_].
+is_option() {
+	[ "${#1}" -le 64 ] || return 1
+	case "$1" in ''|*[!A-Za-z0-9_]*) return 1 ;; esac
+	return 0
+}
+
+# is_ucipath: CFG.SECTION with an optional .OPTION (design 3.3).
+is_ucipath() {
+	local p="$1" dots
+	dots=$(printf '%s' "$p" | tr -cd '.' | wc -c)
+	[ "$dots" -eq 1 ] || [ "$dots" -eq 2 ] || return 1
+	IFS=.
+	# shellcheck disable=SC2086  # word splitting is the point
+	set -- $p
+	unset IFS
+	[ "$#" -eq $((dots + 1)) ] || return 1
+	is_cfg "$1" || return 1
+	is_section "$2" || return 1
+	if [ "$#" -ge 3 ]; then
+		is_option "$3" || return 1
+	fi
+	return 0
+}
+
+# is_iface: an interface name, at most 32 bytes.
+is_iface() {
+	[ "${#1}" -le 32 ] || return 1
+	case "$1" in ''|[!A-Za-z0-9_]*|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+	return 0
+}
+
+# is_host: a host name or address, at most 253 bytes.
+is_host() {
+	[ "${#1}" -le 253 ] || return 1
+	case "$1" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._:-]*) return 1 ;; esac
+	return 0
+}
+
+# is_obj: a ubus object name, at most 64 bytes.
+is_obj() {
+	[ "${#1}" -le 64 ] || return 1
+	case "$1" in ''|[!a-z]*|*[!a-z0-9_.-]*) return 1 ;; esac
+	return 0
+}
+
+# is_nftfam: an nft family word.
+is_nftfam() {
+	case "$1" in inet|ip|ip6|arp|bridge|netdev) return 0 ;; esac
+	return 1
+}
+
+# is_nftname: an nft table or chain name, at most 64 bytes.
+is_nftname() {
+	[ "${#1}" -le 64 ] || return 1
+	case "$1" in ''|[!A-Za-z0-9_]*|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+	return 0
+}
+
+# is_apkname: an apk package name, at most 64 bytes.
+is_apkname() {
+	[ "${#1}" -le 64 ] || return 1
+	case "$1" in ''|[!a-z0-9]*|*[!a-z0-9_.+-]*) return 1 ;; esac
+	return 0
+}
+
+# is_logpat: a logread -e pattern, at most 64 bytes.
+is_logpat() {
+	[ "${#1}" -le 64 ] || return 1
+	case "$1" in ''|[!A-Za-z0-9_.:]*|*[!A-Za-z0-9_.:-]*) return 1 ;; esac
+	return 0
+}
+
+# is_lines: 1 to 99999, no leading zero.
+is_lines() {
+	[ "${#1}" -le 5 ] || return 1
+	case "$1" in
+		[1-9]|[1-9][0-9]|[1-9][0-9][0-9]|[1-9][0-9][0-9][0-9]|[1-9][0-9][0-9][0-9][0-9]) return 0 ;;
+	esac
+	return 1
+}
+
+# is_count: 1 to 5.
+is_count() {
+	case "$1" in [1-5]) return 0 ;; esac
+	return 1
+}
+
+# is_table: a routing table word, number or name (design 3.3, fix-read-ip).
+is_table() {
+	case "$1" in
+		main|local|default|all) return 0 ;;
+	esac
+	case "$1" in
+		''|*[!0-9]*) ;;
+		*) [ "${#1}" -le 10 ] && return 0 ;;
+	esac
+	case "$1" in
+		''|[!A-Za-z0-9_.@]*) return 1 ;;
+	esac
+	case "$1" in
+		*[!A-Za-z0-9_.@-]*) return 1 ;;
+	esac
+	[ "${#1}" -le 64 ]
+}
+
+# ---- 4b. probe-line field classes and checking (design 3.6, 4.2, 4.3) ----
+
+PB_TAB=$(printf '\t')
+
+# probe_spec_ok VALUE: one SPEC field of proc-args (design 4.3): ~TEXT, !SPEC
+# or 1-4 space-separated elements of 1-64 bytes each.
+probe_spec_ok() {
+	local v="$1" rest="$1" e n=0
+	case "$v" in
+		'~'*)
+			[ "${#v}" -ge 2 ] && return 0
+			return 1
+			;;
+		'!'*)
+			[ "${#v}" -ge 2 ] || return 1
+			probe_spec_ok "${v#!}"
+			return
+			;;
+	esac
+	while :; do
+		case "$rest" in
+			*' '*) e=${rest%% *}; rest=${rest#* } ;;
+			*) e=$rest; rest= ;;
+		esac
+		[ "${#e}" -ge 1 ] && [ "${#e}" -le 64 ] || return 1
+		n=$((n + 1))
+		[ "$n" -le 4 ] || return 1
+		[ -n "$rest" ] || break
+	done
+	return 0
+}
+
+# probe_key_ok VALUE: the sysctl-equals KEY rule (design 4.3): a family word,
+# then 1-5 slash-separated parts of 1-64 bytes of [A-Za-z0-9_.@:-], no part
+# "." or "..".
+probe_key_ok() {
+	local rest="$1" p n=0
+	while :; do
+		case "$rest" in
+			*/*) p=${rest%%/*}; rest=${rest#*/} ;;
+			*) p=$rest; rest= ;;
+		esac
+		n=$((n + 1))
+		if [ "$n" -eq 1 ]; then
+			case "$p" in
+				core|ipv4|ipv6|bridge|netfilter) ;;
+				*) return 1 ;;
+			esac
+		else
+			[ "${#p}" -ge 1 ] && [ "${#p}" -le 64 ] || return 1
+			case "$p" in .|..) return 1 ;; esac
+			case "$p" in *[!A-Za-z0-9_.@:-]*) return 1 ;; esac
+		fi
+		[ -n "$rest" ] || break
+	done
+	[ "$n" -ge 2 ] && [ "$n" -le 6 ]
+}
+
+# probe_arg_ok CLASS VALUE: one probe-line argument against its class in the
+# 4.3 table. TEXT is any field: the 3.6 syntax check has already bound every
+# field to 1-128 bytes of 0x20-0x7e without backslash. UCIPATH3 is the
+# uci-equals shape CFG.SECTION.OPTION; the small fixed-word classes (PROTO,
+# RUNSTATE, CHAINPOS, NEAR, ELEMENT, SETSTATE, DNSSVC, CMODE) carry the
+# literal choices of the 4.3 rows that are not built this round.
+probe_arg_ok() {
+	case "$1" in
+		HOST) is_host "$2" ;;
+		IFACE) is_iface "$2" ;;
+		NFTFAM) is_nftfam "$2" ;;
+		NFTNAME) is_nftname "$2" ;;
+		UCIPATH) is_ucipath "$2" ;;
+		UCIPATH3)
+			case "$2" in
+				*.*.*) ;;
+				*) return 1 ;;
+			esac
+			case "$2" in
+				*.*.*.*) return 1 ;;
+			esac
+			is_ucipath "$2"
+			;;
+		EXPECT)
+			case "$2" in
+				present|absent) return 0 ;;
+				eq:0|min:0) return 0 ;;
+				eq:[1-9]|eq:[1-9][0-9]|eq:[1-9][0-9][0-9]|eq:[1-9][0-9][0-9][0-9]) return 0 ;;
+				min:[1-9]|min:[1-9][0-9]|min:[1-9][0-9][0-9]|min:[1-9][0-9][0-9][0-9]) return 0 ;;
+			esac
+			return 1
+			;;
+		TEXT) return 0 ;;
+		COUNT)
+			case "$2" in [1-3]) return 0 ;; esac
+			return 1
+			;;
+		SERVICE)
+			[ "${#2}" -le 32 ] || return 1
+			case "$2" in ''|[!a-z0-9]*|*[!a-z0-9_.-]*) return 1 ;; esac
+			return 0
+			;;
+		INSTANCE)
+			case "$2" in any) return 0 ;; esac
+			is_iface "$2"
+			;;
+		ADDR)
+			case "$2" in any|wildcard) return 0 ;; esac
+			[ "${#2}" -ge 2 ] && [ "${#2}" -le 45 ] || return 1
+			case "$2" in ''|*[!0-9a-fA-F.:]*) return 1 ;; esac
+			return 0
+			;;
+		PORT)
+			case "$2" in
+				[1-9]|[1-9][0-9]|[1-9][0-9][0-9]|[1-9][0-9][0-9][0-9]|[1-9][0-9][0-9][0-9][0-9]) ;;
+				*) return 1 ;;
+			esac
+			[ "$2" -le 65535 ]
+			;;
+		PROG)
+			case "$2" in any) return 0 ;; esac
+			[ "${#2}" -le 32 ] || return 1
+			case "$2" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+			return 0
+			;;
+		PROC)
+			[ "${#2}" -le 32 ] || return 1
+			case "$2" in [A-Za-z0-9_]*) ;; *) return 1 ;; esac
+			case "$2" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
+			return 0
+			;;
+		SPEC) probe_spec_ok "$2" ;;
+		FIELD)
+			case "$2" in
+				up|available|pending|autostart|dynamic|proto|device|l3_device) return 0 ;;
+			esac
+			return 1
+			;;
+		KEY) probe_key_ok "$2" ;;
+		CLASS)
+			case "$2" in
+				EMPTY|LOCKED|HASH|NOROOT|MULTIROOT) return 0 ;;
+			esac
+			return 1
+			;;
+		PROTO)
+			case "$2" in tcp|udp) return 0 ;; esac
+			return 1
+			;;
+		RUNSTATE)
+			case "$2" in present|absent) return 0 ;; esac
+			return 1
+			;;
+		CHAINPOS)
+			case "$2" in ruleset) return 0 ;; esac
+			is_nftname "$2"
+			;;
+		NEAR)
+			case "$2" in [1-9]|10) return 0 ;; esac
+			return 1
+			;;
+		ELEMENT)
+			[ "${#2}" -le 64 ] || return 1
+			case "$2" in ''|*[!A-Za-z0-9_.:/-]*) return 1 ;; esac
+			return 0
+			;;
+		SETSTATE)
+			case "$2" in present|absent|only) return 0 ;; esac
+			return 1
+			;;
+		DNSSVC)
+			case "$2" in dnsmasq) return 0 ;; esac
+			return 1
+			;;
+		CMODE)
+			case "$2" in line|prefix|substr) return 0 ;; esac
+			return 1
+			;;
+		*) return 1 ;;
+	esac
+}
+
+# probe_spec NAME: the min and max argument count and the per-position
+# classes of the 19 probes of 4.3 (arguments after the name); a class ending
+# in + repeats for every remaining argument. All 19 names are known here even
+# though only some are executable this round.
+probe_spec() {
+	PB_MIN=0
+	PB_MAX=0
+	PB_CLASSES=
+	case "$1" in
+		fail) PB_MIN=0; PB_MAX=0 ;;
+		ping) PB_MIN=1; PB_MAX=2; PB_CLASSES='HOST COUNT' ;;
+		resolve) PB_MIN=1; PB_MAX=2; PB_CLASSES='HOST HOST' ;;
+		service-running) PB_MIN=2; PB_MAX=3; PB_CLASSES='SERVICE INSTANCE RUNSTATE' ;;
+		uci-equals) PB_MIN=2; PB_MAX=2; PB_CLASSES='UCIPATH3 TEXT' ;;
+		uci-unset) PB_MIN=1; PB_MAX=1; PB_CLASSES='UCIPATH' ;;
+		listen) PB_MIN=5; PB_MAX=5; PB_CLASSES='PROTO ADDR PORT PROG EXPECT' ;;
+		nft-rule) PB_MIN=5; PB_MAX=8; PB_CLASSES='NFTFAM NFTNAME CHAINPOS EXPECT TEXT+' ;;
+		nft-rule-order) PB_MIN=5; PB_MAX=5; PB_CLASSES='NFTFAM NFTNAME NFTNAME TEXT TEXT' ;;
+		nft-rule-near) PB_MIN=6; PB_MAX=6; PB_CLASSES='NFTFAM NFTNAME CHAINPOS TEXT NEAR TEXT' ;;
+		nft-set-has) PB_MIN=5; PB_MAX=5; PB_CLASSES='NFTFAM NFTNAME NFTNAME ELEMENT SETSTATE' ;;
+		conf-has) PB_MIN=4; PB_MAX=4; PB_CLASSES='DNSSVC CMODE EXPECT TEXT' ;;
+		proc-args) PB_MIN=2; PB_MAX=9; PB_CLASSES='PROC SPEC+' ;;
+		iface-field) PB_MIN=3; PB_MAX=3; PB_CLASSES='IFACE FIELD TEXT' ;;
+		iface-absent) PB_MIN=1; PB_MAX=1; PB_CLASSES='IFACE' ;;
+		sysctl-equals) PB_MIN=2; PB_MAX=2; PB_CLASSES='KEY TEXT' ;;
+		ra-absent) PB_MIN=1; PB_MAX=1; PB_CLASSES='IFACE' ;;
+		log-has) PB_MIN=2; PB_MAX=4; PB_CLASSES='EXPECT TEXT+' ;;
+		root-password-class) PB_MIN=1; PB_MAX=1; PB_CLASSES='CLASS' ;;
+		*) return 1 ;;
+	esac
+	return 0
+}
+
+# probe_check LINE: one probe line without its LF against 3.6 and the 4.3
+# table; sets PB_REASON and returns 1 on a violation, else returns 0 and
+# leaves PB_NAME, PB_NARGS and PB_1..PB_9 (PB_k for k above PB_NARGS is not
+# set). Check order per 3.6: too-long, syntax, unknown-probe, arg-count,
+# bad-arg-<k>. The empty-field tests run on the raw line because TAB is IFS
+# white space and would vanish in the split.
+probe_check() {
+	local line="$1" f i c rest last
+	PB_REASON=
+	if [ "${#line}" -gt 512 ]; then
+		PB_REASON=too-long
+		return 1
+	fi
+	IFS=$PB_TAB
+	# shellcheck disable=SC2086  # field splitting on TAB is the point
+	set -- $line
+	unset IFS
+	for f in "$@"; do
+		if [ "${#f}" -gt 128 ]; then
+			PB_REASON=too-long
+			return 1
+		fi
+	done
+	case "$line" in
+		'')
+			PB_REASON=syntax
+			return 1
+			;;
+		"$PB_TAB"*|*"$PB_TAB"|*"$PB_TAB$PB_TAB"*)
+			PB_REASON=syntax
+			return 1
+			;;
+		*\\*)
+			PB_REASON=syntax
+			return 1
+			;;
+	esac
+	if [ "$(printf '%s' "$line" | tr -d "$PB_TAB\040-\176" | wc -c)" -ne 0 ]; then
+		PB_REASON=syntax
+		return 1
+	fi
+	PB_NAME=$1
+	PB_NARGS=$(( $# - 1 ))
+	shift
+	i=0
+	for f in "$@"; do
+		i=$((i + 1))
+		case $i in
+			1) PB_1=$f ;;
+			2) PB_2=$f ;;
+			3) PB_3=$f ;;
+			4) PB_4=$f ;;
+			5) PB_5=$f ;;
+			6) PB_6=$f ;;
+			7) PB_7=$f ;;
+			8) PB_8=$f ;;
+			9) PB_9=$f ;;
+		esac
+	done
+	probe_spec "$PB_NAME" || { PB_REASON=unknown-probe; return 1; }
+	if [ "$PB_NARGS" -lt "$PB_MIN" ] || [ "$PB_NARGS" -gt "$PB_MAX" ]; then
+		PB_REASON=arg-count
+		return 1
+	fi
+	rest=$PB_CLASSES
+	last=
+	i=0
+	for f in "$@"; do
+		i=$((i + 1))
+		case "$rest" in
+			'') c=$last ;;
+			*' '*) c=${rest%% *}; rest=${rest#* } ;;
+			*) c=$rest; rest= ;;
+		esac
+		case "$c" in
+			*+) c=${c%+} ;;
+		esac
+		last=$c
+		probe_arg_ok "$c" "$f" || { PB_REASON="bad-arg-$i"; return 1; }
+	done
+	return 0
+}
+
+# ---- 5. grammar table and dispatch (design 3.4) ----
+
+# spec_for SUBCOMMAND: the grammar row for one of the 25 names.
+spec_for() {
+	SPEC_MIN=0
+	SPEC_MAX=0
+	SPEC_CLASSES=
+	SPEC_ROLE='read'
+	SPEC_OWNER=no
+	case "$1" in
+		hello) SPEC_MIN=1; SPEC_MAX=1; SPEC_CLASSES='nonce'; SPEC_ROLE='read' ;;
+		hostname) ;;
+		backup) SPEC_ROLE=change ;;
+		stage) SPEC_ROLE=change ;;
+		seal) SPEC_MIN=2; SPEC_MAX=2; SPEC_CLASSES='sid t'; SPEC_ROLE=change; SPEC_OWNER=owner ;;
+		diff) SPEC_MIN=1; SPEC_MAX=1; SPEC_CLASSES='sid'; SPEC_ROLE=change; SPEC_OWNER=owner ;;
+		named) SPEC_MIN=1; SPEC_MAX=1; SPEC_CLASSES='sid'; SPEC_ROLE=change; SPEC_OWNER=owner ;;
+		check-staged) SPEC_MIN=1; SPEC_MAX=1; SPEC_CLASSES='sid'; SPEC_ROLE=change; SPEC_OWNER=owner ;;
+		confighash) ;;
+		fw-loaded) ;;
+		logd-pid) ;;
+		health-snapshot) SPEC_MIN=1; SPEC_MAX=1; SPEC_CLASSES='sid'; SPEC_ROLE=change; SPEC_OWNER=owner ;;
+		apply) SPEC_MIN=5; SPEC_MAX=5; SPEC_CLASSES='sid t token epoch epoch'; SPEC_ROLE=change; SPEC_OWNER=owner ;;
+		fwrestart) SPEC_MIN=1; SPEC_MAX=1; SPEC_CLASSES='fw'; SPEC_ROLE=change ;;
+		dnsmasq-repair) SPEC_ROLE=change ;;
+		verify) SPEC_MIN=2; SPEC_MAX=2; SPEC_CLASSES='sid dhcp'; SPEC_ROLE=change; SPEC_OWNER=owner ;;
+		confirm) SPEC_MIN=1; SPEC_MAX=1; SPEC_CLASSES='sid'; SPEC_ROLE=change; SPEC_OWNER=owner ;;
+		status) SPEC_MIN=1; SPEC_MAX=1; SPEC_CLASSES='sid'; SPEC_ROLE='read' ;;
+		abort) SPEC_MIN=1; SPEC_MAX=1; SPEC_CLASSES='sid'; SPEC_ROLE=change ;;
+		health-check) SPEC_MIN=1; SPEC_MAX=2; SPEC_CLASSES='sid hcmode'; SPEC_ROLE=change ;;
+		dnsmasq-ensure) SPEC_ROLE=change ;;
+		dns-dhcp-check) SPEC_MIN=1; SPEC_MAX=1; SPEC_CLASSES='dhcp'; SPEC_ROLE='read' ;;
+		probe) ;;
+		read) SPEC_MIN=1; SPEC_MAX=15; SPEC_CLASSES='skip'; SPEC_ROLE='read' ;;
+		approval-selftest) SPEC_MIN=1; SPEC_MAX=1; SPEC_CLASSES='nonce'; SPEC_ROLE='read' ;;
+		*) return 1 ;;
+	esac
+	return 0
+}
+
+# handle: check order per design 3.2, then run the subcommand function.
+handle() {
+	local sub="$1" n j k c cls tok owner_name osid
+	spec_for "$sub" || refuse unknown-subcommand 2
+	shift
+	n=$#
+	if [ "$n" -lt "$SPEC_MIN" ] || [ "$n" -gt "$SPEC_MAX" ]; then
+		refuse arg-count 2
+	fi
+	if [ -n "$SPEC_CLASSES" ] && [ "$SPEC_CLASSES" != skip ]; then
+		j=0
+		for tok in "$@"; do
+			j=$((j + 1))
+			cls=
+			k=0
+			# shellcheck disable=SC2086  # word splitting is the point
+			for c in $SPEC_CLASSES; do
+				k=$((k + 1))
+				if [ "$k" -eq "$j" ]; then
+					cls=$c
+					break
+				fi
+			done
+			if [ -n "$cls" ]; then
+				case "$cls" in
+					sid) is_sid "$tok" || refuse bad-arg 2 "$j" ;;
+					t) is_t "$tok" || refuse bad-arg 2 "$j" ;;
+					dhcp) is_dhcp "$tok" || refuse bad-arg 2 "$j" ;;
+					fw) is_fw "$tok" || refuse bad-arg 2 "$j" ;;
+					hcmode) is_hcmode "$tok" || refuse bad-arg 2 "$j" ;;
+					nonce) is_nonce "$tok" || refuse bad-arg 2 "$j" ;;
+					token) is_token "$tok" || refuse bad-arg 2 "$j" ;;
+					epoch) is_epoch "$tok" || refuse bad-arg 2 "$j" ;;
+					cfg) is_cfg "$tok" || refuse bad-arg 2 "$j" ;;
+					section) is_section "$tok" || refuse bad-arg 2 "$j" ;;
+					option) is_option "$tok" || refuse bad-arg 2 "$j" ;;
+					ucipath) is_ucipath "$tok" || refuse bad-arg 2 "$j" ;;
+					iface) is_iface "$tok" || refuse bad-arg 2 "$j" ;;
+					host) is_host "$tok" || refuse bad-arg 2 "$j" ;;
+					obj) is_obj "$tok" || refuse bad-arg 2 "$j" ;;
+					nftfam) is_nftfam "$tok" || refuse bad-arg 2 "$j" ;;
+					nftname) is_nftname "$tok" || refuse bad-arg 2 "$j" ;;
+					apkname) is_apkname "$tok" || refuse bad-arg 2 "$j" ;;
+					logpat) is_logpat "$tok" || refuse bad-arg 2 "$j" ;;
+					lines) is_lines "$tok" || refuse bad-arg 2 "$j" ;;
+					count) is_count "$tok" || refuse bad-arg 2 "$j" ;;
+					table) is_table "$tok" || refuse bad-arg 2 "$j" ;;
+				esac
+			fi
+		done
+	fi
+	CMD_NAME=$sub
+	case $SPEC_CLASSES in
+		sid|sid\ *) LOG_SID=$(printf '%s' "$1" | cut -c 1-8) ;;
+	esac
+	if [ "$SPEC_ROLE" = change ] && [ "$ROLE" != change ]; then
+		# fwrestart never refuses with 3: the host reads 3 as an
+		# outcome (design 3.5).
+		if [ "$sub" = fwrestart ]; then
+			fail role 2
+		fi
+		fail role 3
+	fi
+	if [ "$SPEC_OWNER" = owner ]; then
+		[ -d "$LOCK/$1.txn" ] || fail no-such-txn 3
+		if [ "$CALLER" != root ]; then
+			owner_name=
+			IFS= read -r owner_name 2>/dev/null < "$LOCK/$1.txn/owner" || owner_name=
+			[ -n "$owner_name" ] || fail not-owner 3
+			[ "$owner_name" = "$CALLER" ] || fail not-owner 3
+		fi
+	fi
+	# Owner rules beyond the plain owner row (design 3.4): fwrestart,
+	# dnsmasq-repair and dnsmasq-ensure take owner or root while a txn is
+	# open, anyone with the change role otherwise; health-check takes the
+	# owner while the txn exists. fwrestart refuses with exit 2, never 3
+	# (the host reads 3 as an outcome). abort belongs to a later round.
+	case "$sub" in
+		fwrestart|dnsmasq-repair|dnsmasq-ensure)
+			osid=$(open_txn_sid)
+			if [ -n "$osid" ] && [ "$CALLER" != root ]; then
+				owner_name=
+				IFS= read -r owner_name 2>/dev/null < "$LOCK/$osid.txn/owner" || owner_name=
+				if [ -z "$owner_name" ] || [ "$owner_name" != "$CALLER" ]; then
+					if [ "$sub" = fwrestart ]; then
+						fail not-owner 2
+					fi
+					fail not-owner 3
+				fi
+			fi
+			;;
+		health-check)
+			if [ -d "$LOCK/$1.txn" ] && [ "$CALLER" != root ]; then
+				owner_name=
+				IFS= read -r owner_name 2>/dev/null < "$LOCK/$1.txn/owner" || owner_name=
+				if [ -z "$owner_name" ] || [ "$owner_name" != "$CALLER" ]; then
+					fail not-owner 3
+				fi
+			fi
+			;;
+	esac
+	if [ "$sub" = approval-selftest ] && [ "$DOOR" != root ]; then
+		fail direct-only 3
+	fi
+	case "$sub" in
+		stage|seal|probe) ;;
+		*) exec </dev/null ;;
+	esac
+	case "$sub" in
+		hello) cmd_hello "$@" ;;
+		hostname) cmd_hostname ;;
+		backup) cmd_backup ;;
+		stage) cmd_stage ;;
+		seal) cmd_seal "$@" ;;
+		diff) cmd_diff "$@" ;;
+		named) cmd_named "$@" ;;
+		check-staged) cmd_check_staged "$@" ;;
+		confighash) cmd_confighash ;;
+		fw-loaded) cmd_fw_loaded ;;
+		logd-pid) cmd_logd_pid ;;
+		health-snapshot) cmd_health_snapshot "$@" ;;
+		apply) cmd_apply "$@" ;;
+		fwrestart) cmd_fwrestart "$@" ;;
+		dnsmasq-repair) cmd_dnsmasq_repair ;;
+		verify) cmd_verify "$@" ;;
+		confirm) cmd_confirm "$@" ;;
+		status) cmd_status "$@" ;;
+		abort) cmd_abort "$@" ;;
+		health-check) cmd_health_check "$@" ;;
+		dnsmasq-ensure) cmd_dnsmasq_ensure ;;
+		dns-dhcp-check) cmd_dns_dhcp_check "$@" ;;
+		probe) cmd_probe ;;
+		read) cmd_read "$@" ;;
+		approval-selftest) cmd_approval_selftest "$@" ;;
+	esac
+}
+
+# ---- 6. runtime helpers (design 3.4 lock note, 4.4 crash seam) ----
+
+# sweep_scratch: remove scratch files left by calls that died without their EXIT trap (SIGKILL, an out-of-memory kill). A scratch file is named
+# <two letters>.<pid of its call>.<six random characters> (every mktemp in this file); it goes when no process has that pid. The files of a live call stay,
+# and names without this shape (flock, hello, last) are never touched.
+sweep_scratch() {
+	local f b rest pid
+	set +f
+	for f in "$R"/tmp/newton/??.*.??????; do
+		[ -e "$f" ] || continue
+		b=${f##*/}
+		case "$b" in
+			rd.*|re.*|hl.*|in.*|st.*|dg.*|ls.*|lc.*|lp.*|lo.*|lu.*|ch.*|df.*|le.*|pb.*) ;;
+			*) continue ;;
+		esac
+		rest=${b#??.}
+		pid=${rest%%.*}
+		case "$pid" in
+			''|*[!0-9]*) continue ;;
+		esac
+		kill -0 "$pid" 2>/dev/null && continue
+		rm -f "$f"
+	done
+	set -f
+}
+
+# uptime_now: integer part of the first field of /proc/uptime (design 2.2).
+uptime_now() {
+	local up
+	UP_NOW=0
+	if IFS=' ' read -r up _ < "$R/proc/uptime"; then
+		case "${up%%.*}" in
+			''|*[!0-9]*) ;;
+			*) UP_NOW=${up%%.*} ;;
+		esac
+	fi
+}
+
+# boot_id: content of /proc/sys/kernel/random/boot_id.
+boot_id() {
+	BOOT_ID_OUT=
+	IFS= read -r BOOT_ID_OUT 2>/dev/null < "$R/proc/sys/kernel/random/boot_id" || :
+	[ -n "$BOOT_ID_OUT" ] || BOOT_ID_OUT=-
+}
+
+# uptime_stamp: the integer seconds of /proc/uptime, the value the wifiscan
+# stamp holds (design P9). A malformed or empty /proc/uptime refuses the
+# scan: the stamp must never fall back to 0 (a 0 would refuse every later
+# scan of the same radio until the clock caught up).
+uptime_stamp() {
+	local up
+	UP_STAMP=
+	if [ -r "$R/proc/uptime" ]; then
+		if IFS=' ' read -r up _ < "$R/proc/uptime"; then
+			case "${up%%.*}" in
+				''|*[!0-9]*) ;;
+				*) UP_STAMP=${up%%.*} ;;
+			esac
+		fi
+	fi
+	[ -n "$UP_STAMP" ] || fail internal 1 uptime
+}
+
+# ws_gate_check RADIO NOW: the rate-limit gate of the wifiscan verb: one
+# scan per radio per 60 s. The stamp file $R/tmp/newton/ws.<radio> holds the
+# integer seconds of /proc/uptime of the scan that was allowed to start.
+# Its name is <two letters>.<radio>, NOT the scratch shape
+# <two letters>.<pid>.<six random characters> that sweep_scratch removes:
+# the stamp has no pid and no random tail, so the sweep never takes it and
+# it never looks like a stale scratch file. A stamp that is unreadable or
+# not a number refuses the scan (refusal-safe: never allowed).
+# The program lock is held across this check and the write that follows it,
+# so the two are one critical section and two callers cannot both pass.
+ws_gate_check() {
+	local radio="$1" now="$2" stamp prev
+	stamp="$R/tmp/newton/ws.$radio"
+	[ -e "$stamp" ] || return 0
+	prev=
+	if [ -r "$stamp" ]; then
+		IFS= read -r prev < "$stamp" 2>/dev/null || prev=
+	fi
+	case "$prev" in
+		''|*[!0-9]*) refuse scan-rate-limited 2 ;;
+	esac
+	if [ "$now" -lt "$prev" ]; then
+		refuse scan-rate-limited 2
+	fi
+	if [ $((now - prev)) -lt 60 ]; then
+		refuse scan-rate-limited 2
+	fi
+	return 0
+}
+
+# ws_stamp_write RADIO NOW: write the stamp of the radio (the program lock
+# is held). The stamp is written before the scan, so a scan that fails still
+# counts against the window.
+ws_stamp_write() {
+	printf '%s\n' "$2" > "$R/tmp/newton/ws.$1" || fail internal 1 stamp
+}
+
+# ubus_capture ARG...: run a ubus call bounded 25 s and leave its stdout in
+# UBUS_OUT (design P9). The child's stderr is dropped: the caller says what
+# the caller means. The tool-missing check gives the same 127 the other read
+# verbs give and the watchdog the same 124.
+ubus_capture() {
+	local rc tool_path bare
+	bare=${1##*/}
+	tool_path=$(command -v -- "$1" 2>/dev/null) || tool_path=
+	if [ -z "$tool_path" ]; then
+		printf 'error tool-missing %s\n' "$bare" >&2
+		return 127
+	fi
+	case "$tool_path" in
+		*/*) [ -x "$tool_path" ] || {
+			printf 'error tool-missing %s\n' "$bare" >&2
+			return 127
+		} ;;
+	esac
+	run_bounded 25 "$@"
+	rc=$?
+	UBUS_OUT=
+	if [ -f "$OUT" ]; then
+		UBUS_OUT=$(cat "$OUT")
+	fi
+	case "$rc" in
+		137|143) return 124 ;;
+		255) return 125 ;;
+	esac
+	return "$rc"
+}
+
+# crash_point: test-mode crash seam after durable writes (design 3.1 step 4).
+crash_point() {
+	[ "$PROD" -eq 0 ] || return 0
+	case "$CRASH_TARGET" in
+		''|*[!0-9]*|0) return 0 ;;
+	esac
+	CRASH_COUNT=$((CRASH_COUNT + 1))
+	[ "$CRASH_COUNT" -ne "$CRASH_TARGET" ] || kill -KILL "$PROG_PID"
+}
+
+# lock_take SECONDS: the program lock, fd 8, retried once a second (design 3.4).
+lock_take() {
+	local waited=0
+	exec 8>>"$R/tmp/newton/flock"
+	while :; do
+		"$FLOCK" -n 8 && return 0
+		[ "$waited" -lt "$1" ] || fail lock-timeout 1
+		"$SLEEP" 1
+		waited=$((waited + 1))
+	done
+}
+
+# run_helper ARG...: run the helper; its stdout, stderr and exit status pass
+# through (design 3.5). The caller redirects stdin when the helper must read
+# it (stage); every other caller runs after handle's exec </dev/null, so a
+# call without a redirection never hangs. Test mode gives the child, and
+# only the child, the fake lock and init paths and a PATH that finds the
+# fakes; production runs it with the fixed PATH and no NEWTON_* variables.
+run_helper() {
+	if [ "$PROD" -eq 1 ]; then
+		"$HELPER" "$@"
+		return
+	fi
+	(
+		NEWTON_LOCK="$LOCK"
+		NEWTON_CONFIG_DIR="$R/etc/config"
+		NEWTON_FIREWALL_INIT="$R/etc/init.d/firewall"
+		PATH="$R/bin:$PATH"
+		export NEWTON_LOCK NEWTON_CONFIG_DIR NEWTON_FIREWALL_INIT PATH
+		exec "$HELPER" "$@"
+	)
+}
+
+# open_txn_sid: the SID of the open transaction (design 3.4), or nothing.
+open_txn_sid() {
+	local sid
+	[ -r "$LOCK/sid" ] || return 0
+	IFS= read -r sid 2>/dev/null < "$LOCK/sid" || return 0
+	is_sid "$sid" || return 0
+	[ -d "$LOCK/$sid.txn" ] || return 0
+	printf '%s\n' "$sid"
+}
+
+# bounded_files: the runner's capture files, made once per call (design 4.4).
+bounded_files() {
+	[ -n "$OUT" ] && return 0
+	OUT=$(mktemp "$R/tmp/newton/rd.$PROG_PID.XXXXXX") || { OUT=; fail internal 1 mktemp; }
+	ERR=$(mktemp "$R/tmp/newton/re.$PROG_PID.XXXXXX") || { ERR=; OUT=; fail internal 1 mktemp; }
+	SCRATCH="$SCRATCH $OUT $ERR"
+}
+
+# run_bounded SECS CMD ARG...: design 4.4; output to "$OUT" and "$ERR", stdin
+# /dev/null; a watchdog kill returns 143 or 137.
+run_bounded() {
+	local secs pid w rc
+	secs=$1
+	shift
+	bounded_files
+	"$@" >"$OUT" 2>"$ERR" </dev/null 8>&- 9>&- &
+	pid=$!
+	( exec 8>&- 9>&-
+		"$SLEEP" "$secs"
+		kill -0 "$PROG_PID" 2>/dev/null || exit 0
+		kill -TERM "$pid" 2>/dev/null
+		"$SLEEP" 1
+		kill -0 "$PROG_PID" 2>/dev/null || exit 0
+		kill -KILL "$pid" 2>/dev/null
+	) </dev/null >/dev/null 2>&1 &
+	w=$!
+	wait "$pid" 2>/dev/null
+	rc=$?
+	kill "$w" 2>/dev/null
+	return "$rc"
+}
+
+# run_bounded_in SECS CMD ARG...: the same, but the command reads the
+# caller's stdin (only the stdin reads of stage, seal and probe use it,
+# design 4.4). An asynchronous list gets its stdin from /dev/null (POSIX
+# 2.9.3.1), so the caller's stdin is first saved on fd 7 (8 and 9 are the
+# program and guard locks) and the command reads from there.
+run_bounded_in() {
+	local secs pid w rc
+	secs=$1
+	shift
+	bounded_files
+	if : <&0; then
+		exec 7<&0
+	else
+		exec 7</dev/null
+	fi
+	"$@" >"$OUT" 2>"$ERR" <&7 7>&- 8>&- 9>&- &
+	pid=$!
+	exec 7<&-
+	( exec 7>&- 8>&- 9>&-
+		"$SLEEP" "$secs"
+		kill -0 "$PROG_PID" 2>/dev/null || exit 0
+		kill -TERM "$pid" 2>/dev/null
+		"$SLEEP" 1
+		kill -0 "$PROG_PID" 2>/dev/null || exit 0
+		kill -KILL "$pid" 2>/dev/null
+	) </dev/null >/dev/null 2>&1 &
+	w=$!
+	wait "$pid" 2>/dev/null
+	rc=$?
+	kill "$w" 2>/dev/null
+	return "$rc"
+}
+
+# sha256_of_stdin: hash of stdin into SHA256_OUT, empty on any surprise.
+sha256_of_stdin() {
+	SHA256_OUT=$(sha256sum | cut -c 1-64)
+	[ "${#SHA256_OUT}" -eq 64 ] || SHA256_OUT=
+}
+
+# read_stdin_file MAXBYTES: the caller's stdin through run_bounded_in into
+# $OUT (design 3.5a step 2, 3.5b step 1), at most MAXBYTES+1 bytes; a
+# watchdog kill (143/137) is stdin-timeout. Called before the program lock.
+read_stdin_file() {
+	local rc
+	run_bounded_in 30 head -c "$(( $1 + 1 ))"
+	rc=$?
+	case "$rc" in
+		0) return 0 ;;
+		137|143) fail stdin-timeout 2 ;;
+		*) fail internal 1 head ;;
+	esac
+}
+
+# stdin_check_batch FILE: the stage stdin limits of design 3.6, checked in
+# the order size, bytes, lines, line length; every refusal exits 2 before
+# any lock, session or guard call.
+stdin_check_batch() {
+	local f="$1" n
+	n=$(wc -c < "$f")
+	[ "$n" -le 30720 ] || fail stdin-too-large 2
+	n=$(tr -d '\011\012\040-\176\200-\377' < "$f" | wc -c)
+	[ "$n" -eq 0 ] || fail stdin-bad-byte 2
+	n=$(wc -l < "$f")
+	if [ -n "$(tail -c 1 "$f")" ]; then
+		n=$((n + 1))
+	fi
+	[ "$n" -le 1000 ] || fail stdin-too-many-lines 2
+	# shellcheck disable=SC2016  # the awk program is fixed text (design 3.1)
+	awk 'length($0) > 1024 { long = 1; exit } END { if (long) exit 1 }' "$f" || fail stdin-line-too-long 2
+	return 0
+}
+
+# session_live SID: the ubus session of SID exists (design 3.5a step 4).
+session_live() {
+	"$UBUS" call session list "{\"ubus_rpc_session\":\"$1\"}" </dev/null >/dev/null 2>&1
+}
+
+# guard_status: newton-guard status with stdin /dev/null. G_LINE = the FIRST
+# line of its stdout without the LF (the guard may print more lines after it,
+# for example "skipped <names>"); G_RC = its exit status.
+# A guard that cannot run, or prints nothing, gives G_LINE=failed (the value
+# the callers treated as a failed guard before).
+guard_status() {
+	local out NL
+	NL='
+'
+	out=$("$GUARD" status </dev/null 2>/dev/null)
+	G_RC=$?
+	G_LINE=${out%%"$NL"*}
+	if [ "$G_RC" -ne 0 ] || [ -z "$G_LINE" ]; then
+		G_LINE=failed
+	fi
+	return 0
+}
+
+# ---- 7. subcommands (design 3.4, 3.5, 2.6) ----
+
+# sha_of_file PATH: 64 hex into FILE_SHA, missing when absent (design 2.6).
+sha_of_file() {
+	FILE_SHA=missing
+	if [ -f "$1" ]; then
+		FILE_SHA=$(sha256sum "$1" 2>/dev/null | cut -c 1-64)
+		case "$FILE_SHA" in
+			''|*[!0-9a-f]*) FILE_SHA=missing ;;
+			*) [ "${#FILE_SHA}" -eq 64 ] || FILE_SHA=missing ;;
+		esac
+	fi
+	[ "$FILE_SHA" != missing ] || HELLO_MISSING=1
+}
+
+# profile_value: the design 2.1 profile rule.
+profile_value() {
+	local p
+	PROFILE_OUT='prod'
+	if IFS= read -r p 2>/dev/null < "$R/etc/newton/profile"; then
+		case "$p" in
+			lab) PROFILE_OUT=lab ;;
+			prod) PROFILE_OUT=prod ;;
+		esac
+	fi
+}
+
+# guard_state_value: first word of newton-guard status, failed when it cannot run.
+guard_state_value() {
+	GS_OUT=failed
+	guard_status
+	GS_OUT=${G_LINE%% *}
+	[ -n "$GS_OUT" ] || GS_OUT=failed
+}
+
+# busy_value: the open-transaction rule of design 2.6 busy=; a live open
+# session also leaves its SID in BUSY_SID for the later rounds.
+busy_value() {
+	local bsid dl rest owner
+	BUSY_OUT=-
+	BUSY_SID=
+	[ -r "$LOCK/sid" ] || return 0
+	IFS= read -r bsid 2>/dev/null < "$LOCK/sid" || return 0
+	is_sid "$bsid" || return 0
+	[ -d "$LOCK/$bsid.txn" ] || return 0
+	"$UBUS" call session list "{\"ubus_rpc_session\":\"$bsid\"}" </dev/null >/dev/null 2>&1 || return 0
+	BUSY_SID=$bsid
+	BUSY_OUT='?'
+	if [ -f "$LOCK/$bsid.txn/applied" ]; then
+		if IFS=' ' read -r dl rest 2>/dev/null < "$LOCK/$bsid.txn/applied"; then
+			case "$dl" in
+				''|*[!0-9]*) ;;
+				*)
+					if [ "$UP_NOW" -ge "$dl" ] 2>/dev/null; then
+						BUSY_OUT=-
+						return 0
+					fi
+					;;
+			esac
+		fi
+	fi
+	if IFS= read -r owner 2>/dev/null < "$LOCK/$bsid.txn/owner"; then
+		[ -n "$owner" ] && BUSY_OUT=$owner
+	fi
+}
+
+# trim_hello: keep the last 64 lines of /tmp/newton/hello (design 2.6).
+trim_hello() {
+	local nlines tmpf
+	nlines=$(wc -l < "$R/tmp/newton/hello")
+	case "$nlines" in
+		''|*[!0-9]*) return 0 ;;
+	esac
+	[ "$nlines" -le 64 ] && return 0
+	tmpf=$(mktemp "$R/tmp/newton/hl.$PROG_PID.XXXXXX") || return 0
+	SCRATCH="$SCRATCH $tmpf"
+	tail -n 64 "$R/tmp/newton/hello" > "$tmpf" && mv -f "$tmpf" "$R/tmp/newton/hello"
+}
+
+# hello_record NONCE: append this call's line to $R/tmp/newton/hello and keep the last 64 lines, as one step under an exclusive flock on the
+# directory $R/tmp/newton (fd 6). hello takes no program lock, so without this two calls could lose a line: both trim from a copy taken before
+# the other's append. The wait is at most 10 s (flock -n retried once a second); after that the line is appended without a trim, so a stuck holder never blocks hello.
+hello_record() {
+	local nonce="$1" waited=0 got=0 done_rec=0
+	{
+		done_rec=1
+		while :; do
+			if "$FLOCK" -n 6; then
+				got=1
+				break
+			fi
+			[ "$waited" -lt 10 ] || break
+			"$SLEEP" 1
+			waited=$((waited + 1))
+		done
+		printf '%s %s %s\n' "$nonce" "$CALLER" "$UP_NOW" >> "$R/tmp/newton/hello"
+		if [ "$got" -eq 1 ]; then
+			trim_hello
+		fi
+	} 6< "$R/tmp/newton"
+	if [ "$done_rec" -eq 0 ]; then
+		printf '%s %s %s\n' "$nonce" "$CALLER" "$UP_NOW" >> "$R/tmp/newton/hello"
+	fi
+	return 0
+}
+
+# cmd_hello NONCE: the one hello line of design 2.6.
+cmd_hello() {
+	local nonce="$1" prog helper guard init device profile key gstate busy ttyv agentv kline
+	HELLO_MISSING=0
+	uptime_now
+	sha_of_file "$R/usr/libexec/newton/newton-router"; prog=$FILE_SHA
+	sha_of_file "$R/usr/libexec/newton/newton-safe-apply"; helper=$FILE_SHA
+	sha_of_file "$R/usr/libexec/newton-guard"; guard=$FILE_SHA
+	sha_of_file "$R/etc/init.d/newton-guard"; init=$FILE_SHA
+	device=
+	IFS= read -r device 2>/dev/null < "$R/etc/newton/device-id" || :
+	[ -n "$device" ] || device=-
+	profile_value
+	profile=$PROFILE_OUT
+	key=missing
+	if IFS= read -r kline 2>/dev/null < "$R/etc/newton/approve.key"; then
+		if [ "${#kline}" -eq 64 ]; then
+			case "$kline" in
+				''|*[!0-9a-f]*) ;;
+				*) key=present ;;
+			esac
+		fi
+	fi
+	guard_state_value
+	gstate=$GS_OUT
+	busy_value
+	busy=$BUSY_OUT
+	ttyv=$STDIN_TTY
+	case ${SSH_AUTH_SOCK-} in
+		'') agentv=0 ;;
+		*) agentv=1 ;;
+	esac
+	printf 'hello %s api=1 version=1.3.0 mode=%s prog=%s helper=%s guard=%s init=%s device=%s profile=%s approval-key=%s guard-state=%s busy=%s caller=%s role=%s door=%s tty=%s agent=%s from=%s\n' \
+		"$nonce" "$MODE_STR" "$prog" "$helper" "$guard" "$init" "$device" "$profile" "$key" "$gstate" "$busy" "$CALLER" "$ROLE" "$DOOR" "$ttyv" "$agentv" "$FROM_ADDR"
+	if [ "$DOOR" = ssh ]; then
+		hello_record "$nonce"
+	fi
+	[ "$HELLO_MISSING" -eq 0 ] || return 1
+	return 0
+}
+
+# cmd_hostname: moved snippet I3 (design 3.5).
+cmd_hostname() {
+	"$UCI" -q get 'system.@system[0].hostname' </dev/null
+}
+
+# cmd_fw_loaded: moved snippet I5 (design 3.5).
+cmd_fw_loaded() {
+	if "$NFT" list table inet fw4 >/dev/null 2>&1; then
+		echo 1
+	else
+		echo 0
+	fi
+}
+
+# cmd_logd_pid: moved snippet I6 (design 3.5).
+cmd_logd_pid() {
+	local i
+	i=0
+	while ! "$PIDOF" logd && [ "$i" -lt 5 ]; do
+		"$SLEEP" 1
+		i=$((i + 1))
+	done
+	true
+}
+
+# cmd_backup: design 3.5 new code; stdout is only the archive.
+cmd_backup() {
+	"$TAR" -czf - -C "$R/" etc/config </dev/null
+}
+
+# stage_busy_gate: design 3.5a step 4; fail busy 3 when $LOCK/sid names an
+# SID whose session is live and whose txn has not passed its rpcd deadline
+# (first field of applied). The full SID is shown to root and to that txn's
+# owner, the first 8 hex to anyone else.
+stage_busy_gate() {
+	local bsid dl rest owner show
+	[ -r "$LOCK/sid" ] || return 0
+	IFS= read -r bsid 2>/dev/null < "$LOCK/sid" || return 0
+	is_sid "$bsid" || return 0
+	[ -d "$LOCK/$bsid.txn" ] || return 0
+	session_live "$bsid" || return 0
+	if [ -f "$LOCK/$bsid.txn/applied" ]; then
+		if IFS=' ' read -r dl rest 2>/dev/null < "$LOCK/$bsid.txn/applied"; then
+			case "$dl" in
+				''|*[!0-9]*) ;;
+				*)
+					if [ "$UP_NOW" -ge "$dl" ] 2>/dev/null; then
+						return 0
+					fi
+					;;
+			esac
+		fi
+	fi
+	owner='?'
+	if IFS= read -r owner 2>/dev/null < "$LOCK/$bsid.txn/owner" && [ -n "$owner" ]; then
+		:
+	else
+		owner='?'
+	fi
+	show=$(printf '%s' "$bsid" | cut -c 1-8)
+	if [ "$CALLER" = root ] || [ "$owner" = "$CALLER" ]; then
+		show=$bsid
+	fi
+	fail busy 3 "$owner $show"
+}
+
+# cmd_stage: design 3.5a.
+cmd_stage() {
+	local in f sid rc
+	trap '' HUP PIPE
+	in=$(mktemp "$R/tmp/newton/in.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+	SCRATCH="$SCRATCH $in"
+	read_stdin_file 30720
+	cat "$OUT" > "$in" || fail internal 1 cat
+	stdin_check_batch "$in"
+	lock_take 10
+	uptime_now
+	guard_status
+	case "$G_LINE" in failed*|pending*) fail guard 3 "$G_LINE" ;; esac
+	stage_busy_gate
+	f=$(mktemp "$R/tmp/newton/st.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+	SCRATCH="$SCRATCH $f"
+	run_helper stage < "$in" > "$f"
+	rc=$?
+	[ "$rc" -eq 0 ] || { RC=1; exit 1; }
+	sid=
+	[ "$(wc -l < "$f")" -eq 1 ] || fail internal 1 stage-output
+	[ -z "$(tail -c 1 "$f")" ] || fail internal 1 stage-output
+	IFS= read -r sid < "$f" || fail internal 1 stage-output
+	is_sid "$sid" || fail internal 1 stage-output
+	mkdir "$LOCK/$sid.txn" || fail internal 1 mkdir
+	crash_point
+	printf '%s\n' "$CALLER" > "$LOCK/$sid.txn/owner"
+	crash_point
+	printf '%s\n' "$UP_NOW" > "$LOCK/$sid.txn/stage-up"
+	crash_point
+	boot_id
+	printf '%s\n' "$BOOT_ID_OUT" > "$LOCK/$sid.txn/boot"
+	crash_point
+	LOG_SID=$(printf '%s' "$sid" | cut -c 1-8)
+	printf '%s\n' "$sid"
+	return 0
+}
+
+# router_field VALUE: a router-derived stdout field of design 3.5b step 9
+# (section, type, name, where): every byte outside [A-Za-z0-9_.@:[]-]
+# becomes _, cut to 64 bytes, empty becomes -; the result in
+# ROUTER_FIELD_OUT. The next round uses it.
+router_field() {
+	ROUTER_FIELD_OUT=$(printf '%s' "$1" | tr -c 'A-Za-z0-9_.@:[]-' '_' | cut -c 1-64)
+	[ -n "$ROUTER_FIELD_OUT" ] || ROUTER_FIELD_OUT=-
+	return 0
+}
+
+# plan_digest SID BASE DIFF PSHA T: sha256 of the design 5.4 digest bytes
+# into DIGEST_OUT. The device id is the first line of
+# $R/etc/newton/device-id, - when missing; the text is built with printf
+# into a scratch file, then hashed. The apply round calls this again with
+# freshly computed values.
+plan_digest() {
+	local sid="$1" base="$2" diff="$3" psha="$4" t="$5" dev f
+	dev=
+	IFS= read -r dev 2>/dev/null < "$R/etc/newton/device-id" || :
+	[ -n "$dev" ] || dev=-
+	f=$(mktemp "$R/tmp/newton/dg.$PROG_PID.XXXXXX") || { DIGEST_OUT=; return 1; }
+	SCRATCH="$SCRATCH $f"
+	printf 'newton-plan-v1\n%s\n%s\n%s\n%s\n%s\n%s\n' "$dev" "$sid" "$base" "$diff" "$psha" "$t" > "$f"
+	DIGEST_OUT=$(sha256sum "$f" | cut -c 1-64)
+	case "$DIGEST_OUT" in
+		''|*[!0-9a-f]*) DIGEST_OUT=; return 1 ;;
+	esac
+	[ "${#DIGEST_OUT}" -eq 64 ] || { DIGEST_OUT=; return 1; }
+	return 0
+}
+
+# hex2fmt HEX XOR: the design 5.4 byte-to-printf-format helper. The output
+# contains only generated octal escapes; key bytes never become command argv.
+hex2fmt() {
+	local h="$1" x="$2" f='' b
+	while [ -n "$h" ]; do
+		b=${h%"${h#??}"}
+		h=${h#??}
+		f="$f$(printf '\\%03o' "$(( 0x$b ^ x ))")"
+	done
+	printf '%s' "$f"
+}
+
+# hmac KEYHEX MESSAGE: HMAC-SHA256 from design 5.4, as 64 lowercase hex.
+hmac() {
+	local k="$1" msg="$2" n pad='' ik ok inner ib outer
+	n=$(( ${#k} / 2 ))
+	while [ "$n" -lt 64 ]; do
+		pad="${pad}00"
+		n=$((n + 1))
+	done
+	ik=$(hex2fmt "$k$pad" 54)
+	ok=$(hex2fmt "$k$pad" 92)
+	# shellcheck disable=SC2059  # format is generated octal escapes only
+	inner=$( { printf "$ik"; printf '%s' "$msg"; } | sha256sum )
+	inner=${inner%% *}
+	ib=$(hex2fmt "$inner" 0)
+	# shellcheck disable=SC2059  # formats are generated octal escapes only
+	outer=$( { printf "$ok"; printf "$ib"; } | sha256sum )
+	printf '%s\n' "${outer%% *}"
+}
+
+# approval_key_value: load the exact one-line 32-byte router approval key.
+approval_key_value() {
+	KEY_HEX=
+	[ -f "$R/etc/newton/approve.key" ] || return 1
+	[ "$(wc -c < "$R/etc/newton/approve.key")" -eq 65 ] || return 1
+	[ "$(wc -l < "$R/etc/newton/approve.key")" -eq 1 ] || return 1
+	IFS= read -r KEY_HEX < "$R/etc/newton/approve.key" || { KEY_HEX=; return 1; }
+	[ "${#KEY_HEX}" -eq 64 ] || { KEY_HEX=; return 1; }
+	case "$KEY_HEX" in
+		''|*[!0-9a-f]*) KEY_HEX=; return 1 ;;
+	esac
+	return 0
+}
+
+# approval_token DIGEST NBF EXP: token for the approval domain v2, in TOKEN_OUT.
+# v2 binds NBF and EXP into the HMAC so changing them after minting is
+# detected as bad-approval.
+approval_token() {
+	local digest="$1" nbf="$2" exp="$3" NL msg
+	NL='
+'
+	msg="newton-approval-v2${NL}${digest}${NL}${nbf}${NL}${exp}${NL}"
+	TOKEN_OUT=$(hmac "$KEY_HEX" "$msg")
+}
+
+# check_approval_window NBF EXP: refuse approval-window 3 unless the
+# clock-window rules hold:
+#   EXP > NBF, EXP - NBF <= 3600, now <= EXP.
+# Only the expiry bound is enforced; a router whose clock is behind
+# (no RTC, WAN down) must still accept a fresh token (owner ruling
+# 2026-10-21). Replay stays bounded by host-side single use, the HMAC
+# over digest+NBF+EXP and the stage-age limit.
+check_approval_window() {
+	local nbf="$1" exp="$2" now diff
+	now=$("$DATE" +%s </dev/null) || fail approval-window 3 clock
+	case "$now" in
+		''|*[!0-9]*) fail approval-window 3 clock ;;
+	esac
+	# positive tests: a test that errors counts as a refusal
+	[ "$exp" -gt "$nbf" ] || fail approval-window 3
+	diff=$((exp - nbf))
+	[ "$diff" -le 3600 ] || fail approval-window 3
+	[ "$now" -le "$exp" ] || fail approval-window 3
+	return 0
+}
+
+# check_approval SID TOKEN NBF EXP CODES DIGEST: apply-time approval refusal order.
+check_approval() {
+	local sid="$1" token="$2" nbf="$3" exp="$4" codes="$5" digest="$6"
+	[ "$token" != none ] || fail needs-approval 3 "$codes"
+	approval_key_value || fail approval-key-missing 3
+	check_approval_window "$nbf" "$exp"
+	approval_token "$digest" "$nbf" "$exp"
+	[ "$TOKEN_OUT" = "$token" ] || fail bad-approval 3
+}
+
+# leash_show SHOWFILE STDERRFILE TARGET [STAGED-DIR]: read one UCI view. A
+# missing target is the one expected failure; every other failure is unsafe.
+leash_show() {
+	local showf="$1" showe="$2" target="$3" staged="${4-}" rc line
+	if [ -n "$staged" ]; then
+		"$UCI" -P "$staged" show "$target" </dev/null > "$showf" 2> "$showe"
+	else
+		"$UCI" show "$target" </dev/null > "$showf" 2> "$showe"
+	fi
+	rc=$?
+	[ "$rc" -eq 0 ] && return 0
+	line=
+	if [ "$rc" -eq 1 ]; then
+		IFS= read -r line < "$showe"
+		if [ "$line" = 'uci: Entry not found' ] && [ "$(wc -c < "$showe")" -eq 21 ]; then
+			: > "$showf" || fail internal 1 leash-file
+			return 0
+		fi
+	fi
+	fail internal 1 uci-show
+}
+
+# leash_classify SID OUTFILE: design 5.2. Gathers the profile, the zones
+# file, the staged uci changes, the staged and committed view of every
+# touched (config, section) pair and the committed firewall config into one
+# tagged stream file, then runs one fixed awk program over it that writes
+# the section lines and leash lines to OUTFILE. Nothing derived from the
+# router reaches awk program text: every value the program needs is a line
+# of the stream. The firewall codes, the renames and reorders and the
+# section lines follow design 5.2.
+leash_classify() {
+	local sid="$1" outfile="$2" st chg pairs showf showe line zk zv rest mi mz wz w nw fw cfg sec
+	: > "$outfile" || fail internal 1 leash-file
+	st=$(mktemp "$R/tmp/newton/ls.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+	SCRATCH="$SCRATCH $st"
+	chg=$(mktemp "$R/tmp/newton/lc.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+	SCRATCH="$SCRATCH $chg"
+	pairs=$(mktemp "$R/tmp/newton/lp.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+	SCRATCH="$SCRATCH $pairs"
+	showf=$(mktemp "$R/tmp/newton/lo.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+	SCRATCH="$SCRATCH $showf"
+	showe=$(mktemp "$R/tmp/newton/lu.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+	SCRATCH="$SCRATCH $showe"
+	profile_value
+	printf 'P\t%s\n' "$PROFILE_OUT" > "$st" || fail internal 1 leash-file
+	# the zones file (design 2.1): one mgmt-interface and one mgmt-zone
+	# line, up to four wan-zone lines; an invalid or unknown line is
+	# ignored; the defaults are lan, lan and wan
+	mi=lan
+	mz=lan
+	wz=
+	nw=0
+	if [ -r "$R/etc/newton/zones" ]; then
+		while read -r zk zv rest; do
+			case "$zv" in ''|*[!A-Za-z0-9_-]*) continue ;; esac
+			[ "${#zv}" -le 32 ] || continue
+			case "$zk" in
+				mgmt-interface) mi=$zv ;;
+				mgmt-zone) mz=$zv ;;
+				wan-zone)
+					[ "$nw" -lt 4 ] || continue
+					nw=$((nw + 1))
+					wz="$wz $zv"
+					;;
+			esac
+		done < "$R/etc/newton/zones"
+	fi
+	[ "$nw" -gt 0 ] || wz=' wan'
+	printf 'Z\tmgmt-interface\t%s\n' "$mi" >> "$st"
+	printf 'Z\tmgmt-zone\t%s\n' "$mz" >> "$st"
+	for w in $wz; do
+		printf 'Z\twan-zone\t%s\n' "$w" >> "$st"
+	done
+	# the staged changes, raw, as C lines
+	"$UCI" -P "$R/var/run/rpcd/uci-$sid" changes </dev/null > "$chg" 2>/dev/null || fail internal 1 uci-changes
+	while IFS= read -r line || [ -n "$line" ]; do
+		printf 'C\t%s\n' "$line" >> "$st"
+	done < "$chg"
+	# the first small awk pass: the unique (config, section) pairs of the
+	# parsed C lines, in order of first appearance (a section rename
+	# touches both names); the parser is the packet A final one (policy
+	# parse_diff_line): op char, config, path, last-dot option split, one
+	# pair of quotes removed from the value
+	# shellcheck disable=SC2016  # the awk program is fixed text (design 3.1)
+	awk '
+		function unquote(v, q) {
+			if (length(v) >= 2) {
+				q = substr(v, 1, 1)
+				if ((q == "\047" || q == "\"") && substr(v, length(v), 1) == q) return substr(v, 2, length(v) - 2)
+			}
+			return v
+		}
+		function parse(l, text, op, d, cfg, rest, e, path, val, ld, i, sec, opt, k) {
+			text = l
+			gsub(/^[ \t\r]+|[ \t\r]+$/, "", text)
+			if (text == "") return 0
+			op = ""
+			if (substr(text, 1, 1) == "-" || substr(text, 1, 1) == "+" || substr(text, 1, 1) == "@" || substr(text, 1, 1) == "^") {
+				op = substr(text, 1, 1)
+				text = substr(text, 2)
+			}
+			d = index(text, ".")
+			if (d == 0) return -1
+			cfg = substr(text, 1, d - 1)
+			rest = substr(text, d + 1)
+			if (cfg !~ /^[a-z0-9_-]+$/) return -1
+			e = index(rest, "=")
+			if (e > 0) {
+				path = substr(rest, 1, e - 1)
+				val = unquote(substr(rest, e + 1))
+			} else {
+				path = rest
+				val = ""
+			}
+			if (length(path) > 0 && (substr(path, length(path), 1) == "+" || substr(path, length(path), 1) == "-")) {
+				op = substr(path, length(path), 1)
+				path = substr(path, 1, length(path) - 1)
+			}
+			ld = 0
+			for (i = 1; i <= length(path); i++)
+				if (substr(path, i, 1) == ".") ld = i
+			if (ld == 0) {
+				sec = path
+				opt = ""
+			} else {
+				sec = substr(path, 1, ld - 1)
+				opt = substr(path, ld + 1)
+			}
+			if (sec !~ /^[A-Za-z0-9_-]+$/ && sec !~ /^@[A-Za-z0-9_-]+\[[0-9]+\]$/) return -1
+			if (ld > 0 && opt !~ /^[A-Za-z0-9_]+$/) return -1
+			P_OP = op; P_CFG = cfg; P_SEC = sec; P_OPT = opt; P_VAL = val
+			return 1
+		}
+		{
+			if (parse($0) <= 0) next
+			k = P_CFG SUBSEP P_SEC
+			if (!(k in seen)) {
+				seen[k] = 1
+				print P_CFG "\t" P_SEC
+			}
+			# a section rename touches both names (the rename and reorder
+			# semantics themselves come next round)
+			if (P_OP == "@" && P_OPT == "" && P_VAL ~ /^[A-Za-z0-9_-]+$/) {
+				k = P_CFG SUBSEP P_VAL
+				if (!(k in seen)) {
+					seen[k] = 1
+					print P_CFG "\t" P_VAL
+				}
+			}
+		}
+	' "$chg" > "$pairs" || fail internal 1 leash-pairs
+	# the staged and committed view of every touched pair (S and M lines);
+	# an empty show result is a missing section. F lines: the committed
+	# firewall config, only when some touched pair has config firewall
+	# (used next round)
+	fw=0
+	while IFS="$PB_TAB" read -r cfg sec rest; do
+		[ -n "$cfg" ] || continue
+		printf 'T\t%s\t%s\n' "$cfg" "$sec" >> "$st"
+		if [ "$cfg" = firewall ]; then
+			fw=1
+		fi
+		leash_show "$showf" "$showe" "$cfg.$sec" "$R/var/run/rpcd/uci-$sid"
+		while IFS= read -r line || [ -n "$line" ]; do
+			printf 'S\t%s\t%s\t%s\n' "$cfg" "$sec" "$line" >> "$st"
+		done < "$showf"
+		leash_show "$showf" "$showe" "$cfg.$sec"
+		while IFS= read -r line || [ -n "$line" ]; do
+			printf 'M\t%s\t%s\t%s\n' "$cfg" "$sec" "$line" >> "$st"
+		done < "$showf"
+	done < "$pairs"
+	if [ "$fw" -eq 1 ]; then
+		leash_show "$showf" "$showe" firewall
+		while IFS= read -r line || [ -n "$line" ]; do
+			printf 'F\t%s\n' "$line" >> "$st"
+		done < "$showf"
+	fi
+	# the main pass: one fixed awk program over the tagged stream; it
+	# writes the section lines first, then the leash lines in the order of
+	# the codes in the design 5.2 table
+	# shellcheck disable=SC2016  # the awk program is fixed text (design 3.1)
+	awk '
+		BEGIN { FS = "\t"; OFS = "\t" }
+		function rf(s, i, ch, o) {
+			o = ""
+			for (i = 1; i <= length(s); i++) {
+				ch = substr(s, i, 1)
+				if (index("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.@:[]-", ch) > 0) o = o ch
+				else o = o "_"
+			}
+			if (length(o) > 64) o = substr(o, 1, 64)
+			if (o == "") o = "-"
+			return o
+		}
+		# aftern S N: everything after the Nth TAB of S; a value may
+		# hold TABs, so the raw line cannot be read as a field
+		function aftern(s, n, i, j) {
+			for (i = 0; i < n; i++) {
+				j = index(s, "\t")
+				if (j == 0) return ""
+				s = substr(s, j + 1)
+			}
+			return s
+		}
+		function cidx(c) {
+			if (c == "mgmt-config") return 1
+			if (c == "mgmt-interface") return 2
+			if (c == "bridge-member") return 3
+			if (c == "mgmt-zone") return 4
+			if (c == "wan-zone") return 5
+			if (c == "zone-exposure") return 6
+			if (c == "forwarding-mgmt") return 7
+			if (c == "wan-forwarding") return 8
+			if (c == "wan-redirect") return 9
+			if (c == "wan-rule") return 10
+			if (c == "defaults-accept") return 11
+			if (c == "exec-include") return 12
+			if (c == "firewall-type") return 13
+			if (c == "section-unidentified") return 14
+			if (c == "unparsed-change") return 15
+			if (c == "profile-prod") return 16
+			if (c == "exec-option") return 17
+			if (c == "path-option") return 18
+			if (c == "exec-config") return 19
+			if (c == "unknown-package") return 20
+			if (c == "upnp-on") return 21
+			if (c == "ntp-server-open") return 22
+			if (c == "mgmt-route") return 23
+			return 99
+		}
+		function knownpkg(c) {
+			return (c == "dhcp" || c == "dropbear" || c == "firewall" || c == "luci" || c == "network" || c == "rpcd" || c == "system" || c == "uhttpd" || c == "upnpd" || c == "wireless" || c == "https-dns-proxy" || c == "newton_wanhealth")
+		}
+		function iswz(w, i) {
+			for (i = 1; i <= nzw; i++)
+				if (wz[i] == w) return 1
+			return 0
+		}
+		function intoks(val, tok, n, t, i) {
+			n = split(val, t, /[ \t]+/)
+			for (i = 1; i <= n; i++)
+				if (t[i] == tok) return 1
+			return 0
+		}
+		function fire(code, where, k) {
+			k = code SUBSEP where
+			if (k in fired) return
+			fired[k] = 1
+			nl = nl + 1
+			skey[nl] = sprintf("%03d%08d", cidx(code), nl)
+			stxt[nl] = "leash " code " " where
+		}
+		function grp(cfg, sec, key) {
+			key = cfg SUBSEP sec
+			if (key in gseen) return key
+			gseen[key] = 1
+			ng = ng + 1
+			gord[ng] = key
+			gcfg[key] = cfg
+			gsec[key] = sec
+			return key
+		}
+		function holdslash(v, sl, pre, post) {
+			if (index(v, "/") == 0) return 0
+			sl = index(v, "/")
+			if (index(substr(v, sl + 1), "/") == 0) {
+				pre = substr(v, 1, sl - 1)
+				post = substr(v, sl + 1)
+				if (pre != "" && pre ~ /^[0-9A-Fa-f.:]+$/ && post ~ /^[0-9][0-9]?[0-9]?$/) return 0
+				if (pre != "" && pre ~ /^[0-9]+$/ && (post == "second" || post == "minute" || post == "hour" || post == "day")) return 0
+			}
+			if (substr(v, 1, 7) == "http://" || substr(v, 1, 8) == "https://") return 0
+			return 1
+		}
+		function pathbad(v, n, el, i) {
+			n = split(v, el, " ")
+			for (i = 1; i <= n; i++)
+				if (el[i] != "" && holdslash(el[i])) return 1
+			return 0
+		}
+		function unquote(v, q) {
+			if (length(v) >= 2) {
+				q = substr(v, 1, 1)
+				if ((q == "\047" || q == "\"") && substr(v, length(v), 1) == q) return substr(v, 2, length(v) - 2)
+			}
+			return v
+		}
+		function parse(l, text, op, d, cfg, rest, e, path, val, ld, i, sec, opt) {
+			text = l
+			gsub(/^[ \t\r]+|[ \t\r]+$/, "", text)
+			if (text == "") return 0
+			op = ""
+			if (substr(text, 1, 1) == "-" || substr(text, 1, 1) == "+" || substr(text, 1, 1) == "@" || substr(text, 1, 1) == "^") {
+				op = substr(text, 1, 1)
+				text = substr(text, 2)
+			}
+			d = index(text, ".")
+			if (d == 0) return -1
+			cfg = substr(text, 1, d - 1)
+			rest = substr(text, d + 1)
+			if (cfg !~ /^[a-z0-9_-]+$/) return -1
+			e = index(rest, "=")
+			if (e > 0) {
+				path = substr(rest, 1, e - 1)
+				val = unquote(substr(rest, e + 1))
+			} else {
+				path = rest
+				val = ""
+			}
+			if (length(path) > 0 && (substr(path, length(path), 1) == "+" || substr(path, length(path), 1) == "-")) {
+				op = substr(path, length(path), 1)
+				path = substr(path, 1, length(path) - 1)
+			}
+			ld = 0
+			for (i = 1; i <= length(path); i++)
+				if (substr(path, i, 1) == ".") ld = i
+			if (ld == 0) {
+				sec = path
+				opt = ""
+			} else {
+				sec = substr(path, 1, ld - 1)
+				opt = substr(path, ld + 1)
+			}
+			if (sec !~ /^[A-Za-z0-9_-]+$/ && sec !~ /^@[A-Za-z0-9_-]+\[[0-9]+\]$/) return -1
+			if (ld > 0 && opt !~ /^[A-Za-z0-9_]+$/) return -1
+			P_OP = op; P_CFG = cfg; P_SEC = sec; P_OPT = opt; P_VAL = val
+			return 1
+		}
+		# showline RAW KEY ISV: one line of a uci show output into the
+		# staged (ISV 1) or committed (ISV 0) view of the group KEY: the
+		# header line cfg.NAME=TYPE, else cfg.NAME.option=value with one
+		# pair of quotes removed per blank-separated value
+		function showline(raw, key, isv, eq, left, val, n, f, o, toks, nt, i) {
+			eq = index(raw, "=")
+			if (eq == 0) return
+			left = substr(raw, 1, eq - 1)
+			val = substr(raw, eq + 1)
+			n = split(left, f, ".")
+			if (n == 2) {
+				if (isv) {
+					st_name[key] = f[2]
+					st_type[key] = val
+					sthdr[key] = 1
+				} else {
+					cm_name[key] = f[2]
+					cm_type[key] = val
+					cmhdr[key] = 1
+				}
+				return
+			}
+			if (n != 3) return
+			o = ""
+			nt = split(val, toks, /[ \t]+/)
+			for (i = 1; i <= nt; i++) {
+				if (toks[i] == "") continue
+				if (o != "") o = o " "
+				o = o unquote(toks[i])
+			}
+			o = unquote(o)
+			if (isv) {
+				sv[key, f[3]] = o
+				if (index(sopt[key], " " f[3] " ") == 0) sopt[key] = sopt[key] " " f[3] " "
+			} else {
+				cv[key, f[3]] = o
+				if (index(copt[key], " " f[3] " ") == 0) copt[key] = copt[key] " " f[3] " "
+			}
+		}
+		$1 == "P" { prof = $2; next }
+		$1 == "Z" {
+			if ($2 == "mgmt-interface") mgif = $3
+			else if ($2 == "mgmt-zone") mgzn = $3
+			else if ($2 == "wan-zone") { nzw = nzw + 1; wz[nzw] = $3 }
+			next
+		}
+		$1 == "C" {
+			raw = aftern($0, 1)
+			r = parse(raw)
+			if (r == 0) next
+			if (r < 0) {
+				if (!(raw in useen)) {
+					useen[raw] = 1
+					nun = nun + 1
+					untxt[nun] = raw
+				}
+				next
+			}
+			# renames and reorders (design 5.2): a section rename line
+			# groups under the old name; later lines that name the new
+			# name join that group, whose staged view is the one shown
+			# under the new name (the S handler maps it back)
+			# selector token and structural-line flag (finding F-D, fails
+			# closed: a @TYPE[N] selector index may name a different
+			# section before and after a delete, add, rename or reorder
+			# of its type; the per-(config, type) totals below use both)
+			selt = ""
+			if (P_SEC ~ /^@[A-Za-z0-9_-]+\[[0-9]+\]$/) selt = substr(P_SEC, 2, index(P_SEC, "[") - 2)
+			strc = (P_OPT == "" && (P_OP == "-" || P_OP == "^" || P_OP == "@" || P_OP == "")) ? 1 : 0
+			k0 = P_CFG SUBSEP P_SEC
+			if (k0 in oldof) P_SEC = oldof[k0]
+			if (P_OP == "@" && P_OPT == "" && P_VAL ~ /^[A-Za-z0-9_-]+$/) {
+				nkey = P_CFG SUBSEP P_VAL
+				if (!(nkey in oldof)) {
+					oldof[nkey] = P_SEC
+					renold[P_CFG SUBSEP P_SEC] = 1
+				}
+			}
+			key = grp(P_CFG, P_SEC)
+			if (P_OPT == "") {
+				if (P_OP == "-") gdeleted[key] = 1
+				else if (P_OP == "@") grenamed[key] = 1
+				else if (P_OP == "^") greordered[key] = 1
+			}
+			ncg = ncg + 1
+			c_g[ncg] = key
+			c_op[ncg] = P_OP
+			c_opt[ncg] = P_OPT
+			c_val[ncg] = P_VAL
+			c_selt[ncg] = selt
+			c_str[ncg] = strc
+			gchng[key] = gchng[key] " " ncg
+			# an option rename counts as a change to both names, with the
+			# new name staged value as its value (resolved in
+			# leash_rules, which runs after the S lines)
+			if (P_OP == "@" && P_OPT != "" && P_VAL ~ /^[A-Za-z0-9_]+$/) {
+				ncg = ncg + 1
+				c_g[ncg] = key
+				c_op[ncg] = P_OP
+				c_opt[ncg] = P_VAL
+				c_val[ncg] = ""
+				gchng[key] = gchng[key] " " ncg
+			}
+			next
+		}
+		$1 == "T" {
+			k0 = $2 SUBSEP $3
+			if (k0 in oldof) $3 = oldof[k0]
+			grp($2, $3); next
+		}
+		$1 == "S" {
+			k0 = $2 SUBSEP $3
+			# an S line whose token is the OLD token of a rename points
+			# (in the staged view) at whatever section uci now names with
+			# that selector, which may not be the renamed section: drop
+			# it; only the S lines under the new name count
+			if (k0 in renold) next
+			if (k0 in oldof) $3 = oldof[k0]
+			key = grp($2, $3)
+			if (!(key in gdeleted)) showline(aftern($0, 3), key, 1)
+			next
+		}
+		$1 == "M" {
+			k0 = $2 SUBSEP $3
+			if (k0 in oldof) $3 = oldof[k0]
+			showline(aftern($0, 3), grp($2, $3), 0); next
+		}
+		# F: the committed firewall; the network of the wan-list zones
+		# (zone-exposure) and nothing else
+		$1 == "F" {
+			raw = aftern($0, 1)
+			eq = index(raw, "=")
+			if (eq == 0) next
+			lleft = substr(raw, 1, eq - 1)
+			lval = substr(raw, eq + 1)
+			ln = split(lleft, lf, ".")
+			if (ln == 2) {
+				ftype[lf[2]] = lval
+			} else if (ln == 3 && lf[3] == "name") {
+				fname[lf[2]] = unquote(lval)
+			} else if (ln == 3 && lf[3] == "network") {
+				o = ""
+				lnt = split(lval, ltok, /[ \t]+/)
+				for (li = 1; li <= lnt; li++) {
+					if (ltok[li] == "") continue
+					if (o != "") o = o " "
+					o = o unquote(ltok[li])
+				}
+				fnet[lf[2]] = fnet[lf[2]] " " unquote(o)
+			}
+			next
+		}
+		function leash_firewall_rules(key, cfg, sec, typ, nam, deleted,
+				wh, ixs, n, k, i, o, opx, val, toks, nt, g, s1, s0, tgt,
+				hit, named, ismg, isw, firex, firewh) {
+			if (cfg != "firewall") return
+			wh = rf(cfg "." gdisp[key])
+			ismg = 0
+			isw = 0
+			named = 0
+			if (typ == "zone") {
+				# names: the staged and committed name options, empties
+				# dropped; a TAB cannot hide a name (show values are
+				# split on blanks and TABs already)
+				n = split(sv[key, "name"] " " cv[key, "name"], toks, " ")
+				for (i = 1; i <= n; i++) {
+					if (toks[i] == "") continue
+					named = 1
+					if (toks[i] == mgzn) ismg = 1
+					if (iswz(toks[i])) isw = 1
+				}
+				if (intoks(sv[key, "network"], mgif) || intoks(cv[key, "network"], mgif)) ismg = 1
+			}
+			# mgmt zone: any change to it (create, delete, rename,
+			# reorder or any option)
+			if (ismg) fire("mgmt-zone", wh)
+			# wan zone: any change but the per-option tightening and
+			# logging exemptions of the 5.2 table
+			if (isw) {
+				firex = 0
+				n = split(gchng[key], ixs, " ")
+				for (i = 1; i <= n && firex == 0; i++) {
+					k = ixs[i] + 0
+					o = c_opt[k]
+					opx = c_op[k]
+					if (o == "") firex = 1
+					else if (opx == "-") firex = 1
+					else {
+						val = c_val[k]
+						if ((key, o) in sv) val = sv[key, o]
+						if (o == "input" || o == "forward") {
+							if (toupper(val) != "DROP" && toupper(val) != "REJECT") firex = 1
+						} else if (o != "output" && o != "log" && o != "log_limit" && o != "mtu_fix" && o != "masq" && o != "masq6") firex = 1
+					}
+				}
+				if (firex) fire("wan-zone", wh)
+			}
+			# any other zone, new or existing
+			if (typ == "zone" && ismg == 0 && isw == 0) {
+				firex = 0
+				firewh = wh
+				n = split(gchng[key], ixs, " ")
+				for (i = 1; i <= n && firex == 0; i++) {
+					k = ixs[i] + 0
+					o = c_opt[k]
+					opx = c_op[k]
+					val = c_val[k]
+					if ((key, o) in sv) val = sv[key, o]
+					if (o == "input" || o == "forward") {
+						if (opx == "-") { firex = 1; firewh = rf(cfg "." gdisp[key] "." o) }
+						else if (toupper(val) == "ACCEPT") { firex = 1; firewh = rf(cfg "." gdisp[key] "." o) }
+					} else if (opx != "-" && (o == "device" || o == "subnet" || o == "family" || o == "extra" || o == "extra_src" || o == "extra_dest")) {
+						firex = 1
+						firewh = rf(cfg "." gdisp[key] "." o)
+					}
+				}
+				# a new zone whose staged view lacks input or forward
+				if (firex == 0 && (key in sthdr) && !(key in cmhdr)) {
+					if (!((key, "input") in sv) || sv[key, "input"] == "" || !((key, "forward") in sv) || sv[key, "forward"] == "") firex = 1
+				}
+				# the staged network gains wan, wan6 or an interface of a
+				# wan-list zone (over the committed network)
+				nt = split(sv[key, "network"], toks, /[ \t]+/)
+				for (i = 1; i <= nt && firex == 0; i++) {
+					g = toks[i]
+					if (g == "") continue
+					if (intoks(cv[key, "network"], g)) continue
+					if (g == "wan" || g == "wan6" || g in wnet) {
+						firex = 1
+						firewh = rf(cfg "." gdisp[key] ".network")
+					}
+				}
+				if (firex) fire("zone-exposure", firewh)
+			}
+			if (typ == "forwarding") {
+				if (sv[key, "src"] == mgzn || cv[key, "src"] == mgzn || sv[key, "dest"] == mgzn || cv[key, "dest"] == mgzn) fire("forwarding-mgmt", wh)
+				if (iswz(sv[key, "src"]) || sv[key, "src"] == "*" || iswz(cv[key, "src"]) || cv[key, "src"] == "*") fire("wan-forwarding", wh)
+			}
+			if (typ == "redirect") {
+				s1 = ((key, "src") in sv) ? sv[key, "src"] : ""
+				s0 = ((key, "src") in cv) ? cv[key, "src"] : ""
+				if (iswz(s1) || s1 == "*" || iswz(s0) || s0 == "*") fire("wan-redirect", wh)
+				else if (s1 == "" && s0 == "") fire("wan-redirect", wh)
+			}
+			if (typ == "rule") {
+				s1 = ((key, "src") in sv) ? sv[key, "src"] : ""
+				s0 = ((key, "src") in cv) ? cv[key, "src"] : ""
+				if ((s1 != "" || s0 != "") && (iswz(s1) || s1 == "*" || iswz(s0) || s0 == "*")) {
+					hit = 0
+					if (deleted) hit = 1
+					else {
+						tgt = ((key, "target") in sv) ? sv[key, "target"] : ""
+						if (tgt == "" || toupper(tgt) == "ACCEPT") hit = 1
+					}
+					if (key in greordered) hit = 1
+					n = split(gchng[key], ixs, " ")
+					for (i = 1; i <= n && hit == 0; i++) {
+						k = ixs[i] + 0
+						if (c_opt[k] == "enabled") {
+							val = c_val[k]
+							if ((key, "enabled") in sv) val = sv[key, "enabled"]
+							if (val == "0") hit = 1
+						}
+					}
+					if (hit) fire("wan-rule", wh)
+				}
+			}
+			if (typ == "defaults") {
+				n = split(gchng[key], ixs, " ")
+				for (i = 1; i <= n; i++) {
+					k = ixs[i] + 0
+					o = c_opt[k]
+					if (o != "input" && o != "forward") continue
+					val = c_val[k]
+					if ((key, o) in sv) val = sv[key, o]
+					if (c_op[k] != "-" && toupper(val) == "ACCEPT") fire("defaults-accept", wh)
+				}
+			}
+			if (typ == "include" && gchng[key] != "") fire("exec-include", wh)
+			if (typ != "-" && typ != "defaults" && typ != "zone" && typ != "forwarding" && typ != "rule" && typ != "redirect" && typ != "include") fire("firewall-type", wh)
+			# the firewall half: no type in either view, or a zone with
+			# no non-empty name in either view (an unnamed zone escapes
+			# every name test)
+			if (typ == "-") fire("section-unidentified", wh)
+			else if (typ == "zone" && named == 0) fire("section-unidentified", wh)
+		}
+		function leash_rules(key, cfg, sec, typ, nam, deleted, wh, owh, ixs, arr, n, k, o, opx, val, i) {
+			cfg = gcfg[key]
+			sec = gsec[key]
+			typ = gtyp[key]
+			nam = gnam[key]
+			deleted = (key in gdeleted)
+			wh = rf(cfg "." gdisp[key])
+			if (cfg == "dropbear" || cfg == "rpcd" || cfg == "uhttpd") fire("mgmt-config", wh)
+			if (cfg == "network") {
+				if (typ == "interface" && (st_name[key] == mgif || cm_name[key] == mgif)) fire("mgmt-interface", wh)
+				if (typ == "device" || typ == "bridge-vlan") fire("bridge-member", wh)
+				if ((typ == "route" || typ == "route6") && (((key, "interface") in sv && sv[key, "interface"] == mgif) || ((key, "interface") in cv && cv[key, "interface"] == mgif))) fire("mgmt-route", wh)
+				# no type in either view, or an anonymous selector whose
+				# real name cannot be learned (the firewall half comes next
+				# round, in leash_firewall_rules)
+				if (typ == "-") fire("section-unidentified", wh)
+				else if (nam == "-" && substr(sec, 1, 1) == "@") fire("section-unidentified", wh)
+			}
+			if (cfg == "ucitrack") fire("exec-config", wh)
+			if (!knownpkg(cfg)) fire("unknown-package", wh)
+			if (cfg == "system" && typ == "timeserver" && ((key, "enable_server") in sv) && sv[key, "enable_server"] == "1" && (!((key, "interface") in sv) || sv[key, "interface"] == "")) fire("ntp-server-open", wh)
+			n = split(gchng[key], ixs, " ")
+			for (i = 1; i <= n; i++) {
+				k = ixs[i] + 0
+				o = c_opt[k]
+				if (o == "") continue
+				opx = c_op[k]
+				val = c_val[k]
+				# an option value is its staged value (also the value of
+				# an option renamed to this name)
+				if ((key, o) in sv) val = sv[key, o]
+				owh = rf(cfg "." gdisp[key] "." o)
+				if (cfg == "dhcp" && (o == "dhcpscript" || o == "leasetrigger")) fire("exec-option", owh)
+				if (cfg == "system" && o == "log_file") fire("exec-option", owh)
+				if (cfg == "network" && o == "pppd_options") fire("exec-option", owh)
+				if (cfg == "upnpd" && (o == "enabled" || o == "enable_upnp" || o == "enable_natpmp") && opx != "-" && val == "1") fire("upnp-on", owh)
+			}
+			# path-option: only the values the change itself sets (the
+			# staged value of every option or list item the change lines
+			# set or add, the committed value of every option or list
+			# item the change deletes), and every option of a deleted
+			# section; a change to one option must not need approval for
+			# the values its neighbours already hold
+			if (deleted) {
+				n = split(copt[key], arr, " ")
+				for (i = 1; i <= n; i++) {
+					o = arr[i]
+					if (o != "" && pathbad(cv[key, o])) fire("path-option", rf(cfg "." gdisp[key] "." o))
+				}
+			} else {
+				n = split(gchng[key], ixs, " ")
+				for (i = 1; i <= n; i++) {
+					k = ixs[i] + 0
+					o = c_opt[k]
+					if (o == "") continue
+					opx = c_op[k]
+					if (opx == "+") val = c_val[k]
+					else if (opx == "-") val = ((key, o) in cv) ? cv[key, o] : c_val[k]
+					else val = ((key, o) in sv) ? sv[key, o] : c_val[k]
+					if (val != "" && pathbad(val)) fire("path-option", rf(cfg "." gdisp[key] "." o))
+				}
+			}
+			leash_firewall_rules(key, cfg, sec, typ, nam, deleted)
+		}
+		END {
+			for (i = 1; i <= ng; i++) {
+				key = gord[i]
+				cfg = gcfg[key]
+				sec = gsec[key]
+				typ = "-"
+				nam = "-"
+				if (key in st_type) {
+					typ = st_type[key]
+					nam = st_name[key]
+				} else if (key in cm_type) {
+					typ = cm_type[key]
+					nam = cm_name[key]
+				}
+			gtyp[key] = typ
+			gnam[key] = nam
+			# the section to print and to name in leash lines: a
+			# @type[N] selector is resolved by the show calls to the
+			# real section name
+			disp = sec
+			if (substr(sec, 1, 1) == "@") {
+				if (key in st_type) disp = st_name[key]
+				else if (key in cm_type) disp = cm_name[key]
+			}
+			gdisp[key] = disp
+			# the name option, staged else committed
+			namopt = ""
+			if ((key, "name") in sv) namopt = sv[key, "name"]
+			else if ((key, "name") in cv) namopt = cv[key, "name"]
+			if (namopt == "") namopt = "-"
+			print "section " rf(cfg) " " rf(disp) " " rf(typ) " " rf(namopt)
+		}
+		# the networks of the wan-list zones (committed firewall): the
+		# gain test of zone-exposure
+		for (fs in ftype) {
+			if (ftype[fs] != "zone" || !(fs in fname) || !iswz(fname[fs])) continue
+			nt = split(fnet[fs], ftok, /[ \t]+/)
+			for (j = 1; j <= nt; j++)
+				if (ftok[j] != "") wnet[ftok[j]] = 1
+		}
+		# finding F-D: a change line that names its section as @TYPE[N]
+		# may shift index under a same-batch structural line (delete,
+		# add, rename or reorder of that type), so the resolved section
+		# is not trustworthy; fire section-unidentified per (config,
+		# type) when at least one structural line of the type is
+		# present alongside the selector line. Fails closed.
+		for (fd_i = 1; fd_i <= ncg; fd_i++) {
+			fd_k = c_g[fd_i]
+			fd_ck = gcfg[fd_k] SUBSEP ((c_selt[fd_i] != "") ? c_selt[fd_i] : gtyp[fd_k])
+			if (c_selt[fd_i] != "" || c_str[fd_i]) fd_tot[fd_ck]++
+			if (c_str[fd_i]) fd_nstr[fd_ck]++
+		}
+		for (fd_i = 1; fd_i <= ncg; fd_i++) {
+			if (c_selt[fd_i] == "") continue
+			fd_k = c_g[fd_i]
+			fd_ck = gcfg[fd_k] SUBSEP c_selt[fd_i]
+			if (fd_nstr[fd_ck] > 0 && fd_tot[fd_ck] >= 2) fire("section-unidentified", rf(gcfg[fd_k] "." gdisp[fd_k]))
+		}
+		for (i = 1; i <= ng; i++) leash_rules(gord[i])
+			for (i = 1; i <= nun; i++) fire("unparsed-change", rf(untxt[i]))
+			if (prof == "prod") fire("profile-prod", "-")
+			for (i = 1; i <= nl; i++) {
+				j = i
+				while (j > 1 && skey[j - 1] > skey[j]) {
+					tp = skey[j]; skey[j] = skey[j - 1]; skey[j - 1] = tp
+					tp = stxt[j]; stxt[j] = stxt[j - 1]; stxt[j - 1] = tp
+					j = j - 1
+				}
+			}
+			for (i = 1; i <= nl; i++) print stxt[i]
+		}
+	' "$st" > "$outfile" || fail internal 1 leash-main
+}
+
+# seal_write_fail SID: a durable write of seal failed (disk full, no access). The sealed marker is written last, so it should not exist;
+# take it away anyway and refuse. A half-written seal must never look sealed (design 5.6: the router is the one place every agent passes).
+seal_write_fail() {
+	rm -f "$LOCK/$1.txn/sealed"
+	fail internal 1 write
+}
+
+# cmd_seal SID T: design 3.5b.
+cmd_seal() {
+	local sid="$1" t="$2" in chash dfile leashf base diff psha profile digest n nl pn line required rc lrc
+	trap '' HUP PIPE
+	in=$(mktemp "$R/tmp/newton/in.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+	SCRATCH="$SCRATCH $in"
+	read_stdin_file 4096
+	cat "$OUT" > "$in" || fail internal 1 cat
+	lock_take 10
+	[ -d "$LOCK/$sid.txn" ] || fail no-such-txn 3
+	session_live "$sid" || fail session-gone 3
+	[ ! -e "$LOCK/$sid.txn/sealed" ] || fail already-sealed 3
+	[ ! -e "$LOCK/$sid.txn/applying" ] || fail already-applied 1
+	[ ! -e "$LOCK/$sid.txn/applied" ] || fail already-applied 1
+	if [ "$(wc -c < "$in")" -gt 4096 ]; then
+		n=$(awk '{ b += length($0) + 1; if (b > 4096) { print NR; exit } }' "$in")
+		fail bad-probe 2 "$n too-long"
+	fi
+	nl=$(wc -l < "$in")
+	if [ -n "$(tail -c 1 "$in")" ]; then
+		nl=$((nl + 1))
+	fi
+	[ "$nl" -le 32 ] || fail bad-probe 2 '33 too-many'
+	n=$(awk 'length($0) > 512 { print NR; exit }' "$in")
+	[ -z "$n" ] || fail bad-probe 2 "$n too-long"
+	if [ -n "$(tail -c 1 "$in")" ]; then
+		fail bad-probe 2 "$nl syntax"
+	fi
+	pn=0
+	while IFS= read -r line; do
+		pn=$((pn + 1))
+		probe_check "$line" || fail bad-probe 2 "$pn $PB_REASON"
+	done < "$in"
+	chash=$(mktemp "$R/tmp/newton/ch.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+	SCRATCH="$SCRATCH $chash"
+	confighash_text "$chash" || { RC=1; exit 1; }
+	base=$(sha256sum "$chash" | cut -c 1-64)
+	dfile=$(mktemp "$R/tmp/newton/df.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+	SCRATCH="$SCRATCH $dfile"
+	run_helper diff "$sid" > "$dfile"
+	rc=$?
+	[ "$rc" -eq 0 ] || { RC=1; exit 1; }
+	diff=$(sha256sum "$dfile" | cut -c 1-64)
+	psha=$(sha256sum "$in" | cut -c 1-64)
+	profile_value
+	profile=$PROFILE_OUT
+	leashf=$(mktemp "$R/tmp/newton/le.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+	SCRATCH="$SCRATCH $leashf"
+	leash_classify "$sid" "$leashf"
+	grep -q '^leash ' "$leashf" 2>/dev/null
+	lrc=$?
+	required=0
+	if [ "$profile" = prod ] || [ "$lrc" -ne 1 ]; then
+		required=1
+	fi
+	plan_digest "$sid" "$base" "$diff" "$psha" "$t" || fail internal 1 digest
+	digest=$DIGEST_OUT
+	{ printf '%s\n' "$t" > "$LOCK/$sid.txn/t"; } 2>/dev/null || seal_write_fail "$sid"
+	crash_point
+	{ printf '%s\n' "$base" > "$LOCK/$sid.txn/base"; } 2>/dev/null || seal_write_fail "$sid"
+	crash_point
+	{ printf '%s\n' "$diff" > "$LOCK/$sid.txn/diff"; } 2>/dev/null || seal_write_fail "$sid"
+	crash_point
+	{ cat "$in" > "$LOCK/$sid.txn/probes"; } 2>/dev/null || seal_write_fail "$sid"
+	crash_point
+	{ printf '%s\n' "$psha" > "$LOCK/$sid.txn/probes-sha"; } 2>/dev/null || seal_write_fail "$sid"
+	crash_point
+	{ printf '%s\n' "$profile" > "$LOCK/$sid.txn/profile"; } 2>/dev/null || seal_write_fail "$sid"
+	crash_point
+	{ cat "$leashf" > "$LOCK/$sid.txn/leash"; } 2>/dev/null || seal_write_fail "$sid"
+	crash_point
+	{ printf '%s\n' "$digest" > "$LOCK/$sid.txn/digest"; } 2>/dev/null || seal_write_fail "$sid"
+	crash_point
+	{ printf '' > "$LOCK/$sid.txn/sealed"; } 2>/dev/null || seal_write_fail "$sid"
+	crash_point
+	printf 'base %s\n' "$base"
+	printf 'diff %s\n' "$diff"
+	printf 'probes %s %s\n' "$pn" "$psha"
+	printf 't %s\n' "$t"
+	printf 'profile %s\n' "$profile"
+	cat "$leashf"
+	if [ "$required" -eq 1 ]; then
+		printf 'approval required\n'
+	else
+		printf 'approval not-required\n'
+	fi
+	printf 'digest %s\n' "$digest"
+	return 0
+}
+
+# cmd_diff: design 3.5 helper passthrough.
+cmd_diff() {
+	run_helper diff "$1"
+}
+
+# cmd_named: design 3.5 helper passthrough.
+cmd_named() {
+	run_helper named "$1"
+}
+
+# cmd_check_staged: P16 (router program 1.3.0). The helper checks the STAGED firewall config without
+# applying it; this program is the boundary that holds the answer to ONE line the host can trust:
+#   fw4 pass | fw4 skipped-untouched | fw4 not-checked REASON | fw4 fail DETAIL | fw4 running-fails DETAIL
+# Anything else the helper says (more lines, an unknown word, nothing, a watchdog kill) becomes a
+# not-checked line, never a pass. The line loses control characters; a detail is cut at 300 bytes.
+cmd_check_staged() {
+	local sid="$1" first word rest rc lines
+	run_bounded 25 run_helper check-staged "$sid"
+	rc=$?
+	first=
+	IFS= read -r first < "$OUT" 2>/dev/null || :
+	if [ -z "$first" ]; then
+		printf 'fw4 not-checked no-answer\n'
+		return 0
+	fi
+	# the helper answers one line and exits 0; anything else is not an answer
+	lines=$(grep -c . "$OUT" 2>/dev/null)
+	if [ "$rc" -ne 0 ] || [ "$lines" != 1 ]; then
+		printf 'fw4 not-checked bad-helper-output\n'
+		return 0
+	fi
+	first=$(printf '%s' "$first" | LC_ALL=C tr -d '\000-\037\177' | LC_ALL=C cut -c1-320)
+	case "$first" in
+		'fw4 pass'|'fw4 skipped-untouched')
+			printf '%s\n' "$first"
+			return 0
+			;;
+		'fw4 not-checked '*)
+			rest=${first#fw4 not-checked }
+			case "$rest" in
+				''|*[!a-z0-9-]*) ;;
+				*)
+					if [ "${#rest}" -le 40 ]; then
+						printf '%s\n' "$first"
+						return 0
+					fi
+					;;
+			esac
+			;;
+		'fw4 fail '*|'fw4 running-fails '*)
+			word=${first#fw4 }
+			word=${word%% *}
+			rest=${first#"fw4 $word "}
+			if [ -n "$rest" ]; then
+				printf 'fw4 %s %s\n' "$word" "$(printf '%s' "$rest" | LC_ALL=C cut -c1-300)"
+				return 0
+			fi
+			;;
+	esac
+	printf 'fw4 not-checked bad-helper-output\n'
+	return 0
+}
+
+# confighash_text FILE: run the helper's confighash into FILE and check it
+# (design 3.5): a name that fails the guard's valid_name rule
+# (^{A-Za-z0-9_-}+$) is SKIPPED, like the guard's skipped_line treats it, so
+# edits to it never change the base or post hash; the kept names all pass
+# the rule. Every /etc/config entry whose name is valid_name must be a
+# regular file, not a symlink, so the guard can protect and copy it; an
+# invalid-named symlink or directory is skipped with its name. Returns the
+# helper's status, or 1 with the program's ERROR line on stderr.
+confighash_text() {
+	local out="$1" tmp line name safe entry bad rc
+	run_helper confighash > "$out"
+	rc=$?
+	[ "$rc" -eq 0 ] || return "$rc"
+	tmp=$(mktemp "$R/tmp/newton/ch.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+	SCRATCH="$SCRATCH $tmp"
+	while IFS= read -r line || [ -n "$line" ]; do
+		name=${line#* }
+		case "$name" in
+			''|*[!A-Za-z0-9_-]*) continue ;;
+		esac
+		printf '%s\n' "$line" >> "$tmp" || return 1
+	done < "$out"
+	cat "$tmp" > "$out" || return 1
+	bad=
+	set +f
+	for entry in "$R/etc/config"/*; do
+		[ -e "$entry" ] || continue
+		case "${entry##*/}" in
+			''|*[!A-Za-z0-9_-]*) continue ;;
+		esac
+		if [ ! -f "$entry" ] || [ -L "$entry" ]; then
+			bad=$entry
+			break
+		fi
+	done
+	set -f
+	if [ -n "$bad" ]; then
+		safe=$(printf '%s' "${bad##*/}" | tr -c 'A-Za-z0-9._-' '_')
+		printf 'ERROR: confighash config entry the guard cannot copy: %s\n' "$safe" >&2
+		return 1
+	fi
+	return 0
+}
+
+# cmd_confighash: design 3.5; the helper's lines, after the check.
+cmd_confighash() {
+	local f rc
+	f=$(mktemp "$R/tmp/newton/ch.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+	SCRATCH="$SCRATCH $f"
+	confighash_text "$f"
+	rc=$?
+	[ "$rc" -eq 0 ] || return "$rc"
+	cat "$f"
+	return 0
+}
+
+# cmd_health_snapshot: design 3.5; nothing on stdout, the helper's stderr
+# passes through, then the fw-loaded answer is kept with the snapshot.
+cmd_health_snapshot() {
+	local sid="$1" v
+	lock_take 10
+	if run_helper health-snapshot "$sid" >/dev/null; then
+		[ -d "$LOCK/$sid.health" ] || fail internal 1 health-dir
+		v=0
+		if "$NFT" list table inet fw4 >/dev/null 2>&1; then
+			v=1
+		fi
+		printf '%s\n' "$v" > "$LOCK/$sid.health/newton-fw4-loaded"
+		return 0
+	fi
+	return 1
+}
+
+# cmd_apply: design 6.2 steps 1 to 8 (pre-arm refusals); part 2 in a later round.
+# SW2 round 2a (design Item 2): argv grows from 3 to 5 user words; the new
+# NBF and EXP carry the approval window into the HMAC. The window-shape
+# check fires before reading any state, so a malformed approval fails closed
+# without ever reading the txn dir.
+cmd_apply() {
+	local sid="$1" t="$2" token="$3" nbf="$4" exp="$5" txn stage_up age_limit boot_sealed t_sealed base_f diff_f base diff psha base_sealed diff_sealed psha_sealed required codes line c profile rc out deadline first NL gout post post_f lrc
+	trap '' HUP PIPE
+	# Window shape check (Item 2 v2-changes point 3): a token=0 token needs
+	# NBF=0 AND EXP=0; a 64-hex token needs both NBF and EXP to be 10-digit.
+	# Anything else fails closed BEFORE any state read.
+	case "$token" in
+		none)
+			[ "$nbf" = 0 ] && [ "$exp" = 0 ] || fail bad-request 2 approval-window-shape
+			;;
+		*)
+			[ "${#nbf}" -eq 10 ] || fail bad-request 2 approval-window-shape
+			[ "${#exp}" -eq 10 ] || fail bad-request 2 approval-window-shape
+			[ "$nbf" -ne 0 ] 2>/dev/null || fail bad-request 2 approval-window-shape
+			[ "$exp" -ne 0 ] 2>/dev/null || fail bad-request 2 approval-window-shape
+			;;
+	esac
+	lock_take 10
+	txn="$LOCK/$sid.txn"
+	[ -e "$txn/sealed" ] || fail not-sealed 3
+	[ ! -e "$txn/applying" ] || fail already-applied 1
+	[ ! -e "$txn/applied" ] || fail already-applied 1
+	session_live "$sid" || fail session-gone 3
+	IFS= read -r t_sealed 2>/dev/null < "$txn/t" || t_sealed=
+	[ "$t" = "$t_sealed" ] || fail plan-changed 3 t
+	uptime_now
+	IFS= read -r stage_up 2>/dev/null < "$txn/stage-up" || stage_up=
+	case "$stage_up" in
+		''|*[!0-9]*) fail stale-stage 3 ;;
+	esac
+	age_limit=$(( 2700 - t - 60 ))
+	[ $(( UP_NOW - stage_up )) -le "$age_limit" ] || fail stale-stage 3
+	boot_id
+	IFS= read -r boot_sealed 2>/dev/null < "$txn/boot" || boot_sealed=
+	[ "$BOOT_ID_OUT" = "$boot_sealed" ] || fail stale-stage 3
+	guard_status
+	case "$G_LINE" in
+		idle|restored\ *) ;;
+		*) fail guard 3 "$G_LINE" ;;
+	esac
+	[ -d "$LOCK/$sid.health" ] || fail no-health-snapshot 3
+	base_f=$(mktemp "$R/tmp/newton/ch.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+	SCRATCH="$SCRATCH $base_f"
+	confighash_text "$base_f" || fail stale-base 3
+	base=$(sha256sum "$base_f" | cut -c 1-64)
+	IFS= read -r base_sealed 2>/dev/null < "$txn/base" || base_sealed=
+	[ "$base" = "$base_sealed" ] || fail stale-base 3
+	diff_f=$(mktemp "$R/tmp/newton/df.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+	SCRATCH="$SCRATCH $diff_f"
+	run_helper diff "$sid" > "$diff_f"
+	rc=$?
+	[ "$rc" -eq 0 ] || fail plan-changed 3 diff
+	diff=$(sha256sum "$diff_f" | cut -c 1-64)
+	IFS= read -r diff_sealed 2>/dev/null < "$txn/diff" || diff_sealed=
+	[ "$diff" = "$diff_sealed" ] || fail plan-changed 3 diff
+	psha=$(sha256sum "$txn/probes" | cut -c 1-64)
+	IFS= read -r psha_sealed 2>/dev/null < "$txn/probes-sha" || psha_sealed=
+	[ "$psha" = "$psha_sealed" ] || fail plan-changed 3 probes
+	profile_value
+	profile=$PROFILE_OUT
+	grep -q '^leash ' "$txn/leash" 2>/dev/null
+	lrc=$?
+	required=0
+	if [ "$profile" = prod ] || [ "$lrc" -ne 1 ]; then
+		required=1
+	fi
+	if [ "$required" -eq 1 ]; then
+		codes=
+		if [ "$lrc" -le 1 ]; then
+			while IFS= read -r line; do
+				case "$line" in
+					leash\ *) c=${line#leash }
+						c=${c%% *}
+						case ",$codes," in
+							*",$c,"*) ;;
+							*) codes=${codes:+$codes,}$c ;;
+						esac
+						;;
+				esac
+			done < "$txn/leash"
+		fi
+		if [ "$lrc" -gt 1 ]; then
+			codes=${codes:+$codes,}leash-unreadable
+		fi
+		if [ "$profile" = prod ]; then
+			case ",$codes," in
+				*",profile-prod,"*) ;;
+				*) codes=${codes:+$codes,}profile-prod ;;
+			esac
+		fi
+		plan_digest "$sid" "$base" "$diff" "$psha" "$t" || fail internal 1 digest
+		check_approval "$sid" "$token" "$nbf" "$exp" "$codes" "$DIGEST_OUT"
+	fi
+	# part 2: arm, uci apply, txn files, output (design 6.2 steps 9 to 14)
+	out=$("$GUARD" arm "$sid" "$((t + 30))" </dev/null 2>/dev/null)
+	rc=$?
+	NL='
+'
+	first=${out%%"$NL"*}
+	[ -n "$first" ] || fail guard 3 failed
+	if [ "$rc" -ne 0 ] || [ "$first" != "$out" ]; then
+		fail guard 3 "$first"
+	fi
+	# shellcheck disable=SC2086  # word split is the parse for the arm line
+	set -- $first
+	if [ "$#" -ne 4 ] || [ "$1" != armed ] || [ "$2" != "$sid" ] || [ "$4" != "$((t + 30))" ]; then
+		fail guard 3 "$first"
+	fi
+	case "$3" in
+		''|*[!0-9]*) fail guard 3 "$first" ;;
+	esac
+	deadline=$3
+	uptime_now
+	boot_id
+	printf '%s\n' "$UP_NOW $BOOT_ID_OUT" > "$txn/applying"
+	crash_point
+	if ! "$UBUS" call uci apply "{\"rollback\":true,\"timeout\":$t,\"ubus_rpc_session\":\"$sid\"}" >/dev/null 2>&1; then
+		gout=$("$GUARD" restore apply-failed </dev/null 2>/dev/null)
+		first=${gout%%"$NL"*}
+		fail apply-failed 1 "$first"
+	fi
+	uptime_now
+	printf '%s\n' "$((UP_NOW + t)) $deadline $BOOT_ID_OUT" > "$txn/applied"
+	crash_point
+	# helper-format deadline file (uptime-based, like rpcd's timer)
+	printf 'up %s\n' "$((UP_NOW + t))" > "$LOCK/$sid.applied"
+	crash_point
+	post_f=$(mktemp "$R/tmp/newton/ch.$PROG_PID.XXXXXX") || fail internal 1 post
+	SCRATCH="$SCRATCH $post_f"
+	confighash_text "$post_f" || fail internal 1 post
+	post=$(sha256sum "$post_f" | cut -c 1-64)
+	printf '%s\n' "$post" > "$txn/post"
+	crash_point
+	printf 'applied %s t=%s guard=%s\n' "$sid" "$t" "$deadline"
+	return 0
+}
+
+# cmd_fwrestart: design 3.5 helper passthrough under the 60 s lock; the
+# helper's stdout, stderr and every status (0, 1, 2, 3, 98, 99) pass through.
+cmd_fwrestart() {
+	trap '' HUP PIPE
+	lock_take 60
+	run_helper fwrestart "$1"
+}
+
+# cmd_dnsmasq_repair: moved snippet I7 (design 3.5); its output is exactly
+# restarted rc=<n> dhcp=<0|1> or not-running.
+cmd_dnsmasq_repair() {
+	local d
+	lock_take 10
+	trap '' HUP PIPE
+	if "$R/etc/init.d/dnsmasq" running >/dev/null 2>&1; then
+		d=0
+		"$NETSTAT" -lnup 2>/dev/null | grep -q ':67 .*/dnsmasq' && d=1
+		"$R/etc/init.d/dnsmasq" restart >/dev/null 2>&1
+		echo "restarted rc=$? dhcp=$d"
+	else
+		echo not-running
+	fi
+}
+
+# verify_fail [LINE]: print one plain stderr line (if given), set RC=1,
+# exit 1; design 3.5c keeps the EXIT trap able to log the call.
+verify_fail() {
+	if [ -n "${1-}" ]; then
+		printf '%s\n' "$1" >&2
+	fi
+	RC=1
+	exit 1
+}
+
+# verify_dhcp NEED_DHCP: design 3.5c step 2.3, OC:235. 1: pidof dnsmasq and
+# a :67 .*/dnsmasq line in netstat. 2: pidof dnsmasq.
+verify_dhcp() {
+	local need_dhcp="$1"
+	case "$need_dhcp" in
+		1)
+			"$PIDOF" dnsmasq >/dev/null 2>&1 && \
+				"$NETSTAT" -lnup 2>/dev/null | grep -q ':67 .*/dnsmasq' && return 0
+			verify_fail 'verify: dnsmasq is not running with its DHCP listener (udp 67) after Newton restarted it'
+			;;
+		2)
+			"$PIDOF" dnsmasq >/dev/null 2>&1 && return 0
+			verify_fail 'verify: dnsmasq is not running after Newton restarted it'
+			;;
+	esac
+	return 0
+}
+
+# verify_probe LINE N START_UP: re-check one sealed probe line and run it
+# (design 3.5c step 2.5); the 25 s budget is monotonic uptime from
+# START_UP; over the budget, the probe fails with reason budget.
+verify_probe() {
+	local line="$1" n="$2" start_up="$3" rc
+	probe_check "$line" || verify_fail "verify: probe $n failed: $PB_NAME $PB_REASON"
+	uptime_now
+	if [ "$(( UP_NOW - start_up ))" -ge 25 ]; then
+		PB_REASON=budget
+		verify_fail "verify: probe $n failed: $PB_NAME budget"
+	fi
+	probe_run
+	rc=$?
+	[ "$rc" -eq 0 ] && return 0
+	verify_fail "verify: probe $n failed: $PB_NAME $PB_REASON"
+}
+
+# cmd_verify: design 3.5c. Stdout is empty; the first failing step prints
+# one plain stderr line and the call exits 1 (design 3.7).
+cmd_verify() {
+	local sid="$1" need_dhcp="$2" txn applied boot_applied start_up n line
+	lock_take 10
+	txn="$LOCK/$sid.txn"
+	[ -e "$txn/applied" ] || fail not-applied 1
+	IFS= read -r applied 2>/dev/null < "$txn/applied" || applied=
+	# shellcheck disable=SC2086  # word split is the parse for the applied line
+	set -- $applied
+	boot_applied=${3-}
+	boot_id
+	[ "$BOOT_ID_OUT" = "$boot_applied" ] || fail not-applied 1
+	uptime_now
+	start_up=$UP_NOW
+	run_bounded 10 "$PING" -c1 -W3 1.1.1.1 || verify_fail 'verify: ping -c1 -W3 1.1.1.1 failed'
+	run_bounded 10 "$NSLOOKUP" openwrt.org 127.0.0.1 || verify_fail 'verify: nslookup openwrt.org 127.0.0.1 failed'
+	verify_dhcp "$need_dhcp"
+	health_check_run "$sid" '' || verify_fail
+	n=0
+	while IFS= read -r line; do
+		n=$((n + 1))
+		verify_probe "$line" "$n" "$start_up"
+	done < "$txn/probes"
+}
+
+# cmd_confirm: design 6.3; rpcd confirm first, then the guard.
+cmd_confirm() {
+	local sid="$1" txn applied boot_applied rpcd_dl guard_left gout first NL sha post_sha cf w rpcd_lost expected current_sid LOST rc
+	trap '' HUP PIPE
+	lock_take 10
+	txn="$LOCK/$sid.txn"
+	[ -e "$txn/applied" ] || fail not-applied 1
+	IFS= read -r applied 2>/dev/null < "$txn/applied" || applied=
+	# shellcheck disable=SC2086  # word split for the three words of applied
+	set -- $applied
+	rpcd_dl=${1-}
+	boot_applied=${3-}
+	boot_id
+	[ "$BOOT_ID_OUT" = "$boot_applied" ] || fail not-applied 1
+	uptime_now
+	guard_status
+	# shellcheck disable=SC2086  # word split for the three words of guard status
+	set -- $G_LINE
+	[ "${1-}" = pending ] && [ "${2-}" = "$sid" ] || fail too-late 3
+	guard_left=${3-}
+	case "$guard_left" in
+		''|*[!0-9]*) fail too-late 3 ;;
+	esac
+	[ "$guard_left" -ge 5 ] || fail too-late 3
+	[ "$(( rpcd_dl - UP_NOW ))" -ge 5 ] || fail too-late 3
+	LOST=0
+	if "$UBUS" call uci confirm "{\"ubus_rpc_session\":\"$sid\"}" >/dev/null 2>&1; then
+		printf '%s\n' ok > "$txn/rpcd-confirmed"
+		crash_point
+	else
+		rc=$?
+		rpcd_lost=0
+		# shellcheck disable=SC2086  # word split is the parse for the lost list
+		for w in $RPCD_LOST; do
+			if [ "$w" = "$rc" ]; then
+				rpcd_lost=1
+				break
+			fi
+		done
+		if [ "$rpcd_lost" -eq 1 ]; then
+			cf=$(mktemp "$R/tmp/newton/ch.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+			SCRATCH="$SCRATCH $cf"
+			if confighash_text "$cf"; then
+				sha=$(sha256sum "$cf" | cut -c 1-64)
+				IFS= read -r post_sha 2>/dev/null < "$txn/post" || post_sha=
+				if [ "$sha" = "$post_sha" ]; then
+					printf '%s\n' lost > "$txn/rpcd-confirmed"
+					crash_point
+					LOST=1
+				else
+					fail rpcd-confirm-failed 1 "$rc"
+				fi
+			else
+				fail rpcd-confirm-failed 1 "$rc"
+			fi
+		else
+			fail rpcd-confirm-failed 1 "$rc"
+		fi
+	fi
+	gout=$("$GUARD" confirm "$sid" </dev/null 2>/dev/null)
+	rc=$?
+	NL='
+'
+	first=${gout%%"$NL"*}
+	expected="confirmed $sid"
+	if [ "$rc" -ne 0 ] || [ "$gout" != "$expected" ]; then
+		"$GUARD" restore confirm-incomplete </dev/null >/dev/null 2>&1
+		fail confirm-incomplete 1 "$first"
+	fi
+	"$UBUS" call session destroy "{\"ubus_rpc_session\":\"$sid\"}" >/dev/null 2>&1 || :
+	rm -rf "$R/var/run/rpcd/uci-$sid"
+	crash_point
+	printf '%s\n' "confirmed $sid" > "$R/tmp/newton/last"
+	crash_point
+	if IFS= read -r current_sid 2>/dev/null < "$LOCK/sid"; then
+		if [ "$current_sid" = "$sid" ]; then
+			rm -rf "$LOCK"
+		fi
+	fi
+	crash_point
+	if [ "$LOST" = 1 ]; then
+		printf 'confirmed %s rpcd-timer-lost\n' "$sid"
+	else
+		printf 'confirmed %s\n' "$sid"
+	fi
+	return 0
+}
+
+# status_cfg_kind SID: sha256 of confighash_text bytes against the txn's base
+# and post. Sets CFG_KIND to base, post, other, or - (no txn, a missing file,
+# or the helper failed).
+status_cfg_kind() {
+	local sid="$1" cf hash base post
+	CFG_KIND=-
+	[ -d "$LOCK/$sid.txn" ] || return 0
+	cf=$(mktemp "$R/tmp/newton/ch.$PROG_PID.XXXXXX") || return 0
+	SCRATCH="$SCRATCH $cf"
+	if confighash_text "$cf" 2>/dev/null; then
+		hash=$(sha256sum "$cf" | cut -c 1-64)
+		base=
+		post=
+		[ -f "$LOCK/$sid.txn/base" ] && IFS= read -r base 2>/dev/null < "$LOCK/$sid.txn/base"
+		[ -f "$LOCK/$sid.txn/post" ] && IFS= read -r post 2>/dev/null < "$LOCK/$sid.txn/post"
+		if [ -n "$base" ] && [ -n "$post" ]; then
+			if [ "$hash" = "$base" ]; then
+				CFG_KIND=base
+			elif [ "$hash" = "$post" ]; then
+				CFG_KIND=post
+			else
+				CFG_KIND=other
+			fi
+		fi
+	else
+		CFG_KIND=-
+	fi
+	return 0
+}
+
+# status_rpcd_dl SID GL: derive the rpcd deadline from the txn files.
+# applied: first word when boot id still matches; 0 on a reboot boundary.
+# applying alone with G = pending SID LEFT: UP_NOW + LEFT - 30.
+# Anything else: 0, so rule 4 cannot match.
+status_rpcd_dl() {
+	local sid="$1" gl="$2" txn line
+	RPCD_DL=0
+	txn="$LOCK/$sid.txn"
+	[ -d "$txn" ] || return 0
+	if [ -f "$txn/applied" ]; then
+		IFS= read -r line 2>/dev/null < "$txn/applied" || line=
+		# shellcheck disable=SC2086  # word split reads the three fields
+		set -- $line
+		boot_id
+		if [ "${3-}" = "$BOOT_ID_OUT" ]; then
+			case "${1-}" in
+				''|*[!0-9]*) ;;
+				*) RPCD_DL=${1-} ;;
+			esac
+		fi
+	elif [ -f "$txn/applying" ] && [ "${gl%% *}" = pending ]; then
+		# shellcheck disable=SC2086  # word split reads the pending triple
+		set -- $gl
+		if [ "${2-}" = "$sid" ]; then
+			case "${3-}" in
+				''|*[!0-9]*) ;;
+				*) uptime_now; RPCD_DL=$(( UP_NOW + ${3-} - 30 )) ;;
+			esac
+		fi
+	fi
+	return 0
+}
+
+# cmd_status: section 6.5.
+cmd_status() {
+	local sid="$1" txn GL w1 w2 w3 g c b r word why line last pend_me rest_me applied_any rule8 aborted=
+	"$GUARD" tick </dev/null >/dev/null 2>&1 || :
+	guard_status
+	GL=$G_LINE
+	uptime_now
+	txn="$LOCK/$sid.txn"
+	w1=
+	w2=
+	w3=
+	# shellcheck disable=SC2086  # the guard line splits into the parse words
+	set -- $GL
+	[ $# -ge 1 ] && w1=$1
+	[ $# -ge 2 ] && w2=$2
+	[ $# -ge 3 ] && w3=$3
+	g=other
+	case "$w1" in
+		idle)
+			g=idle
+			;;
+		pending)
+			[ "$w2" = "$sid" ] && g=pending
+			;;
+		restored)
+			if [ "$w2" = "$sid" ]; then
+				router_field "$w3"
+				g="restored:$ROUTER_FIELD_OUT"
+				# After abort the guard says restored <sid> abort
+				# regardless of who restored. The first line of
+				# $R/tmp/newton/last (cmd_abort's "aborted <sid>
+				# <how>") names the real restorer; rewrite the label
+				# only for those three whole strings, otherwise keep
+				# restored:<reason>.
+				if [ "$w3" = abort ]; then
+					last=
+					[ -f "$R/tmp/newton/last" ] && IFS= read -r last 2>/dev/null < "$R/tmp/newton/last"
+					case "$last" in
+						"aborted $sid rolled-back") g=restored:rpcd ;;
+						"aborted $sid already-rolled-back") g=restored:already-base ;;
+						"aborted $sid rolled-back-by-guard") g=restored:guard ;;
+					esac
+				fi
+			fi
+			;;
+		failed)
+			why=-
+			if [ "$GL" != failed ]; then
+				# shellcheck disable=SC2086  # re-parse to grab the last guard word
+				set -- $GL
+				if [ $# -gt 1 ]; then
+					shift $(( $# - 1 ))
+					why=$1
+				fi
+			fi
+			router_field "$why"
+			g="failed:$ROUTER_FIELD_OUT"
+			;;
+	esac
+	b=-
+	if [ -d "$txn" ] && [ -f "$txn/boot" ]; then
+		boot_id
+		IFS= read -r line 2>/dev/null < "$txn/boot" || line=
+		if [ "$line" = "$BOOT_ID_OUT" ]; then
+			b=same
+		else
+			b=new
+		fi
+	fi
+	status_cfg_kind "$sid"
+	c=$CFG_KIND
+	word=gone
+	r=-
+	pend_me=
+	rest_me=
+	if [ "$w1" = pending ] && [ "$w2" = "$sid" ]; then
+		pend_me=1
+	fi
+	if [ "$w1" = restored ] && [ "$w2" = "$sid" ]; then
+		rest_me=1
+	fi
+	if [ "$w1" = failed ]; then
+		word=inconsistent
+		r=-
+	elif [ -d "$txn" ]; then
+		applied_any=
+		if [ -f "$txn/applying" ] || [ -f "$txn/applied" ]; then
+			applied_any=1
+		fi
+		if [ -z "$applied_any" ]; then
+			word=staged
+			r=-
+		elif [ "$pend_me" = 1 ] && [ -f "$txn/rpcd-confirmed" ]; then
+			IFS= read -r line 2>/dev/null < "$txn/rpcd-confirmed" || line=
+			case "$line" in
+				lost)
+					word=applied-pending-confirm
+					r=lost
+					;;
+				*)
+					word=applied-pending-confirm
+					r=confirmed
+					;;
+			esac
+		elif [ "$pend_me" = 1 ]; then
+			status_rpcd_dl "$sid" "$GL"
+			if [ "$UP_NOW" -lt "$RPCD_DL" ] && session_live "$sid"; then
+				word=applied-pending-confirm
+				r=pending
+			elif [ "$c" = base ]; then
+				word=rolled-back
+				r=rolled-back
+			elif [ "$c" = post ]; then
+				word=applied-pending-confirm
+				r=lost
+			else
+				word=inconsistent
+				r=-
+			fi
+		elif [ "$rest_me" = 1 ]; then
+			word=rolled-back
+			r=-
+		else
+			rule8=
+			case "$w1" in
+				idle)
+					rule8=1
+					;;
+				pending|restored)
+					if [ "$w2" != "$sid" ]; then
+						rule8=1
+					fi
+					;;
+			esac
+			if [ "$rule8" = 1 ] && [ "$c" = post ]; then
+				word=confirmed
+				r=-
+			else
+				word=inconsistent
+				r=-
+			fi
+		fi
+	else
+		last=
+		[ -f "$R/tmp/newton/last" ] && IFS= read -r last 2>/dev/null < "$R/tmp/newton/last"
+		case "$last" in
+			"confirmed $sid")
+				word=confirmed
+				r=-
+				;;
+			*)
+				aborted=
+				if [ -n "$last" ]; then
+					case "$last" in
+						"aborted $sid"|"aborted $sid "*) aborted=1 ;;
+					esac
+				fi
+				if [ "$rest_me" = 1 ]; then
+					word=rolled-back
+					r=-
+				elif [ "$aborted" = 1 ]; then
+					word=gone
+					r=-
+				elif [ "$pend_me" = 1 ]; then
+					word=inconsistent
+					r=-
+				else
+					word=gone
+					r=-
+				fi
+				;;
+		esac
+	fi
+	printf '%s sid=%s guard=%s rpcd=%s config=%s boot=%s\n' "$word" "$sid" "$g" "$r" "$c" "$b"
+	return 0
+}
+
+# abort_clean SID HOW [keep_last]: a row returned 0. Destroy the
+# session, remove the rpcd uci dir, the txn dir, and $LOCK/<SID>.applied;
+# write last (unless the third argument is "keep", which leaves an
+# existing line for THIS SID in place - only the "gone" path uses it); then
+# remove $LOCK/sid only when its first line equals the SID being
+# aborted (a missing or unreadable file, or a name mismatch, is no
+# error - other readers, open_txn_sid, busy_value, stage_busy_gate and
+# cmd_confirm, already require the txn dir to exist or check the SID
+# before relying on the file). Each durable step is followed by
+# crash_point (test seam). KEEPS $LOCK/<SID>.health so the host's
+# post-rollback health check still has its snapshot (design 6.4).
+abort_clean() {
+	local sid="$1" how="$2" keep_last="${3-}" current_sid
+	"$UBUS" call session destroy "{\"ubus_rpc_session\":\"$sid\"}" >/dev/null 2>&1 || :
+	rm -rf "$R/var/run/rpcd/uci-$sid"
+	crash_point
+	rm -rf "$LOCK/$sid.txn"
+	crash_point
+	rm -f "$LOCK/$sid.applied"
+	crash_point
+	[ "$keep_last" = keep ] || printf '%s\n' "aborted $sid $how" > "$R/tmp/newton/last"
+	crash_point
+	if IFS= read -r current_sid 2>/dev/null < "$LOCK/sid"; then
+		[ "$current_sid" = "$sid" ] && rm -f "$LOCK/sid"
+	fi
+	crash_point
+}
+
+# abort_restore SID: run guard restore abort and require its first line
+# to be exactly "restored <SID> abort"; otherwise fail rollback-failed 1.
+abort_restore() {
+	local sid="$1" gout
+	gout=$("$GUARD" restore abort </dev/null 2>/dev/null) || fail rollback-failed 1
+	NL='
+'
+	[ "${gout%%"$NL"*}" = "restored $sid abort" ] || fail rollback-failed 1
+}
+
+# abort_stale TXN G_W1 G_W2 SID: 0 when the txn is stale (any change
+# caller may proceed, 3.4), 1 when it is not. Used after the guard tick for
+# a non-owner non-root caller.
+abort_stale() {
+	local txn="$1" g1="$2" g2="$3" sid="$4" stage_up
+	if [ -e "$txn/applied" ] || [ -e "$txn/applying" ]; then
+		[ "$g1" = pending ] && [ "$g2" = "$sid" ] && return 1
+		return 0
+	fi
+	if ! session_live "$sid"; then
+		return 0
+	fi
+	IFS= read -r stage_up 2>/dev/null < "$txn/stage-up" || stage_up=
+	case "$stage_up" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	uptime_now
+	[ $(( UP_NOW - stage_up )) -gt 2700 ] && return 0 || return 1
+}
+
+# abort_post_check TXN: compute confighash_text into a scratch file and
+# fail already-confirmed 1 if it matches txn/post. Returns normally when
+# the live config differs from post (caller fails inconsistent 1).
+abort_post_check() {
+	local txn="$1" base_f post_sha post_c
+	base_f=$(mktemp "$R/tmp/newton/ch.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+	SCRATCH="$SCRATCH $base_f"
+	confighash_text "$base_f" || fail internal 1 ch
+	post_sha=$(sha256sum "$base_f" | cut -c 1-64)
+	IFS= read -r post_c 2>/dev/null < "$txn/post" || post_c=
+	[ "$post_c" = "$post_sha" ] && fail already-confirmed 1
+}
+
+# cmd_abort: design 6.4 and the stale rule in 3.4.
+cmd_abort() {
+	local sid="$1" txn owner_owner G_W1 G_W2 G_W3 rpcd_dl rpcd_rc boot_applied applied_c base_f base_now base_c how live last keep_last
+	trap '' HUP PIPE
+	lock_take 10
+	txn="$LOCK/$sid.txn"
+	owner_owner=
+	if [ -d "$txn" ]; then
+		IFS= read -r owner_owner 2>/dev/null < "$txn/owner" || owner_owner=
+		if [ "$CALLER" != root ] && [ "$owner_owner" != "$CALLER" ]; then
+			"$GUARD" tick </dev/null >/dev/null 2>&1
+		fi
+	fi
+	guard_status
+	# shellcheck disable=SC2086  # word split is the G_LINE parse
+	set -- $G_LINE
+	G_W1=${1-}
+	G_W2=${2-}
+	G_W3=${3-}
+	if [ -d "$txn" ] && [ "$CALLER" != root ] && [ "$owner_owner" != "$CALLER" ]; then
+		abort_stale "$txn" "$G_W1" "$G_W2" "$sid" || fail not-owner 3
+	fi
+	# row 1: guard failed
+	if [ "$G_W1" = failed ]; then
+		fail inconsistent 1 "guard $G_LINE"
+	fi
+	# txn exists
+	if [ -d "$txn" ]; then
+		# row 2: not applied
+		if [ ! -e "$txn/applied" ] && [ ! -e "$txn/applying" ]; then
+			abort_clean "$sid" discarded
+			printf 'aborted %s discarded\n' "$sid"
+			return 0
+		fi
+		# rpcd deadline: from applied file, else from G when applying only
+		rpcd_dl=0
+		if [ -e "$txn/applied" ]; then
+			IFS= read -r applied_c 2>/dev/null < "$txn/applied" || applied_c=
+			# shellcheck disable=SC2086  # word split is the applied parse
+			set -- $applied_c
+			boot_applied=${3-}
+			boot_id
+			if [ "$BOOT_ID_OUT" = "$boot_applied" ]; then
+				case "${1-}" in
+					''|*[!0-9]*) ;;
+					*) rpcd_dl=${1-} ;;
+				esac
+			fi
+		elif [ "$G_W1" = pending ] && [ "$G_W2" = "$sid" ]; then
+			case "$G_W3" in
+				''|*[!0-9]*) ;;
+				*) uptime_now
+					rpcd_dl=$(( UP_NOW + G_W3 - 30 )) ;;
+			esac
+		fi
+		uptime_now
+		live=0
+		session_live "$sid" && live=1
+		# row 3 entry: live AND UP_NOW < rpcd_dl
+		if [ "$live" -eq 1 ] && [ "$UP_NOW" -lt "$rpcd_dl" ]; then
+			"$UBUS" call uci rollback "{\"ubus_rpc_session\":\"$sid\"}" >/dev/null 2>&1
+			rpcd_rc=$?
+			if [ "$G_W1" = pending ] && [ "$G_W2" = "$sid" ]; then
+				abort_restore "$sid"
+				if [ "$rpcd_rc" -ne 0 ]; then
+					abort_clean "$sid" rolled-back-by-guard
+					printf 'aborted %s rolled-back-by-guard\n' "$sid"
+					return 0
+				fi
+				abort_clean "$sid" rolled-back
+				printf 'aborted %s rolled-back\n' "$sid"
+				return 0
+			fi
+			# G not pending for SID: rpcd must be 0
+			if [ "$rpcd_rc" -ne 0 ]; then
+				fail rollback-failed 1
+			fi
+			if [ "$G_W1" = restored ] && [ "$G_W2" = "$sid" ]; then
+				abort_clean "$sid" already-rolled-back
+				printf 'aborted %s already-rolled-back\n' "$sid"
+				return 0
+			fi
+			abort_post_check "$txn"
+			fail inconsistent 1
+		fi
+		# row 4: G pending for SID (row 3 entry was false)
+		if [ "$G_W1" = pending ] && [ "$G_W2" = "$sid" ]; then
+			base_f=$(mktemp "$R/tmp/newton/ch.$PROG_PID.XXXXXX") || fail internal 1 mktemp
+			SCRATCH="$SCRATCH $base_f"
+			confighash_text "$base_f" || fail internal 1 ch
+			base_now=$(sha256sum "$base_f" | cut -c 1-64)
+			abort_restore "$sid"
+			IFS= read -r base_c 2>/dev/null < "$txn/base" || base_c=
+			if [ "$base_c" = "$base_now" ]; then
+				how=already-rolled-back
+			else
+				how=rolled-back-by-guard
+			fi
+			abort_clean "$sid" "$how"
+			printf 'aborted %s %s\n' "$sid" "$how"
+			return 0
+		fi
+		# row 5: G is restored for SID
+		if [ "$G_W1" = restored ] && [ "$G_W2" = "$sid" ]; then
+			abort_clean "$sid" already-rolled-back
+			printf 'aborted %s already-rolled-back\n' "$sid"
+			return 0
+		fi
+		# rows 6/7: G idle or another txn; post check then inconsistent
+		abort_post_check "$txn"
+		fail inconsistent 1
+	fi
+	# no txn directory
+	if [ "$G_W1" = pending ] && [ "$G_W2" = "$sid" ]; then
+		abort_restore "$sid"
+		abort_clean "$sid" rolled-back-by-guard
+		printf 'aborted %s rolled-back-by-guard\n' "$sid"
+		return 0
+	fi
+	# A second abort for a SID an earlier abort already cleaned: its
+	# "aborted <sid> <how>" line in $R/tmp/newton/last names who restored
+	# the config (cmd_status reads it for guard=restored:<who>). The host
+	# wrapper aborts its own SID again while an apply is still running, so
+	# keep that line instead of replacing it with the content-free "gone".
+	last=
+	[ -f "$R/tmp/newton/last" ] && IFS= read -r last 2>/dev/null < "$R/tmp/newton/last"
+	keep_last=
+	case "$last" in
+		"aborted $sid "*) keep_last=keep ;;
+	esac
+	abort_clean "$sid" gone "$keep_last"
+	printf 'aborted %s gone\n' "$sid"
+	return 0
+}
+
+# health_check_run SID [MODE]: design 3.5, shared by health-check and the
+# later verify. A missing snapshot is never compared (a reboot inside the
+# window is the guard's restore, not a health change). Stdout stays empty.
+health_check_run() {
+	local sid="$1" mode="$2" v
+	if [ ! -e "$LOCK/$sid.health" ]; then
+		guard_status
+		if [ "$G_LINE" = "restored $sid boot" ]; then
+			printf 'health: not compared: the router rebooted during the window; the guard restored the config at boot\n' >&2
+		else
+			printf 'health: not compared: no health snapshot for session %s\n' "$sid" >&2
+		fi
+		return 1
+	fi
+	if [ -n "$mode" ]; then
+		run_helper health-check "$sid" "$mode" >/dev/null || return 1
+	else
+		run_helper health-check "$sid" >/dev/null || return 1
+	fi
+	v=
+	if IFS= read -r v 2>/dev/null < "$LOCK/$sid.health/newton-fw4-loaded"; then
+		if [ "$v" = 1 ] && ! "$NFT" list table inet fw4 >/dev/null 2>&1; then
+			printf 'health: the firewall table inet fw4 is not loaded (it was before the apply)\n' >&2
+			return 1
+		fi
+	fi
+	return 0
+}
+
+# cmd_health_check: design 3.5; 0 pass, 1 fail, nothing on stdout.
+cmd_health_check() {
+	health_check_run "$1" "${2-}"
+}
+
+# cmd_dnsmasq_ensure: moved snippet I9 (design 3.5); its output is exactly
+# running or started rc=<n>.
+cmd_dnsmasq_ensure() {
+	lock_take 10
+	trap '' HUP PIPE
+	if "$R/etc/init.d/dnsmasq" running >/dev/null 2>&1; then
+		echo running
+	else
+		"$R/etc/init.d/dnsmasq" restart >/dev/null 2>&1
+		echo "started rc=$?"
+	fi
+}
+
+# cmd_dns_dhcp_check: moved snippet I10 (design 3.5), the OC:428 text through
+# the tool variables; the first failing text goes to stderr, stdout is empty.
+cmd_dns_dhcp_check() {
+	local need_dhcp="$1"
+	"$PIDOF" dnsmasq >/dev/null || { printf 'dnsmasq is not running\n' >&2; return 1; }
+	"$NSLOOKUP" openwrt.org 127.0.0.1 >/dev/null 2>&1 || { printf 'nslookup openwrt.org 127.0.0.1 failed\n' >&2; return 1; }
+	[ "$need_dhcp" != 1 ] || "$NETSTAT" -lnup 2>/dev/null | grep -q ':67 .*/dnsmasq' || { printf 'no DHCP listener (udp 67) from dnsmasq\n' >&2; return 1; }
+	return 0
+}
+
+# probe_killed RC: true when a bounded command died on the watchdog (4.4).
+probe_killed() {
+	case "$1" in
+		137|143) return 0 ;;
+	esac
+	return 1
+}
+
+# probe_capture: save the current $OUT in a fresh scratch file under
+# PROBE_FILE; the next run_bounded call would overwrite $OUT.
+probe_capture() {
+	PROBE_FILE=$(mktemp "$R/tmp/newton/pb.$PROG_PID.XXXXXX") || { PROBE_FILE=; PB_REASON=error; return 1; }
+	SCRATCH="$SCRATCH $PROBE_FILE"
+	cat "$OUT" > "$PROBE_FILE" || { PROBE_FILE=; PB_REASON=error; return 1; }
+	return 0
+}
+
+# match_count N FILE T1 [T2 [T3 [T4]]]: design 4.2. The count of lines of
+# FILE that satisfy the first N TEXTs goes into MATCH_COUNT. The awk program
+# is fixed text; every TEXT enters with -v. A positive TEXT must appear in
+# the line, in order, without overlap; a TEXT that starts with ! must not
+# appear at all. Matching is index(), never a regex.
+match_count() {
+	local n="$1" file="$2" rc
+	# shellcheck disable=SC2016  # the awk program is fixed text (design 3.1)
+	run_bounded 5 awk -v n="$n" -v t1="${3-}" -v t2="${4-}" -v t3="${5-}" -v t4="${6-}" '
+		function holds(line, s, k, t, p) {
+			s = line
+			k = 1
+			while (k <= n) {
+				t = t1
+				if (k == 2) t = t2
+				if (k == 3) t = t3
+				if (k == 4) t = t4
+				if (substr(t, 1, 1) == "!") {
+					if (index(line, substr(t, 2)) > 0) return 0
+				} else {
+					p = index(s, t)
+					if (p == 0) return 0
+					s = substr(s, p + length(t))
+				}
+				k = k + 1
+			}
+			return 1
+		}
+		{ if (holds($0)) cnt = cnt + 1 }
+		END { print cnt + 0 }
+	' "$file"
+	rc=$?
+	if probe_killed "$rc"; then
+		PB_REASON=timeout
+		return 1
+	fi
+	[ "$rc" -eq 0 ] || { PB_REASON=error; return 1; }
+	MATCH_COUNT=
+	IFS= read -r MATCH_COUNT < "$OUT" || MATCH_COUNT=
+	case "$MATCH_COUNT" in ''|*[!0-9]*) PB_REASON=error; return 1 ;; esac
+	return 0
+}
+
+# expect_ok EXPECT COUNT: design 4.2; sets PB_REASON on failure.
+expect_ok() {
+	case "$1" in
+	present)
+		[ "$2" -ge 1 ] && return 0
+		PB_REASON="count=$2"
+		;;
+	absent)
+		[ "$2" -eq 0 ] && return 0
+		PB_REASON="count=$2"
+		;;
+		eq:*)
+			[ "$2" -eq "${1#eq:}" ] && return 0
+			PB_REASON="count=$2"
+			;;
+		min:*)
+			[ "$2" -ge "${1#min:}" ] && return 0
+			PB_REASON="count=$2"
+			;;
+	esac
+	return 1
+}
+
+# nft_list FAM TABLE CHAIN: one bounded nft listing into $OUT; CHAIN ruleset
+# means the whole ruleset. The caller maps the exit code (design 4.2).
+nft_list() {
+	if [ "$3" = ruleset ]; then
+		run_bounded 5 "$NFT" list ruleset
+	else
+		run_bounded 5 "$NFT" list chain "$1" "$2" "$3"
+	fi
+}
+
+# probe_fail: design 4.3; never passes.
+probe_fail() {
+	PB_REASON=planted
+	return 1
+}
+
+# probe_ping HOST [COUNT]: design 4.3; the exit is the answer (4.2).
+probe_ping() {
+	local c rc
+	c=${PB_2-}
+	[ -n "$c" ] || c=1
+	run_bounded 10 "$PING" -c "$c" -W 3 "$PB_1"
+	rc=$?
+	[ "$rc" -eq 0 ] && return 0
+	if probe_killed "$rc"; then
+		PB_REASON=timeout
+	else
+		PB_REASON=fail
+	fi
+	return 1
+}
+
+# probe_resolve HOST [SERVER]: design 4.3; the exit is the answer (4.2).
+probe_resolve() {
+	local s rc
+	s=${PB_2-}
+	[ -n "$s" ] || s=127.0.0.1
+	run_bounded 10 "$NSLOOKUP" "$PB_1" "$s"
+	rc=$?
+	[ "$rc" -eq 0 ] && return 0
+	if probe_killed "$rc"; then
+		PB_REASON=timeout
+	else
+		PB_REASON=fail
+	fi
+	return 1
+}
+
+# probe_service_running SERVICE INSTANCE [STATE]: design 4.3. The ubus output
+# goes to a scratch file because the next bounded command would overwrite
+# $OUT; a jsonfilter no-match is an answer, not an error (4.2), so its exit
+# code 0 or 1 is an answer; other exits are errors.
+probe_service_running() {
+	local inst="$PB_2" st scratch expr rc found
+	st=${PB_3-}
+	[ -n "$st" ] || st=present
+	run_bounded 5 "$UBUS" call service list "{\"name\":\"$PB_1\"}"
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		if probe_killed "$rc"; then PB_REASON=timeout; else PB_REASON=error; fi
+		return 1
+	fi
+	scratch=$(mktemp "$R/tmp/newton/pb.$PROG_PID.XXXXXX") || { PB_REASON=error; return 1; }
+	SCRATCH="$SCRATCH $scratch"
+	cat "$OUT" > "$scratch" || { PB_REASON=error; return 1; }
+	if [ "$inst" = any ]; then
+		expr="@[\"$PB_1\"].instances[*].running"
+	else
+		expr="@[\"$PB_1\"].instances[\"$inst\"].running"
+	fi
+	run_bounded 5 "$JSONFILTER" -i "$scratch" -e "$expr"
+	rc=$?
+	if probe_killed "$rc"; then
+		PB_REASON=timeout
+		return 1
+	fi
+	if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+		PB_REASON=error
+		return 1
+	fi
+	found=0
+	if grep -q '^true$' "$OUT"; then
+		found=1
+	fi
+	if [ "$st" = present ]; then
+		[ "$found" -eq 1 ] && return 0
+		PB_REASON=absent
+	else
+		[ "$found" -eq 0 ] && return 0
+		PB_REASON=present
+	fi
+	return 1
+}
+
+# probe_uci_equals UCIPATH TEXT: design 4.3; only uci get exit 1 = unset.
+probe_uci_equals() {
+	local v rc
+	run_bounded 5 "$UCI" -q get "$PB_1"
+	rc=$?
+	if probe_killed "$rc"; then
+		PB_REASON=timeout
+		return 1
+	fi
+	if [ "$rc" -eq 1 ]; then
+		PB_REASON='unset'
+		return 1
+	fi
+	[ "$rc" -eq 0 ] || { PB_REASON=error; return 1; }
+	v=
+	IFS= read -r v < "$OUT" || v=
+	[ "$v" = "$PB_2" ] && return 0
+	PB_REASON=mismatch
+	return 1
+}
+
+# probe_uci_unset UCIPATH: design 4.3; only uci get exit 1 passes.
+probe_uci_unset() {
+	local rc
+	run_bounded 5 "$UCI" -q get "$PB_1"
+	rc=$?
+	if probe_killed "$rc"; then
+		PB_REASON=timeout
+		return 1
+	fi
+	[ "$rc" -eq 1 ] && return 0
+	if [ "$rc" -ne 0 ]; then
+		PB_REASON=error
+		return 1
+	fi
+	PB_REASON=present
+	return 1
+}
+
+# probe_iface_field IFACE FIELD TEXT: design 4.3; a missing jsonfilter match
+# is an answer (4.2), so no line at all is mismatch, not error.
+probe_iface_field() {
+	local scratch v rc
+	run_bounded 5 "$IFSTATUS" "$PB_1"
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		if probe_killed "$rc"; then PB_REASON=timeout; else PB_REASON=error; fi
+		return 1
+	fi
+	scratch=$(mktemp "$R/tmp/newton/pb.$PROG_PID.XXXXXX") || { PB_REASON=error; return 1; }
+	SCRATCH="$SCRATCH $scratch"
+	cat "$OUT" > "$scratch" || { PB_REASON=error; return 1; }
+	run_bounded 5 "$JSONFILTER" -i "$scratch" -e "@.$PB_2"
+	rc=$?
+	if probe_killed "$rc"; then
+		PB_REASON=timeout
+		return 1
+	fi
+	if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+		PB_REASON=error
+		return 1
+	fi
+	v=
+	IFS= read -r v < "$OUT" || v=
+	[ "$v" = "$PB_3" ] && return 0
+	PB_REASON=mismatch
+	return 1
+}
+
+# probe_iface_absent IFACE: design 4.3; ifstatus exit not 0 passes.
+probe_iface_absent() {
+	local rc
+	run_bounded 5 "$IFSTATUS" "$PB_1"
+	rc=$?
+	if probe_killed "$rc"; then
+		PB_REASON=timeout
+		return 1
+	fi
+	[ "$rc" -ne 0 ] && return 0
+	PB_REASON=present
+	return 1
+}
+
+# probe_sysctl_equals KEY TEXT: design 4.3 and 4.2. Each KEY part that starts
+# @dev: or @l3dev: becomes the ifstatus device of that interface and must
+# satisfy the IFACE class, else error.
+probe_sysctl_equals() {
+	local rest="$PB_1" part ifc jexpr dev key rc scratch v
+	scratch=$(mktemp "$R/tmp/newton/pb.$PROG_PID.XXXXXX") || { PB_REASON=error; return 1; }
+	SCRATCH="$SCRATCH $scratch"
+	key=
+	while :; do
+		case "$rest" in
+			*/*) part=${rest%%/*}; rest=${rest#*/} ;;
+			*) part=$rest; rest= ;;
+		esac
+		case "$part" in
+			@dev:*|@l3dev:*)
+				case "$part" in
+					@dev:*) ifc=${part#@dev:}; jexpr='@.device' ;;
+					*) ifc=${part#@l3dev:}; jexpr='@.l3_device' ;;
+				esac
+				run_bounded 5 "$IFSTATUS" "$ifc"
+				rc=$?
+				if [ "$rc" -ne 0 ]; then
+					if probe_killed "$rc"; then PB_REASON=timeout; else PB_REASON=error; fi
+					return 1
+				fi
+				cat "$OUT" > "$scratch" || { PB_REASON=error; return 1; }
+				run_bounded 5 "$JSONFILTER" -i "$scratch" -e "$jexpr"
+				rc=$?
+				if probe_killed "$rc"; then
+					PB_REASON=timeout
+					return 1
+				fi
+				if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+					PB_REASON=error
+					return 1
+				fi
+				dev=
+				IFS= read -r dev < "$OUT" || dev=
+				is_iface "$dev" || { PB_REASON=error; return 1; }
+				part=$dev
+				;;
+		esac
+		if [ -n "$key" ]; then
+			key="$key/$part"
+		else
+			key=$part
+		fi
+		[ -n "$rest" ] || break
+	done
+	[ -f "$R/proc/sys/net/$key" ] || { PB_REASON=error; return 1; }
+	v=
+	IFS= read -r v < "$R/proc/sys/net/$key" || :
+	[ "$v" = "$PB_2" ] && return 0
+	PB_REASON=mismatch
+	return 1
+}
+
+# probe_ra_absent IFACE: design 4.3. The device is the l3_device of the
+# interface (else its device); the ipv6ra answer must not name it.
+probe_ra_absent() {
+	local scratch dev rc
+	run_bounded 5 "$IFSTATUS" "$PB_1"
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		if probe_killed "$rc"; then PB_REASON=timeout; else PB_REASON=error; fi
+		return 1
+	fi
+	scratch=$(mktemp "$R/tmp/newton/pb.$PROG_PID.XXXXXX") || { PB_REASON=error; return 1; }
+	SCRATCH="$SCRATCH $scratch"
+	cat "$OUT" > "$scratch" || { PB_REASON=error; return 1; }
+	run_bounded 5 "$JSONFILTER" -i "$scratch" -e '@.l3_device'
+	rc=$?
+	if probe_killed "$rc"; then
+		PB_REASON=timeout
+		return 1
+	fi
+	if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+		PB_REASON=error
+		return 1
+	fi
+	dev=
+	IFS= read -r dev < "$OUT" || dev=
+	if [ -z "$dev" ]; then
+		run_bounded 5 "$JSONFILTER" -i "$scratch" -e '@.device'
+		rc=$?
+		if probe_killed "$rc"; then
+			PB_REASON=timeout
+			return 1
+		fi
+		if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+			PB_REASON=error
+			return 1
+		fi
+		dev=
+		IFS= read -r dev < "$OUT" || dev=
+	fi
+	[ -n "$dev" ] || { PB_REASON=error; return 1; }
+	run_bounded 5 "$UBUS" call dhcp ipv6ra
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		if probe_killed "$rc"; then PB_REASON=timeout; else PB_REASON=error; fi
+		return 1
+	fi
+	if grep -Fq "\"$dev\"" "$OUT"; then
+		PB_REASON=present
+		return 1
+	fi
+	return 0
+}
+
+# probe_root_password_class CLASS: design 4.3 and R31. Only the class word
+# leaves this function; the shadow field itself is never printed or kept.
+probe_root_password_class() {
+	local cls rc
+	# shellcheck disable=SC2016  # the awk program is fixed text (design 3.1)
+	run_bounded 5 awk -F: '
+		$1 == "root" {
+			n++
+			if (n == 1) {
+				if ($2 == "") c = "EMPTY"
+				else if (substr($2, 1, 1) == "*" || substr($2, 1, 1) == "!") c = "LOCKED"
+				else c = "HASH"
+			}
+		}
+		END {
+			if (n == 0) print "NOROOT"
+			else if (n > 1) print "MULTIROOT"
+			else print c
+		}
+	' "$R/etc/shadow"
+	rc=$?
+	if probe_killed "$rc"; then
+		PB_REASON=timeout
+		return 1
+	fi
+	[ "$rc" -eq 0 ] || { PB_REASON=error; return 1; }
+	cls=
+	IFS= read -r cls < "$OUT" || cls=
+	case "$cls" in
+		EMPTY|LOCKED|HASH|NOROOT|MULTIROOT) ;;
+		*) PB_REASON=error; return 1 ;;
+	esac
+	[ "$cls" = "$PB_1" ] && return 0
+	PB_REASON="class=$cls"
+	return 1
+}
+
+# probe_listen PROTO ADDR PORT PROG EXPECT: design 4.3. Field 1 must start
+# with the protocol, field 4 splits at its last : into address and port, the
+# program is the text after / in the last field. netstat output is never
+# printed; only the row count matters.
+probe_listen() {
+	local flag rc
+	case "$PB_1" in
+		tcp) flag=-t ;;
+		udp) flag=-u ;;
+	esac
+	run_bounded 5 "$NETSTAT" -lnp "$flag"
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		if probe_killed "$rc"; then PB_REASON=timeout; else PB_REASON=error; fi
+		return 1
+	fi
+	probe_capture || return 1
+	# shellcheck disable=SC2016  # the awk program is fixed text (design 3.1)
+	run_bounded 5 awk -v proto="$PB_1" -v addr="$PB_2" -v port="$PB_3" -v want="$PB_4" '
+		{
+			if ($1 != proto && $1 != proto "6") next
+			lf = $NF
+			s = index(lf, "/")
+			have = ""
+			if (s > 0) have = substr(lf, s + 1)
+			if (want != "any" && have != want) next
+			f4 = $4
+			c = 0
+			j = 1
+			while (j <= length(f4)) {
+				if (substr(f4, j, 1) == ":") c = j
+				j = j + 1
+			}
+			a = substr(f4, 1, c - 1)
+			pn = substr(f4, c + 1)
+			if (pn != port) next
+			if (addr == "any") { cnt = cnt + 1; next }
+			if (addr == "wildcard") {
+				if (a == "0.0.0.0" || a == "::") cnt = cnt + 1
+				next
+			}
+			if (a == addr) cnt = cnt + 1
+		}
+		END { print cnt + 0 }
+	' "$PROBE_FILE"
+	rc=$?
+	if probe_killed "$rc"; then PB_REASON=timeout; return 1; fi
+	[ "$rc" -eq 0 ] || { PB_REASON=error; return 1; }
+	MATCH_COUNT=
+	IFS= read -r MATCH_COUNT < "$OUT" || MATCH_COUNT=
+	case "$MATCH_COUNT" in ''|*[!0-9]*) PB_REASON=error; return 1 ;; esac
+	expect_ok "$PB_5" "$MATCH_COUNT"
+}
+
+# probe_nft_rule FAM TABLE CHAIN|ruleset EXPECT TEXT...: design 4.3; the
+# count of matching lines of the listing (4.2) must meet EXPECT.
+probe_nft_rule() {
+	local rc
+	nft_list "$PB_1" "$PB_2" "$PB_3"
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		if probe_killed "$rc"; then PB_REASON=timeout; else PB_REASON=error; fi
+		return 1
+	fi
+	probe_capture || return 1
+	match_count "$((PB_NARGS - 4))" "$PROBE_FILE" "${PB_5-}" "${PB_6-}" "${PB_7-}" "${PB_8-}" || return 1
+	expect_ok "$PB_4" "$MATCH_COUNT"
+}
+
+# probe_nft_rule_order FAM TABLE CHAIN TEXT-A TEXT-B: design 4.3. Both TEXTs
+# must be found (single fixed strings) and the first line holding A must come
+# before the first line holding B.
+probe_nft_rule_order() {
+	local rc v
+	nft_list "$PB_1" "$PB_2" "$PB_3"
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		if probe_killed "$rc"; then PB_REASON=timeout; else PB_REASON=error; fi
+		return 1
+	fi
+	probe_capture || return 1
+	# shellcheck disable=SC2016  # the awk program is fixed text (design 3.1)
+	run_bounded 5 awk -v a="$PB_4" -v b="$PB_5" '
+		{
+			if (la == 0 && index($0, a) > 0) la = NR
+			if (lb == 0 && index($0, b) > 0) lb = NR
+		}
+		END {
+			if (la == 0 || lb == 0) print "absent"
+			else if (la < lb) print "ok"
+			else print "order"
+		}
+	' "$PROBE_FILE"
+	rc=$?
+	if probe_killed "$rc"; then PB_REASON=timeout; return 1; fi
+	[ "$rc" -eq 0 ] || { PB_REASON=error; return 1; }
+	v=
+	IFS= read -r v < "$OUT" || v=
+	case "$v" in
+		ok) return 0 ;;
+		absent) PB_REASON=absent ;;
+		*) PB_REASON=order ;;
+	esac
+	return 1
+}
+
+# probe_nft_rule_near FAM TABLE CHAIN|ruleset TEXT-A NEAR TEXT-B: design
+# 4.3. Some line i must hold A and a line in i to i+NEAR must hold B.
+probe_nft_rule_near() {
+	local rc v
+	nft_list "$PB_1" "$PB_2" "$PB_3"
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		if probe_killed "$rc"; then PB_REASON=timeout; else PB_REASON=error; fi
+		return 1
+	fi
+	probe_capture || return 1
+	# shellcheck disable=SC2016  # the awk program is fixed text (design 3.1)
+	run_bounded 5 awk -v a="$PB_4" -v near="$PB_5" -v b="$PB_6" '
+		{
+			if (win > 0) {
+				if (index($0, b) > 0) { ok = 1; exit }
+				win = win - 1
+			}
+			if (index($0, a) > 0) {
+				if (index($0, b) > 0) { ok = 1; exit }
+				win = near
+			}
+		}
+		END {
+			if (ok) print "ok"
+			else print "not-near"
+		}
+	' "$PROBE_FILE"
+	rc=$?
+	if probe_killed "$rc"; then PB_REASON=timeout; return 1; fi
+	[ "$rc" -eq 0 ] || { PB_REASON=error; return 1; }
+	v=
+	IFS= read -r v < "$OUT" || v=
+	if [ "$v" = ok ]; then
+		return 0
+	fi
+	PB_REASON=not-near
+	return 1
+}
+
+# probe_nft_set_has FAM TABLE SET ELEMENT STATE: design 4.3. The element
+# list is the text between the words elements = { and the closing brace,
+# spaces and newlines removed, split on commas.
+probe_nft_set_has() {
+	local rc v found ncnt
+	run_bounded 5 "$NFT" list set "$PB_1" "$PB_2" "$PB_3"
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		if probe_killed "$rc"; then PB_REASON=timeout; else PB_REASON=error; fi
+		return 1
+	fi
+	probe_capture || return 1
+	# shellcheck disable=SC2016  # the awk program is fixed text (design 3.1)
+	run_bounded 5 awk -v elem="$PB_4" '
+		{
+			s = $0
+			gsub(/[ \t\r]/, "", s)
+			all = all s
+		}
+		END {
+			found = 0
+			ncnt = 0
+			p = index(all, "elements={")
+			if (p > 0) {
+				s = substr(all, p + 10)
+				q = index(s, "}")
+				if (q > 0) {
+					s = substr(s, 1, q - 1)
+					n = split(s, el, ",")
+					for (i = 1; i <= n; i++)
+						if (el[i] != "") {
+							ncnt = ncnt + 1
+							if (el[i] == elem) found = 1
+						}
+				}
+			}
+			print found, ncnt
+		}
+	' "$PROBE_FILE"
+	rc=$?
+	if probe_killed "$rc"; then PB_REASON=timeout; return 1; fi
+	[ "$rc" -eq 0 ] || { PB_REASON=error; return 1; }
+	found=
+	ncnt=
+	IFS=' ' read -r found ncnt < "$OUT" || found=
+	case "$found" in ''|*[!0-9]*) PB_REASON=error; return 1 ;; esac
+	case "$ncnt" in ''|*[!0-9]*) PB_REASON=error; return 1 ;; esac
+	case "$PB_5" in
+		present)
+			[ "$found" -eq 1 ] && return 0
+			PB_REASON=absent
+			;;
+		absent)
+			[ "$found" -eq 0 ] && return 0
+			PB_REASON=present
+			;;
+		only)
+			if [ "$found" -eq 1 ] && [ "$ncnt" -eq 1 ]; then return 0; fi
+			PB_REASON=mismatch
+			;;
+	esac
+	return 1
+}
+
+# probe_conf_has DNSSVC MODE EXPECT TEXT: design 4.3. The files are the -C
+# arguments of the running dnsmasq pids (each must match the dnsmasq.conf
+# path shape), else every matching name in /var/etc. The count of lines that
+# equal, start with or contain TEXT must meet EXPECT.
+probe_conf_has() {
+	local rc pid a suf wantc name f files cs inputs hf
+	files=
+	cs=$(mktemp "$R/tmp/newton/pb.$PROG_PID.XXXXXX") || { PB_REASON=error; return 1; }
+	SCRATCH="$SCRATCH $cs"
+	run_bounded 5 "$PIDOF" "$PB_1"
+	rc=$?
+	if probe_killed "$rc"; then
+		PB_REASON=timeout
+		return 1
+	fi
+	if [ "$rc" -eq 0 ]; then
+		# shellcheck disable=SC2086,SC2013  # pidof prints pids, words are the point
+		for pid in $(cat "$OUT"); do
+			case "$pid" in ''|*[!0-9]*) continue ;; esac
+			[ -r "$R/proc/$pid/cmdline" ] || continue
+			tr '\000' '\n' < "$R/proc/$pid/cmdline" > "$cs" 2>/dev/null || continue
+			wantc=0
+			while IFS= read -r a; do
+				if [ "$wantc" -eq 1 ]; then
+					wantc=0
+					case "$a" in
+						/var/etc/dnsmasq.conf.*|/tmp/etc/dnsmasq.conf.*)
+							suf=${a#*/dnsmasq.conf.}
+							case "$suf" in
+								''|*[!A-Za-z0-9_.-]*) ;;
+								*)
+									case "$files" in
+										*" $R$a") ;;
+										*) [ "${#suf}" -le 64 ] && files="$files $R$a" ;;
+									esac
+									;;
+							esac
+							;;
+					esac
+				fi
+				[ "$a" = -C ] && wantc=1
+			done < "$cs"
+		done
+	fi
+	if [ -z "$files" ]; then
+		run_bounded 5 ls -1 "$R/var/etc"
+		rc=$?
+		if probe_killed "$rc"; then PB_REASON=timeout; return 1; fi
+		[ "$rc" -eq 0 ] || { PB_REASON=error; return 1; }
+		probe_capture || return 1
+		while IFS= read -r name; do
+			case "$name" in
+				dnsmasq.conf.*)
+					suf=${name#dnsmasq.conf.}
+					case "$suf" in
+						''|*[!A-Za-z0-9_.-]*) ;;
+						*)
+							case "$files" in
+								*" $R/var/etc/$name") ;;
+								*) [ "${#suf}" -le 64 ] && files="$files $R/var/etc/$name" ;;
+							esac
+							;;
+					esac
+					;;
+			esac
+		done < "$PROBE_FILE"
+	fi
+	[ -n "$files" ] || { PB_REASON=error; return 1; }
+	# shellcheck disable=SC2086  # the listed paths carry no spaces
+	set -- $files
+	# the dnsmasq addn-hosts file at /tmp/hosts/dhcp.<SUF> (same SUF as the
+	# conf file name) also carries the records the probe may be asked about
+	# (e.g. dhcp domain -> name/ip lines); the file is optional, so a missing
+	# or unreadable one is skipped, and the conf file stays mandatory.
+	inputs=
+	for f; do
+		[ -r "$f" ] || { PB_REASON=error; return 1; }
+		inputs="$inputs $f"
+		suf=${f##*/dnsmasq.conf.}
+		hf="$R/tmp/hosts/dhcp.$suf"
+		[ -f "$hf" ] && [ -r "$hf" ] && inputs="$inputs $hf"
+	done
+	# shellcheck disable=SC2086  # the listed paths carry no spaces
+	set -- $inputs
+	# shellcheck disable=SC2016  # the awk program is fixed text (design 3.1)
+	run_bounded 5 awk -v m="$PB_2" -v t="$PB_4" '
+		{
+			if (m == "line") hold = ($0 == t)
+			else if (m == "prefix") hold = (substr($0, 1, length(t)) == t)
+			else hold = (index($0, t) > 0)
+			if (hold) cnt = cnt + 1
+		}
+		END { print cnt + 0 }
+	' "$@"
+	rc=$?
+	if probe_killed "$rc"; then PB_REASON=timeout; return 1; fi
+	[ "$rc" -eq 0 ] || { PB_REASON=error; return 1; }
+	MATCH_COUNT=
+	IFS= read -r MATCH_COUNT < "$OUT" || MATCH_COUNT=
+	case "$MATCH_COUNT" in ''|*[!0-9]*) PB_REASON=error; return 1 ;; esac
+	expect_ok "$PB_3" "$MATCH_COUNT"
+}
+
+# probe_dev_of @dev:IFACE | @l3dev:IFACE: design 4.2; the device of the
+# interface in DEV_OUT; 1 with PB_REASON set on error.
+probe_dev_of() {
+	local ifc jexpr scratch rc dev
+	case "$1" in
+		@dev:*) ifc=${1#@dev:}; jexpr='@.device' ;;
+		*) ifc=${1#@l3dev:}; jexpr='@.l3_device' ;;
+	esac
+	run_bounded 5 "$IFSTATUS" "$ifc"
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		if probe_killed "$rc"; then PB_REASON=timeout; else PB_REASON=error; fi
+		return 1
+	fi
+	scratch=$(mktemp "$R/tmp/newton/pb.$PROG_PID.XXXXXX") || { PB_REASON=error; return 1; }
+	SCRATCH="$SCRATCH $scratch"
+	cat "$OUT" > "$scratch" || { PB_REASON=error; return 1; }
+	run_bounded 5 "$JSONFILTER" -i "$scratch" -e "$jexpr"
+	rc=$?
+	if probe_killed "$rc"; then
+		PB_REASON=timeout
+		return 1
+	fi
+	if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+		PB_REASON=error
+		return 1
+	fi
+	dev=
+	IFS= read -r dev < "$OUT" || dev=
+	is_iface "$dev" || { PB_REASON=error; return 1; }
+	DEV_OUT=$dev
+	return 0
+}
+
+# argv_elems_hold N E1 E2 E3 E4 FILE: 0 when some N consecutive argv
+# elements equal E1..EN (design 4.3 proc-args); 2 on error.
+argv_elems_hold() {
+	local n="$1" e1="$2" e2="$3" e3="$4" e4="$5" file="$6" rc v
+	# shellcheck disable=SC2016  # the awk program is fixed text (design 3.1)
+	run_bounded 5 awk -v n="$n" -v e1="$e1" -v e2="$e2" -v e3="$e3" -v e4="$e4" '
+		{ line[NR] = $0; nl = NR }
+		END {
+			ans = 0
+			for (i = 1; i + n - 1 <= nl; i++) {
+				good = 1
+				for (j = 1; j <= n; j++) {
+					v = e1
+					if (j == 2) v = e2
+					if (j == 3) v = e3
+					if (j == 4) v = e4
+					if (line[i + j - 1] != v) { good = 0; break }
+				}
+				if (good) { ans = 1; break }
+			}
+			print ans
+		}
+	' "$file"
+	rc=$?
+	if probe_killed "$rc"; then PB_REASON=timeout; return 2; fi
+	[ "$rc" -eq 0 ] || { PB_REASON=error; return 2; }
+	v=
+	IFS= read -r v < "$OUT" || v=
+	[ "$v" = 1 ]
+}
+
+# spec_hold SPEC FILE: 0 when one proc-args SPEC holds for the argv in FILE,
+# 1 when not, 2 on error (design 4.3).
+spec_hold() {
+	local spec="$1" file="$2" text rest e n e1 e2 e3 e4
+	case "$spec" in
+		'~'*)
+			text=${spec#\~}
+			grep -Fq -e "$text" "$file"
+			return
+			;;
+	esac
+	e1=
+	e2=
+	e3=
+	e4=
+	n=0
+	rest=$spec
+	while :; do
+		case "$rest" in
+			*' '*) e=${rest%% *}; rest=${rest#* } ;;
+			*) e=$rest; rest= ;;
+		esac
+		n=$((n + 1))
+		case "$e" in
+			@dev:*|@l3dev:*)
+				probe_dev_of "$e" || return 2
+				e=$DEV_OUT
+				;;
+		esac
+		case $n in
+			1) e1=$e ;;
+			2) e2=$e ;;
+			3) e3=$e ;;
+			4) e4=$e ;;
+		esac
+		[ -n "$rest" ] || break
+	done
+	argv_elems_hold "$n" "$e1" "$e2" "$e3" "$e4" "$file"
+	return
+}
+
+# probe_specs_hold FILE: 0 when every SPEC of the current probe line holds
+# for the argv in FILE, 1 when one does not, 2 on error.
+probe_specs_hold() {
+	local file="$1" k spec negate rc
+	PB_REASON=
+	k=1
+	while [ "$k" -lt "$PB_NARGS" ]; do
+		k=$((k + 1))
+		spec=
+		case $k in
+			2) spec=$PB_2 ;;
+			3) spec=$PB_3 ;;
+			4) spec=$PB_4 ;;
+			5) spec=$PB_5 ;;
+			6) spec=$PB_6 ;;
+			7) spec=$PB_7 ;;
+			8) spec=$PB_8 ;;
+			9) spec=$PB_9 ;;
+		esac
+		negate=0
+		case "$spec" in
+			'!'*) negate=1; spec=${spec#!} ;;
+		esac
+		spec_hold "$spec" "$file"
+		rc=$?
+		if [ "$rc" -eq 2 ]; then
+			return 2
+		fi
+		if [ "$rc" -eq 0 ]; then
+			if [ "$negate" -eq 1 ]; then return 1; fi
+		else
+			if [ "$negate" -eq 0 ]; then return 1; fi
+		fi
+	done
+	return 0
+}
+
+# probe_proc_args PROC SPEC...: design 4.3. Passes when at least one pid of
+# PROC has an argv that satisfies every SPEC. A pid whose cmdline has
+# vanished is skipped.
+probe_proc_args() {
+	local rc pid argvfile hold
+	run_bounded 5 "$PIDOF" "$PB_1"
+	rc=$?
+	if probe_killed "$rc"; then
+		PB_REASON=timeout
+		return 1
+	fi
+	if [ "$rc" -ne 0 ] || [ ! -s "$OUT" ]; then
+		PB_REASON=no-process
+		return 1
+	fi
+	argvfile=$(mktemp "$R/tmp/newton/pb.$PROG_PID.XXXXXX") || { PB_REASON=error; return 1; }
+	SCRATCH="$SCRATCH $argvfile"
+	# shellcheck disable=SC2086,SC2013  # pidof prints pids, words are the point
+	for pid in $(cat "$OUT"); do
+		case "$pid" in ''|*[!0-9]*) continue ;; esac
+		[ -r "$R/proc/$pid/cmdline" ] || continue
+		tr '\000' '\n' < "$R/proc/$pid/cmdline" > "$argvfile" 2>/dev/null || continue
+		probe_specs_hold "$argvfile"
+		hold=$?
+		if [ "$hold" -eq 0 ]; then
+			return 0
+		fi
+		if [ "$hold" -eq 2 ]; then
+			return 1
+		fi
+	done
+	PB_REASON=mismatch
+	return 1
+}
+
+# probe_log_has EXPECT TEXT...: design 4.3; the count of matching logread
+# lines (4.2) must meet EXPECT.
+probe_log_has() {
+	local rc
+	run_bounded 5 "$LOGREAD"
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		if probe_killed "$rc"; then PB_REASON=timeout; else PB_REASON=error; fi
+		return 1
+	fi
+	probe_capture || return 1
+	match_count "$((PB_NARGS - 1))" "$PROBE_FILE" "${PB_2-}" "${PB_3-}" "${PB_4-}" || return 1
+	expect_ok "$PB_1" "$MATCH_COUNT"
+}
+
+# probe_run: dispatch on PB_NAME (design 3.5d); every probe returns 0 or 1
+# with PB_REASON set to one of the 4.3 reason words.
+probe_run() {
+	PB_REASON=
+	case "$PB_NAME" in
+		fail) probe_fail ;;
+		ping) probe_ping ;;
+		resolve) probe_resolve ;;
+		service-running) probe_service_running ;;
+		uci-equals) probe_uci_equals ;;
+		uci-unset) probe_uci_unset ;;
+		listen) probe_listen ;;
+		nft-rule) probe_nft_rule ;;
+		nft-rule-order) probe_nft_rule_order ;;
+		nft-rule-near) probe_nft_rule_near ;;
+		nft-set-has) probe_nft_set_has ;;
+		conf-has) probe_conf_has ;;
+		proc-args) probe_proc_args ;;
+		iface-field) probe_iface_field ;;
+		iface-absent) probe_iface_absent ;;
+		sysctl-equals) probe_sysctl_equals ;;
+		ra-absent) probe_ra_absent ;;
+		log-has) probe_log_has ;;
+		root-password-class) probe_root_password_class ;;
+		*) fail internal 1 not-built ;;
+	esac
+}
+
+# cmd_probe: design 3.5d. Stdin is read bounded 30 s; the content must be
+# exactly one probe line, which probe_check then validates. Router output is
+# never printed; only the ok or fail line reaches stdout.
+cmd_probe() {
+	local line nbytes rc
+	run_bounded_in 30 head -c 514
+	rc=$?
+	case "$rc" in
+		0) ;;
+		137|143) fail stdin-timeout 2 ;;
+		*) fail internal 1 head ;;
+	esac
+	nbytes=$(wc -c < "$OUT")
+	if [ "$nbytes" -gt 513 ]; then
+		fail bad-probe 2 '1 too-long'
+	fi
+	if [ "$nbytes" -eq 0 ] || [ "$(wc -l < "$OUT")" -ne 1 ] || [ -n "$(tail -c 1 "$OUT")" ]; then
+		fail bad-probe 2 '1 syntax'
+	fi
+	line=
+	IFS= read -r line < "$OUT" || line=
+	probe_check "$line" || fail bad-probe 2 "1 $PB_REASON"
+	if [ "$PB_NAME" = root-password-class ] && [ "$ROLE" != change ]; then
+		fail role 3
+	fi
+	probe_run
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		printf 'probe %s ok\n' "$PB_NAME"
+		return 0
+	fi
+	printf 'probe %s fail %s\n' "$PB_NAME" "$PB_REASON"
+	return 1
+}
+
+# read_run ARGV...: run a validated read command bounded 25 s, pass its stdout
+# and stderr through, map its exit code (design 3.5e). If the underlying
+# binary is not installed the shell would otherwise emit "line N: NAME: not
+# found" (rc 127) or "line N: PATH: Permission denied" (rc 126), leaking the
+# script path and line number. In production the first argument is a bare
+# name (uci, iwinfo, ...) resolved through PATH; in test mode it is a
+# $R/bin/<name> path, which command -v also resolves. The error line uses
+# the basename, so a test-mode path never appears.
+read_run() {
+	local rc tool_path bare
+	bare=${1##*/}
+	tool_path=$(command -v -- "$1" 2>/dev/null) || tool_path=
+	if [ -z "$tool_path" ]; then
+		printf 'error tool-missing %s\n' "$bare" >&2
+		return 127
+	fi
+	# A bare name (BusyBox applet) is always present; only a real path
+	# needs the executable bit, which a non-install would also clear.
+	case "$tool_path" in
+		*/*) [ -x "$tool_path" ] || {
+			printf 'error tool-missing %s\n' "$bare" >&2
+			return 127
+		} ;;
+	esac
+	run_bounded 25 "$@"
+	rc=$?
+	cat "$OUT"
+	cat "$ERR" >&2
+	case "$rc" in
+		137|143)
+			printf 'error read-timeout\n' >&2
+			rc=124
+			;;
+		255) rc=125 ;;
+	esac
+	return "$rc"
+}
+
+# read_uci: design 3.8 row uci; positions count from 1 = the verb.
+read_uci() {
+	case "$#" in
+		2)
+			case "$2" in
+				show|export|changes) set -- "$UCI" "$2" ;;
+				*) refuse bad-arg 2 2 ;;
+			esac
+			;;
+		3)
+			case "$3" in
+				-*) refuse bad-arg 2 3 ;;
+			esac
+			case "$2" in
+			show)
+				is_ucipath "$3" || is_cfg "$3" || refuse bad-arg 2 3
+				set -- "$UCI" show "$3"
+				;;
+			export|changes)
+				is_cfg "$3" || refuse bad-arg 2 3
+				set -- "$UCI" "$2" "$3"
+				;;
+				get)
+					is_ucipath "$3" || refuse bad-arg 2 3
+					set -- "$UCI" get "$3"
+					;;
+				*) refuse bad-arg 2 2 ;;
+			esac
+			;;
+		*) refuse arg-count 2 ;;
+	esac
+	read_run "$@"
+}
+
+# read_ubus: design 3.8 row ubus.
+read_ubus() {
+	local ifc
+	case "$#" in
+		2)
+			case "$2" in
+				list) set -- "$UBUS" list ;;
+				*) refuse bad-arg 2 2 ;;
+			esac
+			;;
+		3)
+			case "$2" in
+				list)
+					is_obj "$3" || refuse bad-arg 2 3
+					set -- "$UBUS" list "$3"
+					;;
+				*) refuse bad-arg 2 2 ;;
+			esac
+			;;
+		4)
+			case "$2" in
+				call) ;;
+				*) refuse bad-arg 2 2 ;;
+			esac
+			case "$3" in
+				system)
+					case "$4" in board|info) ;; *) refuse bad-arg 2 4 ;; esac
+					;;
+				network.interface)
+					case "$4" in dump) ;; *) refuse bad-arg 2 4 ;; esac
+					;;
+				network.device|network.wireless)
+					case "$4" in status) ;; *) refuse bad-arg 2 4 ;; esac
+					;;
+				network.interface.*)
+					ifc=${3#network.interface.}
+					is_iface "$ifc" || refuse bad-arg 2 3
+					case "$4" in status) ;; *) refuse bad-arg 2 4 ;; esac
+					;;
+				*) refuse bad-arg 2 3 ;;
+			esac
+			set -- "$UBUS" call "$3" "$4"
+			;;
+		*) refuse arg-count 2 ;;
+	esac
+	read_run "$@"
+}
+
+# read_ip: the fix-read-ip grammar (design 3.8 row ip); options only before the
+# OBJECT, full words only, each option and selector at most once.
+read_ip() {
+	local fam=0 sf=0 df=0 sfp=0 dfp=0 obj='' act='' dev='' tbl='' host='' ifc pos=1
+	shift
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			-4) [ "$fam" -eq 0 ] || refuse bad-arg 2 "$((pos + 1))"
+				fam=4 ;;
+			-6) [ "$fam" -eq 0 ] || refuse bad-arg 2 "$((pos + 1))"
+				fam=6 ;;
+			-s) [ "$sf" -eq 0 ] || refuse bad-arg 2 "$((pos + 1))"
+				sf=1
+				sfp=$((pos + 1)) ;;
+			-d) [ "$df" -eq 0 ] || refuse bad-arg 2 "$((pos + 1))"
+				df=1
+				dfp=$((pos + 1)) ;;
+			*) break ;;
+		esac
+		shift
+		pos=$((pos + 1))
+	done
+	[ $# -ge 1 ] || refuse arg-count 2
+	pos=$((pos + 1))
+	case "$1" in
+		addr|address|route|link|neigh|rule) obj=$1 ;;
+		*) refuse bad-arg 2 "$pos" ;;
+	esac
+	shift
+	if [ "${1-}" = get ]; then
+		[ "$obj" = route ] || refuse bad-arg 2 "$((pos + 1))"
+		[ "$sf" -eq 0 ] || refuse bad-arg 2 "$sfp"
+		[ "$df" -eq 0 ] || refuse bad-arg 2 "$dfp"
+		shift
+		[ $# -eq 1 ] || refuse arg-count 2
+		case "$1" in -*) refuse bad-arg 2 "$((pos + 2))" ;; esac
+		is_host "$1" || refuse bad-arg 2 "$((pos + 2))"
+		host=$1
+		set -- "$IP"
+		[ "$fam" -eq 0 ] || set -- "$@" "-$fam"
+		set -- "$@" route get "$host"
+		read_run "$@"
+		return
+	fi
+	if [ "${1-}" = show ] || [ "${1-}" = list ]; then
+		act=$1
+		shift
+		pos=$((pos + 1))
+	fi
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			dev)
+				case "$obj" in addr|address|link|neigh|route) ;; *) refuse bad-arg 2 "$((pos + 1))" ;; esac
+				[ -z "$dev" ] || refuse bad-arg 2 "$((pos + 1))"
+				[ $# -ge 2 ] || refuse arg-count 2
+				case "$2" in -*) refuse bad-arg 2 "$((pos + 2))" ;; esac
+				is_iface "$2" || refuse bad-arg 2 "$((pos + 2))"
+				dev=$2
+				shift 2
+				pos=$((pos + 2))
+				;;
+			table)
+				case "$obj" in route|rule) ;; *) refuse bad-arg 2 "$((pos + 1))" ;; esac
+				[ -z "$tbl" ] || refuse bad-arg 2 "$((pos + 1))"
+				[ $# -ge 2 ] || refuse arg-count 2
+				case "$2" in -*) refuse bad-arg 2 "$((pos + 2))" ;; esac
+				is_table "$2" || refuse bad-arg 2 "$((pos + 2))"
+				tbl=$2
+				shift 2
+				pos=$((pos + 2))
+				;;
+			*) refuse bad-arg 2 "$((pos + 1))" ;;
+		esac
+	done
+	set -- "$IP"
+	[ "$fam" -eq 0 ] || set -- "$@" "-$fam"
+	[ "$sf" -eq 0 ] || set -- "$@" -s
+	[ "$df" -eq 0 ] || set -- "$@" -d
+	set -- "$@" "$obj"
+	[ -n "$act" ] && set -- "$@" "$act"
+	[ -n "$dev" ] && set -- "$@" dev "$dev"
+	[ -n "$tbl" ] && set -- "$@" table "$tbl"
+	read_run "$@"
+}
+# read_ifstatus: design 3.8 row ifstatus.
+read_ifstatus() {
+	[ "$#" -eq 2 ] || refuse arg-count 2
+	is_iface "$2" || refuse bad-arg 2 2
+	set -- "$IFSTATUS" "$2"
+	read_run "$@"
+}
+
+# read_fw4: design 3.8 row fw4.
+read_fw4() {
+	[ "$#" -eq 2 ] || refuse arg-count 2
+	case "$2" in
+		check|print) ;;
+		*) refuse bad-arg 2 2 ;;
+	esac
+	set -- "$FW4" "$2"
+	read_run "$@"
+}
+
+# read_nft: design 3.8 row nft.
+read_nft() {
+	[ "$#" -ge 2 ] || refuse arg-count 2
+	case "$2" in
+		list) ;;
+		*) refuse bad-arg 2 2 ;;
+	esac
+	case "$#" in
+		3)
+			case "$3" in
+				ruleset|tables) ;;
+				*) refuse bad-arg 2 3 ;;
+			esac
+			;;
+		5)
+			case "$3" in
+				table) ;;
+				*) refuse bad-arg 2 3 ;;
+			esac
+			is_nftfam "$4" || refuse bad-arg 2 4
+			is_nftname "$5" || refuse bad-arg 2 5
+			;;
+		6)
+			case "$3" in
+				chain|set|map|counter|quota|limit|flowtable) ;;
+				*) refuse bad-arg 2 3 ;;
+			esac
+			is_nftfam "$4" || refuse bad-arg 2 4
+			is_nftname "$5" || refuse bad-arg 2 5
+			is_nftname "$6" || refuse bad-arg 2 6
+			;;
+		2|4|*) refuse arg-count 2 ;;
+	esac
+	shift
+	set -- "$NFT" "$@"
+	read_run "$@"
+}
+
+# read_cat: design 3.8 row cat; /etc/config files must be regular, not symlinks.
+read_cat() {
+	local p cfg
+	[ "$#" -eq 2 ] || refuse arg-count 2
+	p=$2
+	case "$p" in
+		/etc/openwrt_release|/tmp/dhcp.leases|/proc/uptime|/proc/loadavg|/proc/meminfo) ;;
+		/etc/config/*)
+			cfg=${p#/etc/config/}
+			case "$cfg" in
+				-*) refuse bad-arg 2 2 ;;
+			esac
+			is_cfg "$cfg" || refuse bad-arg 2 2
+			[ -f "$R$p" ] || refuse bad-arg 2 2
+			[ ! -L "$R$p" ] || refuse bad-arg 2 2
+			;;
+		*) refuse bad-arg 2 2 ;;
+	esac
+	read_run cat "$R$p"
+}
+
+# read_iwinfo: design 3.8 row iwinfo; scan is refused.
+read_iwinfo() {
+	case "$#" in
+		1) ;;
+		2)
+			is_iface "$2" || refuse bad-arg 2 2
+			;;
+		3)
+			is_iface "$2" || refuse bad-arg 2 2
+			case "$3" in
+				info|assoclist|txpowerlist|freqlist|countrylist|htmodelist) ;;
+				*) refuse bad-arg 2 3 ;;
+			esac
+			;;
+		*) refuse arg-count 2 ;;
+	esac
+	shift
+	set -- "$IWINFO" "$@"
+	read_run "$@"
+}
+
+# read_netstat: design 3.8 row netstat; one token -[alnptuwxr]{1,8}.
+read_netstat() {
+	[ "$#" -le 2 ] || refuse arg-count 2
+	[ "$#" -eq 2 ] || { set -- "$NETSTAT"; read_run "$@"; return; }
+	case "$2" in
+		-[alnptuwxr]*) ;;
+		*) refuse bad-arg 2 2 ;;
+	esac
+	case "${2#-}" in
+		''|*[!alnptuwxr]*) refuse bad-arg 2 2 ;;
+	esac
+	[ "${#2}" -le 9 ] || refuse bad-arg 2 2
+	set -- "$NETSTAT" "$2"
+	read_run "$@"
+}
+
+# read_df: design 3.8 row df; one token -[hkPT]{1,4}.
+read_df() {
+	[ "$#" -le 2 ] || refuse arg-count 2
+	[ "$#" -eq 2 ] || { set -- "$DF"; read_run "$@"; return; }
+	case "$2" in
+		-[hkPT]*) ;;
+		*) refuse bad-arg 2 2 ;;
+	esac
+	case "${2#-}" in
+		''|*[!hkPT]*) refuse bad-arg 2 2 ;;
+	esac
+	[ "${#2}" -le 5 ] || refuse bad-arg 2 2
+	set -- "$DF" "$2"
+	read_run "$@"
+}
+
+# read_free: design 3.8 row free.
+read_free() {
+	[ "$#" -le 2 ] || refuse arg-count 2
+	[ "$#" -eq 2 ] || { set -- "$FREE"; read_run "$@"; return; }
+	case "$2" in
+		-b|-k|-m|-g|-h) ;;
+		*) refuse bad-arg 2 2 ;;
+	esac
+	set -- "$FREE" "$2"
+	read_run "$@"
+}
+
+# read_uptime: design 3.8 row uptime.
+read_uptime() {
+	[ "$#" -eq 1 ] || refuse arg-count 2
+	set -- "$UPTIME"
+	read_run "$@"
+}
+
+# read_uname: design 3.8 row uname; one token -[asnrvmpio]{1,9}.
+read_uname() {
+	[ "$#" -le 2 ] || refuse arg-count 2
+	[ "$#" -eq 2 ] || { set -- "$UNAME"; read_run "$@"; return; }
+	case "$2" in
+		-[asnrvmpio]*) ;;
+		*) refuse bad-arg 2 2 ;;
+	esac
+	case "${2#-}" in
+		''|*[!asnrvmpio]*) refuse bad-arg 2 2 ;;
+	esac
+	[ "${#2}" -le 10 ] || refuse bad-arg 2 2
+	set -- "$UNAME" "$2"
+	read_run "$@"
+}
+
+# read_wifi: design 3.8 row wifi.
+read_wifi() {
+	[ "$#" -eq 2 ] || refuse arg-count 2
+	case "$2" in
+		status) ;;
+		*) refuse bad-arg 2 2 ;;
+	esac
+	set -- "$WIFI" status
+	read_run "$@"
+}
+
+# read_logread: design 3.8 row logread; -e and -l, each at most once, any order.
+read_logread() {
+	case "$#" in
+		1) set -- "$LOGREAD" ;;
+		3)
+			case "$2" in
+				-e)
+					is_logpat "$3" || refuse bad-arg 2 3
+					set -- "$LOGREAD" -e "$3"
+					;;
+				-l)
+					is_lines "$3" || refuse bad-arg 2 3
+					set -- "$LOGREAD" -l "$3"
+					;;
+				*) refuse bad-arg 2 2 ;;
+			esac
+			;;
+		5)
+			case "$2" in
+				-e)
+					case "$4" in
+						-l) ;;
+						*) refuse bad-arg 2 4 ;;
+					esac
+					is_logpat "$3" || refuse bad-arg 2 3
+					is_lines "$5" || refuse bad-arg 2 5
+					set -- "$LOGREAD" -e "$3" -l "$5"
+					;;
+				-l)
+					case "$4" in
+						-e) ;;
+						*) refuse bad-arg 2 4 ;;
+					esac
+					is_lines "$3" || refuse bad-arg 2 3
+					is_logpat "$5" || refuse bad-arg 2 5
+					set -- "$LOGREAD" -l "$3" -e "$5"
+					;;
+				*) refuse bad-arg 2 2 ;;
+			esac
+			;;
+		*) refuse arg-count 2 ;;
+	esac
+	read_run "$@"
+}
+
+# read_apk: design 3.8 row apk.
+read_apk() {
+	[ "$#" -ge 2 ] || refuse arg-count 2
+	case "$2" in
+		list) ;;
+		info) ;;
+		search) ;;
+		*) refuse bad-arg 2 2 ;;
+	esac
+	case "$2" in
+		list)
+			case "$#" in
+				2) set -- "$APK" list ;;
+				3)
+					case "$3" in
+						-I|-u|-a) set -- "$APK" list "$3" ;;
+						*)
+							is_apkname "$3" || refuse bad-arg 2 3
+							set -- "$APK" list "$3"
+							;;
+					esac
+					;;
+				4)
+					case "$3" in
+						-I|-u|-a) ;;
+						*) refuse bad-arg 2 3 ;;
+					esac
+					is_apkname "$4" || refuse bad-arg 2 4
+					set -- "$APK" list "$3" "$4"
+					;;
+				*) refuse arg-count 2 ;;
+			esac
+			;;
+		info)
+			case "$#" in
+				3)
+					is_apkname "$3" || refuse bad-arg 2 3
+					set -- "$APK" info "$3"
+					;;
+				4)
+					case "$3" in
+						-L|-d|-s|-R|-r) ;;
+						*) refuse bad-arg 2 3 ;;
+					esac
+					is_apkname "$4" || refuse bad-arg 2 4
+					set -- "$APK" info "$3" "$4"
+					;;
+				*) refuse arg-count 2 ;;
+			esac
+			;;
+		search)
+			[ "$#" -eq 3 ] || refuse arg-count 2
+			is_apkname "$3" || refuse bad-arg 2 3
+			set -- "$APK" search "$3"
+			;;
+	esac
+	read_run "$@"
+}
+
+# read_ping: design 3.8 row ping.
+read_ping() {
+	[ "$#" -eq 4 ] || refuse arg-count 2
+	case "$2" in
+		-c) ;;
+		*) refuse bad-arg 2 2 ;;
+	esac
+	is_count "$3" || refuse bad-arg 2 3
+	case "$4" in -*) refuse bad-arg 2 4 ;; esac
+	is_host "$4" || refuse bad-arg 2 4
+	set -- "$PING" -c "$3" -W 2 "$4"
+	read_run "$@"
+}
+
+# read_traceroute: design 3.8 row traceroute.
+read_traceroute() {
+	[ "$#" -eq 2 ] || refuse arg-count 2
+	case "$2" in -*) refuse bad-arg 2 2 ;; esac
+	is_host "$2" || refuse bad-arg 2 2
+	set -- "$TRACEROUTE" -m 10 -q 1 -w 2 "$2"
+	read_run "$@"
+}
+
+# read_nslookup: design 3.8 row nslookup.
+read_nslookup() {
+	case "$#" in
+		2|3) ;;
+		*) refuse arg-count 2 ;;
+	esac
+	case "$2" in -*) refuse bad-arg 2 2 ;; esac
+	is_host "$2" || refuse bad-arg 2 2
+	if [ "$#" -eq 3 ]; then
+		case "$3" in -*) refuse bad-arg 2 3 ;; esac
+		is_host "$3" || refuse bad-arg 2 3
+	fi
+	shift
+	set -- "$NSLOOKUP" "$@"
+	read_run "$@"
+}
+
+# read_wifiscan: design P9 row wifiscan; the request 'read wifiscan radioN'
+# runs one Wi-Fi scan with the router's own radio and prints the raw ubus
+# JSON, unmodified. The radio name is the caller's word (radio[0-9]{1,2});
+# the router resolves it to a phy with ubus and scans with that phy, so no
+# netdev is needed and the scan works with the APs off. One scan per radio
+# per 60 s; the gate is the stamp file $R/tmp/newton/ws.<radio> (see
+# ws_gate_check).
+#
+# The order is fixed (design P9):
+#   1. the radio -> phy resolution, BEFORE the program lock: the ubus call
+#      is bounded 25 s and the lock is never held across a ubus call, so a
+#      hung rpcd cannot block every change verb for the whole bound;
+#   2. the program lock (fd 8), the uptime read INSIDE it (so the stamp is
+#      not stale by the length of the lock wait), the rate-limit check and
+#      the stamp write: one critical section, so two callers cannot both
+#      pass the gate;
+#   3. the lock released, then the scan: the stamp is the gate from then
+#      on, so a scan never blocks a change.
+read_wifiscan() {
+	local radio phy json rc nbytes
+	[ "$#" -eq 2 ] || refuse arg-count 2
+	radio=$2
+	case "$radio" in
+		radio[0-9]|radio[0-9][0-9]) ;;
+		*) refuse bad-arg 2 2 ;;
+	esac
+	json=$(printf '{"section":"%s"}' "$radio")
+	ubus_capture "$UBUS" call iwinfo phyname "$json"
+	rc=$?
+	case "$rc" in
+		0) ;;
+		124) printf 'error read-timeout\n' >&2; return 124 ;;
+		127) return 127 ;;
+		*) refuse no-radio 2 ;;
+	esac
+	# ubus prints {"phyname": "phyN"} over three lines (measured on Pulsar,
+	# 2026-10-24); take the value out of the compacted text and validate it.
+	phy=$(printf '%s' "$UBUS_OUT" | tr -d ' \t\r\n')
+	case "$phy" in
+		'{"phyname":"phy'*'"}') ;;
+		*) refuse no-radio 2 ;;
+	esac
+	phy=${phy#'{"phyname":"'}
+	phy=${phy%'"}'}
+	case "$phy" in
+		phy[0-9]|phy[0-9][0-9]) ;;
+		*) refuse no-radio 2 ;;
+	esac
+	lock_take 10
+	uptime_stamp
+	ws_gate_check "$radio" "$UP_STAMP"
+	ws_stamp_write "$radio" "$UP_STAMP"
+	exec 8>&-
+	json=$(printf '{"device":"%s"}' "$phy")
+	run_bounded 25 "$UBUS" call iwinfo scan "$json"
+	rc=$?
+	case "$rc" in
+		0) ;;
+		137|143)
+			cat "$ERR" >&2
+			printf 'error read-timeout\n' >&2
+			return 124
+			;;
+		255)
+			cat "$ERR" >&2
+			return 125
+			;;
+	esac
+	if [ "$rc" -ne 0 ]; then
+		cat "$ERR" >&2
+		return "$rc"
+	fi
+	nbytes=$(wc -c < "$OUT")
+	if [ "$nbytes" -gt 131072 ]; then
+		fail scan-too-large 1
+	fi
+	cat "$OUT"
+	return 0
+}
+
+# cmd_read VERB ARGS...: design 3.5e; dispatch on the verb (3.8 table).
+cmd_read() {
+	case "$1" in
+		uci) read_uci "$@" ;;
+		ubus) read_ubus "$@" ;;
+		ip) read_ip "$@" ;;
+		ifstatus) read_ifstatus "$@" ;;
+		fw4) read_fw4 "$@" ;;
+		nft) read_nft "$@" ;;
+		cat) read_cat "$@" ;;
+		iwinfo) read_iwinfo "$@" ;;
+		netstat) read_netstat "$@" ;;
+		df) read_df "$@" ;;
+		free) read_free "$@" ;;
+		uptime) read_uptime "$@" ;;
+		uname) read_uname "$@" ;;
+		wifi) read_wifi "$@" ;;
+		logread) read_logread "$@" ;;
+		apk) read_apk "$@" ;;
+		ping) read_ping "$@" ;;
+		traceroute) read_traceroute "$@" ;;
+		nslookup) read_nslookup "$@" ;;
+		wifiscan) read_wifiscan "$@" ;;
+		*) refuse bad-arg 2 1 ;;
+	esac
+}
+
+# cmd_approval_selftest NONCE: direct-mode proof of the installed key
+# (design 3.5f). The dispatcher has already enforced direct mode.
+cmd_approval_selftest() {
+	local nonce="$1" NL msg token
+	approval_key_value || fail approval-key-missing 3
+	NL='
+'
+	msg="newton-selftest-v1${NL}${nonce}${NL}"
+	token=$(hmac "$KEY_HEX" "$msg")
+	printf 'approval-selftest %s %s\n' "$nonce" "$token"
+}
+
+# ---- 8. main (design 3.1 step 6) ----
+
+main() {
+	local rc
+	sweep_scratch
+	compute_from
+	detect_mode "$@"
+	if [ "$FORCED" -eq 1 ]; then
+		read_request
+		IFS=' '
+		# shellcheck disable=SC2086  # word splitting is the point (design 3.2 step 5)
+		set -- $REQ_TOKENS
+		unset IFS
+	else
+		check_argv_request "$@"
+	fi
+	handle "$@"
+	rc=$?
+	[ "$rc" -ne 255 ] || rc=1
+	RC=$rc
+	exit "$rc"
+}
+
+main "$@"

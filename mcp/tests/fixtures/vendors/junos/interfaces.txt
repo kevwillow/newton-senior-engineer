@@ -1,0 +1,10 @@
+# synthetic
+Interface               Admin   Link    Proto    Local
+ge-0/0/0                up      up      up
+ge-0/0/0.0              up      up      up      inet 192.0.2.1/24
+ge-0/0/1                up      up      up
+ge-0/0/2                down    down    down
+lo0                     up      up      up
+lo0.0                   up      up      up      inet 198.51.100.1/32
+fxp0                    up      up      up
+fxp0.0                  up      up      up      inet 203.0.113.1/24

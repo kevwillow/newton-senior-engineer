@@ -1,0 +1,44 @@
+platform = "junos"
+
+[[getter]]
+id = "version"
+command = "show version"
+why = "Shows the Junos release and hardware model."
+expect = ["Junos: *"]
+enabled = true
+verified = "lab:vjunos:26.2R1.7:2026-10-18"
+os_range = "26.2R1.7"
+source = "https://www.juniper.net/documentation/"
+error_markers = ["unknown command", "(?m)^error: ", "is ambiguous"]
+
+[[getter]]
+id = "interfaces"
+command = "show interfaces terse"
+why = "Lists interfaces with admin and link state and their addresses in terse form."
+expect = ["Interface Admin Link"]
+enabled = true
+verified = "lab:vjunos:26.2R1.7:2026-10-18"
+os_range = "26.2R1.7"
+source = "https://www.juniper.net/documentation/"
+error_markers = ["unknown command", "(?m)^error: ", "is ambiguous"]
+
+[[getter]]
+id = "routes"
+command = "show route"
+why = "Shows the routing tables with active routes and next hops."
+expect = ["* * destinations, * routes"]
+enabled = true
+verified = "lab:vjunos:26.2R1.7:2026-10-18"
+os_range = "26.2R1.7"
+source = "https://www.juniper.net/documentation/"
+error_markers = ["unknown command", "(?m)^error: ", "is ambiguous"]
+
+[[getter]]
+id = "running_config"
+command = "show configuration"
+why = "Shows the committed configuration (disabled until a lab proves it)."
+expect = ["version *"]
+enabled = false
+verified = "unverified"
+source = "https://www.juniper.net/documentation/"
+error_markers = ["unknown command", "(?m)^error: ", "is ambiguous"]

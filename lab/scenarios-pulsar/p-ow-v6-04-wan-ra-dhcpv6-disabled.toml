@@ -1,0 +1,43 @@
+# PORT of ow-v6-04. Changed: lab-r1 -> pulsar, r1_wan_ip -> p_wan_ip, regression -> pulsar's default list. wan device is `wan` (lab-r1: eth1); dhcp_state_save is the cloned step.
+name = "p-ow-v6-04-wan-ra-dhcpv6-disabled"
+description = "OW-V6-04: dhcp.wan.ra='disabled' and dhcp.wan.dhcpv6='disabled' (the section has only interface and ignore='1' on stock, so both are staged as new options and the apply is confirmed). It must change nothing that runs: odhcpd already ignores a dhcp section that has no ra/dhcpv6/ndp mode set, and dnsmasq returns at ignore='1' before it reads either option. There is no effect, nothing can fail before. The check is a guard on the live state: odhcpd answers `ubus call dhcp ipv6ra` and that list of the interfaces it serves RAs on does not contain the WAN device (read from `ifstatus wan`), so Newton rolls the change back if odhcpd died or started to serve the WAN. Posts: the uci options; odhcpd's list contains br-lan only (a planted ra='server' makes the interface appear, shown by hand on wan2); the live state is unchanged by the apply: the md5 of the conf the running dnsmasq was started with, the pids of dnsmasq and odhcpd (neither daemon restarts: measured) and odhcpd's ipv6ra list equal what the setup step saved before (the four lines of /tmp/dhcp-state.before); the conf has no ra-param line for the WAN device. The WAN wire is not probed: vmbr100 carries Pulsar, the physical test router (out of scope in step 2), so no RA or DHCPv6 server was planted there; the wan2 plant on the VM-only segment vmbr101 is the hand proof (results file)."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on", "dhcp_state_save"]
+regression = "default"
+probes = [["ra-absent", "wan"]]
+batch = '''
+set dhcp.wan.ra='disabled'
+set dhcp.wan.dhcpv6='disabled'
+'''
+
+[[post]]
+device = "pulsar"
+cmd = "echo \"dhcp.wan: ra=$(uci -q get dhcp.wan.ra) dhcpv6=$(uci -q get dhcp.wan.dhcpv6) ignore=$(uci -q get dhcp.wan.ignore)\""
+expect_stdout = '^dhcp\.wan: ra=disabled dhcpv6=disabled ignore=1$'
+
+[[post]]
+device = "pulsar"
+cmd = '''
+d=$(ifstatus wan | jsonfilter -e '@.l3_device')
+o=$(ubus call dhcp ipv6ra | tr -d ' \t\n')
+echo "wan device $d; odhcpd ipv6ra: $o"
+[ -n "$d" ] || exit 1
+case "$o" in *"\"$d\""*) exit 1;; esac
+case "$o" in '{"interfaces":{"br-lan":['*) exit 0;; esac
+exit 1'''
+expect_stdout = '^wan device wan; odhcpd ipv6ra: \{"interfaces":\{"br-lan":\['
+
+[[post]]
+device = "pulsar"
+cmd = '''
+c=; for p in $(pidof dnsmasq); do c=$(tr '\0' ' ' < /proc/$p/cmdline | sed -n 's/.*dnsmasq -C \([^ ]*\).*/\1/p'); [ -n "$c" ] && break; done
+[ -f "$c" ] || { echo "no conf found for the running dnsmasq"; exit 1; }
+{ echo "dnsmasq-conf-md5 $(md5sum < $c | cut -d' ' -f1)"; echo "dnsmasq-pids $(pidof dnsmasq | tr ' ' ',')"; echo "odhcpd-pids $(pidof odhcpd | tr ' ' ',')"; echo "ra-state $(ubus call dhcp ipv6ra | tr -d ' \t\n')"; } > /tmp/dhcp-state.after
+cmp -s /tmp/dhcp-state.before /tmp/dhcp-state.after; rc=$?
+d=$(ifstatus wan | jsonfilter -e '@.l3_device'); ra=$(grep -c "^ra-param=$d" "$c")
+echo "dnsmasq conf md5, dnsmasq and odhcpd pids and odhcpd ra state equal to the ones saved before the apply: $([ $rc = 0 ] && echo yes || echo NO); ra-param lines for $d: $ra"
+rm -f /tmp/dhcp-state.after
+[ $rc = 0 ] && [ "$ra" = 0 ]'''
+expect_stdout = '^dnsmasq conf md5, dnsmasq and odhcpd pids and odhcpd ra state equal to the ones saved before the apply: yes; ra-param lines for wan: 0$'

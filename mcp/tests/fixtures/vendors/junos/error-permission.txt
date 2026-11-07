@@ -1,0 +1,2 @@
+# synthetic
+error: permission denied

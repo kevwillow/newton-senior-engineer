@@ -1,0 +1,60 @@
+# PORT of dw-02-failback. Changed: lab-r1 -> pulsar (Pulsar's wan is device `wan` from lab-isp's ISP-A 10.100.0.1 and wan2 is `wan.101` from ISP-B 10.101.0.1; lab-isp's eth2/eth3, the nft counters and dualwan-lib.sh are unchanged); regression = the same checks plus p_client_on_pulsar.
+name = "p-dw-02-failback"
+description = "DW-02: the WAN-health tool restores wan (ISP-A, device `wan`) when the upstream comes back. The scenario makes the nft cut (the lab-isp eth2 drop, udp 67/68 still allowed), waits for the first connection to leave via ISP-B (`wan.101`), lifts the cut, and waits for the first connection after the lift to leave via ISP-A again while ISP-B stays at its baseline. It prints `failover_seconds=N` (cut to first ISP-B packet) and `failback_seconds=M` (lift to first ISP-A packet; up_after*(interval+K*timeout)+interval = 11 s upper bound under the lab batch with K=1). The same `batch` and the same lab-isp counters as dw-01. BEFORE the change no service means no demotion and no restoration, so wait_via B times out and the effect fails (no `failover_seconds` line). OBSERVATION: lab-isp nft counters."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+timeout = 240
+setup = ["dw_wanhealth_install", "dw_isp_target_on", "dw_isp_count_on"]
+cleanup = ["dw_isp_count_off", "dw_isp_target_off", "dw_cut_clear"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_client_on_pulsar", "client_internet", "client_dns", "client_dhcp"]
+probes = [["uci-equals", "newton_wanhealth.main.enabled", "1"]]
+batch = '''
+set newton_wanhealth.main=settings
+set newton_wanhealth.main.enabled='1'
+set newton_wanhealth.main.interval='3'
+set newton_wanhealth.main.timeout='1'
+set newton_wanhealth.main.down_after='3'
+set newton_wanhealth.main.up_after='2'
+add_list newton_wanhealth.main.target='198.51.100.9'
+add_list newton_wanhealth.main.iface='wan'
+add_list newton_wanhealth.main.iface='wan2'
+'''
+
+[[effect]]
+device = "local"
+timeout = 210
+cmd = '''
+. lab/dualwan-lib.sh
+WH_INTERVAL=3
+WH_TIMEOUT=1
+WH_DOWN_AFTER=3
+WH_UP_AFTER=2
+WH_TARGETS=1
+B1=$(wh_budget "$WH_DOWN_AFTER" "$WH_INTERVAL" "$WH_TIMEOUT" "$WH_TARGETS")
+B2=$(wh_budget "$WH_UP_AFTER" "$WH_INTERVAL" "$WH_TIMEOUT" "$WH_TARGETS")
+nwcut_off 2>/dev/null; nwdown_off 2>/dev/null
+fail() { echo "dw-02-failback: $1" >&2; nwcut_off; exit 1; }
+trap 'nwcut_off' EXIT
+wait_via A 20 || fail "baseline: not via ISP-A"
+nwcut_on
+R1=$(wait_via B 60) || fail "failover: timeout"
+echo "$R1"
+FAILOVER=${R1#*seconds=}
+[ "$FAILOVER" -le "$B1" ] || fail "failover over budget: $FAILOVER s > $B1 s"
+nwcut_off
+R2=$(wait_via A 60) || fail "failback: timeout"
+echo "$R2"
+FAILBACK=${R2#*seconds=}
+[ "$FAILBACK" -le "$B2" ] || fail "failback over budget: $FAILBACK s > $B2 s"
+echo "failover_seconds=$FAILOVER"
+echo "failback_seconds=$FAILBACK"
+echo "budget_seconds=$B1"
+echo "budget_seconds=$B2"
+'''
+expect_stdout = '^failover_seconds=[0-9]+$'
+
+[[post]]
+device = "pulsar"
+cmd = "uci -q get newton_wanhealth.main.up_after"
+expect_stdout = '^2$'

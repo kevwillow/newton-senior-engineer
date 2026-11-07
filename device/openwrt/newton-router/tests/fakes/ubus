@@ -1,0 +1,460 @@
+#!/usr/bin/python3
+"""ubus fake: a stateful Python replacement for the BusyBox stub.
+
+Old behaviour kept:
+  - call session list '{"ubus_rpc_session":"<SID>"}' exits 0 only for a SID
+    listed in <root>/control/sessions (one per line) after honouring
+    control/ubus.rc (exit with it when non-zero) and exits 4 otherwise.
+  - every other call logs "ubus <args>" to <root>/control/calls.log and then
+    honours control/ubus.{sleep,out,err,rc} (default exit 0).
+
+New behaviour (state in files under <root>/control/; every call is logged as
+"ubus <args>" to calls.log exactly as before, and the listed calls get one
+extra log line that the harness reads):
+  - call uci apply '{"rollback":true,"timeout":T,"ubus_rpc_session":SID}'
+      extra log: ubus uci-apply sid=<SID> t=<T> guard-pending=<0|1>
+      honour control/ubus.{sleep,out,err}; then control/apply.rc when that
+      file exists (non-zero: change nothing). On success: copy every file of
+      etc/config/ to control/rpcd-backup/ (replace that directory), copy
+      every file of control/staged/ (if the directory exists) over
+      etc/config/, and record control/rpcd-pending.json = {"sid": SID,
+      "deadline": int(<root>/proc/uptime) + T}.
+  - call uci confirm '{"ubus_rpc_session":SID}'
+      extra log: ubus uci-confirm sid=<SID> guard-pending=<0|1>
+      run control/confirm-hook via "sh <file>" with NEWTON_ROUTER_ROOT in the
+      environment if that file exists; exit control/confirm.rc when that
+      file exists and is non-zero; exit 5 when control/rpcd-lost exists or
+      no rollback is pending for that SID; else clear the pending rollback
+      (delete control/rpcd-pending.json) and exit 0.
+  - call uci rollback '{"ubus_rpc_session":SID}'
+      extra log: ubus uci-rollback sid=<SID>
+      exit control/rollback.rc when that file exists and is non-zero; exit
+      5 when nothing is pending; else restore control/rpcd-backup/ over
+      etc/config/, clear the pending rollback, exit 0.
+  - call session destroy '{"ubus_rpc_session":SID}'
+      remove the SID from control/sessions, exit 0.
+  - call iwinfo phyname '{"section":"radioN"}'
+      the radio -> phy resolution of the wifiscan verb. The reply comes from
+      control/iwinfo.phyname.out (the exact text, so a test can answer
+      junk); without it from control/iwinfo.phyname.map ("radio0 phy0" lines:
+      a section that is not in the map does not exist and answers rc 252
+      "Not found", as ubus does); without either, radioN answers phyN.
+      control/iwinfo.phyname.sleep delays it, control/iwinfo.phyname.rc is
+      its exit code.  After the delay the call records whether the
+      router program's lock was held while it ran, in
+      control/iwinfo.phyname.lock ("free", "held" or "unknown"): the
+      program takes the lock on fd 8 and closes fd 8 for the child, so a
+      separate open plus a non-blocking flock on tmp/newton/flock says
+      whether the parent holds it.
+  - call iwinfo scan '{"device":"phyN"}'
+      the scan itself. control/iwinfo.scan.{out,err,rc,sleep} win over
+      control/ubus.{out,err,rc,sleep}.
+  - --tick (first argument; no log line)
+      when a rollback is pending and the uptime has reached its deadline,
+      restore control/rpcd-backup/ over etc/config/ and clear the pending
+      rollback.
+
+Every call also appends its argv as one JSON array per line to
+control/ubus.argv.json: the calls.log line joins the words with spaces and
+cannot show that a payload was passed as ONE argument.
+"""
+
+import json
+import os
+import re
+import shutil
+import sys
+import time
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - the tests run on Linux
+    fcntl = None
+
+
+ROOT = os.environ.get("NEWTON_ROUTER_ROOT", "")
+if not ROOT:
+    sys.stderr.write("error NEWTON_ROUTER_ROOT not set\n")
+    sys.exit(99)
+
+
+def ctrl(name):
+    return os.path.join(ROOT, "control", name)
+
+
+def read_ctrl(name):
+    path = ctrl(name)
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return f.read().rstrip("\n")
+
+
+def uptime_int():
+    with open(os.path.join(ROOT, "proc", "uptime")) as f:
+        return int(float(f.read().split()[0]))
+
+
+def guard_pending():
+    return 1 if os.path.exists(os.path.join(ROOT, "etc", "newton", "pending")) else 0
+
+
+def log(line):
+    with open(ctrl("calls.log"), "a") as f:
+        f.write(line + "\n")
+
+
+def record_argv(args):
+    """Every call's argv, one JSON array per line (control/ubus.argv.json).
+
+    The calls.log line joins the words with spaces, so it cannot show that
+    a payload was passed as ONE argument."""
+    with open(ctrl("ubus.argv.json"), "a") as f:
+        f.write(json.dumps(args) + "\n")
+
+
+def honour_ubus_generic():
+    s = read_ctrl("ubus.sleep")
+    if s:
+        try:
+            time.sleep(float(s))
+        except ValueError:
+            pass
+    o = read_ctrl("ubus.out")
+    if o:
+        sys.stdout.write(o)
+        if not o.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+    e = read_ctrl("ubus.err")
+    if e:
+        sys.stderr.write(e)
+        if not e.endswith("\n"):
+            sys.stderr.write("\n")
+        sys.stderr.flush()
+    rc = read_ctrl("ubus.rc")
+    if rc is not None:
+        try:
+            return int(rc)
+        except ValueError:
+            return 0
+    return 0
+
+
+def parse_sid(arg):
+    m = re.search(r'"ubus_rpc_session"\s*:\s*"([^"]*)"', arg)
+    return m.group(1) if m else ""
+
+
+def parse_timeout(arg):
+    m = re.search(r'"timeout"\s*:\s*(\d+)', arg)
+    return int(m.group(1)) if m else 0
+
+
+def handle_session_list(arg):
+    rc = read_ctrl("ubus.rc")
+    if rc is not None:
+        try:
+            rci = int(rc)
+        except ValueError:
+            rci = 0
+        if rci != 0:
+            sys.exit(rci)
+    sid = parse_sid(arg)
+    if not sid:
+        sys.exit(4)
+    sessions = ctrl("sessions")
+    if os.path.exists(sessions):
+        with open(sessions) as f:
+            for line in f:
+                if line.strip() == sid:
+                    sys.exit(0)
+    sys.exit(4)
+
+
+def json_string(arg, key):
+    """The value of a JSON string field of the ubus payload."""
+    m = re.search(r'"%s"\s*:\s*"([^"]*)"' % re.escape(key), arg)
+    return m.group(1) if m else ""
+
+
+def phy_for_section(section):
+    """The phy of a radio section, or None when the section does not exist.
+
+    control/iwinfo.phyname.map ("radio0 phy0" per line) wins; a section
+    that is not in the map answers rc 252 "Not found", as ubus does for an
+    unknown section. Without the map file the default is radioN -> phyN."""
+    path = ctrl("iwinfo.phyname.map")
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) == 2 and parts[0] == section:
+                    return parts[1]
+        return None
+    digits = re.sub(r"\D", "", section)
+    return "phy" + (digits or "0")
+
+
+def lock_state():
+    """Whether the router program's lock is held while this call runs.
+
+    The program takes the program lock on fd 8 (an flock on
+    tmp/newton/flock) and closes fd 8 for every child, so a separate
+    open plus a non-blocking flock on the same file says whether the
+    parent holds the lock right now.
+    """
+    if fcntl is None:
+        return "unknown"
+    path = os.path.join(ROOT, "tmp", "newton", "flock")
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        return "unknown"
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return "held"
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return "free"
+    finally:
+        os.close(fd)
+
+
+def handle_iwinfo_phyname(arg):
+    section = json_string(arg, "section")
+    s = read_ctrl("iwinfo.phyname.sleep")
+    if s:
+        try:
+            time.sleep(float(s))
+        except ValueError:
+            pass
+    with open(ctrl("iwinfo.phyname.lock"), "w") as f:
+        f.write(lock_state() + "\n")
+    rc = read_ctrl("iwinfo.phyname.rc")
+    if rc is not None:
+        try:
+            sys.exit(int(rc))
+        except ValueError:
+            sys.exit(0)
+    out = read_ctrl("iwinfo.phyname.out")
+    if out is None:
+        out = phy_for_section(section)
+        if out is None:
+            sys.stderr.write("Not found\n")
+            sys.exit(252)
+    if read_ctrl("iwinfo.phyname.out") is None:
+        out = '{\n\t"phyname": "%s"\n}' % out
+    sys.stdout.write(out + "\n")
+    sys.stdout.flush()
+    sys.exit(0)
+
+
+def handle_iwinfo_scan(arg):
+    s = read_ctrl("iwinfo.scan.sleep")
+    if s is None:
+        s = read_ctrl("ubus.sleep")
+    if s:
+        try:
+            time.sleep(float(s))
+        except ValueError:
+            pass
+    o = read_ctrl("iwinfo.scan.out")
+    if o is None:
+        o = read_ctrl("ubus.out")
+    if o is not None:
+        sys.stdout.write(o)
+        if not o.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+    e = read_ctrl("iwinfo.scan.err")
+    if e is None:
+        e = read_ctrl("ubus.err")
+    if e:
+        sys.stderr.write(e)
+        if not e.endswith("\n"):
+            sys.stderr.write("\n")
+        sys.stderr.flush()
+    rc = read_ctrl("iwinfo.scan.rc")
+    if rc is None:
+        rc = read_ctrl("ubus.rc")
+    if rc is not None:
+        try:
+            sys.exit(int(rc))
+        except ValueError:
+            sys.exit(0)
+    sys.exit(0)
+
+
+def handle_uci_apply(arg):
+    sid = parse_sid(arg)
+    t = parse_timeout(arg)
+    log("ubus uci-apply sid={} t={} guard-pending={}".format(
+        sid, t, guard_pending()))
+    honour_ubus_generic()
+
+    rc = read_ctrl("apply.rc")
+    if rc is not None:
+        try:
+            rci = int(rc)
+        except ValueError:
+            rci = 0
+        if rci != 0:
+            sys.exit(rci)
+    backup = ctrl("rpcd-backup")
+    cfg = os.path.join(ROOT, "etc", "config")
+    if os.path.exists(backup):
+        shutil.rmtree(backup)
+    os.makedirs(backup)
+    for name in os.listdir(cfg):
+        src = os.path.join(cfg, name)
+        if os.path.isfile(src) and not os.path.islink(src):
+            shutil.copyfile(src, os.path.join(backup, name))
+    staged = ctrl("staged")
+    if os.path.isdir(staged):
+        for name in os.listdir(staged):
+            src = os.path.join(staged, name)
+            dst = os.path.join(cfg, name)
+            if os.path.isfile(src) and not os.path.islink(src):
+                shutil.copyfile(src, dst)
+    with open(ctrl("rpcd-pending.json"), "w") as f:
+        json.dump({"sid": sid, "deadline": uptime_int() + t}, f)
+    sys.exit(0)
+
+
+def handle_uci_confirm(arg):
+    sid = parse_sid(arg)
+    log("ubus uci-confirm sid={} guard-pending={}".format(
+        sid, guard_pending()))
+    hook = ctrl("confirm-hook")
+    if os.path.exists(hook):
+        env = dict(os.environ)
+        env["NEWTON_ROUTER_ROOT"] = ROOT
+        subprocess_run = os.system('sh "{}"'.format(hook))
+        del subprocess_run
+    rc = read_ctrl("confirm.rc")
+    if rc is not None:
+        try:
+            rci = int(rc)
+        except ValueError:
+            rci = 0
+        if rci != 0:
+            sys.exit(rci)
+    if os.path.exists(ctrl("rpcd-lost")):
+        sys.exit(5)
+    pending_path = ctrl("rpcd-pending.json")
+    if not os.path.exists(pending_path):
+        sys.exit(5)
+    with open(pending_path) as f:
+        try:
+            pending = json.load(f)
+        except ValueError:
+            sys.exit(5)
+    if pending.get("sid") != sid:
+        sys.exit(5)
+    os.unlink(pending_path)
+    sys.exit(0)
+
+
+def handle_uci_rollback(arg):
+    sid = parse_sid(arg)
+    log("ubus uci-rollback sid={}".format(sid))
+    rc = read_ctrl("rollback.rc")
+    if rc is not None:
+        try:
+            rci = int(rc)
+        except ValueError:
+            rci = 0
+        if rci != 0:
+            sys.exit(rci)
+    pending_path = ctrl("rpcd-pending.json")
+    if not os.path.exists(pending_path):
+        sys.exit(5)
+    backup = ctrl("rpcd-backup")
+    cfg = os.path.join(ROOT, "etc", "config")
+    if os.path.isdir(backup):
+        for name in os.listdir(backup):
+            src = os.path.join(backup, name)
+            dst = os.path.join(cfg, name)
+            if os.path.isfile(src) and not os.path.islink(src):
+                shutil.copyfile(src, dst)
+    os.unlink(pending_path)
+    sys.exit(0)
+
+
+def handle_session_destroy(arg):
+    sid = parse_sid(arg)
+    sessions = ctrl("sessions")
+    if os.path.exists(sessions):
+        with open(sessions) as f:
+            lines = f.readlines()
+        with open(sessions, "w") as f:
+            f.writelines(line for line in lines if line.strip() != sid)
+    sys.exit(0)
+
+
+def handle_tick():
+    pending_path = ctrl("rpcd-pending.json")
+    if not os.path.exists(pending_path):
+        return
+    try:
+        with open(pending_path) as f:
+            pending = json.load(f)
+    except ValueError:
+        return
+    if uptime_int() < pending.get("deadline", 0):
+        return
+    backup = ctrl("rpcd-backup")
+    cfg = os.path.join(ROOT, "etc", "config")
+    if os.path.isdir(backup):
+        for name in os.listdir(backup):
+            src = os.path.join(backup, name)
+            dst = os.path.join(cfg, name)
+            if os.path.isfile(src) and not os.path.islink(src):
+                shutil.copyfile(src, dst)
+    os.unlink(pending_path)
+
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] == "--tick":
+        handle_tick()
+        return
+    log("ubus " + " ".join(args))
+    record_argv(args)
+    if len(args) >= 4 and args[0] == "call" and args[1] == "session" and args[2] == "list":
+        handle_session_list(args[3])
+        return
+    if len(args) >= 4 and args[0] == "call":
+        target, sub, arg = args[1], args[2], args[3]
+        if target == "uci" and sub == "apply":
+            handle_uci_apply(arg)
+            return
+        if target == "uci" and sub == "confirm":
+            handle_uci_confirm(arg)
+            return
+        if target == "uci" and sub == "rollback":
+            handle_uci_rollback(arg)
+            return
+        if target == "iwinfo" and sub == "phyname":
+            handle_iwinfo_phyname(arg)
+            return
+        if target == "iwinfo" and sub == "scan":
+            handle_iwinfo_scan(arg)
+            return
+        if target == "session" and sub == "destroy":
+            handle_session_destroy(arg)
+            return
+    rc = honour_ubus_generic()
+    sys.exit(rc)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        sys.stderr.write("ubus fake crashed\n")
+        sys.exit(99)

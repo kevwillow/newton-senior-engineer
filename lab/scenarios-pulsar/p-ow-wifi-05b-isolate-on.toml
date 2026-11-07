@@ -1,0 +1,70 @@
+# OW-ZONE-03, the client isolation pair, half two: isolation ON on Pulsar's radio1 (5 GHz ch36 HE20, country US,
+# txpower 3 dBm). The same batch as p-ow-wifi-05a-isolate-off, byte for byte except wireless.default_radio1.isolate='1',
+# and the same effect with --expect-cross blocked. This half is the measurement the control half exists for.
+# The two stations are two vifs of the one Panda MT7921AU on lab-wifi (VM 9107, passed through from apollo) in one VRF
+# each: a single namespace cannot carry the cross ping (the kernel drops or loops the local-source frames, measured), so
+# each station's address lives in its own routing table and the ping leaves vrfa. Everything else is held constant, so the
+# one bit that changes between the halves is the one bit the pair measures.
+name = "p-ow-wifi-05b-isolate-on"
+description = "OW-ZONE-03, the client isolation pair, half two: client isolation ON. Interface wlan on radio1 (5 GHz, ch36, HE20, country US, txpower 3 dBm), dhcp section wlan, zone wlz (input/output/forward ACCEPT) with forwarding wlz to wan, and wireless.default_radio1 edited to disabled 0, ssid newton-test, network wlan, encryption sae-mixed, ieee80211w 1, isolate 1, with the key from the secret var. The effect is the same newton-wifi.py pair run as p-ow-wifi-05a-isolate-off: two vifs of the one Panda, each with its own wpa_supplicant, both waited for COMPLETED on the pinned BSSID, power save off, one VRF per station, an address outside the DHCP pool in each, a permanent neighbour entry for the other station both ways, the gateway pinged from each VRF, and then the station-to-station ping. What it proves here: with isolation on, the two stations still associate and each still reaches the gateway, and not one station-to-station echo comes back - isolation is the AP refusing to carry traffic between clients, and both halves of that are measured in the same run, because gw=ok and a=COMPLETED b=COMPLETED are in the one summary line the effect matches. That is why the pair exists: a blocked cross ping on its own would prove nothing, and this is the half that says the association and the gateway were healthy while it was blocked. The other half (p-ow-wifi-05a-isolate-off) is the control that says the same path works with isolation off. A post reads wireless.default_radio1.isolate back off the router and requires 1. The stations are two vifs of the one adapter and never two adapters: two vifs of the one Panda MT7921AU, each in its own VRF, and its combination limit #{managed, P2P-client} <= 2 is what the method rests on. The two VRFs are why a single namespace could not be used. The regression is Pulsar's baseline list; approval = true because the batch touches firewall."
+target = "pulsar"
+reset = ["pulsar"]
+reset_after = ["pulsar"]
+after_reset = ["p_radios_off"]
+approval = true
+expect = "confirmed"
+timeout = 300
+setup = ["wifi_script_install", "wifi_key_install", "wifi_prep"]
+cleanup = ["wifi_cleanup"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen", "p_client_on_pulsar"]
+probes = [["iface-field", "wlan", "up", "true"], ["uci-equals", "wireless.default_radio1.disabled", "0"]]
+batch = '''
+set network.wlan=interface
+set network.wlan.proto='static'
+set network.wlan.ipaddr='192.168.152.1'
+set network.wlan.netmask='255.255.255.0'
+set dhcp.wlan=dhcp
+set dhcp.wlan.interface='wlan'
+set dhcp.wlan.start='100'
+set dhcp.wlan.limit='50'
+set dhcp.wlan.leasetime='1h'
+set firewall.wlz=zone
+set firewall.wlz.name='wlz'
+set firewall.wlz.network='wlan'
+set firewall.wlz.input='ACCEPT'
+set firewall.wlz.output='ACCEPT'
+set firewall.wlz.forward='ACCEPT'
+set firewall.wlz_wan=forwarding
+set firewall.wlz_wan.src='wlz'
+set firewall.wlz_wan.dest='wan'
+set wireless.radio1.country='US'
+set wireless.radio1.channel='36'
+set wireless.radio1.htmode='HE20'
+set wireless.radio1.txpower='3'
+set wireless.default_radio1.disabled='0'
+set wireless.default_radio1.network='wlan'
+set wireless.default_radio1.ssid='newton-test'
+set wireless.default_radio1.encryption='sae-mixed'
+set wireless.default_radio1.ieee80211w='1'
+set wireless.default_radio1.isolate='1'
+set wireless.default_radio1.key='{wifi_psk}'
+'''
+
+# received=0 exactly: with isolation on nothing at all comes back. Before the apply neither station associates, so the
+# line is a=SCANNING b=SCANNING gw=fail and this expectation fails before the change too, which is what lets it be an
+# effect rather than a post.
+[[effect]]
+device = "lab-wifi"
+timeout = 200
+cmd = "sudo /usr/local/bin/newton-wifi.py pair --ssid newton-test --bssid {p_wifi_bssid} --freq 5180 --ieee80211w 1 --secs 40 --expect-cross blocked"
+expect_stdout = '^pair: a=COMPLETED b=COMPLETED gw=ok received=0/8$'
+
+[[post]]
+device = "pulsar"
+timeout = 30
+cmd = '''
+v=$(uci -q get wireless.default_radio1.isolate)
+[ "$v" = 1 ] || { echo "wireless.default_radio1.isolate is '$v', not 1" >&2; exit 1; }
+echo "isolate is 1 in the config"
+'''
+expect_stdout = '^isolate is 1 in the config$'

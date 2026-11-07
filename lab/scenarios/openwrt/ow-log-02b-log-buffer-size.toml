@@ -1,0 +1,39 @@
+name = "ow-log-02b-log-buffer-size"
+description = "OW-LOG-02 with log_buffer_size, the option the 25.12 log init script prefers: system.@system[0].log_buffer_size='512' while log_size keeps the stock '128'. The init script builds logd's -S from log_buffer_size when it is non-zero and from log_size only as the fallback, so logd must run with -S 512, not -S 128 (shown by the effect; hand run: with log_size='512' and log_buffer_size='256' logd gets -S 256, results file). Same check and effects as ow-log-02: logd's live arguments (-S 512, before -S 128) and the ring capacity (2000 lines of about 100 characters, about 300 KB, all kept by a 512 KB ring; a 128 KB ring keeps about 900). Post: log_buffer_size is 512 and log_size is still 128, so the size logd uses comes from the preferred option. Like ow-log-02 this restarts logd (see ow-log-02c for what that does to dnsmasq's logging)."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+probes = [["proc-args", "logd", "-S 512"]]
+batch = '''
+set system.@system[0].log_buffer_size='512'
+'''
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+for p in $(pidof logd); do c=$(tr '\0' ' ' < /proc/$p/cmdline); echo "logd command: $c"; done
+c=" $(tr '\0' ' ' < /proc/$(pidof logd | cut -d' ' -f1)/cmdline)"
+case "$c" in " /sbin/logd -S 512 "*) exit 0;; esac
+exit 1'''
+expect_stdout = '^logd command: /sbin/logd -S 512 $'
+
+[[effect]]
+device = "lab-r1"
+timeout = 90
+cmd = '''
+run=$RANDOM$RANDOM
+i=1; while [ $i -le 2000 ]; do echo "newton-fill $run $i xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; i=$((i+1)); done | logger -t newton-fill
+sleep 2
+n=$(logread | grep -c "newton-fill: newton-fill $run ")
+f=$(logread | grep -c "newton-fill: newton-fill $run 1 ")
+l=$(logread | grep -c "newton-fill: newton-fill $run 2000 ")
+echo "ring buffer kept $n of 2000 lines, first line kept=$f, last line kept=$l"
+[ "$n" -ge 1950 ] && [ "$f" = 1 ] && [ "$l" = 1 ]'''
+expect_stdout = '^ring buffer kept (19[5-9][0-9]|2000) of 2000 lines, first line kept=1, last line kept=1$'
+
+[[post]]
+device = "lab-r1"
+cmd = "echo \"log_size=$(uci -q get system.@system[0].log_size) log_buffer_size=$(uci -q get system.@system[0].log_buffer_size)\""
+expect_stdout = '^log_size=128 log_buffer_size=512$'

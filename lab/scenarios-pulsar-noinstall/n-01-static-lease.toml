@@ -1,0 +1,16 @@
+name = "n-01-static-lease"
+description = "No-install: a static DHCP lease is an auto plan, applied and confirmed; an owner script deletes it again. (no-install port of p-01)"
+target = "pulsar"
+access = "no-install"
+expect = "none"
+
+[[post]]
+device = "local"
+timeout = 900
+cmd = '{ni_env} {ni_py} -I {ni_shape} n01'
+expect_stdout = '== END fails=0'
+
+[[post]]
+device = "local"
+cmd = '''{pr} 'uci -q get dhcp.ni_h1; echo rc=$?''''
+expect_stdout = '^rc=1$'

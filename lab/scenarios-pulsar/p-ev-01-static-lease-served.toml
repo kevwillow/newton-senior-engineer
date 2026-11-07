@@ -1,0 +1,26 @@
+# PORT of ev-01-static-lease-served. Changed: lab-r1 -> pulsar; the client LAN is 192.168.151.0/24, so the probe server is 192.168.151.1 and the lease is 192.168.151.77; regression = the same checks plus p_client_on_pulsar.
+name = "p-ev-01-static-lease-served"
+description = "Same UCI change as p-01-static-lease (a dhcp host entry for 02:00:00:00:00:77 -> 192.168.151.77 on the client LAN), plus an on-the-wire check that dnsmasq really hands that address out for that MAC: a raw DHCPDISCOVER from chaddr 02:00:00:00:00:77 toward 192.168.151.1 must come back with yiaddr 192.168.151.77 (no REQUEST, so no lease is taken). Before the change dnsmasq offers a pool address for that MAC, so the effect fails before and passes after."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+timeout = 120
+setup = ["dhcp_probe_mac_on"]
+cleanup = ["dhcp_probe_mac_off"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_client_on_pulsar", "client_internet", "client_dns", "client_dhcp"]
+probes = [["conf-has", "dnsmasq", "substr", "present", "02:00:00:00:00:77"]]
+batch = """set dhcp.labtest=host
+set dhcp.labtest.name='labtest'
+set dhcp.labtest.mac='02:00:00:00:00:77'
+set dhcp.labtest.ip='192.168.151.77'"""
+
+[[effect]]
+device = "lab-client"
+timeout = 60
+cmd = "sudo python3 /tmp/newton-dhcp-probe-mac.py eth0 192.168.151.1 02:00:00:00:00:77"
+expect_stdout = '^chaddr 02:00:00:00:00:77 offered 192\.168\.151\.77$'
+
+[[post]]
+device = "pulsar"
+cmd = "uci get dhcp.labtest.ip"
+expect_stdout = "^192\\.168\\.151\\.77$"

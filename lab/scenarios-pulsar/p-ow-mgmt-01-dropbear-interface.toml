@@ -1,0 +1,30 @@
+# PORT of ow-mgmt-01. Changed: lab-r1 -> pulsar; mgmt address 10.109.0.11 -> 192.168.1.1 (pulsar has a single LAN, mgmt and client side are the same network);
+# the lab-client "refused on the client address" effect is dropped (no second network to be refused on); a post proves the agent host still reaches ssh on 192.168.1.1.
+name = "p-ow-mgmt-01-dropbear-interface"
+description = "OW-MGMT-01 on pulsar: dropbear Interface='lan' binds ssh to the lan address only (no wildcard listener); the agent host still reaches it."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+approval = true
+probes = [["listen", "tcp", "192.168.1.1", "22", "dropbear", "present"]]
+batch = '''
+set dropbear.@dropbear[0].Interface='lan'
+'''
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+netstat -tlnp | awk '$4=="192.168.1.1:22" && $7 ~ /dropbear/ {m=1} $4=="0.0.0.0:22"||$4==":::22"{w=1} END{print "mgmt-listener=" m+0 " wildcard-listener=" w+0; exit !(m&&!w)}'
+'''
+
+[[post]]
+device = "pulsar"
+cmd = "uci -q get dropbear.@dropbear[0].Interface"
+expect_stdout = '^lan$'
+
+[[post]]
+device = "local"
+cmd = "timeout 6 bash -c 'exec 3<>/dev/tcp/192.168.1.1/22' && echo agent-ssh-open"
+expect_stdout = '^agent-ssh-open$'

@@ -1,0 +1,13 @@
+network.@wg[0]=interface
+network.@wg[0].proto='wireguard'
+network.@wg[0].private_key='WGPRIVKEYaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa='
+network.@wg[0].preshared_key='WGPSKbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb='
+network.@wg[0].listen_port='51820'
+network.wan=interface
+network.wan.proto='pppoe'
+network.wan.username='fake-pppoe-user'
+network.wan.password='fake-pppoe-password-value'
+network.wan.device='eth0'
+network.loopback=interface
+network.loopback.proto='static'
+network.loopback.ipaddr='127.0.0.1'

@@ -1,0 +1,1494 @@
+{
+ "accepted": [
+  [
+   "fail"
+  ],
+  [
+   "ping",
+   "192.0.2.1"
+  ],
+  [
+   "ping",
+   "192.0.2.1",
+   "1"
+  ],
+  [
+   "resolve",
+   "openwrt.org"
+  ],
+  [
+   "resolve",
+   "openwrt.org",
+   "8.8.8.8"
+  ],
+  [
+   "service-running",
+   "dropbear",
+   "any"
+  ],
+  [
+   "service-running",
+   "dropbear",
+   "any",
+   "present"
+  ],
+  [
+   "uci-equals",
+   "network.lan.proto",
+   "static"
+  ],
+  [
+   "uci-unset",
+   "network.lan.proto"
+  ],
+  [
+   "listen",
+   "tcp",
+   "any",
+   "22",
+   "any",
+   "present"
+  ],
+  [
+   "nft-rule",
+   "inet",
+   "fw4",
+   "ruleset",
+   "present",
+   "dport 2222"
+  ],
+  [
+   "nft-rule",
+   "inet",
+   "fw4",
+   "ruleset",
+   "present",
+   "dport 2222",
+   "t1",
+   "t2",
+   "t3"
+  ],
+  [
+   "nft-rule-order",
+   "inet",
+   "fw4",
+   "input_wan",
+   "Allow-DHCP-Renew",
+   "Drop-Bogon-WAN"
+  ],
+  [
+   "nft-rule-near",
+   "inet",
+   "fw4",
+   "ruleset",
+   "limit",
+   "3",
+   "rate"
+  ],
+  [
+   "nft-set-has",
+   "inet",
+   "fw4",
+   "nw_block",
+   "192.0.2.1",
+   "only"
+  ],
+  [
+   "conf-has",
+   "dnsmasq",
+   "line",
+   "present",
+   "stop-dns-rebind"
+  ],
+  [
+   "proc-args",
+   "dropbear",
+   "-l br-lan"
+  ],
+  [
+   "proc-args",
+   "dropbear",
+   "-l br-lan",
+   "~e0",
+   "~e1",
+   "~e2",
+   "~e3",
+   "~e4",
+   "~e5",
+   "~e6"
+  ],
+  [
+   "iface-field",
+   "lan",
+   "up",
+   "true"
+  ],
+  [
+   "iface-absent",
+   "wan6"
+  ],
+  [
+   "sysctl-equals",
+   "ipv4/ip_forward",
+   "1"
+  ],
+  [
+   "ra-absent",
+   "wan"
+  ],
+  [
+   "log-has",
+   "present",
+   "dnsmasq["
+  ],
+  [
+   "log-has",
+   "present",
+   "dnsmasq[",
+   "x",
+   "y"
+  ],
+  [
+   "root-password-class",
+   "LOCKED"
+  ],
+  [
+   "nft-rule",
+   "inet",
+   "fw4",
+   "ruleset",
+   "present",
+   "x"
+  ],
+  [
+   "nft-rule",
+   "inet",
+   "fw4",
+   "ruleset",
+   "present",
+   "x1",
+   "x2",
+   "x3",
+   "x4"
+  ],
+  [
+   "proc-args",
+   "ntpd",
+   "~x"
+  ],
+  [
+   "proc-args",
+   "ntpd",
+   "~e0",
+   "~e1",
+   "~e2",
+   "~e3",
+   "~e4",
+   "~e5",
+   "~e6",
+   "~e7"
+  ],
+  [
+   "log-has",
+   "present",
+   "x"
+  ],
+  [
+   "log-has",
+   "present",
+   "x",
+   "y",
+   "z"
+  ],
+  [
+   "ping",
+   "192.0.2.1",
+   "2"
+  ],
+  [
+   "ping",
+   "192.0.2.1",
+   "3"
+  ],
+  [
+   "listen",
+   "tcp",
+   "any",
+   "1",
+   "any",
+   "present"
+  ],
+  [
+   "listen",
+   "tcp",
+   "any",
+   "65535",
+   "any",
+   "present"
+  ],
+  [
+   "nft-rule-near",
+   "inet",
+   "fw4",
+   "ruleset",
+   "a",
+   "1",
+   "b"
+  ],
+  [
+   "nft-rule-near",
+   "inet",
+   "fw4",
+   "ruleset",
+   "a",
+   "10",
+   "b"
+  ],
+  [
+   "log-has",
+   "absent",
+   "x"
+  ],
+  [
+   "log-has",
+   "eq:0",
+   "x"
+  ],
+  [
+   "log-has",
+   "eq:1",
+   "x"
+  ],
+  [
+   "log-has",
+   "eq:9999",
+   "x"
+  ],
+  [
+   "log-has",
+   "min:0",
+   "x"
+  ],
+  [
+   "log-has",
+   "min:1",
+   "x"
+  ],
+  [
+   "log-has",
+   "min:9999",
+   "x"
+  ],
+  [
+   "nft-set-has",
+   "inet",
+   "fw4",
+   "nw_block",
+   "192.0.2.1",
+   "present"
+  ],
+  [
+   "nft-set-has",
+   "inet",
+   "fw4",
+   "nw_block",
+   "192.0.2.1",
+   "absent"
+  ],
+  [
+   "service-running",
+   "dropbear",
+   "lan",
+   "present"
+  ],
+  [
+   "service-running",
+   "dropbear",
+   "lan",
+   "absent"
+  ],
+  [
+   "listen",
+   "tcp",
+   "wildcard",
+   "22",
+   "any",
+   "present"
+  ],
+  [
+   "listen",
+   "tcp",
+   "::",
+   "22",
+   "any",
+   "present"
+  ],
+  [
+   "listen",
+   "tcp",
+   "0.0.0.0",
+   "22",
+   "any",
+   "present"
+  ],
+  [
+   "listen",
+   "tcp",
+   "192.0.2.1",
+   "22",
+   "any",
+   "present"
+  ],
+  [
+   "listen",
+   "tcp",
+   "::1",
+   "22",
+   "any",
+   "present"
+  ],
+  [
+   "listen",
+   "udp",
+   "any",
+   "1900",
+   "miniupnpd",
+   "present"
+  ],
+  [
+   "nft-rule",
+   "ip",
+   "fw4",
+   "ruleset",
+   "present",
+   "x"
+  ],
+  [
+   "nft-rule",
+   "ip6",
+   "fw4",
+   "ruleset",
+   "present",
+   "x"
+  ],
+  [
+   "nft-rule",
+   "arp",
+   "fw4",
+   "ruleset",
+   "present",
+   "x"
+  ],
+  [
+   "nft-rule",
+   "bridge",
+   "fw4",
+   "ruleset",
+   "present",
+   "x"
+  ],
+  [
+   "nft-rule",
+   "netdev",
+   "fw4",
+   "ruleset",
+   "present",
+   "x"
+  ],
+  [
+   "nft-rule",
+   "inet",
+   "fw4",
+   "input_wan",
+   "present",
+   "x"
+  ],
+  [
+   "sysctl-equals",
+   "ipv4/a/b/c/d",
+   "1"
+  ],
+  [
+   "sysctl-equals",
+   "ipv4/a/b/c/d/e",
+   "1"
+  ],
+  [
+   "sysctl-equals",
+   "ipv4/conf/@dev:lab/forwarding",
+   "2"
+  ],
+  [
+   "sysctl-equals",
+   "ipv6/conf/@l3dev:wan6/disable_ipv6",
+   "1"
+  ],
+  [
+   "nft-set-has",
+   "inet",
+   "fw4",
+   "s",
+   "10.0.0.0/8:80",
+   "present"
+  ],
+  [
+   "iface-field",
+   "lan",
+   "l3_device",
+   "eth0"
+  ],
+  [
+   "root-password-class",
+   "EMPTY"
+  ],
+  [
+   "root-password-class",
+   "HASH"
+  ],
+  [
+   "root-password-class",
+   "NOROOT"
+  ],
+  [
+   "root-password-class",
+   "MULTIROOT"
+  ],
+  [
+   "conf-has",
+   "dnsmasq",
+   "line",
+   "present",
+   "x"
+  ],
+  [
+   "conf-has",
+   "dnsmasq",
+   "prefix",
+   "present",
+   "x"
+  ],
+  [
+   "conf-has",
+   "dnsmasq",
+   "substr",
+   "present",
+   "x"
+  ],
+  [
+   "proc-args",
+   "ntpd",
+   "!~x"
+  ],
+  [
+   "proc-args",
+   "ntpd",
+   "!-p 5053"
+  ],
+  [
+   "proc-args",
+   "ntpd",
+   "!!x"
+  ],
+  [
+   "proc-args",
+   "ntpd",
+   "-l",
+   "-I @dev:lab",
+   "-p pool.ntp.org",
+   "!~openwrt"
+  ],
+  [
+   "ping",
+   "aa-bb.cc:1"
+  ],
+  [
+   "resolve",
+   "openwrt.org",
+   "10.9.0.53"
+  ],
+  [
+   "uci-equals",
+   "firewall.@defaults[0].input",
+   "REJECT"
+  ],
+  [
+   "uci-equals",
+   "firewall.@zone[1].name",
+   "wan"
+  ],
+  [
+   "uci-unset",
+   "network.lan"
+  ],
+  [
+   "uci-unset",
+   "firewall.@defaults[0].synflood_protect"
+  ],
+  [
+   "uci-equals",
+   "network.lan.proto",
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  ],
+  [
+   "nft-rule",
+   "inet",
+   "fw4",
+   "ruleset",
+   "present",
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  ]
+ ],
+ "refused": [
+  {
+   "probe": [
+    "fail",
+    "x"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "ping",
+    "192.0.2.1",
+    "1",
+    "1"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "resolve",
+    "openwrt.org",
+    "8.8.8.8",
+    "8.8.8.8"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "service-running",
+    "dropbear",
+    "any",
+    "present",
+    "present"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "uci-equals",
+    "network.lan.proto",
+    "static",
+    "x"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "uci-unset",
+    "network.lan.proto",
+    "x"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "listen",
+    "tcp",
+    "any",
+    "22",
+    "any",
+    "present",
+    "x"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "nft-rule",
+    "inet",
+    "fw4",
+    "ruleset",
+    "present",
+    "dport 2222",
+    "t1",
+    "t2",
+    "t3",
+    "t1"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "nft-rule-order",
+    "inet",
+    "fw4",
+    "input_wan",
+    "Allow-DHCP-Renew",
+    "Drop-Bogon-WAN",
+    "x"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "nft-rule-near",
+    "inet",
+    "fw4",
+    "ruleset",
+    "limit",
+    "3",
+    "rate",
+    "x"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "nft-set-has",
+    "inet",
+    "fw4",
+    "nw_block",
+    "192.0.2.1",
+    "only",
+    "x"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "conf-has",
+    "dnsmasq",
+    "line",
+    "present",
+    "stop-dns-rebind",
+    "x"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "proc-args",
+    "dropbear",
+    "-l br-lan",
+    "~e0",
+    "~e1",
+    "~e2",
+    "~e3",
+    "~e4",
+    "~e5",
+    "~e6",
+    "~e0"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "iface-field",
+    "lan",
+    "up",
+    "true",
+    "x"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "iface-absent",
+    "wan6",
+    "x"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "sysctl-equals",
+    "ipv4/ip_forward",
+    "1",
+    "x"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "ra-absent",
+    "wan",
+    "x"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "log-has",
+    "present",
+    "dnsmasq[",
+    "x",
+    "y",
+    "x"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "root-password-class",
+    "LOCKED",
+    "x"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "nft-rule",
+    "inet",
+    "fw4",
+    "ruleset",
+    "present"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "proc-args",
+    "ntpd"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "log-has",
+    "present"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "ping",
+    "192.0.2.1",
+    "0"
+   ],
+   "reason": "bad-arg-2"
+  },
+  {
+   "probe": [
+    "ping",
+    "192.0.2.1",
+    "4"
+   ],
+   "reason": "bad-arg-2"
+  },
+  {
+   "probe": [
+    "listen",
+    "tcp",
+    "any",
+    "0",
+    "any",
+    "present"
+   ],
+   "reason": "bad-arg-3"
+  },
+  {
+   "probe": [
+    "listen",
+    "tcp",
+    "any",
+    "65536",
+    "any",
+    "present"
+   ],
+   "reason": "bad-arg-3"
+  },
+  {
+   "probe": [
+    "listen",
+    "tcp",
+    "any",
+    "022",
+    "any",
+    "present"
+   ],
+   "reason": "bad-arg-3"
+  },
+  {
+   "probe": [
+    "nft-rule-near",
+    "inet",
+    "fw4",
+    "ruleset",
+    "a",
+    "0",
+    "b"
+   ],
+   "reason": "bad-arg-5"
+  },
+  {
+   "probe": [
+    "nft-rule-near",
+    "inet",
+    "fw4",
+    "ruleset",
+    "a",
+    "11",
+    "b"
+   ],
+   "reason": "bad-arg-5"
+  },
+  {
+   "probe": [
+    "log-has",
+    "eq:01",
+    "x"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "log-has",
+    "eq:10000",
+    "x"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "log-has",
+    "min:01",
+    "x"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "log-has",
+    "min:10000",
+    "x"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "log-has",
+    "bogus",
+    "x"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "log-has",
+    "eq:",
+    "x"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "log-has",
+    "min:1:2",
+    "x"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "nft-set-has",
+    "inet",
+    "fw4",
+    "s",
+    "1.2.3.4",
+    "maybe"
+   ],
+   "reason": "bad-arg-5"
+  },
+  {
+   "probe": [
+    "service-running",
+    "Dropbear",
+    "any"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "service-running",
+    "drop bear",
+    "any"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "service-running",
+    "dropbear",
+    "0bad!x"
+   ],
+   "reason": "bad-arg-2"
+  },
+  {
+   "probe": [
+    "service-running",
+    "dropbear",
+    "any",
+    "maybe"
+   ],
+   "reason": "bad-arg-3"
+  },
+  {
+   "probe": [
+    "listen",
+    "tcp",
+    ":",
+    "22",
+    "any",
+    "present"
+   ],
+   "reason": "bad-arg-2"
+  },
+  {
+   "probe": [
+    "listen",
+    "tcp",
+    "tcp!1",
+    "22",
+    "any",
+    "present"
+   ],
+   "reason": "bad-arg-2"
+  },
+  {
+   "probe": [
+    "listen",
+    "tcp",
+    "a",
+    "22",
+    "any",
+    "present"
+   ],
+   "reason": "bad-arg-2"
+  },
+  {
+   "probe": [
+    "listen",
+    "tcp",
+    "0000000000000000000000000000000000000000000000",
+    "22",
+    "any",
+    "present"
+   ],
+   "reason": "bad-arg-2"
+  },
+  {
+   "probe": [
+    "listen",
+    "tcp",
+    "any",
+    "22",
+    "@prog",
+    "present"
+   ],
+   "reason": "bad-arg-4"
+  },
+  {
+   "probe": [
+    "listen",
+    "tcp",
+    "any",
+    "22",
+    "any",
+    "present",
+    "x"
+   ],
+   "reason": "arg-count"
+  },
+  {
+   "probe": [
+    "listen",
+    "tcp6",
+    "any",
+    "22",
+    "any",
+    "present"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "nft-rule",
+    "inetx",
+    "fw4",
+    "ruleset",
+    "present",
+    "x"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "nft-rule",
+    "inet",
+    "fw4!",
+    "ruleset",
+    "present",
+    "x"
+   ],
+   "reason": "bad-arg-2"
+  },
+  {
+   "probe": [
+    "nft-rule",
+    "inet",
+    "fw4",
+    "ruleset!",
+    "present",
+    "x"
+   ],
+   "reason": "bad-arg-3"
+  },
+  {
+   "probe": [
+    "nft-rule",
+    "inet",
+    "fw4",
+    "input wan",
+    "present",
+    "x"
+   ],
+   "reason": "bad-arg-3"
+  },
+  {
+   "probe": [
+    "sysctl-equals",
+    "ipv4/conf/.",
+    "1"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "sysctl-equals",
+    "ipv4/conf/..",
+    "1"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "sysctl-equals",
+    "ipv4/a/b/c/d/e/f",
+    "1"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "sysctl-equals",
+    "ipv4",
+    "1"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "sysctl-equals",
+    "fs/file-max",
+    "1"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "sysctl-equals",
+    "ipv4/conf/a!b",
+    "1"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "nft-set-has",
+    "inet",
+    "fw4",
+    "s",
+    "!elem",
+    "present"
+   ],
+   "reason": "bad-arg-4"
+  },
+  {
+   "probe": [
+    "iface-field",
+    "lan",
+    "upx",
+    "true"
+   ],
+   "reason": "bad-arg-2"
+  },
+  {
+   "probe": [
+    "iface-field",
+    "lan!",
+    "up",
+    "true"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "root-password-class",
+    "empty"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "conf-has",
+    "dnsmasq",
+    "regex",
+    "present",
+    "x"
+   ],
+   "reason": "bad-arg-2"
+  },
+  {
+   "probe": [
+    "conf-has",
+    "unbound",
+    "line",
+    "present",
+    "x"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "proc-args",
+    "ntpd",
+    "!"
+   ],
+   "reason": "bad-arg-2"
+  },
+  {
+   "probe": [
+    "proc-args",
+    "ntpd",
+    "~"
+   ],
+   "reason": "bad-arg-2"
+  },
+  {
+   "probe": [
+    "proc-args",
+    "ntpd",
+    "a b c d e"
+   ],
+   "reason": "bad-arg-2"
+  },
+  {
+   "probe": [
+    "proc-args",
+    "ntpd",
+    "a  b"
+   ],
+   "reason": "bad-arg-2"
+  },
+  {
+   "probe": [
+    "proc-args",
+    "-bad",
+    "~x"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "ping",
+    "-abc"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "uci-equals",
+    "network.lan",
+    "1"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "uci-equals",
+    "network.lan.proto.extra",
+    "1"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "uci-equals",
+    "network.lan.pro!to",
+    "1"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "uci-equals",
+    "Network.lan.proto",
+    "1"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "uci-unset",
+    "network"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "uci-unset",
+    "network.lan.pro!to"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "uci-unset",
+    "network..lan"
+   ],
+   "reason": "bad-arg-1"
+  },
+  {
+   "probe": [
+    "ping",
+    "bad\\host"
+   ],
+   "reason": "syntax"
+  },
+  {
+   "probe": [
+    "ping",
+    "192.0.2.1\r"
+   ],
+   "reason": "syntax"
+  },
+  {
+   "probe": [
+    "ping",
+    "\u0001host"
+   ],
+   "reason": "syntax"
+  },
+  {
+   "probe": [
+    "ping",
+    "host\u007f"
+   ],
+   "reason": "syntax"
+  },
+  {
+   "probe": [
+    "ping",
+    "host\u0080"
+   ],
+   "reason": "syntax"
+  },
+  {
+   "probe": [
+    "ping",
+    "",
+    "192.0.2.1"
+   ],
+   "reason": "syntax"
+  },
+  {
+   "probe": [
+    "",
+    "b"
+   ],
+   "reason": "syntax"
+  },
+  {
+   "probe": [
+    ""
+   ],
+   "reason": "syntax"
+  },
+  {
+   "probe": [
+    "",
+    "ping",
+    "192.0.2.1"
+   ],
+   "reason": "syntax"
+  },
+  {
+   "probe": [
+    "ping",
+    "192.0.2.1",
+    ""
+   ],
+   "reason": "syntax"
+  },
+  {
+   "probe": [
+    "ping",
+    "192.0.2.1 ",
+    ""
+   ],
+   "reason": "syntax"
+  },
+  {
+   "probe": [
+    "uci-equals",
+    "network.lan.proto",
+    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   ],
+   "reason": "too-long"
+  },
+  {
+   "probe": [
+    "no-such-probe",
+    "x"
+   ],
+   "reason": "unknown-probe"
+  },
+  {
+   "probe": [
+    "!bad"
+   ],
+   "reason": "unknown-probe"
+  },
+  {
+   "probe": [
+    "PING",
+    "192.0.2.1"
+   ],
+   "reason": "unknown-probe"
+  },
+  {
+   "probe": [
+    "nft-rule",
+    "inet",
+    "fw4",
+    "ruleset",
+    "present",
+    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   ],
+   "reason": "too-long"
+  }
+ ],
+ "refused_multi": [
+  {
+   "probes": [
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ],
+    [
+     "fail"
+    ]
+   ],
+   "reason": "too-many"
+  }
+ ]
+}

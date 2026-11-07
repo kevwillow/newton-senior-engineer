@@ -1,0 +1,38 @@
+name = "ev-03-forward-change"
+description = "Change the pf_client port forward from WAN tcp 2222 to WAN tcp 2223 (still a DNAT to the client LAN host on port 22). Before the change tcp 2222 reaches the client's sshd (so lab-isp sees an SSH banner on 2222 and a refused on 2223); after the confirmed apply the live nft ruleset carries the new dport 2223 rule, tcp 2223 reaches the sshd, tcp 2222 is refused at once by the wan zone input REJECT, and uci shows firewall.pf_client.src_dport = 2223."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 90
+approval = true
+setup = ["portfwd_on"]
+regression = "default"
+breaks = ["portfwd"]
+probes = [["nft-rule", "inet", "fw4", "ruleset", "present", "dport 2223"]]
+batch = "set firewall.pf_client.src_dport='2223'"
+
+[[effect]]
+device = "lab-isp"
+timeout = 30
+cmd = '''
+b=$( (nc {r1_wan_ip} 2223 </dev/null > /tmp/b 2>/dev/null &) ; sleep 3; head -c 7 /tmp/b; rm -f /tmp/b )
+echo "port 2223: $b"
+'''
+
+expect_stdout = '^port 2223: SSH-2\.0$'
+
+[[effect]]
+device = "lab-isp"
+timeout = 30
+cmd = '''
+t=$(mktemp); nc {r1_wan_ip} 2222 </dev/null >/dev/null 2>$t & n=$!
+i=0; while [ ! -s $t ] && [ $i -lt 4 ]; do sleep 1; i=$((i+1)); done
+r=$(cat $t); kill $n 2>/dev/null; rm -f $t
+case "$r" in *refused*) echo "port 2222 on {r1_wan_ip}: refused";; "") echo "port 2222 on {r1_wan_ip}: no answer in 4 s";; *) echo "port 2222 on {r1_wan_ip}: $r";; esac
+'''
+expect_stdout = ': refused$'
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get firewall.pf_client.src_dport"
+expect_stdout = '^2223$'

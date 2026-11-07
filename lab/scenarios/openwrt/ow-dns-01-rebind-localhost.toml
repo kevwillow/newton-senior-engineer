@@ -1,0 +1,66 @@
+name = "ow-dns-01-rebind-localhost"
+description = "OW-DNS-01: dhcp.@dnsmasq[0].rebind_protection='1' (already the stock value) and rebind_localhost='0'. The stock config has rebind_localhost='1', which RELAXES the protection (the init script then passes --rebind-localhost-ok, so an upstream answer in 127.0.0.0/8 or ::1 reaches the clients); '0' is the hardened value, so the batch changes one option and the plan stages exactly that. Setup step dns_upstream_direct makes 1.1.1.1 lab-r1's only upstream: the stock upstream is lab-isp's dnsmasq and Quasar behind it, which already strip RFC1918 answers, so on the stock path an RFC1918 name is blocked whatever lab-r1 does. Effects: the live dnsmasq conf loses rebind-localhost-ok and keeps stop-dns-rebind; a nip.io name that resolves to 127.0.0.1 and localtest.me (AAAA ::1) are answered by 1.1.1.1 itself (proves the names and the internet) and get no address through 192.168.150.1, while openwrt.org still resolves through it. The nip.io probes use a fresh label each time, so dnsmasq's cache cannot answer for them (the apply restarts dnsmasq anyway: its conf file changes). Post: an RFC1918 answer (192.168.1.1.nip.io) is still discarded, with the same proof that 1.1.1.1 returns it, and the two options read back as 0 and 1."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on", "dns_upstream_direct"]
+regression = "default"
+probes = [["conf-has", "dnsmasq", "line", "absent", "rebind-localhost-ok"], ["conf-has", "dnsmasq", "line", "present", "stop-dns-rebind"]]
+batch = '''
+set dhcp.@dnsmasq[0].rebind_protection='1'
+set dhcp.@dnsmasq[0].rebind_localhost='0'
+'''
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+f=$(cat /var/etc/dnsmasq.conf.*)
+a=$(echo "$f" | grep -c '^rebind-localhost-ok$'); b=$(echo "$f" | grep -c '^stop-dns-rebind$')
+echo "dnsmasq conf: rebind-localhost-ok=$a stop-dns-rebind=$b"; [ "$a" = 0 ] && [ "$b" = 1 ]
+'''
+expect_stdout = '^dnsmasq conf: rebind-localhost-ok=0 stop-dns-rebind=1$'
+
+[[effect]]
+device = "lab-client"
+timeout = 45
+cmd = '''
+n=n$(date +%s)$RANDOM
+d=$(host -W 5 -t A $n.127.0.0.1.nip.io 1.1.1.1 | tail -1)
+r=$(host -W 5 -t A $n.127.0.0.1.nip.io 192.168.150.1 | tail -1)
+c=$(host -W 5 -t A openwrt.org 192.168.150.1 | tail -1)
+echo "direct: $d"; echo "router: $r"; echo "control: $c"
+case "$d" in *"has address 127.0.0.1") ;; *) exit 1;; esac
+case "$c" in *"has address "*) ;; *) exit 1;; esac
+case "$r" in *"has no A record") ;; *) exit 1;; esac
+'''
+expect_stdout = '^direct: n\d+\.127\.0\.0\.1\.nip\.io has address 127\.0\.0\.1\nrouter: n\d+\.127\.0\.0\.1\.nip\.io has no A record\ncontrol: openwrt\.org has address '
+
+[[effect]]
+device = "lab-client"
+timeout = 45
+cmd = '''
+d=$(host -W 5 -t AAAA localtest.me 1.1.1.1 | tail -1)
+r=$(host -W 5 -t AAAA localtest.me 192.168.150.1 | tail -1)
+echo "direct: $d"; echo "router: $r"
+case "$d" in *"has IPv6 address ::1") ;; *) exit 1;; esac
+case "$r" in *"has no AAAA record") ;; *) exit 1;; esac
+'''
+expect_stdout = '^direct: localtest\.me has IPv6 address ::1\nrouter: localtest\.me has no AAAA record$'
+
+[[post]]
+device = "lab-client"
+timeout = 45
+cmd = '''
+n=m$(date +%s)$RANDOM
+d=$(host -W 5 -t A $n.192.168.1.1.nip.io 1.1.1.1 | tail -1)
+r=$(host -W 5 -t A $n.192.168.1.1.nip.io 192.168.150.1 | tail -1)
+echo "direct: $d"; echo "router: $r"
+case "$d" in *"has address 192.168.1.1") ;; *) exit 1;; esac
+case "$r" in *"has no A record") ;; *) exit 1;; esac
+'''
+expect_stdout = '^direct: m\d+\.192\.168\.1\.1\.nip\.io has address 192\.168\.1\.1\nrouter: m\d+\.192\.168\.1\.1\.nip\.io has no A record$'
+
+[[post]]
+device = "lab-r1"
+cmd = "echo \"rebind_protection=$(uci -q get dhcp.@dnsmasq[0].rebind_protection) rebind_localhost=$(uci -q get dhcp.@dnsmasq[0].rebind_localhost)\""
+expect_stdout = '^rebind_protection=1 rebind_localhost=0$'

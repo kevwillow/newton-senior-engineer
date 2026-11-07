@@ -1,0 +1,11 @@
+# synthetic
+Version: FortiGate-VM64 v7.4.7 build2579
+Firmware Signature: certified
+Virus-DB: 98.01234(2026-09-21 09:11)
+Extended DB: 1.00000(2026-09-21 09:11)
+IPS-DB: 26.00456(2026-09-21 09:11)
+IPS-ETDB: 26.00456(2026-09-21 09:11)
+AV-DB: 98.01234(2026-09-21 09:11)
+Operation Mode: NAT
+Current virtual domain: root
+Hostname: lab-fg-r1

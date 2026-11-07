@@ -1,0 +1,16 @@
+name = "n-05-bad-syntax"
+description = "No-install: a set without a value is refused at plan time. (no-install port of p-05)"
+target = "pulsar"
+access = "no-install"
+expect = "none"
+
+[[post]]
+device = "local"
+timeout = 300
+cmd = '{ni_env} {ni_py} -I {ni_shape} n05'
+expect_stdout = '== END fails=0'
+
+[[post]]
+device = "local"
+cmd = '''{pr} 'uci get network.lan.ipaddr''''
+expect_stdout = '^192\.168\.1\.1/24$'

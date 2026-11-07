@@ -1,0 +1,120 @@
+platform = "routeros"
+
+[[getter]]
+id = "version"
+command = "/system resource print"
+why = "Shows RouterOS version, uptime, board and resource usage."
+expect = ["version: 6* || version: 7*", "uptime: *"]
+enabled = true
+verified = "lab:chr:7.24.5:2026-10-18"
+os_range = "7.24.5"
+source = "https://help.mikrotik.com/docs/"
+error_markers = ["bad command name", "expected end of command", "not enough permissions", "no such item"]
+
+[[getter]]
+id = "interfaces"
+command = "/interface print"
+why = "Lists interfaces with type, MTU and running state."
+expect = ["Columns: NAME, || # NAME || * name=* || * * name=*"]
+enabled = true
+verified = "lab:chr:7.24.5:2026-10-18"
+os_range = "7.24.5"
+source = "https://help.mikrotik.com/docs/"
+error_markers = ["bad command name", "expected end of command", "not enough permissions", "no such item"]
+
+[[getter]]
+id = "routes"
+command = "/ip route print"
+why = "Shows the IP routing table with destinations, gateways and distance."
+expect = ["Columns: DST-ADDRESS, || DST-ADDRESS GATEWAY || # DST-ADDRESS || * dst-address=* || * * dst-address=*"]
+enabled = true
+verified = "lab:chr:7.24.5:2026-10-18"
+os_range = "7.24.5"
+source = "https://help.mikrotik.com/docs/"
+error_markers = ["bad command name", "expected end of command", "not enough permissions", "no such item"]
+
+[[getter]]
+id = "firewall_policy"
+command = "/ip firewall filter print"
+why = "Lists the firewall filter rules in order."
+expect = ["chain=* || * chain=* || * * chain=*"]
+enabled = true
+verified = "lab:chr:7.24.5:2026-10-18"
+os_range = "7.24.5"
+source = "https://help.mikrotik.com/docs/"
+error_markers = ["bad command name", "expected end of command", "not enough permissions", "no such item"]
+
+[[getter]]
+id = "nat"
+command = "/ip firewall nat print"
+why = "Lists the NAT rules in order."
+expect = ["chain=* || * chain=* || * * chain=*"]
+enabled = true
+verified = "lab:chr:7.24.5:2026-10-18"
+os_range = "7.24.5"
+source = "https://help.mikrotik.com/docs/"
+error_markers = ["bad command name", "expected end of command", "not enough permissions", "no such item"]
+
+[[getter]]
+id = "mgmt_services"
+command = "/ip service print"
+why = "Lists the management services (ssh, api, www and others) with ports."
+expect = ["Columns: NAME, PORT, || # NAME PORT || * name=* || * * name=*"]
+enabled = true
+verified = "lab:chr:7.24.5:2026-10-18"
+os_range = "7.24.5"
+source = "https://help.mikrotik.com/docs/"
+error_markers = ["bad command name", "expected end of command", "not enough permissions", "no such item"]
+
+[[getter]]
+id = "admins"
+command = "/user print"
+why = "Lists local users and their groups (disabled until a lab proves it)."
+expect = ["Columns: NAME, || # NAME || * name=* || * * name=*"]
+enabled = false
+verified = "unverified"
+source = "https://help.mikrotik.com/docs/"
+error_markers = ["bad command name", "expected end of command", "not enough permissions", "no such item"]
+
+[[getter]]
+id = "logging"
+command = "/system logging print"
+why = "Lists the logging rules mapping topics to actions."
+expect = ["Columns: TOPICS, || # TOPICS || * topics=* || * * topics=* || * action=* || * * action=*"]
+enabled = true
+verified = "lab:chr:7.24.5:2026-10-18"
+os_range = "7.24.5"
+source = "https://help.mikrotik.com/docs/"
+error_markers = ["bad command name", "expected end of command", "not enough permissions", "no such item"]
+
+[[getter]]
+id = "ntp"
+command = "/system ntp client print"
+why = "Shows the NTP client settings and sync state."
+expect = ["enabled: *", "mode: *"]
+enabled = true
+verified = "lab:chr:7.24.5:2026-10-18"
+os_range = "7.24.5"
+source = "https://help.mikrotik.com/docs/"
+error_markers = ["bad command name", "expected end of command", "not enough permissions", "no such item"]
+
+[[getter]]
+id = "vpn"
+command = "/ip ipsec active-peers print"
+why = "Lists the active IPsec peers and their state."
+expect = ["Columns: ID, || Columns: NAME, || # ID || # NAME || * name=* || * * name=* || * id=* || * * id=*"]
+enabled = true
+verified = "lab:chr:7.24.5:2026-10-18"
+os_range = "7.24.5"
+source = "https://help.mikrotik.com/docs/"
+error_markers = ["bad command name", "expected end of command", "not enough permissions", "no such item"]
+
+[[getter]]
+id = "running_config"
+command = "/export"
+why = "Exports the configuration as script text (disabled until a lab proves it)."
+expect = ["# * * by RouterOS"]
+enabled = false
+verified = "unverified"
+source = "https://help.mikrotik.com/docs/"
+error_markers = ["bad command name", "expected end of command", "not enough permissions", "no such item"]

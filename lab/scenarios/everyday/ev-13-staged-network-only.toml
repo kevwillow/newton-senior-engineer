@@ -1,0 +1,15 @@
+name = "ev-13-staged-network-only"
+description = "a network-only change is never reported as a fw4 pass, because fw4 reads interface state from the live system, not from the staged config. A new proto none interface is added; the plan output carries 'STAGEDCHECK fw4 not-checked network-live-state'."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+plan_match = "^STAGEDCHECK fw4 not-checked network-live-state$"
+timeout = 90
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "client_internet", "client_dns", "client_dhcp"]
+batch = """set network.ev13=interface
+set network.ev13.proto='none'"""
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get network.ev13.proto"
+expect_stdout = '^none$'

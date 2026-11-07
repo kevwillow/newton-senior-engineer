@@ -1,0 +1,35 @@
+name = "ow-mgmt-02-uhttpd-listen-lan"
+description = "OW-MGMT-02: uhttpd.main.listen_http/listen_https replaced (delete + add_list) by 10.109.0.11:80 and 10.109.0.11:443. Effects: lab-r1 has listeners on the mgmt address only (no 0.0.0.0 or [::] on 80/443), and lab-client is refused on 192.168.150.1:80 and :443 while dnsmasq on the same address answers. mgmt_luci (regression) keeps proving LuCI still answers on the mgmt address. IPv6 LuCI is gone by design."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+approval = true
+probes = [["listen", "tcp", "10.109.0.11", "443", "uhttpd", "present"]]
+batch = '''
+delete uhttpd.main.listen_http
+add_list uhttpd.main.listen_http='10.109.0.11:80'
+delete uhttpd.main.listen_https
+add_list uhttpd.main.listen_https='10.109.0.11:443'
+'''
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+netstat -tlnp | awk '$4=="10.109.0.11:80" && $7 ~ /uhttpd/ {a=1} $4=="10.109.0.11:443" && $7 ~ /uhttpd/ {b=1} $4=="0.0.0.0:80"||$4==":::80"||$4=="0.0.0.0:443"||$4==":::443"{w=1} END{print "mgmt-80=" a+0 " mgmt-443=" b+0 " wildcard=" w+0; exit !(a&&b&&!w)}'
+'''
+
+[[effect]]
+device = "lab-client"
+cmd = '''
+tcp() { LC_ALL=C timeout 6 bash -c "exec 3<>/dev/tcp/$1/$2" 2>&1; }
+tcp 192.168.150.1 53 >/dev/null || { echo "router not reachable on 192.168.150.1:53"; exit 1; }
+tcp 192.168.150.1 80 | grep -q 'Connection refused' && tcp 192.168.150.1 443 | grep -q 'Connection refused' && echo "192.168.150.1:80 and :443 refused, 192.168.150.1:53 open"
+'''
+expect_stdout = '^192\.168\.150\.1:80 and :443 refused'
+
+[[post]]
+device = "lab-client"
+cmd = "curl -s -o /dev/null -D - --max-time 8 http://10.109.0.11/"
+expect_stdout = '^HTTP/\S+ 200'

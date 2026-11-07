@@ -1,0 +1,26 @@
+name = "ow-fw-12b-unknown-ipset-rolls-back"
+description = "a wan rule referencing an undefined ipset makes fw4 check fail. Newton must leave the rule unconfirmed and automatic rollback must remove it."
+target = "lab-r1"
+reset = ["lab-r1"]
+setup = ["portfwd_on"]
+expect = "rolled_back"
+timeout = 60
+regression = "default"
+approval = true
+batch = '''
+set firewall.newton_unknown_ipset=rule
+set firewall.newton_unknown_ipset.name='Newton unknown ipset'
+set firewall.newton_unknown_ipset.src='wan'
+set firewall.newton_unknown_ipset.proto='tcp'
+set firewall.newton_unknown_ipset.dest_port='8443'
+set firewall.newton_unknown_ipset.ipset='newton_set_does_not_exist'
+set firewall.newton_unknown_ipset.target='ACCEPT'
+'''
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+if uci -q get firewall.newton_unknown_ipset >/dev/null; then exit 1; fi
+echo 'unknown-ipset rule absent after rollback'
+'''
+expect_stdout = '^unknown-ipset rule absent after rollback$'

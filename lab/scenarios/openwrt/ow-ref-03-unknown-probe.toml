@@ -1,0 +1,23 @@
+name = "ow-ref-03-unknown-probe"
+description = "Negative scenario for design 5.1: an unknown probe name is refused (no-such-probe is not in the probe grammar of design 4.3 / the router program). The batch itself is harmless: set system.@system[0].description='ref03'. Seal reads the probe list and refuses with 'error bad-probe 1 unknown-probe' (device/openwrt/newton-router/tests/test_seal.py and scripts/owrt-change.sh wrap that as 'probes refused: error bad-probe 1 unknown-probe'). Nothing reaches the staging session and the live system config is unchanged. The reject_match regex pins both the wrapper and the router's reason so a future change to either fails the test."
+target = "lab-r1"
+reset = ["lab-r1"]
+timeout = 60
+setup = ["portfwd_on"]
+regression = "default"
+expect = "rejected"
+reject_match = "probes refused: .* bad-probe 1 unknown-probe"
+batch = '''
+set system.@system[0].description='ref03'
+'''
+probes = [["no-such-probe"]]
+
+[[post]]
+device = "lab-r1"
+cmd = "uci changes | wc -l"
+expect_stdout = "^0$"
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get system.@system[0].description || true"
+expect_stdout = "^$"

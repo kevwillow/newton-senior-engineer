@@ -1,0 +1,45 @@
+name = "ow-dns-06-force-lan-dns"
+description = "OW-DNS-06 in the form the verify report calls 06d: a fw4 redirect from the client zone (lab), target DNAT, proto 'tcp udp', src_dport 53, dest_port 53, family any, no dest_ip (renders 'redirect to :53' for tcp and udp, with no address-family match, and no fw4 warning). Every DNS query a client sends to any resolver address ends at dnsmasq on the router. Effects: the live dstnat_lab chain holds exactly the two redirect rules, neither carries an nfproto match, and the mgmt side's dstnat_lan has no redirect; lab-client asks 1.1.1.1 (udp and tcp) and 8.8.8.8 for lab-r1.lan, a name only dnsmasq knows (NXDOMAIN from the real resolvers before), and gets the router's own address back. Post: the two rule counters are above 0 after those queries (the tcp one is only reached by the tcp queries). Regression: the default list plus client_ext_dns, which must keep working because dnsmasq answers it now. lab-client's mgmt NIC (eth1, zone lan) is not in the lab zone, so mgmt traffic is untouched."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_luci", "client_internet", "client_dns", "client_dhcp", "portfwd", "client_ext_dns"]
+probes = [["nft-rule", "inet", "fw4", "dstnat_lab", "eq:2", "redirect to :53"]]
+batch = '''
+set firewall.dns_redirect=redirect
+set firewall.dns_redirect.name='Redirect-DNS'
+set firewall.dns_redirect.src='lab'
+set firewall.dns_redirect.target='DNAT'
+set firewall.dns_redirect.proto='tcp udp'
+set firewall.dns_redirect.src_dport='53'
+set firewall.dns_redirect.dest_port='53'
+set firewall.dns_redirect.family='any'
+'''
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+n=$(nft list chain inet fw4 dstnat_lab 2>/dev/null | grep -c 'redirect to :53'); m=$(nft list chain inet fw4 dstnat_lab 2>/dev/null | grep 'redirect to :53' | grep -c 'nfproto'); l=$(nft list chain inet fw4 dstnat_lan 2>/dev/null | grep -c 'redirect')
+echo "dstnat_lab: redirect-to-:53 rules=$n with an address-family match=$m; dstnat_lan: redirect rules=$l"; [ "$n" = 2 ] && [ "$m" = 0 ] && [ "$l" = 0 ]
+'''
+expect_stdout = '^dstnat_lab: redirect-to-:53 rules=2 with an address-family match=0; dstnat_lan: redirect rules=0$'
+
+[[effect]]
+device = "lab-client"
+timeout = 45
+cmd = '''
+u=$(host -W 5 -t A lab-r1.lan 1.1.1.1 | tail -1)
+t=$(host -W 5 -T -t A lab-r1.lan 1.1.1.1 | tail -1)
+g=$(host -W 5 -t A lab-r1.lan 8.8.8.8 | tail -1)
+echo "udp to 1.1.1.1: $u"; echo "tcp to 1.1.1.1: $t"; echo "udp to 8.8.8.8: $g"
+[ "$u" = "lab-r1.lan has address 192.168.150.1" ] && [ "$t" = "$u" ] && [ "$g" = "$u" ]
+'''
+expect_stdout = '^udp to 1\.1\.1\.1: lab-r1\.lan has address 192\.168\.150\.1\ntcp to 1\.1\.1\.1: lab-r1\.lan has address 192\.168\.150\.1\nudp to 8\.8\.8\.8: lab-r1\.lan has address 192\.168\.150\.1$'
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+nft list chain inet fw4 dstnat_lab | awk '/tcp dport 53/ {for (i = 1; i <= NF; i++) if ($i == "packets") t = $(i + 1)} /udp dport 53/ {for (i = 1; i <= NF; i++) if ($i == "packets") u = $(i + 1)} END {print "redirect hits: tcp=" t + 0 " udp=" u + 0; exit !(t >= 1 && u >= 1)}'
+'''
+expect_stdout = '^redirect hits: tcp=[1-9]\d* udp=[1-9]\d*$'

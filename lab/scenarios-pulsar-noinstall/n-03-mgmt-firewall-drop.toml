@@ -1,0 +1,16 @@
+name = "n-03-mgmt-firewall-drop"
+description = "No-install: dropping input on the LAN zone is refused at plan time, by the same rule: nothing is applied. (no-install port of p-03)"
+target = "pulsar"
+access = "no-install"
+expect = "none"
+
+[[post]]
+device = "local"
+timeout = 900
+cmd = '{ni_env} {ni_py} -I {ni_shape} n03 {fw_lan_zone}'
+expect_stdout = '== END fails=0'
+
+[[post]]
+device = "local"
+cmd = '''{pr} 'uci get firewall.{fw_lan_zone}.input''''
+expect_stdout = '^ACCEPT$'

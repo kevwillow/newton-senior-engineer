@@ -1,0 +1,16 @@
+name = "n-07-wan-down-isolation"
+description = "No-install: an owner script disables every uplink; the change must not be confirmed and the router's own timer rolls it back. (no-install port of p-07)"
+target = "pulsar"
+access = "no-install"
+expect = "none"
+
+[[post]]
+device = "local"
+timeout = 900
+cmd = '{ni_env} {ni_py} -I {ni_shape} n07'
+expect_stdout = '== END fails=0'
+
+[[post]]
+device = "local"
+cmd = '''{pr} 'uci -q get network.wan.disabled; echo rc=$?''''
+expect_stdout = '^rc=1$'

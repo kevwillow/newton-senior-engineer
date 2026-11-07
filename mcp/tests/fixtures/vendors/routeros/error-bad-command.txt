@@ -1,0 +1,2 @@
+# synthetic
+bad command name "show" at position 1

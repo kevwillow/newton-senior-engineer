@@ -1,0 +1,96 @@
+name = "ev-clientcheck-block-holds"
+description = "EV-CLIENTCHECK-HOLDS proves that the guest zone's router addresses stay unreachable from a real client vantage while DNS, DHCP and internet access work. The change creates the guest interface and keeps its input policy at REJECT. A registered inside vantage checks the guest client itself: it resolves openwrt.org through 192.168.30.1, gets a DHCP offer from that router, reaches the internet, and finds every claimed router address refused. All four client claims pass, so Newton confirms the change; the effects and post repeat the router-address block by the older namespace method."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 180
+setup = ["portfwd_on", "zone_probe_on", "guest_ns_on", "vantage_checks_on"]
+cleanup = ["vantage_checks_off", "guest_ns_off", "zone_probe_off"]
+regression = "default"
+probes = [["iface-field", "guest", "up", "true"]]
+batch = '''
+set network.guest=interface
+set network.guest.proto='static'
+set network.guest.device='eth3.30'
+set network.guest.ipaddr='192.168.30.1'
+set network.guest.netmask='255.255.255.0'
+set dhcp.guest=dhcp
+set dhcp.guest.interface='guest'
+set dhcp.guest.start='100'
+set dhcp.guest.limit='100'
+set dhcp.guest.leasetime='1h'
+set firewall.guest_zone=zone
+set firewall.guest_zone.name='guest'
+set firewall.guest_zone.network='guest'
+set firewall.guest_zone.input='REJECT'
+set firewall.guest_zone.output='ACCEPT'
+set firewall.guest_zone.forward='REJECT'
+set firewall.guest_wan=forwarding
+set firewall.guest_wan.src='guest'
+set firewall.guest_wan.dest='wan'
+set firewall.guest_dhcp=rule
+set firewall.guest_dhcp.name='Allow-Guest-DHCP'
+set firewall.guest_dhcp.src='guest'
+set firewall.guest_dhcp.proto='udp'
+set firewall.guest_dhcp.dest_port='67'
+set firewall.guest_dhcp.target='ACCEPT'
+set firewall.guest_dns=rule
+set firewall.guest_dns.name='Allow-Guest-DNS'
+set firewall.guest_dns.src='guest'
+set firewall.guest_dns.proto='tcp udp'
+set firewall.guest_dns.dest_port='53'
+set firewall.guest_dns.target='ACCEPT'
+'''
+
+[[client_checks]]
+kind = "client_dns"
+zone = "guest"
+
+[[client_checks]]
+kind = "client_dhcp"
+zone = "guest"
+
+[[client_checks]]
+kind = "client_internet"
+zone = "guest"
+
+[[client_checks]]
+kind = "client_blocked"
+zone = "guest"
+to = "router"
+targets = ["192.168.30.1:22", "192.168.30.1:80", "192.168.30.1:443", "10.109.0.11:22", "10.109.0.11:443", "192.168.150.1:22", "192.168.150.1:443"]
+
+[[effect]]
+device = "lab-client"
+timeout = 30
+cmd = "sudo ip netns exec guest curl -sk -o /dev/null --max-time 8 https://1.1.1.1/ && echo 'guest netns: tls exchange with 1.1.1.1 completed'"
+expect_stdout = '^guest netns: tls exchange with 1\.1\.1\.1 completed$'
+
+[[effect]]
+device = "lab-client"
+timeout = 30
+cmd = "sudo ip netns exec guest host -W 4 openwrt.org 192.168.30.1"
+expect_stdout = 'Address: 192\.168\.30\.1#53(.|\n)*openwrt\.org has address'
+
+[[effect]]
+device = "lab-client"
+timeout = 40
+cmd = "sudo ip netns exec guest python3 /tmp/newton-dhcp-offer.py eth0.30 192.168.30.1"
+expect_stdout = '^DHCPOFFER from 192\.168\.30\.1 yiaddr=192\.168\.30\.(1\d\d) '
+
+[[post]]
+device = "lab-client"
+timeout = 90
+cmd = '''
+sudo ip netns exec guest bash -c '
+tcp() { LC_ALL=C timeout 6 bash -c "exec 3<>/dev/tcp/$1/$2" 2>&1; }
+tcp 192.168.30.1 53 >/dev/null || { echo "control failed: no tcp connect from the guest netns to the allowed 192.168.30.1:53"; exit 1; }
+bad=""
+for t in 192.168.30.1:22 192.168.30.1:80 192.168.30.1:443 10.109.0.11:22 10.109.0.11:443 192.168.150.1:22 192.168.150.1:443 {client_lab_ip}:22; do
+  tcp ${t%:*} ${t#*:} | grep -q "Connection refused" || bad="$bad $t"
+done
+[ -z "$bad" ] || { echo "not refused:$bad"; exit 1; }
+echo "guest netns: 192.168.30.1:53 open; refused: router 22/80/443 on 192.168.30.1, 22/443 on 10.109.0.11 and 192.168.150.1, and ssh on the client LAN host"
+'
+'''
+expect_stdout = '^guest netns: 192\.168\.30\.1:53 open; refused: '

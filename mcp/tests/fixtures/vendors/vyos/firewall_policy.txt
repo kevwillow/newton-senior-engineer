@@ -1,0 +1,9 @@
+# synthetic
+Ruleset Information
+-------------------
+Firewall name: "lab"
+Frame: ethernet-input
+Default action: drop
+Rule            Action    Log       Both
+----            ------    ---       ----
+10             accept     no        no

@@ -1,0 +1,32 @@
+name = "ow-mgmt-01-dropbear-interface"
+description = "OW-MGMT-01: dropbear.@dropbear[0].Interface='lan' binds ssh to the addresses of the mgmt interface. Effects: lab-r1 has dropbear listening on 10.109.0.11:22 and no wildcard :22 listener, and lab-client is refused on 192.168.150.1:22 while dnsmasq on the same address still answers. The protocol's own verify path (ssh over mgmt) must survive. The router-side check demands the mgmt listener owned by dropbear: Interface is fail-open (an interface without an address leaves the wildcard listener), and a hand run with Interface='nosuchif' and this check was rolled back (results file). Interface binds addresses, not the device: a client that reaches 10.109.0.11 through the client LAN can still connect (see ow-mgmt-01b)."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+approval = true
+probes = [["listen", "tcp", "10.109.0.11", "22", "dropbear", "present"]]
+batch = '''
+set dropbear.@dropbear[0].Interface='lan'
+'''
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+netstat -tlnp | awk '$4=="10.109.0.11:22" && $7 ~ /dropbear/ {m=1} $4=="0.0.0.0:22"||$4==":::22"{w=1} END{print "mgmt-listener=" m+0 " wildcard-listener=" w+0; exit !(m&&!w)}'
+'''
+
+[[effect]]
+device = "lab-client"
+cmd = '''
+tcp() { LC_ALL=C timeout 6 bash -c "exec 3<>/dev/tcp/$1/$2" 2>&1; }
+tcp 192.168.150.1 53 >/dev/null || { echo "router not reachable on 192.168.150.1:53"; exit 1; }
+tcp 192.168.150.1 22 | grep -q 'Connection refused' && echo "192.168.150.1:22 refused, 192.168.150.1:53 open"
+'''
+expect_stdout = '^192\.168\.150\.1:22 refused'
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get dropbear.@dropbear[0].Interface"
+expect_stdout = '^lan$'

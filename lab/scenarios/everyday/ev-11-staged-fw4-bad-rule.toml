@@ -1,0 +1,18 @@
+name = "ev-11-staged-fw4-bad-rule"
+description = "a staged firewall rule that fw4 cannot render (proto nosuchproto) is refused at plan. The router's check-staged verb renders the STAGED ruleset with fw4's own template over the session's delta and asks nft -c about it; the plan dies with 'staged firewall config fails fw4 check' and discards the session, so nothing is applied and the firewall keeps running as it was."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "rejected"
+reject_match = "fails fw4 check"
+timeout = 90
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "client_internet", "client_dns", "client_dhcp"]
+batch = """set firewall.ev11_bad=rule
+set firewall.ev11_bad.name='ev11-bad'
+set firewall.ev11_bad.src='wan'
+set firewall.ev11_bad.proto='nosuchproto'
+set firewall.ev11_bad.target='ACCEPT'"""
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get firewall.ev11_bad >/dev/null && echo present || echo absent"
+expect_stdout = '^absent$'

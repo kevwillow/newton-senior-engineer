@@ -1,0 +1,526 @@
+#!/usr/bin/env python3
+"""Run client-vantage checks from a Newton-owned local specification."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Sequence
+
+
+SID_RE = re.compile(r"^[0-9a-f]{32}$")
+ZONE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+RESULT_RE = re.compile(r"^RESULT (PASS|FAIL|NOTTESTED) ([a-z-]{1,24})$")
+WORD_RE = re.compile(r"^[a-z-]{1,24}$")
+CLIENT_KINDS = frozenset(
+    {"client_dns", "client_dhcp", "client_internet", "client_blocked"}
+)
+DEFAULT_CHECK_TIMEOUT_S = 40
+MAX_CHECK_TIMEOUT_S = 40
+MAX_TARGETS = 24
+MAX_SPEC_BYTES = 1024 * 1024
+# How many ssh calls of one group may run at the same time.  The apply
+# gives every round a fixed budget and needs three passing rounds, so the
+# calls of a group must not wait for each other: a vantage whose
+# firewall DROPs the probes would take six seconds a target.
+GROUP_WORKERS = 6
+# The verb the forced command knows for every check kind.
+VERB_BY_KIND = {
+    "client_dns": "dns",
+    "client_dhcp": "dhcp",
+    "client_internet": "internet",
+}
+
+
+class SpecError(ValueError):
+    def __init__(self, word: str) -> None:
+        self.word = word
+        super().__init__(word)
+
+
+@dataclass(frozen=True)
+class VantageSpec:
+    name: str
+    destination: str
+    key_file: str
+    known_hosts: str
+    proxy_command: str | None
+
+
+@dataclass(frozen=True)
+class CheckSpec:
+    claim: int
+    kind: str
+    to: str | None
+    targets: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GroupSpec:
+    zone: str
+    vantage: VantageSpec
+    checks: tuple[CheckSpec, ...]
+
+
+@dataclass(frozen=True)
+class RunSpec:
+    sid: str
+    groups: tuple[GroupSpec, ...]
+    check_timeout_s: int
+
+
+@dataclass(frozen=True)
+class Outcome:
+    status: str
+    word: str
+
+
+def _required_text(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise SpecError("bad-spec")
+    if "\x00" in value or "\n" in value or "\r" in value:
+        raise SpecError("bad-spec")
+    return value
+
+
+def _exact_keys(
+    value: Any,
+    allowed: set[str],
+    required: set[str] | None = None,
+) -> None:
+    if not isinstance(value, dict):
+        raise SpecError("bad-spec")
+    if set(value) - allowed:
+        raise SpecError("unknown-key")
+    if (allowed if required is None else required) - set(value):
+        raise SpecError("bad-spec")
+
+
+def _valid_ipv4(value: str) -> bool:
+    parts = value.split(".")
+    if len(parts) != 4:
+        return False
+    for part in parts:
+        if not part or not re.fullmatch(r"[0-9]{1,3}", part):
+            return False
+        if len(part) > 1 and part.startswith("0"):
+            return False
+        if int(part) > 255:
+            return False
+    return True
+
+
+def _valid_target(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    if value.count(":") != 1:
+        return False
+    address, port_text = value.split(":", 1)
+    if not _valid_ipv4(address):
+        return False
+    if not re.fullmatch(r"[0-9]{1,5}", port_text):
+        return False
+    if len(port_text) > 1 and port_text.startswith("0"):
+        return False
+    port = int(port_text)
+    return 1 <= port <= 65535
+
+
+def _parse_vantage(value: Any) -> VantageSpec:
+    _exact_keys(
+        value,
+        {"name", "destination", "key_file", "known_hosts", "proxy_command"},
+    )
+    proxy = value["proxy_command"]
+    if proxy is not None and not isinstance(proxy, str):
+        raise SpecError("bad-spec")
+    if isinstance(proxy, str) and (
+        "\x00" in proxy or "\n" in proxy or "\r" in proxy
+    ):
+        raise SpecError("bad-spec")
+    return VantageSpec(
+        name=_required_text(value["name"]),
+        destination=_required_text(value["destination"]),
+        key_file=_required_text(value["key_file"]),
+        known_hosts=_required_text(value["known_hosts"]),
+        proxy_command=proxy,
+    )
+
+
+def _parse_check(value: Any) -> CheckSpec:
+    if not isinstance(value, dict):
+        raise SpecError("bad-spec")
+    kind = value.get("kind")
+    if kind not in CLIENT_KINDS:
+        raise SpecError("bad-kind")
+    allowed = {"claim", "kind"}
+    if kind == "client_blocked":
+        allowed.update({"to", "targets"})
+    _exact_keys(value, allowed)
+    claim = value["claim"]
+    if type(claim) is not int or claim < 1:
+        raise SpecError("bad-spec")
+    to: str | None = None
+    targets: tuple[str, ...] = ()
+    if kind == "client_blocked":
+        to = value["to"]
+        if to not in {"router", "internet"}:
+            raise SpecError("bad-spec")
+        raw_targets = value["targets"]
+        if not isinstance(raw_targets, list) or not 1 <= len(raw_targets) <= MAX_TARGETS:
+            raise SpecError("bad-spec")
+        if not all(_valid_target(target) for target in raw_targets):
+            raise SpecError("bad-target")
+        targets = tuple(raw_targets)
+    return CheckSpec(claim=claim, kind=kind, to=to, targets=targets)
+
+
+def _parse_group(value: Any) -> GroupSpec:
+    _exact_keys(value, {"zone", "vantage", "checks"})
+    zone = value["zone"]
+    if not isinstance(zone, str) or ZONE_RE.fullmatch(zone) is None:
+        raise SpecError("bad-zone")
+    checks_value = value["checks"]
+    if not isinstance(checks_value, list) or not checks_value:
+        raise SpecError("bad-spec")
+    checks = tuple(_parse_check(check) for check in checks_value)
+    claim_numbers = [check.claim for check in checks]
+    if claim_numbers != sorted(claim_numbers) or len(set(claim_numbers)) != len(claim_numbers):
+        raise SpecError("bad-spec")
+    return GroupSpec(
+        zone=zone,
+        vantage=_parse_vantage(value["vantage"]),
+        checks=checks,
+    )
+
+
+def _parse_spec(value: Any, expected_sid: str) -> RunSpec:
+    _exact_keys(
+        value,
+        {"version", "sid", "groups", "check_timeout_s"},
+        {"version", "sid", "groups"},
+    )
+    version = value["version"]
+    if type(version) is not int or version != 1:
+        raise SpecError("bad-version")
+    sid = value["sid"]
+    if not isinstance(sid, str) or SID_RE.fullmatch(sid) is None:
+        raise SpecError("bad-sid")
+    if sid != expected_sid:
+        raise SpecError("sid-mismatch")
+    check_timeout_s = value.get("check_timeout_s", DEFAULT_CHECK_TIMEOUT_S)
+    if (
+        type(check_timeout_s) is not int
+        or not 1 <= check_timeout_s <= MAX_CHECK_TIMEOUT_S
+    ):
+        raise SpecError("bad-spec")
+    groups_value = value["groups"]
+    if not isinstance(groups_value, list) or not groups_value:
+        raise SpecError("bad-spec")
+    groups = tuple(_parse_group(group) for group in groups_value)
+    group_keys: set[tuple[str, str, str]] = set()
+    claim_numbers: set[int] = set()
+    for group in groups:
+        group_key = (group.vantage.name, group.vantage.destination, group.zone)
+        if group_key in group_keys:
+            raise SpecError("bad-spec")
+        group_keys.add(group_key)
+        for check in group.checks:
+            if check.claim in claim_numbers:
+                raise SpecError("bad-spec")
+            claim_numbers.add(check.claim)
+    return RunSpec(
+        sid=sid,
+        groups=groups,
+        check_timeout_s=check_timeout_s,
+    )
+
+
+def _read_spec(path: Path, expected_sid: str) -> RunSpec:
+    try:
+        path_stat = os.lstat(path)
+    except FileNotFoundError:
+        raise SpecError("spec-missing")
+    except OSError:
+        raise SpecError("spec-unreadable")
+    if stat.S_ISLNK(path_stat.st_mode):
+        raise SpecError("spec-symlink")
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise SpecError("spec-not-regular")
+    if path_stat.st_uid != os.getuid():
+        raise SpecError("spec-owner")
+    if stat.S_IMODE(path_stat.st_mode) & 0o077:
+        raise SpecError("spec-mode")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        raise SpecError("spec-unreadable")
+    try:
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = None
+            open_stat = os.fstat(stream.fileno())
+            if not stat.S_ISREG(open_stat.st_mode):
+                raise SpecError("spec-not-regular")
+            if open_stat.st_uid != os.getuid():
+                raise SpecError("spec-owner")
+            if stat.S_IMODE(open_stat.st_mode) & 0o077:
+                raise SpecError("spec-mode")
+            data = stream.read(MAX_SPEC_BYTES + 1)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if len(data) > MAX_SPEC_BYTES:
+        raise SpecError("bad-spec")
+    try:
+        decoded = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise SpecError("bad-json")
+    try:
+        value = json.loads(decoded)
+    except (json.JSONDecodeError, ValueError):
+        raise SpecError("bad-json")
+    return _parse_spec(value, expected_sid)
+
+
+def _ssh_argv(
+    ssh_path: str,
+    vantage: VantageSpec,
+    zone: str,
+    verb: str,
+    extra: tuple[str, ...] = (),
+) -> list[str]:
+    argv = [
+        ssh_path,
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ControlPath=none",
+        "-o",
+        "ConnectTimeout=8",
+        "-o",
+        "BatchMode=yes",
+    ]
+    if vantage.proxy_command is not None:
+        argv.extend(["-o", f"ProxyCommand={vantage.proxy_command}"])
+    argv.extend(
+        [
+            "-i",
+            vantage.key_file,
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={vantage.known_hosts}",
+            # INJ-1: the destination can never be read as an ssh option
+            "--",
+            vantage.destination,
+            "check",
+            zone,
+            verb,
+        ]
+    )
+    argv.extend(extra)
+    return argv
+
+
+def _run_ssh(argv: list[str], timeout_s: int) -> tuple[str, str]:
+    try:
+        completed = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            timeout=timeout_s,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return ("ERROR", "ssh-failed")
+    except (OSError, UnicodeError, ValueError):
+        return ("ERROR", "ssh-failed")
+    if completed.returncode != 0:
+        return ("ERROR", "ssh-failed")
+    lines = completed.stdout.splitlines()
+    if len(lines) != 1:
+        return ("INVALID", "bad-reply")
+    match = RESULT_RE.fullmatch(lines[0])
+    if match is None:
+        return ("INVALID", "bad-reply")
+    return (match.group(1), match.group(2))
+
+
+def _failed_canary_outcome(reply: tuple[str, str]) -> Outcome:
+    status, word = reply
+    if status == "FAIL":
+        return Outcome("NOT-TESTED", "canary-failed")
+    if status == "NOTTESTED":
+        return Outcome("NOT-TESTED", word)
+    if status == "ERROR":
+        return Outcome("NOT-TESTED", "ssh-failed")
+    return Outcome("NOT-TESTED", "bad-reply")
+
+
+def _check_outcome(reply: tuple[str, str], pass_word: str = "ok") -> Outcome:
+    status, word = reply
+    if WORD_RE.fullmatch(word) is None:
+        # a word that is not in the fixed shape is not a word Newton uses
+        return Outcome("NOT-TESTED", "bad-reply")
+    if status == "PASS":
+        return Outcome("PASS", pass_word)
+    if status == "FAIL":
+        return Outcome("FAIL", word)
+    if status == "NOTTESTED":
+        return Outcome("NOT-TESTED", word)
+    if status == "ERROR":
+        return Outcome("NOT-TESTED", "ssh-failed")
+    return Outcome("NOT-TESTED", "bad-reply")
+
+
+@dataclass(frozen=True)
+class _Call:
+    """One ssh call of a group: a check, or one target of a blocked check."""
+
+    claim: int
+    verb: str
+    extra: tuple[str, ...] = ()
+    target_index: int = -1
+
+
+def _calls_of(group: GroupSpec) -> list[_Call]:
+    """The ssh calls of a group, in claim order.
+
+    A blocked claim has one call per target: the targets are probed at
+    the same time, so none of them waits for another.
+    """
+    calls: list[_Call] = []
+    for check in group.checks:
+        if check.kind == "client_blocked":
+            for index, target in enumerate(check.targets):
+                address, port = target.rsplit(":", 1)
+                calls.append(_Call(check.claim, "blocked", (address, port), index))
+            continue
+        calls.append(_Call(check.claim, VERB_BY_KIND[check.kind]))
+    return calls
+
+
+def _blocked_outcome(outcomes: list[Outcome]) -> Outcome:
+    """The outcome of a blocked claim from the outcomes of its targets.
+
+    The word does not depend on the order the replies came back in: the
+    first FAIL in target order wins, then the first target that could
+    not be tested, and only a claim whose every target was refused (or
+    timed out) passes.
+    """
+    for outcome in outcomes:
+        if outcome.status == "FAIL":
+            return Outcome("FAIL", outcome.word)
+    for outcome in outcomes:
+        if outcome.status != "PASS":
+            return Outcome("NOT-TESTED", outcome.word)
+    return Outcome("PASS", "refused")
+
+
+def _run_call(
+    ssh_path: str,
+    group: GroupSpec,
+    call: _Call,
+    timeout_s: int,
+) -> tuple[str, str]:
+    try:
+        return _run_ssh(
+            _ssh_argv(ssh_path, group.vantage, group.zone, call.verb, call.extra),
+            timeout_s,
+        )
+    except Exception:
+        return ("ERROR", "ssh-failed")
+
+
+def _run_group(spec: RunSpec, ssh_path: str, group: GroupSpec) -> list[tuple[int, Outcome]]:
+    """The outcomes of the checks of one group.
+
+    The canary runs first and alone: it proves that the vantage is in
+    the zone, and no check runs when it fails.  The checks of the group
+    then run at the same time, and so do the targets of a blocked claim.
+    """
+    canary_reply = _run_ssh(
+        _ssh_argv(ssh_path, group.vantage, group.zone, "canary"),
+        spec.check_timeout_s,
+    )
+    if canary_reply[0] != "PASS":
+        failed = _failed_canary_outcome(canary_reply)
+        return [(check.claim, failed) for check in group.checks]
+    calls = _calls_of(group)
+    with ThreadPoolExecutor(max_workers=GROUP_WORKERS) as pool:
+        replies = list(
+            pool.map(
+                lambda call: _run_call(ssh_path, group, call, spec.check_timeout_s),
+                calls,
+            )
+        )
+    outcomes: list[tuple[int, Outcome]] = []
+    by_claim: dict[int, list[Outcome]] = {}
+    for call, reply in zip(calls, replies):
+        by_claim.setdefault(call.claim, []).append(_check_outcome(reply))
+    for check in group.checks:
+        found = by_claim.get(check.claim, [])
+        if check.kind == "client_blocked":
+            outcomes.append((check.claim, _blocked_outcome(found)))
+            continue
+        outcomes.append((check.claim, found[0] if found else Outcome("NOT-TESTED", "bad-reply")))
+    return outcomes
+
+
+def _execute(spec: RunSpec, ssh_path: str) -> bool:
+    outcomes: list[tuple[int, Outcome]] = []
+    for group in spec.groups:
+        outcomes.extend(_run_group(spec, ssh_path, group))
+    for claim, outcome in sorted(outcomes, key=lambda item: item[0]):
+        print(
+            f"vantage-check: claim {claim} {outcome.status} {outcome.word}",
+            file=sys.stderr,
+        )
+    return all(outcome.status == "PASS" for _claim, outcome in outcomes)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    try:
+        if len(arguments) != 1:
+            raise SpecError("bad-args")
+        sid = arguments[0]
+        if SID_RE.fullmatch(sid) is None:
+            raise SpecError("bad-sid")
+        spec_dir_text = os.environ.get("NEWTON_VANTAGE_SPEC_DIR")
+        if spec_dir_text is None or not spec_dir_text:
+            raise SpecError("env-unset")
+        if "\x00" in spec_dir_text:
+            raise SpecError("bad-spec-dir")
+        spec_path = Path(spec_dir_text) / f"{sid}.json"
+        spec = _read_spec(spec_path, sid)
+        ssh_path = shutil.which("ssh")
+        if ssh_path is None:
+            raise SpecError("ssh-missing")
+        return 0 if _execute(spec, ssh_path) else 1
+    except SpecError as error:
+        print(f"vantage-check: error {error.word}", file=sys.stderr)
+        return 1
+    except Exception:
+        print("vantage-check: error internal", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,550 @@
+/* source: https://openwrt.org/docs/guide-user/base-system/uci?do=export_raw | retrieved 2026-10-03 by Kev (browser) | CC BY-SA 4.0, (c) OpenWrt contributors | raw DokuWiki markup, unmodified below this line */
+====== The UCI system ======
+See also: [[docs:guide-developer:uci-defaults|UCI defaults]], [[docs:guide-developer:network-scripting#examples|Network scripting]]
+
+The abbreviation [[docs:techref:uci|UCI]] stands for //**__U__**nified **__C__**onfiguration **__I__**nterface//, and is a system to centralize the configuration of OpenWrt services.
+
+UCI is the successor to the NVRAM-based configuration found in the White Russian series of OpenWrt. It is the main configuration user interface for the most important system settings including the main network interface configuration, wireless settings, logging functionality and remote access configuration.
+
+Many packages in the OpenWrt repository have been made compatible with the UCI system.
+Applications are made UCI-compatible by simply writing the original configuration file (which is read by the program) according to the chosen settings in the corresponding UCI file.
+This is done upon running the initialization scripts in ''/etc/init.d/''.
+See [[docs:techref:initscripts|Init scripts]] for more information.
+Thus, when starting a daemon with such a UCI-compatible initialization script, you should be aware that the program's original configuration file gets overwritten.
+For example, in the case of [[docs:guide-user:services:nas:cifs.server|Samba/CIFS]], the file ''/etc/samba/smb.conf'' is overwritten with UCI settings from the UCI configuration file ''/etc/config/samba'' when running ''/etc/init.d/samba start''.
+In addition, the application's configuration file is often stored in RAM instead of in flash, because it does not need to be stored in non-volatile memory and it is rewritten after every change, based on the UCI file.
+There are ways to disable UCI in case you want to adjust settings in the original configuration file not available through UCI, in [[docs:guide-user:services:nas:cifs.server]] you can see how to disable UCI for samba, for example.
+
+For those non-UCI compatible programs, there is a convenient [[docs:guide-user:base-system:notuci.config|list of some non-UCI configuration files]] you may want to tend to.
+Note that, for most third party programs, you should consult the program's own documentation.
+
+===== Common principles =====
+OpenWrt's central configuration is split into several files located in the ''/etc/config/'' directory.
+Each file relates roughly to the part of the system it configures.
+You can edit the configuration files with a text editor or modify them with the command line utility program ''uci''.
+UCI configuration files are also modifiable through various programming APIs (like Shell, Lua and C), which is also how web interfaces like [[docs:guide-user:luci:luci.essentials|LuCI]] make changes to the UCI files.
+
+Upon changing a UCI configuration file, whether through a text editor or the command line, the services or executables that are affected must be (re)started (or, in some cases, simply reloaded) by an [[docs:techref:initscripts|init.d call]], such that the updated UCI configuration is applied to them.
+Many programs are made compatible with UCI by simply making their init.d script first update their standard program-specific configuration files, based on the updated UCI configuration in ''/etc/config'', and then restarting the executable.
+This implies that solely (re)starting the executable directly, without calling the appropriate init.d script, would not behave as expected as it would not yet result in the incorporation of configuration updates into the program's standard [[http://en.wikipedia.org/wiki/Configuration_file|configuration file(s)]].
+
+As an example of modifying the UCI configuration, suppose you want to change the device's IP address from the default ''192.168.1.1'' to ''192.168.2.1''.
+To do this, using any text editor, such as vi, change the line
+
+<code bash>
+option ipaddr	192.168.1.1
+</code>
+
+in the file ''/etc/config/network'' to: 
+
+<code bash>
+option ipaddr	192.168.2.1
+</code>
+
+Next, commit the settings by running
+
+<code bash>
+/etc/init.d/network restart
+</code>
+
+In this case, remember that you have to login again using SSH as the device is now accessible at its new IP address!
+
+===== Configuration files =====
+^ File                                                                                            ^ Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                ^
+^ Basic                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       ||
+| [[docs:guide-user:base-system:dhcp|/etc/config/dhcp]]                                           | [[docs:guide-user:base-system:dhcp.dnsmasq|Dnsmasq]] and [[docs:techref:odhcpd|odhcpd]] settings: DNS, DHCP, DHCPv6                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| [[docs:guide-user:base-system:dropbear|/etc/config/dropbear]]                                   | SSH server options                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| [[docs:guide-user:firewall:firewall_configuration|/etc/config/firewall]]                        | NAT, packet filter, port forwarding, etc.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| [[docs:guide-user:network:ucicheatsheet|/etc/config/network]]                                   | Switch, interface and route configuration:\\ [[docs:guide-user:network:network_configuration|General]], [[docs:guide-user:network:ipv4:configuration|IPv4]], [[docs:guide-user:network:ipv6:configuration|IPv6]], [[docs:guide-user:network:routing:routes_configuration|Routes]], [[docs:guide-user:network:routing:ip_rules|Rules]], [[docs:guide-user:network:wan:wan_interface_protocols|WAN]], [[docs:guide-user:network:network_interface_alias|Aliases]], [[docs:guide-user:network:network_configuration#switch_configuration_dsabridge-vlan|Switches]], [[docs:guide-user:network:vlan:switch_configuration|VLAN]], [[docs:guide-user:network:ipv6_ipv4_transitioning|IPv4/IPv6 transitioning]], [[docs:guide-user:network:tunneling_interface_protocols|Tunneling]]  |
+| [[docs:guide-user:base-system:system_configuration|/etc/config/system]]                         | Misc. system settings, [[docs:guide-user:advanced:ntp_configuration|NTP]], [[docs:guide-user:services:rng|RNG]], [[docs:guide-user:advanced:watchcat|Watchcat]]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| [[docs:guide-user:network:wifi:basic|/etc/config/wireless]]                                     | Wireless settings and wifi network definition                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+^ IPv6                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        ||
+| [[doc:uci:ahcpd|/etc/config/ahcpd]]                                                             | Ad-Hoc Configuration Protocol (AHCP) server and forwarder configuration                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| [[docs:guide-user:network:ipv6:dhcp6c|/etc/config/dhcp6c]]                                      | WIDE-DHCPv6 client                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| [[doc:uci:dhcp6s|/etc/config/dhcp6s]]                                                           | WIDE-DHCPv6 server                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| [[doc:uci:gw6c|/etc/config/gw6c]]                                                               | GW6c client configuration                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+^ Other                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       ||
+| [[docs:guide-user:services:tls:acmesh|/etc/config/acme]]                                        | Configure issuing of TLS certificates via ACME                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| [[docs:guide-user:services:babeld|/etc/config/babeld]]                                          | babeld configuration                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| [[docs:guide-user:services:bbstored|/etc/config/bbstored]]                                      | BoxBackup server configuration                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| [[docs:guide-user:services:vpn:cloudfare_tunnel|/etc/config/cloudflared]]                       | Cloudflare tunnel                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| [[docs:guide-user:base-system:ddns|/etc/config/ddns]]                                           | Dynamic DNS configuration (ddns-scripts)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| [[docs:guide-user:services:dns:dnscrypt-proxy|/etc/config/dnscrypt-proxy]]                      | DNSCrypt proxy                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| [[docs:guide-user:virtualization:docker_host|/etc/config/dockerd]]                              | The Docker CE Engine Daemon                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| [[docs:guide-user:services:email:emailrelay|/etc/config/emailrelay]]                            | E-MailRelay: simple SMTP server and proxy with POP support. Package [[:packages:pkgdata:emailrelay]]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| [[docs:guide-user:services:w_o_l:etherwake|/etc/config/etherwake]]                              | Wake-on-Lan: etherwake                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| [[docs:guide-user:firewall:freifunk_p2pblock|/etc/config/freifunk_p2pblock]]                    | Uses iptables layer7-, ipp2p- and recent-modules to block p2p/filesharing traffic                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| [[docs:guide-user:storage:fstab|/etc/config/fstab]]                                             | Mount points and swap                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| [[docs:guide-user:storage:hd-idle|/etc/config/hd-idle]]                                         | Another idle-daemon for attached hard drives                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| [[docs:guide-user:base-system:httpd|/etc/config/httpd]]                                         | Web server options (Busybox httpd, deprecated)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| [[docs:guide-user:services:dns:ipset-dns|/etc/config/ipset-dns]]                                | Configure [[https://git.zx2c4.com/ipset-dns/about/|ipset-dns]]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| [[docs:guide-user:services:dns:kadnode|/etc/config/kadnode]]                                    | KadNode p2p DNS                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| [[doc:uci:luci|/etc/config/luci]]                                                               | Base LuCI config                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| [[doc:uci:luci_statistics|/etc/config/luci_statistics]]                                         | Configuration of Statistics packet                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| [[docs:guide-user:services:snmp:mini_snmpd|/etc/config/mini_snmpd]]                             | mini_snmpd settings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| [[docs:guide-user:services:media_server:minidlna|/etc/config/minidlna]]                         | MiniDLNA settings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| [[doc:uci:mjpg-streamer|/etc/config/mjpg-streamer]]                                             | Streaming application for Linux-UVC compatible webcams                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| [[docs:guide-user:storage:mountd|/etc/config/mountd]]                                           | OpenWrt automount daemon                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| [[doc:uci:mroute|/etc/config/mroute]]                                                           | Configuration files for multiple WAN routes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| [[docs:guide-user:network:wan:multiwan:multiwan_package|/etc/config/multiwan]]                  | Simple multi WAN configuration                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| [[docs:guide-user:network:wan:multiwan:mwan3|/etc/config/mwan3]]                                | Multi-WAN config with load balancing and failover                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| [[docs:guide-user:services:captive-portal:nodogsplash|/etc/config/nodogsplash]]                 | nodogsplash configuration                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| [[docs:guide-user:services:ntp:client|/etc/config/ntpclient]]                                   | Getting the correct time                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| [[docs:guide-user:services:ups:software.nut|/etc/config/nut_server]]                            | Controlling a UPS (Uninterruptible Power Supply) and/or sharing with other hosts                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| [[docs:guide-user:services:ups:software.nut|/etc/config/nut_monitor]]                           | Monitoring a UPS (Uninterruptible Power Supply) from a remote host or local nut-server                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| [[docs:guide-user:services:ups:software.nut|/etc/config/nut_cgi]]                               | Web UI for NUT (viewing only in UCI)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| [[docs:guide-user:services:print_server:p910nd|/etc/config/p910nd]]                             | config for non-spooling Printer daemon [[docs:guide-user:services:print_server:p910nd.server]]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| [[docs:guide-user:services:nas:pure-ftpd|/etc/config/pure-ftpd]]                                | Pure-FTPd server config                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| [[docs:guide-user:network:traffic-shaping:traffic_shaping|/etc/config/qos]]                     | Implementing Quality of Service for the //upload//                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| [[docs:guide-user:services:vpn:ipsec:racoon:basic|/etc/config/racoon]]                          | racoon IPsec daemon                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| [[docs:guide-user:services:nas:samba|/etc/config/samba]]                                        | settings for the Microsoft file and print services daemon                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| [[docs:guide-user:services:snmp:snmpd|/etc/config/snmpd]]                                       | SNMPd settings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| [[docs:guide-user:network:traffic-shaping:sqm_configuration|/etc/config/sqm]]                   | SQM settings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| [[docs:guide-user:services:ssh:sshtunnel|/etc/config/sshtunnel]]                                | Settings for the package ''sshtunnel''                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ''/etc/config/socat''                                | Settings for the package ''socat''                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| [[docs:guide-user:services:voip:stund|/etc/config/stund]]                                       | STUN server configuration                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| [[doc:uci:tinc|/etc/config/tinc]]                                                               | [[docs:guide-user:services:vpn:tinc|tinc]] package configuration                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| [[docs:guide-user:services:tor:client|/etc/config/tor]]                                         | Tor anonymizer configuration                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| [[docs:guide-user:services:tor:hs|/etc/config/tor-hs]]                                          | Tor onion services (hidden sites) configuration                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| [[docs:guide-user:services:downloading_and_filesharing:transmission|/etc/config/transmission]]  | BitTorrent configuration                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| [[docs:guide-user:services:webserver:uhttpd|/etc/config/uhttpd]]                                | Web server options (uHTTPd)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| [[docs:guide-user:firewall:upnp:miniupnpd|/etc/config/upnpd]]                                   | miniupnpd UPnP server settings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| [[docs:guide-user:base-system:users|/etc/config/users]]                                         | user database for different services                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| [[docs:guide-user:services:media_server:ushare|/etc/config/ushare]]                             | uShare UPnP server settings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| [[docs:guide-user:services:vblade|/etc/config/vblade]]                                          | vblade userspace AOE target                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| [[docs:guide-user:services:network_monitoring:vnstat|/etc/config/vnstat]]                       | vnstat downloader settings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| [[docs:guide-user:network:wifi:wifi_toggle|/etc/config/wifitoggle]]                             | Toggle WiFi with a button                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| [[docs:guide-user:services:w_o_l:wol|/etc/config/wol]]                                          | Wake-on-Lan: wol                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| [[docs:guide-user:services:proxy:znc|/etc/config/znc]]                                          | ZNC bouncer configuration                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+
+===== File syntax =====
+The UCI configuration files usually consist of one or more ''config'' statements, so called sections with one or more option statements defining the actual values.
+
+A ''#'' begins comments in the usual way.
+Specifically, if a line contains a ''#'' outside of a string literal, it and all characters after it in the line are considered a comment and ignored.
+
+Below is an example of a simple configuration file (see also [[#uci_dataobject_model]]):
+
+<code bash>
+package 'example'
+
+config 'example' 'test'
+        option   'string'      'some value'
+        option   'boolean'     '1'
+        list     'collection'  'first item'
+        list     'collection'  'second item'
+</code>
+
+  * The ''config 'example' 'test''' statement defines the start of a section with the type ''example'' and the name ''test''. There can also be so called anonymous sections with only a type, but no name identifier. The type is important for the processing programs to decide how to treat the enclosed options.
+
+  * The ''option 'string' 'some value''' and ''option 'boolean' '1''' lines define simple values within the section. Note that there are no syntactical differences between text and boolean options. Per convention, boolean options may have one of the values '0', 'no', 'off', 'false' or 'disabled' to specify a false value or '1' , 'yes', 'on', 'true' or 'enabled' to specify a true value.
+
+  * In the lines starting with a ''list'' keyword an option with multiple values is defined. All ''list'' statements that share the same name, ''collection'' in our example, will be combined into a single list of values with the same order as in the configuration file.
+
+  * The indentation of the ''option'' and ''list'' statements is a convention to improve the readability of the configuration file but it's not syntactically required.
+
+  * If an option is absent and not required, the default value is assumed. If it is absent and required, it may trigger an error in the application or other unwanted behaviour.
+  
+  * A way to disable a config section, that does not have a ''enabled'' option to be disabled, is renaming the config section identifier (or type, in this case ''example'') to a value not recognized by the processes that uses those values. Normally a ''disabled_identifier'' as config section type/identifier is sufficient.
+
+Usually you do not need to enclose identifiers or values in quotes. Quotes are only required if the enclosed value contains spaces or tabs. Also it's legal to use double- instead of single-quotes when typing configuration options.
+
+All of the examples below are valid UCI syntax:
+
+<code bash>
+option  example   value
+option  example  "value"
+option 'example'  value
+option 'example' "value"
+option "example" 'value'
+</code>
+
+In contrast, the following examples are not valid UCI syntax:
+
+<code bash>
+# missing quotes around the value
+option  example   v_a l u-e
+# unbalanced quotes
+option 'example" "value'
+</code>
+
+It is important to know that UCI identifiers and config file names may contain only the characters ''a-z'', ''0-9'' and ''_''.
+E.g. no hyphens (''-'') are allowed.
+Option values may contain any character (as long they are properly quoted).
+
+===== Editor plugins =====
+Syntax highlighting and (slightly) more in vim: [[https://github.com/cmcaine/vim-uci |vim-uci]] - works well with sshfs (need openssh-sftp-server).
+
+===== Command-line utility =====
+For adjusting settings, one normally changes the UCI config files directly.
+However, for scripting purposes, all of UCI configuration can also be read and changed using the ''uci'' command line utility.
+For developers requiring automatic parsing of the UCI configuration, it is therefore redundant, unwise, and inefficient to use ''awk'' and ''grep'' to parse OpenWrt's config files.
+The ''uci'' utility offers all functionality with respect to modifying and parsing UCI.
+
+Below is the usage, as well as some useful examples of how to use this powerful utility.
+
+<WRAP important>
+When using ''uci'' to write configuration files, the files are always rewritten in whole and non-recognised commands are omitted. This means that any extraneous lines in the file are deleted, such as comments. If you have UCI configuration files that you have edited yourself and you want to preserve your own comments and blank lines, you should not use the command line utility but edit the files normally. Note that some files, such as the uHTTPd configuration file, already contain many comments when the application is first installed. Also, note that some applications such as [[docs:techref:luci|LuCI]] also use the ''uci'' utility and thus may rewrite UCI configuration files.
+</WRAP>
+
+When there are multiple sections of the same type in a config, UCI supports array-like references for them.
+If there are 8 NTP servers defined in ''/etc/config/system'', UCI will let you reference their sections as ''system.@timeserver[0]'' for the first or ''system.@timeserver[7]'' for the last one.
+You can also use negative indexes, such as ''system.@timeserver[-1]''.
+"-1" means the last one, "-2" means the second-to-last one, and so on.
+This comes in very handy when appending new rules to the end of a list.
+See the examples below.
+
+==== Usage ====
+<code>
+# uci
+Usage: uci [<options>] <command> [<arguments>]
+
+Commands:
+	batch
+	export     [<config>]
+	import     [<config>]
+	changes    [<config>]
+	commit     [<config>]
+	add        <config> <section-type>
+	add_list   <config>.<section>.<option>=<string>
+	del_list   <config>.<section>.<option>=<string>
+	show       [<config>[.<section>[.<option>]]]
+	get        <config>.<section>[.<option>]
+	set        <config>.<section>[.<option>]=<value>
+	delete     <config>.<section>[.<option>]
+	rename     <config>.<section>[.<option>]=<name>
+	revert     <config>[.<section>[.<option>]]
+	reorder    <config>.<section>=<position>
+
+Options:
+	-c <path>  set the search path for config files (default: /etc/config)
+	-d <str>   set the delimiter for list values in uci show
+	-f <file>  use <file> as input instead of stdin
+	-m         when importing, merge data into an existing package
+	-n         name unnamed sections on export (default)
+	-N         don't name unnamed sections
+	-p <path>  add a search path for config change files
+	-P <path>  add a search path for config change files and use as default
+	-q         quiet mode (don't print error messages)
+	-s         force strict mode (stop on parser errors, default)
+	-S         disable strict mode
+	-X         do not use extended syntax on 'show'
+</code>
+
+<sortable>
+^ ''Command'' ^ Target ^ Description ^
+| ''commit'' | ''[<config>]'' | Writes changes of the given configuration file, or if none is given, all configuration files, to the filesystem. All "uci set", "uci add", "uci rename" and "uci delete" commands are staged into a temporary location and written to flash at once with "uci commit". This is not needed after editing configuration files with a text editor, but for scripts, GUIs and other programs working directly with UCI files. |
+| ''batch'' | - | Executes a multi-line UCI script which is typically wrapped into a //here// document syntax. |
+| ''export'' | ''[<config>]'' | Exports the configuration in a machine readable format. It is used internally to evaluate configuration files as shell scripts. |
+| ''import'' | ''[<config>]'' | Imports configuration files in UCI syntax. |
+| ''changes'' | ''[<config>]'' | List staged changes to the given configuration file or if none given, all configuration files. |
+| ''add'' | ''<config> <section-type>'' | Add an anonymous section of type ''section-type'' to the given configuration. |
+| ''add_list'' | ''<config>.<section>.<option>=<string>'' | Add the given string to an existing list option. |
+| ''del_list'' | ''<config>.<section>.<option>=<string>'' | Remove the given string from an existing list option. |
+| ''show'' | ''[<config>[.<section>[.<option>]]]'' | Show the given option, section or configuration in compressed notation. |
+| ''get'' | ''<config>.<section>[.<option>]'' | Get the value of the given option or the type of the given section. |
+| ''set'' | ''<config>.<section>[.<option>]=<value>'' | Set the value of the given option, or add a new section with the type set to the given value. |
+| ''delete'' | ''<config>.<section>[.<option>]'' | Delete the given section or option. |
+| ''rename'' | ''<config>.<section>[.<option>]=<name>'' | Rename the given option or section to the given name. |
+| ''revert'' | ''<config>[.<section>[.<option>]]'' | Revert the given option, section or configuration file. |
+| ''reorder'' | ''<config>.<section>=<position>'' | Move a section to another position. |
+</sortable>
+
+Note that you cannot delete an entire config using ''uci delete'' eg. ''uci delete umdns'' will not work. If you are really, truly sure you want to wipe an entire config, this shell code snippet will do it by looping and deleting the first entry in the config until it is empty:
+
+<code bash>
+while uci -q delete umdns.@umdns[0]; do :; done
+</code>
+
+===== UCI data/object model =====
+==== Elements ====
+The elements in UCI model are:
+  * **config**: main configuration groups like **network**, **system**, **firewall**. Each configuration group has it's own file in **/etc/config**
+  * **sections**: config is divided into sections. A section can either be **named** or **unnamed**.
+  * **types**: a section can have a type. E.g in the network config we typically have 4 sections of the type "interface". The sections are "lan", "wan", "loopback" and "wan6"
+  * **options**: each section have some options where you set your configuration values
+  * **values**: value of option
+
+=== Sections naming ===
+Sections deserve some extra explanation in regards to naming.
+A section can be //named// or //unnamed//. 
+Unnamed sections will get an **autogenerated ID/CFGID** (like "cfg073777") and be presented with an **anonymous-name** (like "@switch[0]")
+
+Section names may only contain alphanum and "_" (for shell compatibility).  Hyphen '-' is not allowed.
+
+Example of **anonymous-name**:
+
+<code bash>
+# uci show network
+...
+network.@switch[0]=switch
+network.@switch[0].name='switch0'
+network.@switch[0].reset='1'
+network.@switch[0].enable_vlan='1'
+...
+</code>
+
+Example of **autogenerated ID/CFGID**:
+
+<code bash>
+# uci show network.@switch[0]
+network.cfg073777=switch
+network.cfg073777.name='switch0'
+network.cfg073777.reset='1'
+network.cfg073777.enable_vlan='1'
+</code>
+
+=== Different presentation ===
+The same config section can be presented in different ways:
+  * Human-friendly: as presented in the config files or with the command "uci export <config>"
+  * Programmable: as presented with the command "uci show <config>"
+
+^ Different model presentations ^^^ 
+| **Human-friendly**, named section ("uci export network") | **Human-friendly**, unnamed section ("uci export network") | |
+| {{:media:doc:howtos:uci_hr_named.png?nolink|}} | {{:media:doc:howtos:uci_hr_unmaned.png?nolink|}} | |
+| **Programmable**, named section ("uci show network.wan") | **Programmable**, unnamed section, anonymous name ("uci show network") | **Programmable**, unnamed section, CFGID ("uci show network.@switch[0]") |
+| {{:media:doc:howtos:uci_prg_named.png?nolink|}} | {{:media:doc:howtos:uci_prg_unmaned_an.png?nolink|}} | {{:media:doc:howtos:uci_prg_unmaned_cfgid.png?nolink|}} |
+
+==== Examples ====
+=== Setting a value ===
+If we want to change the listening port of the [[docs:guide-user:services:webserver:http.uhttpd|uHTTPd Web Server]] from 80 to 8080 we change the configuration in ''/etc/config/uhttpd'' :
+
+<code bash>
+uci set uhttpd.main.listen_http='8080'
+uci commit uhttpd
+/etc/init.d/uhttpd restart
+</code>
+
+Done, now the configuration file is updated and uHTTPd listens on port 8080.
+
+=== Export an entire configuration ===
+<code bash>
+uci export configuration_name
+</code>
+
+Commonly available configurations are: **defaults**, **dnsmasq**, **dropbear**, **firewall**, **fstab**, **net**, **qos**, **samba**, **system**, **wireless**.
+
+=== Show a configuration ===
+<code bash>
+uci show configuration_name
+</code>
+
+Here an example:
+
+<code bash>
+# uci show system 
+system.@system[0]=system 
+system.@system[0].hostname='OpenWrt' 
+system.@system[0].timezone='UTC' 
+system.ntp=timeserver 
+system.ntp.server='0.openwrt.pool.ntp.org' '1.openwrt.pool.ntp.org' '2.openwrt.pool.ntp.org' '3.openwrt.pool.ntp.org' 
+system.ntp.enabled='1' 
+system.ntp.enable_server='0'
+</code>
+
+=== Display just the value of an option ===
+<code bash>
+uci get httpd.@httpd[0].port
+</code>
+
+=== Append an entry to a list ===
+<code bash>
+uci add_list system.ntp.server='0.de.pool.ntp.org'
+</code>
+
+=== Replace a list completely ===
+<code bash>
+uci delete system.ntp.server
+uci add_list system.ntp.server='0.de.pool.ntp.org'
+uci add_list system.ntp.server='1.de.pool.ntp.org'
+uci add_list system.ntp.server='2.de.pool.ntp.org'
+</code>
+
+=== Adding a new anonymous section to configuration ===
+<code bash>
+uci add configuration_name section_type
+</code>
+
+It will generate a new unnamed section of type ''section_type'' inside the configuration called ''configuration_name''.
+Afterwards you can add keys to this section as normal.
+The add command will print an auto generated alphanumeric section name that you can use for further adding keys to the newly added section.
+
+Add a new firewall config section of type ''rule'' and refer to it by index:
+
+<code bash>
+uci add firewall rule
+uci set firewall.@rule[-1].src='wan'
+</code>
+
+Add a new firewall config section of type ''rule'' and refer to it by its auto generated name:
+
+<code bash>
+sid=$(uci add firewall rule)
+uci set firewall.$sid.src='wan'
+</code>
+
+=== Adding a named section to configuration ===
+
+In order to add a named section of a given type, the option-less form of the ''uci set'' command must be used.
+
+<code bash>
+touch /etc/config/example
+uci set example.this_name=blah
+uci set example.this_name.xxx=yyy
+uci set example.other_name=blah
+uci set example.other_name.yyy=zzz
+uci commit example
+</code>
+
+<code bash>
+uci show example
+</code>
+<code>
+example.this_name=blah
+example.this_name.xxx=yyy
+example.other_name=blah
+example.other_name.yyy=zzz
+</code>
+
+<code bash>
+cat /etc/config/example
+</code>
+<code>
+config blah 'this_name'
+    option xxx 'yyy'
+    
+config blah 'other_name'
+    option xxx 'zzz'
+</code>
+
+=== Showing the not-yet-saved modified values ===
+<code bash>
+uci changes
+</code>
+
+=== Saving modified values of a single configuration ===
+<code bash>
+uci commit configuration_name 
+reload_config
+</code>
+
+=== Saving all modified values ===
+<code bash>
+uci commit
+reload_config
+</code>
+
+=== Generating a full UCI section with a simple copy-paste ===
+This block of code catches the code printed by uci when you add a new section (see above) and reuses it in all the new keys you want to add after it. This automates what would be a very fun typing or copy-paste job. You can also do this in your scripts.
+
+Generic version:
+
+<code bash>
+rule_name=$(uci add <config> <section-type>) 
+uci batch << EOI
+set <config>.$rule_name.<option1>='value'
+set <config>.$rule_name.<option2>='value'
+set <config>.$rule_name.<option3>='value'
+...
+EOI
+uci commit
+</code>
+
+A working example:
+
+<code bash>
+rule_name=$(uci add firewall rule) 
+uci batch << EOI
+set firewall.$rule_name.enabled='1'
+set firewall.$rule_name.target='ACCEPT'
+set firewall.$rule_name.src='wan'
+set firewall.$rule_name.proto='tcp udp'
+set firewall.$rule_name.dest_port='111'
+set firewall.$rule_name.name='NFS_share'
+EOI
+uci commit
+</code>
+
+=== UCI paths ===
+Consider this example config file:
+
+<code bash>
+config bar 'first'
+	option name	'Mr. First'
+config bar
+	option name	'Mr. Second'
+config bar 'third'
+	option name	'Mr. Third'
+</code>
+
+Then the paths below are equal in every group:
+
+<code bash>
+# Mr. First
+uci get foo.@bar[0].name
+uci get foo.@bar[-0].name
+uci get foo.@bar[-3].name
+uci get foo.first.name
+
+# Mr. Second
+uci get foo.@bar[1].name
+uci get foo.@bar[-2].name
+# uci get foo.second.name won't work; label 'second' undefined
+
+# Mr. Third
+uci get foo.@bar[2].name
+uci get foo.@bar[-1].name
+uci get foo.third.name
+</code>
+
+If you show it, you get :
+
+<code bash>
+# uci show foo
+foo.first=bar
+foo.first.name='Mr. First'
+foo.@bar[0]=bar
+foo.@bar[0].name='Mr. Second'
+foo.third=bar
+foo.third.name='Mr. Third'
+</code>
+
+But if you used ''uci show foo.@bar[0]'', you will see:
+
+<code bash>
+# uci show foo.@bar[0]
+foo.first=bar
+foo.first.name='Mr. First'
+</code>
+
+=== Add a firewall rule ===
+This is a good example of both adding a firewall rule to forward the TCP SSH port, and of the negative (-1) syntax used with uci.
+
+<code bash>
+uci add firewall rule
+uci set firewall.@rule[-1].src='wan'
+uci set firewall.@rule[-1].target='ACCEPT'
+uci set firewall.@rule[-1].proto='tcp'
+uci set firewall.@rule[-1].dest_port='22'
+uci commit firewall
+/etc/init.d/firewall restart
+</code>
+
+=== Get SSID ===
+<code bash>
+uci get wireless.@wifi-iface[0].ssid
+</code>
+
+===== Porting UCI to a different Linux distribution =====
+See [[docs:techref:uci#usage_outside_of_openwrt|UCI (Unified Configuration Interface) – Technical Reference]]
+
+===== Corrupted configs =====
+See also:
+[[docs:guide-user:advanced:uci_extras|UCI extras]]
+
+If you manually edited the configs in ''/etc/config'', it is possible that some of them are corrupted due to typos.
+
+<code bash>
+# uci show fstab
+uci: Parse error (invalid command) at line 20, byte 0
+</code>

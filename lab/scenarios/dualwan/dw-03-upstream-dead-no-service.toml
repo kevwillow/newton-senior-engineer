@@ -1,0 +1,54 @@
+name = "dw-03-upstream-dead-no-service"
+description = "DW-03: with the WAN-health tool installed and configured but DISABLED (`enabled='0'`), no failover happens when the lab gives them a dead upstream. The same `inet nwcut` nft cut as dw-01, the same lab-isp counters and probe target. The [[post]] (no [[effect]]: there is nothing to fail before the change in a useful way, since the service is installed and configured throughout) sends one connection per second for 45 s and asserts NONE arrives via ISP-B and none via ISP-A either (the cut drops everything from lab-r1's eth2 on lab-isp before it reaches a counter). It prints `no_failover_after_45s=1`. The trap removes the cut on exit. This proves the tool, not netifd, does the dual-WAN failover (netifd alone, with no other mechanism, cannot demote a still-up route). OBSERVATION: lab-isp nft counters (no eth2 rise and no eth3 rise means the cut is still in place and netifd did not move traffic)."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 180
+setup = ["dw_wanhealth_install", "dw_isp_target_on", "dw_isp_count_on"]
+cleanup = ["dw_isp_count_off", "dw_isp_target_off", "dw_cut_clear"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "client_internet", "client_dns", "client_dhcp"]
+probes = [["uci-equals", "newton_wanhealth.main.enabled", "0"]]
+batch = '''
+set newton_wanhealth.main=settings
+set newton_wanhealth.main.enabled='0'
+set newton_wanhealth.main.interval='3'
+set newton_wanhealth.main.timeout='1'
+set newton_wanhealth.main.down_after='3'
+set newton_wanhealth.main.up_after='2'
+add_list newton_wanhealth.main.target='198.51.100.9'
+add_list newton_wanhealth.main.iface='wan'
+add_list newton_wanhealth.main.iface='wan2'
+'''
+
+[[post]]
+device = "local"
+timeout = 170
+cmd = '''
+. lab/dualwan-lib.sh
+nwcut_off 2>/dev/null; nwdown_off 2>/dev/null
+fail() { echo "dw-03-upstream-dead-no-service: $1" >&2; nwcut_off; exit 1; }
+trap 'nwcut_off' EXIT
+# baseline via A so we know the link is alive before the cut
+wait_via A 20 || fail "baseline: not via ISP-A"
+nwcut_on
+read -r a0 b0 < <(counts)
+end=$(( $(date +%s) + 45 ))
+while [ "$(date +%s)" -lt "$end" ]; do
+    nwsend
+    sleep 1
+done
+read -r a1 b1 < <(counts)
+nwcut_off
+if [ "$a1" -eq "$a0" ] && [ "$b1" -eq "$b0" ]; then
+    echo "no_failover_after_45s=1"
+    exit 0
+fi
+echo "no_failover_after_45s=0 (eth2 a0=$a0 a1=$a1 eth3 b0=$b0 b1=$b1)"
+exit 1
+'''
+expect_stdout = '^no_failover_after_45s=1$'
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get newton_wanhealth.main.enabled"
+expect_stdout = '^0$'

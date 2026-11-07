@@ -1,0 +1,61 @@
+{
+ "canonical_json": "{\"base_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"device\":\"lab-router\",\"diff\":\"system.@system[0].description='café router'\",\"explanation\":{\"expect\":[{\"equals\":\"cafe router\",\"kind\":\"uci_equals\",\"path\":\"system.@system[0].description\"}],\"intent\":\"Rename the router description to café router\",\"risk\":\"Cosmetic only; the owner would see the old name on the status page.\",\"steps\":[\"Set the system description to the new name\"]},\"host\":\"192.0.2.10\",\"owner_confirmed_in_chat\":true,\"probes\":[[\"ping\",\"192.0.2.1\"],[\"log-has\",\"present\",\"made-up-marker\"]],\"reasons\":[\"excluded from the canonical identity\"],\"requires_approval\":true,\"router_digest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"router_leash\":[\"mgmt-if\"],\"router_profile\":\"lab\",\"router_requires_approval\":false,\"router_sections\":[\"dhcp skilltest host-reservation skilltest\"],\"session_id\":\"0123456789abcdef0123456789abcdef\",\"staged_at\":\"2026-10-07T12:00:00+00:00\",\"staged_check\":{\"fw4\":\"pass\",\"not_checked\":[\"dhcp\"],\"reason\":\"\"},\"timeout_s\":120,\"uci_batch\":\"set system.@system[0].description='café router'\\n\"}",
+ "plan_hash": "5208f464d141ed64b16613273c174b956e0d96f38e1e4ab710552cb572f44ab3",
+ "record": {
+  "base_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "created_at": "2026-10-07T12:00:00+00:00",
+  "device": "lab-router",
+  "diff": "system.@system[0].description='café router'",
+  "explanation": {
+   "expect": [
+    {
+     "equals": "cafe router",
+     "kind": "uci_equals",
+     "path": "system.@system[0].description"
+    }
+   ],
+   "intent": "Rename the router description to café router",
+   "risk": "Cosmetic only; the owner would see the old name on the status page.",
+   "steps": [
+    "Set the system description to the new name"
+   ]
+  },
+  "host": "192.0.2.10",
+  "owner_confirmed_in_chat": true,
+  "probes": [
+   [
+    "ping",
+    "192.0.2.1"
+   ],
+   [
+    "log-has",
+    "present",
+    "made-up-marker"
+   ]
+  ],
+  "reasons": [
+   "excluded from the canonical identity"
+  ],
+  "requires_approval": true,
+  "router_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "router_leash": [
+   "mgmt-if"
+  ],
+  "router_profile": "lab",
+  "router_requires_approval": false,
+  "router_sections": [
+   "dhcp skilltest host-reservation skilltest"
+  ],
+  "session_id": "0123456789abcdef0123456789abcdef",
+  "staged_at": "2026-10-07T12:00:00+00:00",
+  "staged_check": {
+   "fw4": "pass",
+   "not_checked": [
+    "dhcp"
+   ],
+   "reason": ""
+  },
+  "timeout_s": 120,
+  "uci_batch": "set system.@system[0].description='café router'\n"
+ }
+}

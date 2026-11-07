@@ -1,0 +1,42 @@
+name = "ow-dns-03-domainneeded-boguspriv"
+description = "OW-DNS-03: dhcp.@dnsmasq[0].domainneeded='1' and boguspriv='1', both already the stock values, so the plan stages nothing and the expected outcome is noop. A client lookup cannot tell the router's own policy from its upstream's here (lab-isp's dnsmasq has the same defaults, so a single-label name or a private PTR gets NXDOMAIN either way), so the setup step dns_logqueries_on makes dnsmasq log every query and every forward, and the posts read the log: the single-label name newton-single-label and the PTR of the unused private address 10.55.55.55 are answered NXDOMAIN by dnsmasq's own configuration (log source 'config') and are never forwarded. The client queries use a trailing dot so that the wire name is the single label (host would otherwise add the search domain 'lan'). Positive controls: the single-label name lab-r1 (the router, from /tmp/hosts) and the PTR of 192.168.150.1 still resolve, so the two options do not hide local names. Also the options and the two lines of the running dnsmasq's conf. Each post was shown to fail with the options at 0 (results file)."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "noop"
+setup = ["portfwd_on", "dns_logqueries_on"]
+regression = "default"
+batch = '''
+set dhcp.@dnsmasq[0].domainneeded='1'
+set dhcp.@dnsmasq[0].boguspriv='1'
+'''
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+c=; for p in $(pidof dnsmasq); do c=$(tr '\0' ' ' < /proc/$p/cmdline | sed -n 's/.*dnsmasq -C \([^ ]*\).*/\1/p'); [ -n "$c" ] && break; done
+[ -f "$c" ] || { echo "no conf found for the running dnsmasq"; exit 1; }
+echo "options: domainneeded=$(uci -q get dhcp.@dnsmasq[0].domainneeded) boguspriv=$(uci -q get dhcp.@dnsmasq[0].boguspriv); running conf: domain-needed=$(grep -c '^domain-needed$' $c) bogus-priv=$(grep -c '^bogus-priv$' $c)"
+'''
+expect_stdout = '^options: domainneeded=1 boguspriv=1; running conf: domain-needed=1 bogus-priv=1$'
+
+[[post]]
+device = "lab-client"
+timeout = 45
+cmd = '''
+echo "single label: $(host -W 5 -t A newton-single-label. 192.168.150.1 | tail -1)"
+echo "private PTR: $(host -W 5 10.55.55.55 192.168.150.1 | tail -1)"
+echo "router name: $(host -W 5 -t A lab-r1. 192.168.150.1 | tail -1)"
+echo "router PTR: $(host -W 5 192.168.150.1 192.168.150.1 | tail -1)"
+'''
+expect_stdout = '^single label: Host newton-single-label\.? not found: 3\(NXDOMAIN\)\nprivate PTR: Host 55\.55\.55\.10\.in-addr\.arpa\.? not found: 3\(NXDOMAIN\)\nrouter name: lab-r1\.? has address 192\.168\.150\.1\nrouter PTR: 1\.150\.168\.192\.in-addr\.arpa domain name pointer lab-r1\.lan\.$'
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+l=$(logread)
+n1=$(echo "$l" | grep -c ' config newton-single-label is NXDOMAIN'); f1=$(echo "$l" | grep -c 'forwarded newton-single-label to')
+n2=$(echo "$l" | grep -c ' config 10\.55\.55\.55 is NXDOMAIN'); f2=$(echo "$l" | grep -c 'forwarded 55\.55\.55\.10\.in-addr\.arpa to')
+echo "single label: answered by dnsmasq's config=$n1 forwarded=$f1; private PTR: answered by dnsmasq's config=$n2 forwarded=$f2"
+[ "$n1" -ge 1 ] && [ "$f1" = 0 ] && [ "$n2" -ge 1 ] && [ "$f2" = 0 ]
+'''
+expect_stdout = '^single label: answered by dnsmasq.s config=[1-9]\d* forwarded=0; private PTR: answered by dnsmasq.s config=[1-9]\d* forwarded=0$'

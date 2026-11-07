@@ -1,0 +1,11 @@
+# synthetic
+== [ port1 ]
+name: port1   status: up   speed: 1000Mbps   ip: 198.51.100.10 255.255.255.0
+== [ port2 ]
+name: port2   status: up   speed: 1000Mbps   ip: 198.51.100.11 255.255.255.0
+== [ port3 ]
+name: port3   status: down   speed: auto
+== [ port4 ]
+name: port4   status: up   speed: 1000Mbps   ip: 192.0.2.10 255.255.255.0
+== [ mgmt ]
+name: mgmt   status: up   speed: 1000Mbps   ip: 203.0.113.10 255.255.255.0

@@ -1,0 +1,22 @@
+#!/bin/sh
+# Fixture guard (addendum R3 4.5): `status` prints the first line of the
+# state file (default idle); `restore` and `confirm` echo.
+
+FS=${FAKE_ROUTER_FS:-/nonexistent}
+
+case "${1:-}" in
+  status)
+    line=idle
+    if [ -f "$FS/etc/newton/guard-state" ]; then
+      IFS= read -r line < "$FS/etc/newton/guard-state" || line=idle
+    fi
+    echo "$line"
+    ;;
+  restore|confirm)
+    echo "$1"
+    ;;
+  *)
+    echo "usage: newton-guard status|restore|confirm" >&2
+    exit 2
+    ;;
+esac

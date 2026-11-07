@@ -1,0 +1,44 @@
+name = "ev-06-fw-user-allow"
+description = "A plain firewall rule on lab-r1 lets a host on the WAN side reach an HTTP service on the client LAN. The batch adds a redirect (wan tcp 8080 -> {client_lab_ip} tcp 8080) and a forward rule that ACCEPTs the redirected flow. fw4 normally auto-allows redirected flows, so the rule is belt and braces; both are kept so the batch is a documented rule + redirect pair. The client LAN is not routed on lab-isp, so without the redirect the router has no destination for the packet and a rule alone would not let it through. Before the change tcp 8080 is closed on the WAN side, so a GET from lab-isp to {r1_wan_ip}:8080 is refused at once. After the confirmed apply the same GET reaches the listener (a python http.server serving a fixed body 'newton-ev-ok') and reads the body; uci shows firewall.ev_allow_8080.target = ACCEPT and firewall.ev_fwd_8080.target = DNAT."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 90
+approval = true
+setup = ["http8080_on"]
+cleanup = ["http8080_off"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "client_internet", "client_dns", "client_dhcp"]
+probes = [["nft-rule", "inet", "fw4", "ruleset", "present", "dport 8080"]]
+batch = """set firewall.ev_allow_8080=rule
+set firewall.ev_allow_8080.name='ev-allow-8080'
+set firewall.ev_allow_8080.src='wan'
+set firewall.ev_allow_8080.dest='lab'
+set firewall.ev_allow_8080.dest_ip='{client_lab_ip}'
+set firewall.ev_allow_8080.proto='tcp'
+set firewall.ev_allow_8080.dest_port='8080'
+set firewall.ev_allow_8080.target='ACCEPT'
+set firewall.ev_fwd_8080=redirect
+set firewall.ev_fwd_8080.name='ev-fwd-8080'
+set firewall.ev_fwd_8080.src='wan'
+set firewall.ev_fwd_8080.src_dport='8080'
+set firewall.ev_fwd_8080.dest='lab'
+set firewall.ev_fwd_8080.dest_ip='{client_lab_ip}'
+set firewall.ev_fwd_8080.dest_port='8080'
+set firewall.ev_fwd_8080.proto='tcp'
+set firewall.ev_fwd_8080.target='DNAT'"""
+
+[[effect]]
+device = "lab-isp"
+timeout = 30
+cmd = '''
+t=$(mktemp); (printf 'GET / HTTP/1.0\r\n\r\n' | nc {r1_wan_ip} 8080 > $t 2>/dev/null &)
+i=0; while [ ! -s $t ] && [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done
+if grep -q 'newton-ev-ok' $t; then echo "body: newton-ev-ok"; else echo "body: not served"; fi
+rm -f $t
+'''
+expect_stdout = '^body: newton-ev-ok$'
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get firewall.ev_allow_8080.target; uci -q get firewall.ev_fwd_8080.target"
+expect_stdout = '^ACCEPT\nDNAT$'

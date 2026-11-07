@@ -1,0 +1,787 @@
+{
+ "base": {
+  "platform": "openwrt",
+  "host": "192.0.2.1",
+  "user": "root",
+  "auth": "key",
+  "profile": "prod"
+ },
+ "cases": [
+  {
+   "id": "base",
+   "fields": {},
+   "ok": true
+  },
+  {
+   "id": "name-32-chars",
+   "fields": {
+    "name": "abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "ok": true
+  },
+  {
+   "id": "name-33-chars",
+   "fields": {
+    "name": "abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "ok": false
+  },
+  {
+   "id": "name-uppercase",
+   "fields": {
+    "name": "Quasar"
+   },
+   "ok": false
+  },
+  {
+   "id": "name-underscore",
+   "fields": {
+    "name": "lab_r1"
+   },
+   "ok": false
+  },
+  {
+   "id": "name-leading-digit",
+   "fields": {
+    "name": "1lab"
+   },
+   "ok": false
+  },
+  {
+   "id": "name-leading-dash",
+   "fields": {
+    "name": "-lab"
+   },
+   "ok": false
+  },
+  {
+   "id": "name-newline",
+   "fields": {
+    "name": "lab\nforged"
+   },
+   "ok": false
+  },
+  {
+   "id": "name-dot",
+   "fields": {
+    "name": "lab.r1"
+   },
+   "ok": false
+  },
+  {
+   "id": "key-file-tmp",
+   "fields": {
+    "key_file": "{tmp}/newton-key"
+   },
+   "ok": true
+  },
+  {
+   "id": "key-file-empty",
+   "fields": {
+    "key_file": ""
+   },
+   "ok": true
+  },
+  {
+   "id": "key-file-space",
+   "fields": {
+    "key_file": "/bad path"
+   },
+   "ok": false
+  },
+  {
+   "id": "key-file-dollar",
+   "fields": {
+    "key_file": "key$file"
+   },
+   "ok": false
+  },
+  {
+   "id": "key-file-int",
+   "fields": {
+    "key_file": 5
+   },
+   "ok": false
+  },
+  {
+   "id": "known-hosts-path",
+   "fields": {
+    "known_hosts": "/var/lib/newton/hosts"
+   },
+   "ok": true
+  },
+  {
+   "id": "known-hosts-empty",
+   "fields": {
+    "known_hosts": ""
+   },
+   "ok": true
+  },
+  {
+   "id": "known-hosts-space",
+   "fields": {
+    "known_hosts": "kh file"
+   },
+   "ok": false
+  },
+  {
+   "id": "known-hosts-int",
+   "fields": {
+    "known_hosts": 7
+   },
+   "ok": false
+  },
+  {
+   "id": "wan-zones-default-ok",
+   "fields": {
+    "wan_zones": [
+     "wan"
+    ]
+   },
+   "ok": true
+  },
+  {
+   "id": "wan-zones-four",
+   "fields": {
+    "wan_zones": [
+     "wan",
+     "wan2",
+     "zone3",
+     "z4"
+    ]
+   },
+   "ok": true
+  },
+  {
+   "id": "wan-zones-five",
+   "fields": {
+    "wan_zones": [
+     "wan",
+     "a",
+     "b",
+     "c",
+     "d"
+    ]
+   },
+   "ok": false
+  },
+  {
+   "id": "wan-zones-empty",
+   "fields": {
+    "wan_zones": []
+   },
+   "ok": false
+  },
+  {
+   "id": "wan-zones-item-32",
+   "fields": {
+    "wan_zones": [
+     "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww"
+    ]
+   },
+   "ok": true
+  },
+  {
+   "id": "wan-zones-item-33",
+   "fields": {
+    "wan_zones": [
+     "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww"
+    ]
+   },
+   "ok": false
+  },
+  {
+   "id": "wan-zones-item-space",
+   "fields": {
+    "wan_zones": [
+     "wan zone"
+    ]
+   },
+   "ok": false
+  },
+  {
+   "id": "wan-zones-not-list",
+   "fields": {
+    "wan_zones": "wan"
+   },
+   "ok": false
+  },
+  {
+   "id": "wan-zones-item-int",
+   "fields": {
+    "wan_zones": [
+     "wan",
+     3
+    ]
+   },
+   "ok": false
+  },
+  {
+   "id": "mgmt-interface-32",
+   "fields": {
+    "mgmt_interface": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"
+   },
+   "ok": true
+  },
+  {
+   "id": "mgmt-interface-33",
+   "fields": {
+    "mgmt_interface": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"
+   },
+   "ok": false
+  },
+  {
+   "id": "mgmt-zone-32",
+   "fields": {
+    "mgmt_zone": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+   },
+   "ok": true
+  },
+  {
+   "id": "mgmt-zone-33",
+   "fields": {
+    "mgmt_zone": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+   },
+   "ok": false
+  },
+  {
+   "id": "mgmt-zone-space",
+   "fields": {
+    "mgmt_zone": "lan lan"
+   },
+   "ok": false
+  },
+  {
+   "id": "mgmt-interface-int",
+   "fields": {
+    "mgmt_interface": 5
+   },
+   "ok": false
+  },
+  {
+   "id": "port-22",
+   "fields": {
+    "port": 22
+   },
+   "ok": true
+  },
+  {
+   "id": "port-zero",
+   "fields": {
+    "port": 0
+   },
+   "ok": false
+  },
+  {
+   "id": "port-high",
+   "fields": {
+    "port": 70000
+   },
+   "ok": false
+  },
+  {
+   "id": "port-bool",
+   "fields": {
+    "port": true
+   },
+   "ok": false
+  },
+  {
+   "id": "profile-staging",
+   "fields": {
+    "profile": "staging"
+   },
+   "ok": false
+  },
+  {
+   "id": "routeros-ok",
+   "fields": {
+    "platform": "routeros",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": true
+  },
+  {
+   "id": "junos-ok",
+   "fields": {
+    "platform": "junos",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": true
+  },
+  {
+   "id": "eos-ok",
+   "fields": {
+    "platform": "eos",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": true
+  },
+  {
+   "id": "iosxe-ok",
+   "fields": {
+    "platform": "iosxe",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": true
+  },
+  {
+   "id": "fortios-ok",
+   "fields": {
+    "platform": "fortios",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": true
+  },
+  {
+   "id": "vyos-lab-ok",
+   "fields": {
+    "platform": "vyos",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts",
+    "lab": true
+   },
+   "ok": true
+  },
+  {
+   "id": "vyos-no-lab",
+   "fields": {
+    "platform": "vyos",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "vyos-lab-false",
+   "fields": {
+    "platform": "vyos",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts",
+    "lab": false
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "vyos-vendor-write-ok",
+   "fields": {
+    "platform": "vyos",
+    "profile": "lab",
+    "vendor_write": true,
+    "lab": true,
+    "key_file": "{tmp}/newton-key",
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": true
+  },
+  {
+   "id": "vyos-vendor-write-string",
+   "fields": {
+    "platform": "vyos",
+    "profile": "lab",
+    "vendor_write": "yes",
+    "lab": true,
+    "key_file": "{tmp}/newton-key",
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "vyos-vendor-write-no-key-file",
+   "fields": {
+    "platform": "vyos",
+    "profile": "lab",
+    "vendor_write": true,
+    "lab": true,
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "vyos-vendor-write-password-auth",
+   "fields": {
+    "platform": "vyos",
+    "profile": "lab",
+    "auth": "password",
+    "password_file": "{tmp}/pw",
+    "vendor_write": true,
+    "lab": true,
+    "key_file": "{tmp}/newton-key",
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "vyos-vendor-write-not-lab",
+   "fields": {
+    "platform": "vyos",
+    "profile": "prod",
+    "vendor_write": true,
+    "key_file": "{tmp}/newton-key",
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "vyos-vendor-write-both-flags",
+   "fields": {
+    "platform": "vyos",
+    "profile": "lab",
+    "vendor_write": true,
+    "experimental_readonly": true,
+    "lab": true,
+    "key_file": "{tmp}/newton-key",
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-vendor-write",
+   "fields": {
+    "platform": "routeros",
+    "profile": "lab",
+    "vendor_write": true,
+    "lab": true,
+    "key_file": "{tmp}/newton-key",
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": true,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-vendor-write-no-lab",
+   "fields": {
+    "platform": "routeros",
+    "profile": "lab",
+    "vendor_write": true,
+    "key_file": "{tmp}/newton-key",
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-vendor-write-no-key-file",
+   "fields": {
+    "platform": "routeros",
+    "profile": "lab",
+    "vendor_write": true,
+    "lab": true,
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-vendor-write-password-auth",
+   "fields": {
+    "platform": "routeros",
+    "profile": "lab",
+    "auth": "password",
+    "password_file": "{tmp}/pw",
+    "vendor_write": true,
+    "lab": true,
+    "key_file": "{tmp}/newton-key",
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-vendor-write-both-flags",
+   "fields": {
+    "platform": "routeros",
+    "profile": "lab",
+    "vendor_write": true,
+    "experimental_readonly": true,
+    "lab": true,
+    "key_file": "{tmp}/newton-key",
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "junos-vendor-write",
+   "fields": {
+    "platform": "junos",
+    "profile": "lab",
+    "vendor_write": true,
+    "lab": true,
+    "key_file": "{tmp}/newton-key",
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": true,
+   "setup_ok": true
+  },
+  {
+   "id": "junos-vendor-write-no-lab",
+   "fields": {
+    "platform": "junos",
+    "profile": "lab",
+    "vendor_write": true,
+    "key_file": "{tmp}/newton-key",
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "junos-vendor-write-no-key-file",
+   "fields": {
+    "platform": "junos",
+    "profile": "lab",
+    "vendor_write": true,
+    "lab": true,
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "junos-vendor-write-password-auth",
+   "fields": {
+    "platform": "junos",
+    "profile": "lab",
+    "auth": "password",
+    "password_file": "{tmp}/pw",
+    "vendor_write": true,
+    "lab": true,
+    "key_file": "{tmp}/newton-key",
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "junos-vendor-write-both-flags",
+   "fields": {
+    "platform": "junos",
+    "profile": "lab",
+    "vendor_write": true,
+    "experimental_readonly": true,
+    "lab": true,
+    "key_file": "{tmp}/newton-key",
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "eos-vendor-write",
+   "fields": {
+    "platform": "eos",
+    "profile": "lab",
+    "vendor_write": true,
+    "lab": true,
+    "key_file": "{tmp}/newton-key",
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-lab-true",
+   "fields": {
+    "platform": "routeros",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts",
+    "lab": true
+   },
+   "ok": true
+  },
+  {
+   "id": "routeros-lab-string",
+   "fields": {
+    "platform": "routeros",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts",
+    "lab": "yes"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-lab-int",
+   "fields": {
+    "platform": "routeros",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts",
+    "lab": 1
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-no-flag",
+   "fields": {
+    "platform": "routeros",
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-flag-false",
+   "fields": {
+    "platform": "routeros",
+    "experimental_readonly": false,
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-flag-string",
+   "fields": {
+    "platform": "routeros",
+    "experimental_readonly": "true",
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-flag-int",
+   "fields": {
+    "platform": "routeros",
+    "experimental_readonly": 1,
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-no-known-hosts",
+   "fields": {
+    "platform": "routeros",
+    "experimental_readonly": true
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-known-hosts-empty",
+   "fields": {
+    "platform": "routeros",
+    "experimental_readonly": true,
+    "known_hosts": ""
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-known-hosts-missing",
+   "fields": {
+    "platform": "routeros",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/nope"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-known-hosts-dir",
+   "fields": {
+    "platform": "routeros",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-known-hosts-symlink",
+   "fields": {
+    "platform": "routeros",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts_link"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-password-no-known-hosts",
+   "fields": {
+    "platform": "routeros",
+    "auth": "password",
+    "password_file": "{tmp}/pw",
+    "experimental_readonly": true
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "routeros-password-ok",
+   "fields": {
+    "platform": "routeros",
+    "auth": "password",
+    "password_file": "{tmp}/pw",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": true
+  },
+  {
+   "id": "platform-acme",
+   "fields": {
+    "platform": "acme",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "platform-empty",
+   "fields": {
+    "platform": "",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "platform-capital",
+   "fields": {
+    "platform": "OpenWrt",
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "platform-int",
+   "fields": {
+    "platform": 5,
+    "experimental_readonly": true,
+    "known_hosts": "{tmp}/known_hosts"
+   },
+   "ok": false,
+   "setup_ok": true
+  },
+  {
+   "id": "openwrt-ignores-experimental-fields",
+   "fields": {
+    "platform": "openwrt",
+    "experimental_readonly": "x",
+    "lab": "x"
+   },
+   "ok": true
+  }
+ ]
+}

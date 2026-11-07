@@ -1,0 +1,36 @@
+#!/usr/bin/python3
+"""utpl fake for the check-staged helper: `utpl -S WRAPPER.uc`.
+
+Logs the call, keeps a copy of the wrapper text (control/utpl.wrapper.N), honours control/utpl.rc and
+control/utpl.err, prints nothing for a non-canary render when control/utpl.empty-staged exists, then prints control/utpl.out (the base ruleset) and, unless control/utpl.ignore-savedir
+exists, every line of `<savedir>/batch`, the file the fake `uci -P DIR batch` writes. The savedir is the
+second string in the wrapper's `orig("<confdir>", "<savedir>")` call, so a wrapper that does not name
+the session dir renders none of its delta."""
+import os
+import re
+import sys
+
+root = os.environ["NEWTON_ROUTER_ROOT"]
+ctl = root + "/control"
+args = sys.argv[1:]
+open(ctl + "/calls.log", "a").write("utpl " + " ".join(args) + "\n")
+text = ""
+if len(args) == 2 and args[0] == "-S":
+    text = open(args[1]).read()
+n = len([f for f in os.listdir(ctl) if f.startswith("utpl.wrapper.")]) + 1
+open("%s/utpl.wrapper.%d" % (ctl, n), "w").write(text)
+if os.path.exists(ctl + "/utpl.err"):
+    sys.stderr.write(open(ctl + "/utpl.err").read())
+if os.path.exists(ctl + "/utpl.rc"):
+    rc = int(open(ctl + "/utpl.rc").read().split()[0])
+    if rc:
+        sys.exit(rc)
+if os.path.exists(ctl + "/utpl.empty-staged") and "canary" not in text:
+    sys.exit(0)
+if os.path.exists(ctl + "/utpl.out"):
+    sys.stdout.write(open(ctl + "/utpl.out").read())
+m = re.search(r'orig\("([^"]*)",\s*"([^"]*)"\)', text)
+if m and not os.path.exists(ctl + "/utpl.ignore-savedir"):
+    batch = m.group(2) + "/batch"
+    if os.path.exists(batch):
+        sys.stdout.write(open(batch).read())

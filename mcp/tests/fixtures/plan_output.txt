@@ -1,0 +1,16 @@
+BACKUP /home/user/.local/state/network-agent/backups/Quasar-20261003-205204.tar.gz (2 config files)
+STAGED session=fd595e20f2cd6c2b928fe3156f82d5db from /tmp/changes.uci diff=0123456789ab
+BASEHASH 8888888888888888888888888888888888888888888888888888888888888888
+PROBES 2 1111111111111111111111111111111111111111111111111111111111111111
+PROFILE lab
+SECTION dhcp skilltest host-reservation skilltest
+LEASH wan-rule firewall.wan_rule.src
+APPROVAL not-required
+PLANDIGEST 3333333333333333333333333333333333333333333333333333333333333333
+----- diff -----
+dhcp.skilltest='host'
+dhcp.skilltest.name='skilltest'
+dhcp.skilltest.mac='02:00:00:00:00:99'
+dhcp.skilltest.ip='192.0.2.99'
+----------------
+next: /home/user/newton/scripts/owrt-change.sh apply root@192.0.2.1 fd595e20f2cd6c2b928fe3156f82d5db [timeout]

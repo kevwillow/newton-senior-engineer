@@ -1,0 +1,12 @@
+# synthetic
+VRF: default
+Codes: C - connected, S - static, K - kernel,
+       O - OSPF, IA - OSPF inter area
+
+Gateway of last resort is not set
+
+ C        192.0.2.0/24 is directly connected, Loopback0
+ C        198.51.100.0/24 is directly connected, Ethernet1
+ C        203.0.113.0/32 is directly connected, Loopback1
+ O        198.51.100.0/24 [110/20] via 198.51.100.1, Ethernet1
+ S        0.0.0.0/0 [1/0] via 198.51.100.1, Ethernet1

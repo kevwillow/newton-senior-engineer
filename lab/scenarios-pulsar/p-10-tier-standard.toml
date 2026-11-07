@@ -1,0 +1,15 @@
+name = "p-10-tier-standard"
+description = "PULSAR PORT of 10-tier-standard: only target, reset device and the post device changed (lab vars fw_wan_zone and fw_allow_ping resolve on pulsar in the local config). The tier file skips lab-bound blocks, so only portable controls apply. Original text: Live proof of the standard tier: restore pulsar from the baseline sysupgrade archive, apply every batch of profiles/openwrt/standard.uci in order through the same splitter newton_plan_tier uses, then reboot the router and re-run every batch's sealed probes plus the rollback-hash check. Standard fits one batch at the router cap and only needs the WAN firewall zone id; values come from lab.toml [vars] fw_wan_zone."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+timeout = 180
+tier = "standard"
+tier_reboot = true
+tier_fail_probe = ["conf-has", "dnsmasq", "substr", "present", "newton-tier-rollback-marker-never-present"]
+tier_values = { fw_wan_zone = "{fw_wan_zone}" }
+
+[[post]]
+device = "pulsar"
+cmd = "uci changes | wc -l"
+expect_stdout = "^0$"

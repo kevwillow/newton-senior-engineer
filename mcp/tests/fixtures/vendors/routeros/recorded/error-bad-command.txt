@@ -1,0 +1,2 @@
+# recorded lab:chr:7.24.5:2026-10-18
+bad command name nonexistent (line 1 column 2)

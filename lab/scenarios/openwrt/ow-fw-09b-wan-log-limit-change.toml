@@ -1,0 +1,23 @@
+name = "ow-fw-09b-wan-log-limit-change"
+description = "OW-FW-09, changing an existing log limit. The wan zone already logs with log_limit 10/minute (setup step, set directly and live), then Newton changes log_limit to 30/minute. A firewall reload, which is what the apply triggers (`fw4 reload`), re-renders the ruleset but keeps an already existing named nft object, so on its own the live `limit wan.log_limit` would stay at 10/minute while `fw4 print` says 30/minute. Newton now restarts the firewall after the apply when the staged change touches a zone's log_limit (or an ipset), which re-creates the object with the configured rate. The check is the live rate, so Newton confirms only once 30/minute is live; the [[effect]] (live rate 30/minute) fails before and must pass after; the post shows the config and the live rate both at 30/minute. Before that this file was ow-fw-09b-wan-log-limit-change-rolls-back and asserted the rollback that Newton gave then (the change never went live); ow-fw-09c now covers the rollback path. The first application in ow-fw-09 is not affected either way: the object does not exist yet, so a reload creates it with the configured rate."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on", "fw_wan_log_on"]
+regression = "default"
+probes = [["nft-rule-near", "inet", "fw4", "ruleset", "limit wan.log_limit", "3", "rate 30/minute"]]
+batch = '''
+set firewall.{fw_wan_zone}.log_limit='30/minute'
+'''
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+nft list ruleset | grep -A3 'limit wan.log_limit' | grep -q 'rate 30/minute' && echo "live limit wan.log_limit is 30/minute"
+'''
+expect_stdout = '^live limit wan\.log_limit is 30/minute$'
+
+[[post]]
+device = "lab-r1"
+cmd = "echo \"uci log_limit=$(uci -q get firewall.{fw_wan_zone}.log_limit); live: $(nft list ruleset | grep -A3 'limit wan.log_limit' | grep rate | tr -d '\\t')\""
+expect_stdout = '^uci log_limit=30/minute; live: rate 30/minute$'

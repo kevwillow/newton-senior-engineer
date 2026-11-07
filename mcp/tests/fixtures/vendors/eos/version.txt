@@ -1,0 +1,11 @@
+# synthetic
+Arista DCS-7280SR-48C6
+Hardware version:    01.00
+
+Software image version: 4.30.3F
+Architecture:           x86_64
+Build date:             2026-09-04 10:11:00 -0700
+
+Uptime:                 12 days, 4 hours, 22 minutes
+
+Internal build version: 4.30.3F-34290189.3069318

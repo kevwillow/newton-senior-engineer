@@ -1,0 +1,61 @@
+name = "ev-clientcheck-block-opens"
+description = "EV-CLIENTCHECK-OPENS proves that a client claim can stop a change the router-side verify alone would accept. The guest zone is created with input ACCEPT, so the guest client can open one of the claimed router ports while the router's own interface probe still passes. The inside vantage reports that blocked claim as FAIL open; Newton must not confirm and must roll the change back. The expected failed claim names claim 1, and the post proves the guest interface is gone after the rollback."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "rolled_back"
+# input ACCEPT on a new zone is an approval-required change; the runner mints the lab token
+approval = true
+timeout = 180
+setup = ["portfwd_on", "zone_probe_on", "guest_ns_on", "vantage_checks_on"]
+cleanup = ["vantage_checks_off", "guest_ns_off", "zone_probe_off"]
+regression = "default"
+probes = [["iface-field", "guest", "up", "true"]]
+expect_failed_claim = '^expect claim 1 failed: .*cannot reach router addresses.*\(open\)$'
+batch = '''
+set network.guest=interface
+set network.guest.proto='static'
+set network.guest.device='eth3.30'
+set network.guest.ipaddr='192.168.30.1'
+set network.guest.netmask='255.255.255.0'
+set dhcp.guest=dhcp
+set dhcp.guest.interface='guest'
+set dhcp.guest.start='100'
+set dhcp.guest.limit='100'
+set dhcp.guest.leasetime='1h'
+set firewall.guest_zone=zone
+set firewall.guest_zone.name='guest'
+set firewall.guest_zone.network='guest'
+set firewall.guest_zone.input='ACCEPT'
+set firewall.guest_zone.output='ACCEPT'
+set firewall.guest_zone.forward='REJECT'
+set firewall.guest_wan=forwarding
+set firewall.guest_wan.src='guest'
+set firewall.guest_wan.dest='wan'
+set firewall.guest_dhcp=rule
+set firewall.guest_dhcp.name='Allow-Guest-DHCP'
+set firewall.guest_dhcp.src='guest'
+set firewall.guest_dhcp.proto='udp'
+set firewall.guest_dhcp.dest_port='67'
+set firewall.guest_dhcp.target='ACCEPT'
+set firewall.guest_dns=rule
+set firewall.guest_dns.name='Allow-Guest-DNS'
+set firewall.guest_dns.src='guest'
+set firewall.guest_dns.proto='tcp udp'
+set firewall.guest_dns.dest_port='53'
+set firewall.guest_dns.target='ACCEPT'
+'''
+
+[[client_checks]]
+kind = "client_blocked"
+zone = "guest"
+to = "router"
+targets = ["192.168.30.1:22", "192.168.30.1:80", "192.168.30.1:443", "10.109.0.11:22", "10.109.0.11:443", "192.168.150.1:22", "192.168.150.1:443"]
+
+[[client_checks]]
+kind = "client_dns"
+zone = "guest"
+
+[[post]]
+device = "lab-r1"
+cmd = "ubus call network.interface.guest status >/dev/null 2>&1; [ $? -ne 0 ] && echo guest-interface-gone"
+expect_stdout = '^guest-interface-gone$'

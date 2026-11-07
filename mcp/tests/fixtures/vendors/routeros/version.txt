@@ -1,0 +1,7 @@
+# synthetic
+  uptime: 3d12h44m
+  version: 7.14.3 (stable)
+  build-time: Mar/05/2026 09:14:22
+  factory-software: 7.14
+  board-name: lab-router-r1
+  platform: MikroTik

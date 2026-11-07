@@ -1,0 +1,3 @@
+# recorded lab:chr:7.24.5:2026-10-18
+0  chain=srcnat action=masquerade out-interface=ether1
+

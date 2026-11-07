@@ -1,0 +1,5 @@
+rpcd.@login[0]=login
+rpcd.@login[0].username='newton'
+rpcd.@login[0].password='fake-rpcd-login-password-value'
+rpcd.@login[0].read='/usr/share/rpcd/acl.d/newton-ro.json'
+rpcd.@login[0].write='/usr/share/rpcd/acl.d/newton-rw.json'

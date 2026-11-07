@@ -1,0 +1,60 @@
+# OW-WIFI-04, the hidden SSID, on Pulsar's radio1 (5 GHz ch36 HE20, country US, txpower 3 dBm). Hiding is
+# cosmetic and the control says do NOT use it, so the scenario is here to show the cost and not to recommend it:
+# the beacons carry no SSID (length 0 or 32 NULs), the network stops being visible, and the only way in is a
+# directed probe, which the client sends because it was told the SSID.
+name = "p-ow-wifi-04-hidden"
+description = "OW-WIFI-04: the hidden SSID, and why the control says do NOT use it. Interface wlan on radio1 (5 GHz, ch36, HE20, country US, txpower 3 dBm), dhcp section wlan, zone wlz (input/output/forward ACCEPT) with forwarding wlz to wan, and wireless.default_radio1 edited to disabled 0, ssid newton-test, network wlan, encryption sae-mixed, ieee80211w 1, hidden 1, with the key from the secret var. Effects from the Panda on lab-wifi, --bssid pinned to radio1's MAC and the channel pinned to 5180 MHz: the monitor parses 20 s of that BSSID's beacons and the SSID element must be empty (length 0 or 32 NULs, which the same parser prints as empty in p-ow-wifi-02) with the AKM set exactly {2,8}, MFPC=1, MFPR=0 and at least five beacons, so the radio is still beaconing and only the name is gone; then a SAE client that was told the SSID associates with scan_ssid=1, its scan_results lists that SSID on that pinned BSSID (scan_ssid_seen=1), it takes a 192.168.152.0/24 lease and pings 192.168.152.1. That is the whole of hiding: cosmetic. It hides nothing from an attacker who watches the air for a directed probe, it takes the network out of every client's list, and it makes roaming worse, which is why OW-WIFI-04 is a do NOT use. The regression is Pulsar's baseline list; approval = true because the batch touches firewall."
+target = "pulsar"
+reset = ["pulsar"]
+reset_after = ["pulsar"]
+after_reset = ["p_radios_off"]
+approval = true
+expect = "confirmed"
+timeout = 240
+setup = ["wifi_script_install", "wifi_key_install", "wifi_prep"]
+cleanup = ["wifi_cleanup"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen", "p_client_on_pulsar"]
+probes = [["iface-field", "wlan", "up", "true"], ["uci-equals", "wireless.default_radio1.hidden", "1"]]
+batch = '''
+set network.wlan=interface
+set network.wlan.proto='static'
+set network.wlan.ipaddr='192.168.152.1'
+set network.wlan.netmask='255.255.255.0'
+set dhcp.wlan=dhcp
+set dhcp.wlan.interface='wlan'
+set dhcp.wlan.start='100'
+set dhcp.wlan.limit='50'
+set dhcp.wlan.leasetime='1h'
+set firewall.wlz=zone
+set firewall.wlz.name='wlz'
+set firewall.wlz.network='wlan'
+set firewall.wlz.input='ACCEPT'
+set firewall.wlz.output='ACCEPT'
+set firewall.wlz.forward='ACCEPT'
+set firewall.wlz_wan=forwarding
+set firewall.wlz_wan.src='wlz'
+set firewall.wlz_wan.dest='wan'
+set wireless.radio1.country='US'
+set wireless.radio1.channel='36'
+set wireless.radio1.htmode='HE20'
+set wireless.radio1.txpower='3'
+set wireless.default_radio1.disabled='0'
+set wireless.default_radio1.network='wlan'
+set wireless.default_radio1.ssid='newton-test'
+set wireless.default_radio1.encryption='sae-mixed'
+set wireless.default_radio1.ieee80211w='1'
+set wireless.default_radio1.hidden='1'
+set wireless.default_radio1.key='{wifi_psk}'
+'''
+
+[[effect]]
+device = "lab-wifi"
+timeout = 60
+cmd = "sudo /usr/local/bin/newton-wifi.py monitor --freq 5180 --bssid {p_wifi_bssid} --secs 20 --min-beacons 5 --expect-akm 2,6,8 --expect-mfpc 1 --expect-mfpr 0 --expect-ssid-empty"
+expect_stdout = '^monitor: beacons=[1-9][0-9]* ssid=empty akm=2,6,8 mfpc=1 mfpr=0 wps=0 ciphers=ccmp '
+
+[[effect]]
+device = "lab-wifi"
+timeout = 120
+cmd = "sudo /usr/local/bin/newton-wifi.py client --mode sae --ssid newton-test --bssid {p_wifi_bssid} --freq 5180 --ieee80211w 1 --scan-ssid --secs 40"
+expect_stdout = '^client: state=COMPLETED ip=192\.168\.152\.[0-9]{1,3} ping=ok scan_ssid_seen=1$'

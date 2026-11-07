@@ -1,0 +1,23 @@
+# PORT of ev-04. Changed: lab-r1 -> pulsar; 192.168.150.77 -> 192.168.1.77; the effect query comes from the agent host (device local, a real LAN client) via dig @192.168.1.1 instead of lab-client 'host'; regression = pulsar's default list.
+name = "p-ev-04-dns-local-record"
+description = "Add a local DNS name to dnsmasq on pulsar: an anonymous dhcp domain section (name='nas.lab', ip='192.168.1.77') makes the router serve 'nas.lab' on the client LAN. Before the change 'host -t A nas.lab 192.168.1.1' returns NXDOMAIN (the name is unknown) so the effect fails; after the confirmed apply the same lookup answers with that address, and uci reads the name and the ip back. No firewall change, so no approval. The plan carries a conf-has probe because the domain record is not in the generated conf: dnsmasq writes it to /tmp/hosts/dhcp.<SUF> (the addn-hosts file), so the probe must look there too."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+timeout = 60
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen"]
+probes = [["conf-has", "dnsmasq", "substr", "present", "nas.lab"]]
+batch = """add dhcp domain
+set dhcp.@domain[-1].name='nas.lab'
+set dhcp.@domain[-1].ip='192.168.1.77'"""
+
+[[effect]]
+device = "local"
+timeout = 30
+cmd = "dig +short +time=4 +tries=1 @192.168.1.1 nas.lab A"
+expect_stdout = '^192\.168\.1\.77$'
+
+[[post]]
+device = "pulsar"
+cmd = "echo $(uci -q get dhcp.@domain[-1].name) $(uci -q get dhcp.@domain[-1].ip)"
+expect_stdout = '^nas\.lab 192\.168\.1\.77$'

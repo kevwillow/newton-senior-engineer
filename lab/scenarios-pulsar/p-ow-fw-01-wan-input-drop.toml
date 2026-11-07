@@ -1,0 +1,42 @@
+# PORT of ow-fw-01. Changed: lab-r1 -> pulsar, r1_wan_ip -> p_wan_ip, regression names -> pulsar's checks; single WAN: the wan2 probe and its second expected line are dropped.
+name = "p-ow-fw-01-wan-input-drop"
+description = "OW-FW-01: the wan zone (found by name) gets input='DROP'. On pulsar the stock wan zone is input REJECT, forward DROP, so only input changes. Effects: lab-isp's connect to a closed tcp port on each of the router's two WAN addresses (wan 10.100.0.x and wan2 10.101.0.x, both in the zone) is no longer refused at once but gets no answer, while the router still answers ping on both (Allow-Ping precedes the drop, and a silent connect on a dead router would look the same); the live input_wan chain ends in jump drop_from_wan and the drop_from_wan chain holds a drop rule. wan_closed_refused is the intended breakage (refused before, not after). The default regression includes the port forward, which must survive: DNAT traffic does not go through input_wan."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+breaks = ["wan_closed_refused"]
+probes = [["nft-rule", "inet", "fw4", "input_wan", "present", "jump drop_from_wan"]]
+batch = '''
+set firewall.{fw_wan_zone}.input='DROP'
+'''
+
+[[effect]]
+device = "lab-isp"
+timeout = 40
+cmd = '''
+probe() {
+  ping -c 1 -W 2 $1 >/dev/null 2>&1 && p=ok || p=none
+  t=$(mktemp); nc $1 9 </dev/null >/dev/null 2>$t & n=$!
+  i=0; while [ ! -s $t ] && [ $i -lt 4 ]; do sleep 1; i=$((i+1)); done
+  r=$(cat $t); kill $n 2>/dev/null; rm -f $t
+  case "$r" in *refused*) c=refused;; "") c="no answer in 4 s";; *) c="$r";; esac
+  echo "$1: ping=$p closed-port-9=$c"
+  [ "$p" = ok ] && [ "$c" = "no answer in 4 s" ]
+}
+probe {p_wan_ip}
+'''
+expect_stdout = '^10\.100\.0\.\d+: ping=ok closed-port-9=no answer in 4 s$'
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+nft list chain inet fw4 input_wan | grep -q 'jump drop_from_wan' && nft list chain inet fw4 drop_from_wan | grep -q '[[:space:]]drop[[:space:]]' && echo "input_wan -> drop_from_wan"
+'''
+expect_stdout = '^input_wan -> drop_from_wan$'
+
+[[post]]
+device = "pulsar"
+cmd = "echo \"input=$(uci -q get firewall.{fw_wan_zone}.input) forward=$(uci -q get firewall.{fw_wan_zone}.forward) output=$(uci -q get firewall.{fw_wan_zone}.output)\""
+expect_stdout = '^input=DROP forward=DROP output=ACCEPT$'

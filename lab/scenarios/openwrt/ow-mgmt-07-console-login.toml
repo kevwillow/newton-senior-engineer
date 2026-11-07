@@ -1,0 +1,35 @@
+name = "ow-mgmt-07-console-login"
+description = "OW-MGMT-07: system.@system[0].ttylogin='1'. Behavioural effect on the serial console of lab-r1 (the lab-r1 VM has a serial0 socket; no restart needed): lab/lab-serial.sh bridges that VM to its serial port and scripts/newton-serial.py probe presses Enter. Before: a root shell opens with no password (STATE: shell). After: the console asks for a login (STATE: login). Each probe leaves the console at 'Please press Enter' (exit from the shell, Ctrl-D at the login prompt) so a stale shell cannot mask the change, and takes the bridge down again on exit. Needs uv (the script declares pyserial) and must run from the repo root. Behaviour with an empty root password is not covered: the lab password is set at baseline-pw."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+batch = '''
+set system.@system[0].ttylogin='1'
+'''
+
+[[effect]]
+device = "local"
+timeout = 150
+cmd = '''
+cd "$(git rev-parse --show-toplevel)" || exit 2
+D=$(mktemp -d)
+trap 'lab/lab-serial.sh down {lab_r1_vmid} >/dev/null 2>&1; rm -rf "$D"' EXIT
+timeout 20 lab/lab-serial.sh up {lab_r1_vmid} >/dev/null || { echo "serial bridge to VM {lab_r1_vmid} is not available"; exit 2; }
+S="timeout 45 uv run --script scripts/newton-serial.py --port socket://127.0.0.1:{lab_r1_serial_port} --log-dir $D --timeout 30"
+out=$($S --prompt 'root@\S+:\S*# *$' probe 2>&1)
+state=$(printf '%s\n' "$out" | sed -n 's/^STATE: //p' | tail -1)
+case "$state" in
+  shell) $S send exit --wait 2 >/dev/null 2>&1 ;;
+  login) $S send "$(printf '\004')" --wait 2 >/dev/null 2>&1 ;;
+esac
+echo "console state: $state"
+[ "$state" = login ]
+'''
+expect_stdout = '^console state: login$'
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get system.@system[0].ttylogin"
+expect_stdout = '^1$'

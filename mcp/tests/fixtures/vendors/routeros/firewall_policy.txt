@@ -1,0 +1,7 @@
+# synthetic
+ 0    ;;; accept established
+      chain=input action=accept connection-state=established,related
+ 1    ;;; drop invalid
+      chain=input action=drop connection-state=invalid
+ 2    ;;; accept mgmt
+      chain=input action=accept src-address=192.0.2.10/32 dst-port=22 protocol=tcp

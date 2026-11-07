@@ -1,0 +1,22 @@
+# PORT of ow-fw-05b. Changed: lab-r1 -> pulsar, r1_wan_ip -> p_wan_ip, regression names -> pulsar's checks; portfwd_on forwards to the agent host.
+name = "p-ow-fw-05b-wan-redirect-detected"
+description = "OW-FW-05 (audit), variant with the port forward present: portfwd_on adds the redirect pf_client (src wan, tcp 2222 to the client LAN host). The same audit as ow-fw-05-no-wan-redirects must now count exactly 1 enabled uci redirect with src=wan and 1 live DNAT rule in dstnat_wan, which proves the audit can see a WAN port forward (it would fail the 0 and 0 test of ow-fw-05). No batch, so expect none. The default regression includes the port forward itself."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "none"
+setup = ["portfwd_on"]
+regression = "default"
+
+[[post]]
+device = "pulsar"
+cmd = '''
+set -f
+n=0
+for s in $(uci -q show firewall | sed -n 's/^firewall\.\([^.=]*\)=redirect$/\1/p'); do
+  [ "$(uci -q get firewall.$s.src)" = wan ] && [ "$(uci -q get firewall.$s.enabled)" != 0 ] && n=$((n+1))
+done
+live=$(nft list chain inet fw4 dstnat_wan 2>/dev/null | grep -c -E ' (dnat|redirect) ')
+echo "enabled uci redirects with src=wan: $n; live dnat or redirect rules in dstnat_wan: $live"
+[ "$n" = 1 ] && [ "$live" = 1 ]
+'''
+expect_stdout = '^enabled uci redirects with src=wan: 1; live dnat or redirect rules in dstnat_wan: 1$'

@@ -1,0 +1,18 @@
+# recorded lab:vjunos:26.2R1.7:2026-10-18
+
+inet.0: 2 destinations, 2 routes (2 active, 0 holddown, 0 hidden)
++ = Active Route, - = Last Active, * = Both
+
+192.0.2.0/24      *[Direct/0] 00:02:22
+                    >  via fxp0.0
+192.0.2.41/32     *[Local/0] 00:02:22
+                       Local via fxp0.0
+
+inet6.0: 2 destinations, 2 routes (2 active, 0 holddown, 0 hidden)
++ = Active Route, - = Last Active, * = Both
+
+fe80::200:5eff:fe00:5301/128
+                   *[Local/0] 00:14:22
+                       Local via fxp0.0
+ff02::2/128        *[INET6/0] 00:14:33
+                       MultiRecv

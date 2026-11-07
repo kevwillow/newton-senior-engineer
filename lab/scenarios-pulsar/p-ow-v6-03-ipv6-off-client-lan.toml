@@ -1,0 +1,80 @@
+# PORT of ow-v6-03-ipv6-off-client-lan. Changed: lab-r1 -> pulsar; the lab interface's device is Pulsar's wan.151 (VLAN 151 on the WAN cable, an 802.1q device over `wan`), so the batch creates `config device` lab_dev with type 8021q / ifname wan / vid 151 / ipv6=0 instead of a bare eth3; the client LAN link-local is pinged from lab-client's eth0 as before, the management link-local control is pinged from the runner host's own Pulsar LAN NIC, and every router read uses the pinned admin-key path (r() to 192.168.1.1, no proxy); the wan devices in the posts are `wan` and `wan.101`; regression = pulsar's default list plus the client checks.
+name = "p-ow-v6-03-ipv6-off-client-lan"
+description = "OW-V6-03 (the verify report's renamed form: IPv6 off through a device section, not an interface option) for the lab LAN of pulsar. wan.151, the device of interface lab, is the 802.1q device netifd made for the VLAN 151 lab LAN on the WAN port, so the batch declares it explicitly (lab_dev: name='wan.151', type='8021q', ifname='wan', vid='151', ipv6='0'), sets dhcp.lab.dhcpv6 and ra to 'disabled' (new options; odhcpd already ignored this section) and deletes network.wan6. On apply netifd reloads: interface lab flaps once (down, link down, link up, up within one second) and fw4 reloads. The check reads the live state (the sysctl disable_ipv6 of the lab interface's device is 1 and `ifstatus wan6` fails), so Newton rolls the change back if netifd did not apply it. Effects: (1) wan.151 has disable_ipv6=1 and no IPv6 address at all, not even the link-local one that it has before; (2) the wan6 interface is gone, with its odhcp6c process and its udp 546 listener; (3) from lab-client the router's lab LAN link-local address (derived from wan.151's MAC) answers ping6 before and does not after, while the router's management link-local address on br-lan still answers in the same probe, pinged from the runner host's own NIC on pulsar's LAN (so the silence is wan.151's IPv6 being off, not a broken probe). Posts: the uci state; what fw4 does with the wan zone's network list, which still names wan6 (this post documents the behaviour of fw4 on 25.12.5 and turns red if a later fw4 starts to warn): nothing, it ignores the name silently (zone list unchanged in uci, `fw4 check` passes, fw4 prints no warning, the live rules still hook wan and wan.101 into input_wan, because wan6 shared device wan with wan; had wan6 used a device of its own the zone would have lost it without a word); odhcpd serves RAs on no interface but br-lan. IPv4 is untouched: the regression passes after, client_dhcp and the port forward included. The lab has no IPv6 upstream, so 'global addresses disappear' cannot be shown; the lab-client side only ever had link-local addresses on the client LAN."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen", "portfwd", "p_client_on_pulsar", "client_internet", "client_dns", "client_dhcp"]
+approval = true
+probes = [["sysctl-equals", "ipv6/conf/@dev:lab/disable_ipv6", "1"], ["iface-absent", "wan6"]]
+batch = '''
+set network.lab_dev=device
+set network.lab_dev.name='wan.151'
+set network.lab_dev.type='8021q'
+set network.lab_dev.ifname='wan'
+set network.lab_dev.vid='151'
+set network.lab_dev.ipv6='0'
+set dhcp.lab.dhcpv6='disabled'
+set dhcp.lab.ra='disabled'
+delete network.wan6
+'''
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+d=$(ifstatus lab | jsonfilter -e '@.device'); [ -n "$d" ] || { echo "no device for interface lab"; exit 1; }
+v=$(cat /proc/sys/net/ipv6/conf/$d/disable_ipv6); a=$(ip -6 addr show dev $d | grep -c inet6)
+echo "$d: disable_ipv6=$v inet6 addresses=$a"; [ "$v" = 1 ] && [ "$a" = 0 ]'''
+expect_stdout = '^wan\.151: disable_ipv6=1 inet6 addresses=0$'
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+if ifstatus wan6 >/dev/null 2>&1; then s=present; else s=gone; fi
+o=$(ps w | grep -c '[o]dhcp6c'); l=$(netstat -ulpn | grep -c ':546 ')
+echo "wan6 interface: $s; odhcp6c processes=$o; udp 546 listeners=$l"; [ $s = gone ] && [ "$o" = 0 ] && [ "$l" = 0 ]'''
+expect_stdout = '^wan6 interface: gone; odhcp6c processes=0; udp 546 listeners=0$'
+
+[[effect]]
+device = "local"
+timeout = 60
+cmd = '''
+sshx() { h=$1; shift; timeout 25 ssh -i "$LAB_SSH_KEY" -o BatchMode=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" "$h" "$@"; }
+r() { timeout 40 ssh -i {pulsar_admin_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 "$@"; }
+eui() { IFS=: read a b c d e f <<<"$1"; printf 'fe80::%02x%s:%sff:fe%s:%s%s' $((0x$a ^ 2)) $b $c $d $e $f; }
+ldev=$(r "ifstatus lab | jsonfilter -e '@.device'")
+ll3=$(eui "$(r "cat /sys/class/net/$ldev/address")")
+llb=$(eui "$(r 'cat /sys/class/net/br-lan/address')")
+r3=$(sshx {client_lab_user}@10.109.0.50 "ping -6 -c 2 -W 2 -I eth0 $ll3 2>&1 | grep -c 'bytes from'")
+rb=$(ping -6 -c 2 -W 2 -I {agent_usb_nic} $llb 2>&1 | grep -c 'bytes from')
+echo "ping6 to the client LAN link-local $ll3 via eth0: $r3 of 2; control, management link-local $llb via the agent host: $rb of 2"
+[ "$r3" = 0 ] && [ "$rb" = 2 ]'''
+expect_stdout = '^ping6 to the client LAN link-local fe80::[0-9a-f:]+ via eth0: 0 of 2; control, management link-local fe80::[0-9a-f:]+ via the agent host: 2 of 2$'
+
+[[post]]
+device = "pulsar"
+cmd = "echo \"lab_dev: name=$(uci -q get network.lab_dev.name) ipv6=$(uci -q get network.lab_dev.ipv6); dhcp.lab: dhcpv6=$(uci -q get dhcp.lab.dhcpv6) ra=$(uci -q get dhcp.lab.ra); network.wan6: [$(uci -q get network.wan6)]\""
+expect_stdout = '^lab_dev: name=wan\.151 ipv6=0; dhcp\.lab: dhcpv6=disabled ra=disabled; network\.wan6: \[\]$'
+
+[[post]]
+device = "pulsar"
+cmd = '''
+nets=$(uci -q get firewall.{fw_wan_zone}.network)
+fw4 check >/dev/null 2>&1; rc=$?
+w=$(fw4 print 2>&1 >/dev/null | wc -l)
+h=$(nft list chain inet fw4 input | grep -o 'iifname { "wan", "wan.101" } jump input_wan')
+echo "wan zone networks in uci: $nets; fw4 check rc=$rc; fw4 print warning lines=$w; live hook: $h"
+case " $nets " in *" wan6 "*) :;; *) exit 1;; esac
+[ "$rc" = 0 ] && [ "$w" = 0 ] && [ -n "$h" ]'''
+expect_stdout = '^wan zone networks in uci: .*\bwan6\b.*; fw4 check rc=0; fw4 print warning lines=0; live hook: iifname \{ "wan", "wan\.101" \} jump input_wan$'
+
+[[post]]
+device = "pulsar"
+cmd = '''
+o=$(ubus call dhcp ipv6ra | tr -d ' \t\n')
+echo "odhcpd ipv6ra: $o"
+case "$o" in *'"wan.151"'*|*'"wan"'*|*'"wan.101"'*) exit 1;; esac
+case "$o" in *'"br-lan"'*) exit 0;; esac
+exit 1'''
+expect_stdout = '^odhcpd ipv6ra: \{"interfaces":\{"br-lan":\[\{"prefix":"[0-9a-f:]+","length":\d+,"stale":false\}\]\}\}$'

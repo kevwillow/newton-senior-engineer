@@ -1,0 +1,1453 @@
+# OpenWrt profile manifest. Generated from the profile research
+# (not published) and lab/scenarios/openwrt/*.toml. Scenario-derived check and expect text follows
+# check_from byte for byte (apart from a trailing newline); do not edit it by hand.
+#
+# Keys of a [[control]] entry, in this order:
+#   id            control ID, e.g. OW-FW-01
+#   tier          standard | hardened | lockdown | opt-in | none
+#   title         catalogue title; a step-up or opt-in form adds it in parentheses
+#   lab           proven | audit | caveat | not-yet   (the tier doc's Lab column)
+#   scenario      file name in lab/scenarios/openwrt/, or "" when there is none
+#   step_up_of    tier of the base entry this stronger form belongs to, or ""
+#   form_of       tier of the base entry this alternative form belongs to, or ""
+#   preconditions plain strings: packages, listeners or clock state needed first
+#   batch         the uci staging lines, exactly as in the scenario; [] for
+#                 audit-only and not-yet controls
+#   check         read-only command that proves the control is live (taken from
+#                 one effect or post of the scenario), or ""
+#   expect        regex the check's stdout must match, or ""
+#   check_host    router | lab | ""    (lab: the check runs on a lab host)
+#   check_from    effect:N | post:N | derived | ""; source of check/expect;
+#                 derived means the check is built from more than one step;
+#                 notes must contain "Derived check:" and say how; check.py cannot
+#                 compare a derived check with the scenario, so
+#                 tests/profiles/test_profiles_live_checks.py runs it offline
+#   check_kind    live | config | ""; whether check reads runtime or UCI only
+#   lab_bound     batch/check parts tied to lab-r1 names, addresses or devices
+#   notes         the tier doc's Notes column, shortened, plus placeholder and
+#                 lab-bound remarks
+#
+# Every key is a string except preconditions, batch and lab_bound, which are
+# lists of strings; check.py reports any other type as a problem line.
+#
+# Placeholders {fw_wan_zone}, {fw_allow_ping}, {client_lab_ip} and {lan_device}
+# are resolved at apply time; {lan_device} stands in for the lab's physical
+# eth3 in the zone and IPv6-off batches, because profiles must not hard-code
+# physical device names.
+#
+# (id, tier) is unique; step_up_of / form_of entries are not counted again.
+[[control]]
+id = 'OW-MGMT-01'
+tier = 'standard'
+title = 'SSH on LAN only'
+lab = 'caveat'
+scenario = 'ow-mgmt-01-dropbear-interface.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set dropbear.@dropbear[0].Interface='lan'",
+]
+probes = [
+  ["listen", "tcp", "wildcard", "22", "dropbear", "absent"],
+  ["listen", "tcp", "any", "22", "dropbear", "present"],
+]
+check = '''
+netstat -tlnp | awk '$4=="10.109.0.11:22" && $7 ~ /dropbear/ {m=1} $4=="0.0.0.0:22"||$4==":::22"{w=1} END{print "mgmt-listener=" m+0 " wildcard-listener=" w+0; exit !(m&&!w)}'
+'''
+expect = '^mgmt-listener=1 wildcard-listener=0$'
+check_host = 'router'
+check_from = 'effect:0'
+check_kind = 'live'
+lab_bound = ['check']
+notes = '''proven; `Interface` binds addresses and fails open; 01b `DirectInterface` binds the device. Standard/Hardened use `Interface`, Lockdown uses `DirectInterface`; it needs its own listener check. check is the lab's listener check (Interface fails open): it names lab-r1's mgmt address, so it passes on lab-r1 only; the expect is derived from the line the step prints.'''
+
+[[control]]
+id = 'OW-MGMT-02'
+tier = 'standard'
+title = 'LuCI/uhttpd on LAN only'
+lab = 'proven'
+scenario = 'ow-mgmt-02-uhttpd-listen-lan.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  'delete uhttpd.main.listen_http',
+  "add_list uhttpd.main.listen_http='10.109.0.11:80'",
+  'delete uhttpd.main.listen_https',
+  "add_list uhttpd.main.listen_https='10.109.0.11:443'",
+]
+check = '''
+tcp() { LC_ALL=C timeout 6 bash -c "exec 3<>/dev/tcp/$1/$2" 2>&1; }
+tcp 192.168.150.1 53 >/dev/null || { echo "router not reachable on 192.168.150.1:53"; exit 1; }
+tcp 192.168.150.1 80 | grep -q 'Connection refused' && tcp 192.168.150.1 443 | grep -q 'Connection refused' && echo "192.168.150.1:80 and :443 refused, 192.168.150.1:53 open"
+'''
+expect = '^192\.168\.150\.1:80 and :443 refused'
+check_host = 'lab'
+check_from = 'effect:1'
+check_kind = 'live'
+lab_bound = ['batch', 'check']
+notes = 'IPv6 access to LuCI goes away. check runs from a lab client and names the lab client LAN address (192.168.150.1).'
+
+[[control]]
+id = 'OW-MGMT-03'
+tier = 'standard'
+title = 'HTTPS redirect'
+lab = 'proven'
+scenario = 'ow-mgmt-03-uhttpd-redirect-https.toml'
+step_up_of = ''
+form_of = ''
+preconditions = [
+  'listener tcp 443',
+]
+batch = [
+  "set uhttpd.main.redirect_https='1'",
+]
+probes = [
+  ["proc-args", "uhttpd", "-q"],
+]
+check = '''
+tr '\0' '\n' < /proc/$(pidof uhttpd | cut -d' ' -f1)/cmdline | grep -x -- -q
+'''
+expect = '^-q$'
+check_host = 'router'
+check_from = 'effect:1'
+check_kind = 'live'
+lab_bound = []
+notes = '''Check is the lab's live listener check: it checks the uhttpd command line for -q; the expect is derived from the line the step prints.'''
+
+[[control]]
+id = 'OW-MGMT-06'
+tier = 'standard'
+title = 'Non-default root password'
+lab = 'audit'
+scenario = 'ow-mgmt-06-root-password-audit.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = []
+check = '''
+awk -F: '$1=="root"{n++; f=$2; c=(f==""?"EMPTY":(f~/^[*!]/?"LOCKED":"HASH"))} END{if(n==0)print "NOROOT"; else if(n>1)print "MULTIROOT"; else print c}' /etc/shadow
+'''
+expect = '^HASH$'
+check_host = 'router'
+check_from = 'post:0'
+check_kind = 'live'
+lab_bound = []
+notes = 'Audit only: the lab test reads the router and changes nothing. A root password is not a uci setting. If empty or locked, apply the other Standard controls and report this one as failed.'
+
+[[control]]
+id = 'OW-FW-01'
+tier = 'standard'
+title = 'WAN zone input/forward DROP (default on stock is input REJECT, forward DROP)'
+lab = 'proven'
+scenario = 'ow-fw-01-wan-input-drop.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set firewall.{fw_wan_zone}.input='DROP'",
+]
+check = '''
+nft list chain inet fw4 input_wan | grep -q 'jump drop_from_wan' && nft list chain inet fw4 drop_from_wan | grep -q '[[:space:]]drop[[:space:]]' && echo "input_wan -> drop_from_wan"
+'''
+expect = '^input_wan -> drop_from_wan$'
+check_host = 'router'
+check_from = 'effect:1'
+check_kind = 'live'
+lab_bound = []
+notes = ''
+
+[[control]]
+id = 'OW-FW-02'
+tier = 'standard'
+title = 'SYN flood protection'
+lab = 'proven'
+scenario = 'ow-fw-02-synflood-protect.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set firewall.@defaults[0].synflood_protect='1'",
+]
+probes = [
+  ["nft-rule", "inet", "fw4", "input", "present", "jump syn_flood"],
+  ["nft-rule", "inet", "fw4", "syn_flood", "present", "limit rate"],
+  ["uci-equals", "firewall.@defaults[0].synflood_protect", "1"],
+]
+check = '''
+nft list chain inet fw4 syn_flood | grep -q 'limit rate 25/second burst 50 packets return' && nft list chain inet fw4 syn_flood | grep -q 'drop' && nft list chain inet fw4 input | grep -q 'jump syn_flood' && echo "syn_flood chain has the 25/s burst 50 limit and input jumps to it"
+'''
+expect = '^syn_flood chain has the 25/s burst 50 limit and input jumps to it$'
+check_host = 'router'
+check_from = 'post:1'
+check_kind = 'live'
+lab_bound = []
+notes = 'Already the stock default on 25.12.5, so applying it changes nothing on a stock image.'
+
+[[control]]
+id = 'OW-FW-03'
+tier = 'standard'
+title = 'Drop invalid packets'
+lab = 'proven'
+scenario = 'ow-fw-03-drop-invalid.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set firewall.@defaults[0].drop_invalid='1'",
+]
+probes = [
+  ["nft-rule", "inet", "fw4", "ruleset", "min:1", "invalid : drop"],
+  ["uci-equals", "firewall.@defaults[0].drop_invalid", "1"],
+]
+check = '''
+n=$(nft list ruleset | grep -c 'invalid : drop'); echo "invalid : drop vmap rules=$n"; [ "$n" = 3 ]
+'''
+expect = '^invalid : drop vmap rules=3$'
+check_host = 'router'
+check_from = 'effect:0'
+check_kind = 'live'
+lab_bound = []
+notes = ''
+
+[[control]]
+id = 'OW-FW-06'
+tier = 'standard'
+title = 'UPnP/NAT-PMP off'
+lab = 'proven'
+scenario = 'ow-fw-06-upnp-disabled.toml'
+step_up_of = ''
+form_of = ''
+preconditions = [
+  'package miniupnpd-nftables',
+]
+batch = [
+  "set upnpd.config.enabled='0'",
+]
+probes = [
+  ["listen", "udp", "any", "1900", "miniupnpd", "absent"],
+  ["listen", "udp", "any", "5351", "miniupnpd", "absent"],
+  ["listen", "tcp", "any", "5000", "miniupnpd", "absent"],
+  ["service-running", "miniupnpd", "any", "absent"],
+  ["uci-equals", "upnpd.config.enabled", "0"],
+]
+check = '''
+l=$(netstat -lun | grep -c -E ':(1900|5351) '); t=$(netstat -ltn | grep -c ':5000 '); p=$(ps w | grep -c '[m]iniupnpd')
+echo "udp 1900/5351 listeners=$l tcp 5000 listeners=$t miniupnpd processes=$p"; [ "$l$t$p" = 000 ]
+'''
+expect = '^udp 1900/5351 listeners=0 tcp 5000 listeners=0 miniupnpd processes=0$'
+check_host = 'router'
+check_from = 'post:1'
+check_kind = 'live'
+lab_bound = []
+notes = '''UPnP stays off in every tier. The batch needs the package miniupnpd-nftables: on a router without it uci batch rejects the whole file, so the tier .uci files show it commented out. The check passes without the package. The tier doc says do not install the package; the scenario installs it and sets enabled=0.'''
+
+[[control]]
+id = 'OW-ZONE-03'
+tier = 'standard'
+title = 'Wifi client isolation'
+lab = 'not-yet'
+scenario = ''
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = []
+check = ''
+expect = ''
+check_host = ''
+check_from = ''
+check_kind = ''
+lab_bound = []
+notes = "Wi-Fi devices on the isolated network can no longer talk to each other (printers or casting between them stop working). Proven on real hardware (Pulsar, 2026-10-23). Catalogue: guest Wi-Fi at Standard, IoT Wi-Fi at Hardened. Follow the row."
+
+[[control]]
+id = 'OW-DNS-01'
+tier = 'standard'
+title = 'Rebind protection'
+lab = 'proven'
+scenario = 'ow-dns-01-rebind-localhost.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set dhcp.@dnsmasq[0].rebind_protection='1'",
+  "set dhcp.@dnsmasq[0].rebind_localhost='0'",
+]
+probes = [
+  ["conf-has", "dnsmasq", "line", "present", "stop-dns-rebind"],
+  ["conf-has", "dnsmasq", "line", "absent", "rebind-localhost-ok"],
+]
+check = '''
+f=$(cat /var/etc/dnsmasq.conf.*)
+a=$(echo "$f" | grep -c '^rebind-localhost-ok$'); b=$(echo "$f" | grep -c '^stop-dns-rebind$')
+echo "dnsmasq conf: rebind-localhost-ok=$a stop-dns-rebind=$b"; [ "$a" = 0 ] && [ "$b" = 1 ]
+'''
+expect = '^dnsmasq conf: rebind-localhost-ok=0 stop-dns-rebind=1$'
+check_host = 'router'
+check_from = 'effect:0'
+check_kind = 'live'
+lab_bound = []
+notes = ''
+
+[[control]]
+id = 'OW-DNS-02'
+tier = 'standard'
+title = 'Resolver LAN-only'
+lab = 'proven'
+scenario = 'ow-dns-02-localservice.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set dhcp.@dnsmasq[0].localservice='1'",
+  "set dhcp.@dnsmasq[0].nonwildcard='1'",
+]
+probes = [
+  ["conf-has", "dnsmasq", "line", "present", "local-service"],
+  ["conf-has", "dnsmasq", "line", "present", "bind-dynamic"],
+]
+check = '''
+c=; for p in $(pidof dnsmasq); do c=$(tr '\0' ' ' < /proc/$p/cmdline | sed -n 's/.*dnsmasq -C \([^ ]*\).*/\1/p'); [ -n "$c" ] && break; done
+[ -f "$c" ] || { echo "no conf found for the running dnsmasq"; exit 1; }
+ls=$(grep -c '^local-service$' $c); bd=$(grep -c '^bind-dynamic$' $c); ia=$(grep -c -e '^interface=' -e '^listen-address=' $c)
+echo "running dnsmasq conf: local-service=$ls bind-dynamic=$bd interface-or-listen-address-lines=$ia"; [ "$ls" = 1 ] && [ "$bd" = 1 ] && [ "$ia" = 0 ]
+'''
+expect = '^running dnsmasq conf: local-service=1 bind-dynamic=1 interface-or-listen-address-lines=0$'
+check_host = 'router'
+check_from = 'post:1'
+check_kind = 'live'
+lab_bound = []
+notes = 'Already the stock default on 25.12.5, so applying it changes nothing on a stock image. An attached subnet counts as local, the WAN subnet included: the firewall, not this option, stops WAN queries.'
+
+[[control]]
+id = 'OW-DNS-03'
+tier = 'standard'
+title = 'Query hygiene'
+lab = 'proven'
+scenario = 'ow-dns-03-domainneeded-boguspriv.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set dhcp.@dnsmasq[0].domainneeded='1'",
+  "set dhcp.@dnsmasq[0].boguspriv='1'",
+]
+probes = [
+  ["conf-has", "dnsmasq", "line", "present", "domain-needed"],
+  ["conf-has", "dnsmasq", "line", "present", "bogus-priv"],
+]
+check = '''
+c=; for p in $(pidof dnsmasq); do c=$(tr '\0' ' ' < /proc/$p/cmdline | sed -n 's/.*dnsmasq -C \([^ ]*\).*/\1/p'); [ -n "$c" ] && break; done
+[ -f "$c" ] || { echo "no conf found for the running dnsmasq"; exit 1; }
+echo "options: domainneeded=$(uci -q get dhcp.@dnsmasq[0].domainneeded) boguspriv=$(uci -q get dhcp.@dnsmasq[0].boguspriv); running conf: domain-needed=$(grep -c '^domain-needed$' $c) bogus-priv=$(grep -c '^bogus-priv$' $c)"
+'''
+expect = '^options: domainneeded=1 boguspriv=1; running conf: domain-needed=1 bogus-priv=1$'
+check_host = 'router'
+check_from = 'post:0'
+check_kind = 'live'
+lab_bound = []
+notes = 'Already the stock default on 25.12.5, so applying it changes nothing on a stock image.'
+
+[[control]]
+id = 'OW-DHCP-02'
+tier = 'standard'
+title = 'Rogue DHCP guard: DHCP never offered on WAN'
+lab = 'proven'
+scenario = 'ow-dhcp-02-wan-ignore.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set dhcp.wan.ignore='1'",
+]
+probes = [
+  ["conf-has", "dnsmasq", "prefix", "present", "no-dhcp-interface="],
+  ["uci-equals", "dhcp.wan.ignore", "1"],
+]
+check = '''
+c=; for p in $(pidof dnsmasq); do c=$(tr '\0' ' ' < /proc/$p/cmdline | sed -n 's/.*dnsmasq -C \([^ ]*\).*/\1/p'); [ -n "$c" ] && break; done
+[ -f "$c" ] || { echo "no conf found for the running dnsmasq"; exit 1; }
+d=$(ifstatus wan | jsonfilter -e '@.l3_device')
+n=$(grep -c "^no-dhcp-interface=$d\$" "$c")
+r=$(grep '^dhcp-range=' "$c" | cut -d, -f1 | sed 's/^dhcp-range=//' | tr '\n' ' ')
+echo "wan device $d: no-dhcp-interface lines=$n; dhcp ranges served: $r"
+[ -n "$d" ] && [ "$n" = 1 ] && [ "$r" = "set:lab " ]
+'''
+expect = '^wan device eth1: no-dhcp-interface lines=1; dhcp ranges served: set:lab $'
+check_host = 'router'
+check_from = 'post:1'
+check_kind = 'live'
+lab_bound = ['check']
+notes = 'Already the stock default on 25.12.5, so applying it changes nothing on a stock image. check/expect name the lab WAN device eth1.'
+
+[[control]]
+id = 'OW-NTP-01'
+tier = 'standard'
+title = 'Local NTP, restricted'
+lab = 'proven'
+scenario = 'ow-ntp-01-local-server.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set system.ntp.use_dhcp='0'",
+  "set system.ntp.enable_server='1'",
+  "set system.ntp.interface='lab'",
+  'delete system.ntp.server',
+  "add_list system.ntp.server='time.cloudflare.com'",
+  "add_list system.ntp.server='time.google.com'",
+  "add_list system.ntp.server='pool.ntp.org'",
+]
+probes = [
+  ["uci-equals", "system.ntp.use_dhcp", "0"],
+  ["uci-equals", "system.ntp.enable_server", "1"],
+  ["proc-args", "ntpd", "-p time.cloudflare.com"],
+  ["proc-args", "ntpd", "!~openwrt.pool.ntp.org"],
+]
+check = '''
+d=$(ifstatus lab | jsonfilter -e '@.device'); [ -n "$d" ] || { echo "no device for interface lab"; exit 1; }
+for p in $(pidof ntpd); do
+  c=" $(tr '\0' ' ' < /proc/$p/cmdline)"
+  case "$c" in " /usr/sbin/ntpd "*) :;; *) continue;; esac
+  ok=1
+  for t in " -l " " -I $d " " -p time.cloudflare.com " " -p time.google.com " " -p pool.ntp.org "; do
+    case "$c" in *"$t"*) :;; *) ok=0;; esac
+  done
+  case "$c" in *"openwrt.pool.ntp.org"*) ok=0;; esac
+  l=$(netstat -ulpn | grep -c ':123 .*ntpd')
+  echo "ntpd:$c| listener udp :123 lines=$l"
+  [ $ok = 1 ] && [ "$l" -ge 1 ] && exit 0
+  exit 1
+done
+echo "no ntpd process"; exit 1'''
+expect = '^ntpd: /usr/sbin/ntpd -n -N -l -I eth3 -S /usr/sbin/ntpd-hotplug -p time\.cloudflare\.com -p time\.google\.com -p pool\.ntp\.org \| listener udp :123 lines=[1-9]'
+check_host = 'router'
+check_from = 'effect:0'
+check_kind = 'live'
+lab_bound = ['batch', 'check']
+notes = "check/expect pin the lab ntpd command line: the lab device eth3 and the lab's NTP servers."
+
+[[control]]
+id = 'OW-WIFI-02'
+tier = 'standard'
+title = 'WPA2/3 mixed'
+lab = 'not-yet'
+scenario = ''
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = []
+check = ''
+expect = ''
+check_host = ''
+check_from = ''
+check_kind = ''
+lab_bound = []
+notes = "Both WPA2 and WPA3 devices can join; very old devices without WPA2 cannot. Proven on real hardware (Pulsar, 2026-10-23)."
+
+[[control]]
+id = 'OW-WIFI-03'
+tier = 'standard'
+title = 'WPS disabled'
+lab = 'not-yet'
+scenario = ''
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = []
+check = ''
+expect = ''
+check_host = ''
+check_from = ''
+check_kind = ''
+lab_bound = []
+notes = "Devices that join with the WPS button stop doing so; use the Wi-Fi password instead. Not yet proven as a setting: on the test router (Pulsar, 2026-10-23) the stock Wi-Fi software has no WPS at all, so WPS was off whatever the setting."
+
+[[control]]
+id = 'OW-SVC-01'
+tier = 'standard'
+title = 'Listening-port audit'
+lab = 'audit'
+scenario = 'ow-svc-01-listener-audit.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = []
+check = '''
+exp='tcp 22 dropbear wildcard
+tcp 443 uhttpd wildcard
+tcp 53 dnsmasq loopback
+tcp 53 dnsmasq specific
+tcp 80 uhttpd wildcard
+udp 53 dnsmasq loopback
+udp 53 dnsmasq specific
+udp 546 odhcp6c wildcard
+udp 547 odhcpd wildcard
+udp 67 dnsmasq wildcard'
+set -- $(cat /proc/sys/net/ipv4/ip_local_port_range); lo=$1; [ -n "$lo" ] || lo=32768
+act=$(netstat -tulpn 2>/dev/null | awk -v lo="$lo" '
+NR > 2 {
+  proto = $1; sub(/6$/, "", proto)
+  n = split($4, a, ":"); port = a[n]; addr = substr($4, 1, length($4) - length(port) - 1)
+  split($NF, b, "/"); prog = b[2]; if (prog == "") prog = "-"
+  if (proto == "udp" && prog == "ntpd" && port + 0 != 123 && port + 0 >= lo + 0) next
+  if (addr == "0.0.0.0" || addr == "::" || addr == "") cls = "wildcard"; else if (addr ~ /^127\./ || addr == "::1") cls = "loopback"; else cls = "specific"
+  print proto, port, prog, cls
+}' | sort -u)
+extra=$(echo "$act" | grep -vxF "$exp" | tr '\n' ';'); missing=$(echo "$exp" | grep -vxF "$act" | tr '\n' ';')
+echo "listeners: $(echo "$act" | grep -c .), unexpected: ${extra:-none}, missing: ${missing:-none}"
+[ -z "$extra" ] && [ -z "$missing" ]'''
+expect = '^listeners: 10, unexpected: none, missing: none$'
+check_host = 'router'
+check_from = 'post:0'
+check_kind = 'live'
+lab_bound = ['check']
+notes = "Audit only: the lab test reads the router and changes nothing. Answer 10B: report only, in every tier; enforce is a later option. check expects the lab's ten-row listener baseline."
+
+[[control]]
+id = 'OW-UPD-01'
+tier = 'standard'
+title = 'Package updates policy'
+lab = 'audit'
+scenario = 'ow-upd-01-apk-updates-audit.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = []
+check = '''
+o=$(apk update 2>&1); rc=$?
+t=$(echo "$o" | tail -1)
+l=$(apk list -u 2>&1); rc2=$?
+n=$(echo "$l" | grep -c .)
+echo "apk update rc=$rc: $t"
+echo "apk list -u rc=$rc2: $n upgradable packages, first: $(echo "$l" | head -3 | cut -d' ' -f1 | tr '\n' ' ')"
+[ $rc = 0 ] && [ $rc2 = 0 ]'''
+expect = '^apk update rc=0: OK: \d+ distinct packages available\napk list -u rc=0: \d+ upgradable packages, first: '
+check_host = 'router'
+check_from = 'post:0'
+check_kind = 'live'
+lab_bound = []
+notes = 'Audit only: the lab test reads the router and changes nothing. Answer 11B: report on demand, in every tier. A scheduled check is a later option, and nothing on the router runs a schedule.'
+
+[[control]]
+id = 'OW-LOG-03'
+tier = 'standard'
+title = 'Log config changes'
+lab = 'not-yet'
+scenario = ''
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = []
+check = ''
+expect = ''
+check_host = ''
+check_from = ''
+check_kind = ''
+lab_bound = []
+notes = 'Results summary: no scenario: Newton gap (the audit log has no diff text and no operator). Newton will add the diff text and the operator to its audit log first.'
+
+[[control]]
+id = 'OW-V6-01'
+tier = 'standard'
+title = 'IPv6 firewall parity'
+lab = 'audit'
+scenario = 'ow-v6-01-wan6-in-wan-zone.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = []
+check = '''
+ch=$(nft list chain inet fw4 input_wan 2>/dev/null) || { echo "no chain input_wan in table inet fw4"; exit 1; }
+v6=$(echo "$ch" | grep -c -e 'icmpv6' -e 'nfproto ipv6')
+v4=$(echo "$ch" | grep -c -e 'nfproto ipv4' -e 'icmp type' -e 'igmp')
+last=$(echo "$ch" | awk '/^\t\t/ {l=$0} END {sub(/^[[:space:]]+/, "", l); print l}')
+hook=$(nft list chain inet fw4 input | grep 'jump input_wan' | sed 's/^[[:space:]]*//')
+echo "input_wan: ipv6-specific rules=$v6, ipv4-specific rules=$v4; final rule: $last; hook: $hook"
+case "$last" in "jump reject_from_wan"|"jump drop_from_wan") :;; *) exit 1;; esac
+[ "$v6" -ge 1 ] && case "$hook" in *"IPv4/IPv6"*) exit 0;; esac
+exit 1'''
+expect = '^input_wan: ipv6-specific rules=[1-9]\d*, ipv4-specific rules=\d+; final rule: jump (reject|drop)_from_wan; hook: iifname .* jump input_wan comment "!fw4: Handle wan IPv4/IPv6 input traffic"$'
+check_host = 'router'
+check_from = 'post:1'
+check_kind = 'live'
+lab_bound = []
+notes = 'Audit only: the lab test reads the router and changes nothing. The lab has no IPv6 upstream, so nothing was tested on the wire.'
+
+[[control]]
+id = 'OW-V6-02'
+tier = 'standard'
+title = 'Keep required ICMPv6, drop the rest'
+lab = 'audit'
+scenario = 'ow-v6-02-icmpv6-rules.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = []
+check = '''
+i=$(nft list chain inet fw4 input_wan | grep 'Allow-ICMPv6-Input'); f=$(nft list chain inet fw4 forward_wan | grep 'Allow-ICMPv6-Forward')
+ni=$(echo "$i" | grep -c .); nf=$(echo "$f" | grep -c .); bad=0
+for t in echo-request nd-neighbor-solicit nd-neighbor-advert nd-router-solicit nd-router-advert packet-too-big; do echo "$i" | grep -q "$t" || { echo "input_wan lacks $t"; bad=1; }; done
+for t in echo-request packet-too-big; do echo "$f" | grep -q "$t" || { echo "forward_wan lacks $t"; bad=1; }; done
+echo "input_wan Allow-ICMPv6-Input rules=$ni, forward_wan Allow-ICMPv6-Forward rules=$nf"
+[ "$ni" -ge 1 ] && [ "$nf" -ge 1 ] && [ $bad = 0 ]'''
+expect = '^input_wan Allow-ICMPv6-Input rules=[1-9]\d*, forward_wan Allow-ICMPv6-Forward rules=[1-9]\d*$'
+check_host = 'router'
+check_from = 'post:1'
+check_kind = 'live'
+lab_bound = []
+notes = 'Audit only: the lab test reads the router and changes nothing.'
+
+[[control]]
+id = 'OW-V6-04'
+tier = 'standard'
+title = 'RA/DHCPv6 not served on WAN, guest and IoT unless needed'
+lab = 'proven'
+scenario = 'ow-v6-04-wan-ra-dhcpv6-disabled.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set dhcp.wan.ra='disabled'",
+  "set dhcp.wan.dhcpv6='disabled'",
+]
+probes = [
+  ["ra-absent", "wan"],
+  ["uci-equals", "dhcp.wan.ra", "disabled"],
+  ["uci-equals", "dhcp.wan.dhcpv6", "disabled"],
+]
+check = '''
+d=$(ifstatus wan | jsonfilter -e '@.l3_device')
+o=$(ubus call dhcp ipv6ra | tr -d ' \t\n')
+echo "wan device $d; odhcpd ipv6ra: $o"
+[ -n "$d" ] || exit 1
+case "$o" in *"\"$d\""*) exit 1;; esac
+case "$o" in '{"interfaces":{"br-lan":['*) exit 0;; esac
+exit 1'''
+expect = '^wan device eth1; odhcpd ipv6ra: \{"interfaces":\{"br-lan":\['
+check_host = 'router'
+check_from = 'post:1'
+check_kind = 'live'
+lab_bound = ['check']
+notes = 'Already the stock default on 25.12.5, so applying it changes nothing on a stock image. check/expect name the lab WAN device eth1.'
+
+[[control]]
+id = 'OW-MGMT-05'
+tier = 'hardened'
+title = 'SSH brute-force limits'
+lab = 'proven'
+scenario = 'ow-mgmt-05-dropbear-limits.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set dropbear.@dropbear[0].MaxAuthTries='3'",
+  "set dropbear.@dropbear[0].IdleTimeout='600'",
+]
+probes = [
+  ["proc-args", "dropbear", "-I 600"],
+  ["proc-args", "dropbear", "-T 3"],
+]
+check = '''
+c=" $(tr '\0' ' ' < /proc/$(cat /var/run/dropbear.main.pid)/cmdline)"
+case "$c" in *" -I 600 "*) case "$c" in *" -T 3 "*) echo "dropbear live: -I 600 -T 3"; exit 0;; esac;; esac
+echo "dropbear command line lacks -I 600 or -T 3:$c"; exit 1
+'''
+expect = '^dropbear live: -I 600 -T 3$'
+check_host = 'router'
+check_from = 'derived'
+check_kind = 'live'
+lab_bound = []
+notes = '''Derived check: the live dropbear command line has both -I 600 and -T 3. The scenario's own check sleeps 50 s to prove the setting outlives the rollback window; that belongs to the apply step.'''
+
+[[control]]
+id = 'OW-MGMT-07'
+tier = 'hardened'
+title = 'Console login required'
+lab = 'proven'
+scenario = 'ow-mgmt-07-console-login.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set system.@system[0].ttylogin='1'",
+]
+probes = [
+  ["uci-equals", "system.@system[0].ttylogin", "1"],
+]
+check = 'uci -q get system.@system[0].ttylogin'
+expect = '^1$'
+check_host = 'router'
+check_from = 'post:0'
+check_kind = 'config'
+lab_bound = []
+notes = '''Config-only check: /usr/libexec/login.sh reads system.@system[0].ttylogin at each console login; the scenario's behavioural proof needs the lab serial console.'''
+
+[[control]]
+id = 'OW-MGMT-09'
+tier = 'hardened'
+title = 'LuCI session lifetime'
+lab = 'proven'
+scenario = 'ow-mgmt-09-luci-session-time.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set luci.sauth.sessiontime='600'",
+]
+probes = [
+  ["uci-equals", "luci.sauth.sessiontime", "600"],
+]
+check = 'uci -q get luci.sauth.sessiontime'
+expect = '^600$'
+check_host = 'router'
+check_from = 'post:0'
+check_kind = 'config'
+lab_bound = []
+notes = '''Config-only check: the LuCI dispatcher reads luci.sauth.sessiontime at each login and open sessions keep their lifetime; the scenario's behavioural proof logs in to LuCI from the lab.'''
+
+[[control]]
+id = 'OW-FW-04'
+tier = 'hardened'
+title = 'Block WAN ping'
+lab = 'proven'
+scenario = 'ow-fw-04-block-wan-ping.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set firewall.{fw_allow_ping}.enabled='0'",
+]
+check = '''
+a=$(nft list chain inet fw4 input_wan | grep -c 'Allow-Ping'); d=$(nft list chain inet fw4 input_wan | grep -c 'Allow-DHCP-Renew')
+echo "input_wan: Allow-Ping rules=$a Allow-DHCP-Renew rules=$d"; [ "$a" = 0 ] && [ "$d" = 1 ]
+'''
+expect = '^input_wan: Allow-Ping rules=0 Allow-DHCP-Renew rules=1$'
+check_host = 'router'
+check_from = 'effect:1'
+check_kind = 'live'
+lab_bound = []
+notes = ''
+
+[[control]]
+id = 'OW-FW-07'
+tier = 'hardened'
+title = 'Anti-spoof / bogon block on WAN'
+lab = 'proven'
+scenario = 'ow-fw-07-wan-bogon-drop.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  'set firewall.bogon_wan=rule',
+  "set firewall.bogon_wan.name='Drop-Bogon-WAN'",
+  "set firewall.bogon_wan.src='wan'",
+  "set firewall.bogon_wan.proto='all'",
+  "set firewall.bogon_wan.target='DROP'",
+  "add_list firewall.bogon_wan.src_ip='10.0.0.0/8'",
+  "add_list firewall.bogon_wan.src_ip='172.16.0.0/12'",
+  "add_list firewall.bogon_wan.src_ip='192.168.0.0/16'",
+  "add_list firewall.bogon_wan.src_ip='169.254.0.0/16'",
+]
+probes = [
+  ["nft-rule", "inet", "fw4", "input_wan", "present", "10.0.0.0/8", "Drop-Bogon-WAN"],
+  ["nft-rule", "inet", "fw4", "input_wan", "present", "172.16.0.0/12", "Drop-Bogon-WAN"],
+  ["nft-rule", "inet", "fw4", "input_wan", "present", "192.168.0.0/16", "Drop-Bogon-WAN"],
+  ["nft-rule", "inet", "fw4", "input_wan", "present", "169.254.0.0/16", "Drop-Bogon-WAN"],
+  ["nft-rule", "inet", "fw4", "input_wan", "absent", "100.64", "Drop-Bogon-WAN"],
+  ["nft-rule-order", "inet", "fw4", "input_wan", "Allow-DHCP-Renew", "Drop-Bogon-WAN"],
+]
+check = '''
+c=$(nft list chain inet fw4 input_wan); l=$(echo "$c" | grep 'Drop-Bogon-WAN')
+a=$(echo "$c" | grep -n 'Allow-DHCP-Renew' | cut -d: -f1); b=$(echo "$c" | grep -n 'Drop-Bogon-WAN' | cut -d: -f1)
+[ -n "$l" ] && [ -n "$a" ] && [ "$a" -lt "$b" ] && echo "$l" | grep -q '10.0.0.0/8' && echo "$l" | grep -q '172.16.0.0/12' && echo "$l" | grep -q '192.168.0.0/16' && echo "$l" | grep -q '169.254.0.0/16' && ! echo "$l" | grep -q '100.64' && echo "input_wan: Drop-Bogon-WAN after Allow-DHCP-Renew, lists 10/8 172.16/12 192.168/16 169.254/16, not 100.64/10"
+'''
+expect = '^input_wan: Drop-Bogon-WAN after Allow-DHCP-Renew, lists 10/8 172\.16/12 192\.168/16 169\.254/16, not 100\.64/10$'
+check_host = 'router'
+check_from = 'effect:1'
+check_kind = 'live'
+lab_bound = []
+notes = ''
+
+[[control]]
+id = 'OW-FW-08'
+tier = 'hardened'
+title = 'Default-deny outbound from IoT/guest (see ZONE-02)'
+lab = 'caveat'
+scenario = 'ow-zone-02-iot.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = []
+check = '''
+sudo ip netns exec iot bash -c '
+tcp() { LC_ALL=C timeout 6 bash -c "exec 3<>/dev/tcp/$1/$2" 2>&1; }
+tcp 192.168.40.1 53 >/dev/null || { echo "control failed: no tcp connect from the iot netns to the allowed 192.168.40.1:53"; exit 1; }
+bad=""
+for t in 192.168.40.1:22 192.168.40.1:80 192.168.40.1:443 10.109.0.11:22 10.109.0.11:443 192.168.150.1:22 192.168.150.1:443 {client_lab_ip}:22 1.1.1.1:443 1.1.1.1:53; do
+  tcp ${t%:*} ${t#*:} | grep -q "Connection refused" || bad="$bad $t"
+done
+[ -z "$bad" ] || { echo "not refused:$bad"; exit 1; }
+if host -W 3 -t A openwrt.org 1.1.1.1 | grep -q "has address"; then echo "a query to 1.1.1.1 was answered"; exit 1; fi
+echo "iot netns: 192.168.40.1:53 open; refused: router 22/80/443 on 192.168.40.1, 22/443 on 10.109.0.11 and 192.168.150.1, client LAN host {client_lab_ip}:22, internet 1.1.1.1:443 and :53; no answer from a resolver at 1.1.1.1"
+'
+'''
+expect = '^iot netns: 192\.168\.40\.1:53 open; refused: '
+check_host = 'lab'
+check_from = 'post:0'
+check_kind = 'live'
+lab_bound = ['check']
+notes = "proven in the ZONE-02 form (ow-zone-02-iot); the catalogue form, zone output REJECT, breaks DHCP in the zone. batch is empty: the change is OW-ZONE-02's. check runs in the lab's iot namespace and names lab addresses."
+
+[[control]]
+id = 'OW-FW-09'
+tier = 'hardened'
+title = 'Firewall logging of drops'
+lab = 'proven'
+scenario = 'ow-fw-09-wan-log.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set firewall.{fw_wan_zone}.log='1'",
+  "set firewall.{fw_wan_zone}.log_limit='10/minute'",
+]
+check = '''
+nft list chain inet fw4 reject_from_wan | grep -q 'log prefix "reject wan in: "' && nft list ruleset | grep -A3 'limit wan.log_limit' | grep -q 'rate 10/minute' && echo "reject_from_wan logs with prefix 'reject wan in: ', limit wan.log_limit is 10/minute"
+'''
+expect = '^reject_from_wan logs with prefix .reject wan in: ., limit wan\.log_limit is 10/minute$'
+check_host = 'router'
+check_from = 'effect:1'
+check_kind = 'live'
+lab_bound = []
+notes = 'The first application works, and a changed log limit is now live too, because Newton restarts the firewall after the apply and after a rollback.'
+
+[[control]]
+id = 'OW-ZONE-02'
+tier = 'hardened'
+title = 'IoT zone isolated, no inbound from IoT to LAN, LAN->IoT allowed'
+lab = 'proven'
+scenario = 'ow-zone-02-iot.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  'set network.iot=interface',
+  "set network.iot.proto='static'",
+  "set network.iot.device='{lan_device}.40'",
+  "set network.iot.ipaddr='192.168.40.1'",
+  "set network.iot.netmask='255.255.255.0'",
+  'set dhcp.iot=dhcp',
+  "set dhcp.iot.interface='iot'",
+  "set dhcp.iot.start='100'",
+  "set dhcp.iot.limit='100'",
+  "set dhcp.iot.leasetime='1h'",
+  'set firewall.iot_zone=zone',
+  "set firewall.iot_zone.name='iot'",
+  "set firewall.iot_zone.network='iot'",
+  "set firewall.iot_zone.input='REJECT'",
+  "set firewall.iot_zone.output='ACCEPT'",
+  "set firewall.iot_zone.forward='REJECT'",
+  'set firewall.lab_iot=forwarding',
+  "set firewall.lab_iot.src='lab'",
+  "set firewall.lab_iot.dest='iot'",
+  'set firewall.iot_dhcp=rule',
+  "set firewall.iot_dhcp.name='Allow-IoT-DHCP'",
+  "set firewall.iot_dhcp.src='iot'",
+  "set firewall.iot_dhcp.proto='udp'",
+  "set firewall.iot_dhcp.dest_port='67'",
+  "set firewall.iot_dhcp.target='ACCEPT'",
+  'set firewall.iot_dns=rule',
+  "set firewall.iot_dns.name='Allow-IoT-DNS'",
+  "set firewall.iot_dns.src='iot'",
+  "set firewall.iot_dns.proto='tcp udp'",
+  "set firewall.iot_dns.dest_port='53'",
+  "set firewall.iot_dns.target='ACCEPT'",
+]
+check = '''
+sudo ip netns exec iot bash -c '
+tcp() { LC_ALL=C timeout 6 bash -c "exec 3<>/dev/tcp/$1/$2" 2>&1; }
+tcp 192.168.40.1 53 >/dev/null || { echo "control failed: no tcp connect from the iot netns to the allowed 192.168.40.1:53"; exit 1; }
+bad=""
+for t in 192.168.40.1:22 192.168.40.1:80 192.168.40.1:443 10.109.0.11:22 10.109.0.11:443 192.168.150.1:22 192.168.150.1:443 {client_lab_ip}:22 1.1.1.1:443 1.1.1.1:53; do
+  tcp ${t%:*} ${t#*:} | grep -q "Connection refused" || bad="$bad $t"
+done
+[ -z "$bad" ] || { echo "not refused:$bad"; exit 1; }
+if host -W 3 -t A openwrt.org 1.1.1.1 | grep -q "has address"; then echo "a query to 1.1.1.1 was answered"; exit 1; fi
+echo "iot netns: 192.168.40.1:53 open; refused: router 22/80/443 on 192.168.40.1, 22/443 on 10.109.0.11 and 192.168.150.1, client LAN host {client_lab_ip}:22, internet 1.1.1.1:443 and :53; no answer from a resolver at 1.1.1.1"
+'
+'''
+expect = '^iot netns: 192\.168\.40\.1:53 open; refused: '
+check_host = 'lab'
+check_from = 'post:0'
+check_kind = 'live'
+lab_bound = ['batch', 'check']
+notes = "Same scenario as OW-FW-08 (ow-zone-02-iot). batch uses {lan_device} in place of the lab's eth3. check runs in the lab's iot namespace and names lab addresses; {client_lab_ip} is resolved at apply time."
+
+[[control]]
+id = 'OW-DNS-06'
+tier = 'hardened'
+title = 'Force LAN DNS through router'
+lab = 'proven'
+scenario = 'ow-dns-06-force-lan-dns.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  'set firewall.dns_redirect=redirect',
+  "set firewall.dns_redirect.name='Redirect-DNS'",
+  "set firewall.dns_redirect.src='lab'",
+  "set firewall.dns_redirect.target='DNAT'",
+  "set firewall.dns_redirect.proto='tcp udp'",
+  "set firewall.dns_redirect.src_dport='53'",
+  "set firewall.dns_redirect.dest_port='53'",
+  "set firewall.dns_redirect.family='any'",
+]
+probes = [
+  ["nft-rule", "inet", "fw4", "dstnat_lab", "min:2", "redirect to :53"],
+]
+check = '''
+n=$(nft list chain inet fw4 dstnat_lab 2>/dev/null | grep -c 'redirect to :53'); m=$(nft list chain inet fw4 dstnat_lab 2>/dev/null | grep 'redirect to :53' | grep -c 'nfproto'); l=$(nft list chain inet fw4 dstnat_lan 2>/dev/null | grep -c 'redirect')
+echo "dstnat_lab: redirect-to-:53 rules=$n with an address-family match=$m; dstnat_lan: redirect rules=$l"; [ "$n" = 2 ] && [ "$m" = 0 ] && [ "$l" = 0 ]
+'''
+expect = '^dstnat_lab: redirect-to-:53 rules=2 with an address-family match=0; dstnat_lan: redirect rules=0$'
+check_host = 'router'
+check_from = 'effect:0'
+check_kind = 'live'
+lab_bound = ['batch', 'check']
+notes = ''
+
+[[control]]
+id = 'OW-DHCP-01'
+tier = 'hardened'
+title = 'Small DHCP pool and lease time, static leases for known devices'
+lab = 'caveat'
+scenario = 'ow-dhcp-01-lab-pool-limit.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set dhcp.lab.limit='50'",
+]
+check = '''
+c=; for p in $(pidof dnsmasq); do c=$(tr '\0' ' ' < /proc/$p/cmdline | sed -n 's/.*dnsmasq -C \([^ ]*\).*/\1/p'); [ -n "$c" ] && break; done
+[ -f "$c" ] || { echo "no conf found for the running dnsmasq"; exit 1; }
+r=$(grep '^dhcp-range=set:lab,' "$c"); n=$(echo "$r" | grep -c .); echo "running dnsmasq: $r"
+[ "$n" = 1 ] || { echo "dhcp-range lines for tag lab: $n"; exit 1; }
+case "$r" in dhcp-range=set:lab,192.168.150.100,192.168.150.149,*) exit 0;; esac
+exit 1
+'''
+expect = '^running dnsmasq: dhcp-range=set:lab,192\.168\.150\.100,192\.168\.150\.149,255\.255\.255\.0,12h$'
+check_host = 'router'
+check_from = 'effect:0'
+check_kind = 'live'
+lab_bound = ['batch', 'check']
+notes = 'proven for the pool limit; static leases and lease time not tested (C4 Not verified). check/expect pin the lab client LAN pool (192.168.150.100 to .149).'
+
+[[control]]
+id = 'OW-WIFI-01'
+tier = 'hardened'
+title = 'WPA3 (SAE)'
+lab = 'not-yet'
+scenario = ''
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = []
+check = ''
+expect = ''
+check_host = ''
+check_from = ''
+check_kind = ''
+lab_bound = []
+notes = "Devices without WPA3 (older phones, some IoT) cannot join; use the mixed form (OW-WIFI-02) if you have them. Proven on real hardware (Pulsar, 2026-10-23). Catalogue: WPA3-only at Hardened; Standard uses the mixed form (OW-WIFI-02). WPA3-only, with a fallback to mixed when the owner lists old clients."
+
+[[control]]
+id = 'OW-SVC-02'
+tier = 'hardened'
+title = 'Remove unneeded services (Samba, SFTP, SNMP, UPnP)'
+lab = 'audit'
+scenario = 'ow-svc-02-unneeded-services-audit.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = []
+check = '''
+pk=$(apk list -I 2>/dev/null | grep -E '^(samba4-server|openssh-sftp-server|snmpd|miniupnpd-)' | cut -d' ' -f1 | tr '\n' ' ')
+ini=$(for s in samba4 snmpd miniupnpd; do [ -e /etc/init.d/$s ] && printf '%s ' $s; done)
+pr=$(pidof smbd nmbd snmpd miniupnpd | wc -w)
+ls=$(netstat -tulpn 2>/dev/null | grep -cE ':(137|138|139|445|161|1900|5351) ')
+echo "unneeded packages installed: [$pk]; their init scripts present: [$ini]; processes: $pr; listeners on 137/138/139/445/161/1900/5351: $ls"
+[ -z "$pk" ] && [ -z "$ini" ] && [ "$pr" = 0 ] && [ "$ls" = 0 ]'''
+expect = '^unneeded packages installed: \[\]; their init scripts present: \[\]; processes: 0; listeners on 137/138/139/445/161/1900/5351: 0$'
+check_host = 'router'
+check_from = 'post:0'
+check_kind = 'live'
+lab_bound = []
+notes = 'Audit only: the lab test reads the router and changes nothing. The lab checked that these services are absent. Removing them (`service stop/disable`, `apk del`) was not run through Newton.'
+
+[[control]]
+id = 'OW-LOG-01'
+tier = 'hardened'
+title = 'Remote syslog'
+lab = 'proven'
+scenario = 'ow-log-01-remote-syslog.toml'
+step_up_of = ''
+form_of = ''
+preconditions = ['syslog listener on udp 514 at log_ip']
+batch = [
+  "set system.@system[0].log_ip='{client_lab_ip}'",
+  "set system.@system[0].log_port='514'",
+  "set system.@system[0].log_proto='udp'",
+  "set system.@system[0].log_remote='1'",
+]
+check = '''
+for p in $(pidof logread); do
+  c=" $(tr '\0' ' ' < /proc/$p/cmdline)"
+  case "$c" in *" -r {client_lab_ip} 514 "*) case "$c" in *" -u "*) echo "logread forwarder:$c"; exit 0;; esac;; esac
+done
+echo "no logread forwarder with -r {client_lab_ip} 514 -u"; exit 1'''
+expect = '^logread forwarder: /sbin/logread -f -h lab-r1 -r 192\.168\.150\.\d+ 514 -p /var/run/logread\.\d+\.pid -u $'
+check_host = 'router'
+check_from = 'effect:0'
+check_kind = 'live'
+lab_bound = ['batch', 'check']
+notes = "check/expect name the lab log host ({client_lab_ip}, 192.168.150.x) and the router's lab hostname lab-r1; {client_lab_ip} is resolved at apply time."
+
+[[control]]
+id = 'OW-LOG-02'
+tier = 'hardened'
+title = 'Log buffer size'
+lab = 'proven'
+scenario = 'ow-log-02-log-size.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set system.@system[0].log_size='512'",
+]
+probes = [
+  ["uci-equals", "system.@system[0].log_size", "512"],
+  ["proc-args", "logd", "-S 512"],
+]
+check = '''
+for p in $(pidof logd); do c=$(tr '\0' ' ' < /proc/$p/cmdline); echo "logd command: $c"; done
+c=" $(tr '\0' ' ' < /proc/$(pidof logd | cut -d' ' -f1)/cmdline)"
+case "$c" in " /sbin/logd -S 512 "*) exit 0;; esac
+exit 1'''
+expect = '^logd command: /sbin/logd -S 512 $'
+check_host = 'router'
+check_from = 'effect:0'
+check_kind = 'live'
+lab_bound = []
+notes = 'After a logd restart Newton restarts dnsmasq and checks DNS and DHCP, also after a rollback.'
+
+[[control]]
+id = 'OW-ZONE-03'
+tier = 'hardened'
+title = 'Wifi client isolation (IoT Wi-Fi)'
+lab = 'not-yet'
+scenario = ''
+step_up_of = 'standard'
+form_of = ''
+preconditions = []
+batch = []
+check = ''
+expect = ''
+check_host = ''
+check_from = ''
+check_kind = ''
+lab_bound = []
+notes = "Wi-Fi devices on the isolated network can no longer talk to each other. Proven on real hardware (Pulsar, 2026-10-23)."
+
+[[control]]
+id = 'OW-MGMT-08'
+tier = 'lockdown'
+title = 'Management VLAN'
+lab = 'not-yet'
+scenario = ''
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = []
+check = ''
+expect = ''
+check_host = ''
+check_from = ''
+check_kind = ''
+lab_bound = []
+notes = 'Results summary: deferred: Phase 2 (needs a tagged mgmt client and a different Newton mgmt path). Catalogue: in Lockdown, opt-in on Hardened. Keep that split.'
+
+[[control]]
+id = 'OW-FW-05'
+tier = 'lockdown'
+title = 'No port forwards (audit)'
+lab = 'audit'
+scenario = 'ow-fw-05-no-wan-redirects.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = []
+check = '''
+set -f
+n=0
+for s in $(uci -q show firewall | sed -n 's/^firewall\.\([^.=]*\)=redirect$/\1/p'); do
+  [ "$(uci -q get firewall.$s.src)" = wan ] && [ "$(uci -q get firewall.$s.enabled)" != 0 ] && n=$((n+1))
+done
+live=$(nft list chain inet fw4 dstnat_wan 2>/dev/null | grep -c -E ' (dnat|redirect) ')
+echo "enabled uci redirects with src=wan: $n; live dnat or redirect rules in dstnat_wan: $live"
+[ "$n" = 0 ] && [ "$live" = 0 ]
+'''
+expect = '^enabled uci redirects with src=wan: 0; live dnat or redirect rules in dstnat_wan: 0$'
+check_host = 'router'
+check_from = 'post:0'
+check_kind = 'live'
+lab_bound = []
+notes = 'Audit only: the lab test reads the router and changes nothing. Refusing to add a WAN port forward is Newton code, not a uci setting.'
+
+[[control]]
+id = 'OW-DNS-07'
+tier = 'lockdown'
+title = 'Block outbound DoT'
+lab = 'proven'
+scenario = 'ow-dns-07-block-dot.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  'set firewall.block_dot=rule',
+  "set firewall.block_dot.name='Block-DoT'",
+  "set firewall.block_dot.src='lab'",
+  "set firewall.block_dot.dest='wan'",
+  "set firewall.block_dot.proto='tcp'",
+  "set firewall.block_dot.dest_port='853'",
+  "set firewall.block_dot.target='REJECT'",
+]
+probes = [
+  ["nft-rule", "inet", "fw4", "forward_lab", "present", "tcp dport 853", "jump reject_to_wan"],
+]
+check = '''
+t=$(nft list chain inet fw4 forward_lab | grep -c 'tcp dport 853 .*jump reject_to_wan'); u=$(nft list chain inet fw4 forward_lab | grep -c 'udp dport 853')
+echo "forward_lab: tcp 853 reject rules=$t udp 853 rules=$u"; [ "$t" = 1 ] && [ "$u" = 0 ]
+'''
+expect = '^forward_lab: tcp 853 reject rules=1 udp 853 rules=0$'
+check_host = 'router'
+check_from = 'effect:0'
+check_kind = 'live'
+lab_bound = ['batch', 'check']
+notes = ''
+
+[[control]]
+id = 'OW-DNS-08'
+tier = 'lockdown'
+title = 'Block outbound DNS except router (stricter than 06)'
+lab = 'proven'
+scenario = 'ow-dns-08-block-outbound-dns.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  'set firewall.block_dns=rule',
+  "set firewall.block_dns.name='Block-DNS-WAN'",
+  "set firewall.block_dns.src='lab'",
+  "set firewall.block_dns.dest='wan'",
+  "set firewall.block_dns.proto='tcp udp'",
+  "set firewall.block_dns.dest_port='53'",
+  "set firewall.block_dns.target='REJECT'",
+]
+probes = [
+  ["nft-rule", "inet", "fw4", "forward_lab", "min:2", "dport 53 ", "jump reject_to_wan"],
+]
+check = '''
+t=$(nft list chain inet fw4 forward_lab | grep -c 'tcp dport 53 .*jump reject_to_wan'); u=$(nft list chain inet fw4 forward_lab | grep -c 'udp dport 53 .*jump reject_to_wan')
+echo "forward_lab: tcp 53 reject rules=$t udp 53 reject rules=$u"; [ "$t" = 1 ] && [ "$u" = 1 ]
+'''
+expect = '^forward_lab: tcp 53 reject rules=1 udp 53 reject rules=1$'
+check_host = 'router'
+check_from = 'effect:0'
+check_kind = 'live'
+lab_bound = ['batch', 'check']
+notes = ''
+
+[[control]]
+id = 'OW-MGMT-01'
+tier = 'lockdown'
+title = 'SSH on LAN only (DirectInterface)'
+lab = 'proven'
+scenario = 'ow-mgmt-01b-dropbear-directinterface.toml'
+step_up_of = 'standard'
+form_of = ''
+preconditions = []
+batch = [
+  "set dropbear.@dropbear[0].DirectInterface='lan'",
+]
+probes = [
+  ["proc-args", "dropbear", "-l"],
+]
+check = '''
+tr '\0' ' ' < /proc/$(cat /var/run/dropbear.main.pid)/cmdline | grep -- ' -l br-lan '
+'''
+expect = ' -l br-lan '
+check_host = 'router'
+check_from = 'effect:0'
+check_kind = 'live'
+lab_bound = []
+notes = '''Lab: ow-mgmt-01b; it binds the device, so a client on another side is refused. check is the lab's live listener check (DirectInterface binds the device): it checks the dropbear command line for -l br-lan; the expect is derived from the line the step prints.'''
+
+[[control]]
+id = 'OW-MGMT-04'
+tier = 'opt-in'
+title = 'SSH password auth: keep (O, S, H), key-only is an option'
+lab = 'caveat'
+scenario = 'ow-mgmt-04-ssh-key-only.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  "set dropbear.@dropbear[0].PasswordAuth='0'",
+  "set dropbear.@dropbear[0].RootPasswordAuth='0'",
+]
+probes = [
+  ["proc-args", "dropbear", "-s"],
+  ["proc-args", "dropbear", "-g"],
+]
+check = '''
+tr '\0' '\n' < /proc/$(cat /var/run/dropbear.main.pid)/cmdline | grep -cx -e -s -e -g | grep -qx 2 && echo "dropbear has -s and -g"
+'''
+expect = '^dropbear has -s and -g$'
+check_host = 'router'
+check_from = 'effect:0'
+check_kind = 'live'
+lab_bound = []
+notes = "Offered at Lockdown. Expects rolled_back: Newton's verify runs password-only under the runner, so key-only cannot confirm; password mode rolls it back (the lockout protection works). Key-mode path comes later."
+
+[[control]]
+id = 'OW-ZONE-01'
+tier = 'opt-in'
+title = 'Guest network isolated'
+lab = 'proven'
+scenario = 'ow-zone-01-guest.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  'set network.guest=interface',
+  "set network.guest.proto='static'",
+  "set network.guest.device='{lan_device}.30'",
+  "set network.guest.ipaddr='192.168.30.1'",
+  "set network.guest.netmask='255.255.255.0'",
+  'set dhcp.guest=dhcp',
+  "set dhcp.guest.interface='guest'",
+  "set dhcp.guest.start='100'",
+  "set dhcp.guest.limit='100'",
+  "set dhcp.guest.leasetime='1h'",
+  'set firewall.guest_zone=zone',
+  "set firewall.guest_zone.name='guest'",
+  "set firewall.guest_zone.network='guest'",
+  "set firewall.guest_zone.input='REJECT'",
+  "set firewall.guest_zone.output='ACCEPT'",
+  "set firewall.guest_zone.forward='REJECT'",
+  'set firewall.guest_wan=forwarding',
+  "set firewall.guest_wan.src='guest'",
+  "set firewall.guest_wan.dest='wan'",
+  'set firewall.guest_dhcp=rule',
+  "set firewall.guest_dhcp.name='Allow-Guest-DHCP'",
+  "set firewall.guest_dhcp.src='guest'",
+  "set firewall.guest_dhcp.proto='udp'",
+  "set firewall.guest_dhcp.dest_port='67'",
+  "set firewall.guest_dhcp.target='ACCEPT'",
+  'set firewall.guest_dns=rule',
+  "set firewall.guest_dns.name='Allow-Guest-DNS'",
+  "set firewall.guest_dns.src='guest'",
+  "set firewall.guest_dns.proto='tcp udp'",
+  "set firewall.guest_dns.dest_port='53'",
+  "set firewall.guest_dns.target='ACCEPT'",
+]
+check = '''
+sudo ip netns exec guest bash -c '
+tcp() { LC_ALL=C timeout 6 bash -c "exec 3<>/dev/tcp/$1/$2" 2>&1; }
+tcp 192.168.30.1 53 >/dev/null || { echo "control failed: no tcp connect from the guest netns to the allowed 192.168.30.1:53"; exit 1; }
+bad=""
+for t in 192.168.30.1:22 192.168.30.1:80 192.168.30.1:443 10.109.0.11:22 10.109.0.11:443 192.168.150.1:22 192.168.150.1:443 {client_lab_ip}:22; do
+  tcp ${t%:*} ${t#*:} | grep -q "Connection refused" || bad="$bad $t"
+done
+[ -z "$bad" ] || { echo "not refused:$bad"; exit 1; }
+echo "guest netns: 192.168.30.1:53 open; refused: router 22/80/443 on 192.168.30.1, 22/443 on 10.109.0.11 and 192.168.150.1, and ssh on the client LAN host"
+'
+'''
+expect = '^guest netns: 192\.168\.30\.1:53 open; refused: '
+check_host = 'lab'
+check_from = 'post:0'
+check_kind = 'live'
+lab_bound = ['check']
+notes = "Offered at Standard. Adds a new network with its own subnet and DHCP. It is an extra, not a Standard control. batch uses {lan_device} in place of the lab's eth3. check runs in the lab's guest namespace and names lab addresses."
+
+[[control]]
+id = 'OW-DNS-04'
+tier = 'opt-in'
+title = 'DNSSEC validation'
+lab = 'caveat'
+scenario = 'ow-dns-04b-dnssec-full.toml'
+step_up_of = ''
+form_of = ''
+preconditions = [
+  'package dnsmasq-full',
+  'router clock correct (NTP synced)',
+]
+batch = [
+  "set dhcp.@dnsmasq[0].dnssec='1'",
+]
+probes = [
+  ["conf-has", "dnsmasq", "line", "present", "dnssec"],
+  ["conf-has", "dnsmasq", "substr", "present", "trust-anchors.conf"],
+  ["log-has", "min:1", "DNSSEC validation enabled"],
+]
+check = '''
+f=$(cat /var/etc/dnsmasq.conf.*)
+a=$(echo "$f" | grep -c '^dnssec$'); b=$(echo "$f" | grep -c '^conf-file=/usr/share/dnsmasq/trust-anchors.conf$')
+c=$(logread | grep 'dnsmasq\[' | grep -c 'DNSSEC validation enabled')
+echo "running dnsmasq conf: dnssec=$a trust-anchors=$b; startup log lines 'DNSSEC validation enabled'=$c"; [ "$a" = 1 ] && [ "$b" = 1 ] && [ "$c" -ge 1 ]
+'''
+expect = '^running dnsmasq conf: dnssec=1 trust-anchors=1; startup log lines .DNSSEC validation enabled.=[1-9]\d*$'
+check_host = 'router'
+check_from = 'effect:0'
+check_kind = 'live'
+lab_bound = []
+notes = "Offered at Hardened. Opt-in, never applied by default. Needs `dnsmasq-full`; on the stock build `dnssec='1'` leaves no DNS or DHCP after the next restart, so it needs a live check first."
+
+[[control]]
+id = 'OW-DNS-05'
+tier = 'opt-in'
+title = 'Encrypted upstream (DoH)'
+lab = 'caveat'
+scenario = 'ow-dns-05-https-dns-proxy.toml'
+step_up_of = ''
+form_of = ''
+preconditions = [
+  'package https-dns-proxy',
+]
+batch = [
+  "set https-dns-proxy.@https-dns-proxy[0].resolver_url='https://dns.quad9.net/dns-query'",
+  "set https-dns-proxy.@https-dns-proxy[0].bootstrap_dns='9.9.9.9,149.112.112.112'",
+  'delete https-dns-proxy.config.force_dns_src_interface',
+  "add_list https-dns-proxy.config.force_dns_src_interface='lab'",
+]
+probes = [
+  ["uci-equals", "https-dns-proxy.@https-dns-proxy[0].resolver_url", "https://dns.quad9.net/dns-query"],
+  ["uci-equals", "https-dns-proxy.@https-dns-proxy[0].bootstrap_dns", "9.9.9.9,149.112.112.112"],
+  ["proc-args", "https-dns-proxy", "-r https://dns.quad9.net/dns-query"],
+]
+check = '''
+q=$(ps w | grep -c '[h]ttps-dns-proxy -r https://dns.quad9.net/dns-query -p 5053 '); c=$(ps w | grep -c '[h]ttps-dns-proxy -r https://cloudflare-dns.com/dns-query')
+echo "https-dns-proxy processes: quad9 on 5053=$q cloudflare=$c"; [ "$q" = 1 ] && [ "$c" = 0 ]
+'''
+expect = '^https-dns-proxy processes: quad9 on 5053=1 cloudflare=0$'
+check_host = 'router'
+check_from = 'effect:0'
+check_kind = 'live'
+lab_bound = ['batch']
+notes = "In no tier (the Tier cell says H). https-dns-proxy edits dhcp and fw4 outside Newton's rollback, and its dhcp backup is not idempotent; see the tier doc's DoH warning."
+
+[[control]]
+id = 'OW-UPD-02'
+tier = 'opt-in'
+title = 'Auto-update'
+lab = 'audit'
+scenario = 'ow-upd-02-owut-check-audit.toml'
+step_up_of = ''
+form_of = ''
+preconditions = [
+  'package owut',
+]
+batch = []
+check = '''
+o=$(owut check 2>&1); rc=$?
+. /etc/openwrt_release
+vf=$(echo "$o" | sed -n 's/^Version-from[[:space:]]*\([0-9.]*\).*/\1/p')
+vt=$(echo "$o" | sed -n 's/^Version-to[[:space:]]*\([0-9.]*\).*/\1/p')
+srv=$(echo "$o" | sed -n 's/^ASU-Server[[:space:]]*//p')
+ood=$(echo "$o" | sed -n 's/^\([0-9][0-9]*\) packages are out-of-date.*/\1/p')
+echo "owut check rc=$rc; server=$srv; installed=$DISTRIB_RELEASE; Version-from=$vf Version-to=$vt; out-of-date packages=$ood"
+[ $rc = 0 ] && [ "$vf" = "$DISTRIB_RELEASE" ] && [ -n "$srv" ] && [ -n "$ood" ]'''
+expect = '^owut check rc=0; server=https://sysupgrade\.openwrt\.org; installed=([0-9.]+); Version-from=\1 Version-to=[0-9.]+; out-of-date packages=\d+$'
+check_host = 'router'
+check_from = 'post:0'
+check_kind = 'live'
+lab_bound = []
+notes = 'Offered at Lockdown. Audit only: the lab test reads the router and changes nothing. Opt-in, never applied by default. Needs `owut`; only `owut check` was run, download/verify/install/upgrade never were.'
+
+[[control]]
+id = 'OW-V6-03'
+tier = 'opt-in'
+title = 'IPv6 off entirely'
+lab = 'proven'
+scenario = 'ow-v6-03-ipv6-off-client-lan.toml'
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = [
+  'set network.eth3_dev=device',
+  "set network.eth3_dev.name='{lan_device}'",
+  "set network.eth3_dev.ipv6='0'",
+  "set dhcp.lab.dhcpv6='disabled'",
+  "set dhcp.lab.ra='disabled'",
+  'delete network.wan6',
+]
+check = '''
+d=$(ifstatus lab | jsonfilter -e '@.device'); [ -n "$d" ] || { echo "no device for interface lab"; exit 1; }
+v=$(cat /proc/sys/net/ipv6/conf/$d/disable_ipv6); a=$(ip -6 addr show dev $d | grep -c inet6)
+echo "$d: disable_ipv6=$v inet6 addresses=$a"; [ "$v" = 1 ] && [ "$a" = 0 ]'''
+expect = '^eth3: disable_ipv6=1 inet6 addresses=0$'
+check_host = 'router'
+check_from = 'effect:0'
+check_kind = 'live'
+lab_bound = ['batch', 'check']
+notes = "Offered at Lockdown. Opt-in, never applied by default. In the lab it was applied to the client LAN interface, with wan6 deleted. batch uses {lan_device} in place of the lab's eth3; check/expect name the lab device eth3."
+
+[[control]]
+id = 'OW-FW-06'
+tier = 'opt-in'
+title = 'UPnP/NAT-PMP off (UPnP on)'
+lab = 'proven'
+scenario = 'ow-fw-06b-upnp-enabled.toml'
+step_up_of = ''
+form_of = 'standard'
+preconditions = [
+  'package miniupnpd-nftables',
+]
+batch = [
+  "set upnpd.config.enabled='1'",
+]
+probes = [
+  ["listen", "udp", "any", "1900", "miniupnpd", "present"],
+  ["uci-equals", "upnpd.config.enabled", "1"],
+]
+check = '''
+l=$(netstat -lunp | grep ':1900 ' | grep -c miniupnpd); echo "udp 1900 listeners owned by miniupnpd=$l"; [ "$l" -ge 1 ]
+'''
+expect = '^udp 1900 listeners owned by miniupnpd=[1-9]'
+check_host = 'router'
+check_from = 'effect:0'
+check_kind = 'live'
+lab_bound = []
+notes = 'Offered at Standard. OW-FW-06 itself stays in Standard with UPnP off; this form turns it on. Needs the package `miniupnpd-nftables`. Lab: ow-fw-06b.'
+
+[[control]]
+id = 'OW-WIFI-04'
+tier = 'none'
+title = 'Hidden SSID: do NOT use'
+lab = 'not-yet'
+scenario = ''
+step_up_of = ''
+form_of = ''
+preconditions = []
+batch = []
+check = ''
+expect = ''
+check_host = ''
+check_from = ''
+check_kind = ''
+lab_bound = []
+notes = 'The catalogue says n/a: there is nothing to apply. Proven on real hardware (Pulsar, 2026-10-23): hiding the network name does not protect it, so it is not recommended.'
+

@@ -1,0 +1,96 @@
+/* source: https://openwrt.org/docs/guide-user/additional-software/apk?do=export_raw | retrieved 2026-10-03 by Kev (browser) | CC BY-SA 4.0, (c) OpenWrt contributors | raw DokuWiki markup, unmodified below this line */
+====== apk package manager ======
+<abbr>Alpine Package Keeper (APK)</abbr> was developed by [[https://alpinelinux.org/|Alpine Linux]] and is the package manager used in OpenWrt 25.12 and newer. This replaced the former package manager [[:docs:guide-user:additional-software:opkg|opkg]] which ended development. Note that apk has nothing to do with Android or other systems that may use the same acronym.
+
+Useful references:
+
+  * [[:docs:guide-user:additional-software:opkg-to-apk-cheatsheet|OpenWrt OPKG to APK Cheatsheet]]
+  * [[https://forum.openwrt.org/t/the-future-is-now-opkg-vs-apk/201164|OpenWrt Forum APK support]]
+  * [[https://wiki.alpinelinux.org/wiki/Alpine_Package_Keeper|Alpine Linux APK docs]]
+
+==== Basics ====
+
+''apk update'' Update local package database
+
+''apk add <package>'' Install a package
+
+''apk add <package>*'' Install packages using a mask
+
+''apk add --allow-untrusted ./<package>.apk'' Install packages you built yourself or downloaded from an external repo
+
+''apk add --allow-untrusted ./*.apk'' Install packages you built yourself using a mask
+
+''apk del <package>'' Uninstall a package
+
+''apk del <package>*'' Uninstall packages using a mask
+
+''apk list -I'' List installed packages
+
+''apk list -a [<package>*]'' List available packages [using a mask]
+
+''apk search [<needle>*]'' Find packages [using a needle]
+
+==== Install many packages at once ====
+To update your package database and install multiple packages simply list any packages you want in one command as follows:
+<code sh>apk -U add package1 package2 package3</code>
+
+==== Repository Feeds ====
+
+This file contains the package repository database URLs. Note that lines starting with # are comments:
+<code sh>cat /etc/apk/repositories.d/distfeeds.list</code>
+
+<code>
+$ cat /etc/apk/repositories.d/distfeeds.list
+https://downloads.openwrt.org/releases/25.12/targets/x86/64/packages/packages.adb
+https://downloads.openwrt.org/releases/25.12/packages/x86_64/base/packages.adb
+https://downloads.openwrt.org/releases/25.12/targets/x86/64/kmods/6.12.60-1-41eae5d636a323424ce95c71d55e15f0/packages.adb
+https://downloads.openwrt.org/releases/25.12/packages/x86_64/luci/packages.adb
+https://downloads.openwrt.org/releases/25.12/packages/x86_64/packages/packages.adb
+https://downloads.openwrt.org/releases/25.12/packages/x86_64/routing/packages.adb
+https://downloads.openwrt.org/releases/25.12/packages/x86_64/telephony/packages.adb
+https://downloads.openwrt.org/releases/25.12/packages/x86_64/video/packages.adb
+</code>
+
+To include custom feeds in a file that will be retained over upgrades, add new entries to the ''customfeeds.dist'' file:
+<code>
+$ cat /etc/apk/repositories.d/customfeeds.list
+# add your custom package feeds here
+#
+# http://www.example.com/path/to/files/packages.adb
+https://dev.melmac.net/apk/packages.adb
+</code>
+
+==== Updating Packages ====
+Read this warning carefully before proceeding:
+
+<WRAP round alert 100%>
+Do not use ''apk upgrade'' to blindly mass-update your packages!
+
+Doing so will sooner or later brick your device.  Several packages may have various missing conflicts, incomplete dependencies or are otherwise specified incorrectly, which will cause a misconfiguration if you blindly upgrade them (''hostapd-*'', ''wpad-*'', ''ucode-mod-*'', various libraries, and others).
+
+The only safe way to upgrade all packages is to sysupgrade to a new firmware which would have a coherent set of current packages. You can use one of the ASU clients (LuCI Attended Sysupgrade, owut, or Firmware Selector), use the imagebuilder, or full toolchain to locally compile the firmware image by yourself at your Linux buildhost.
+</WRAP>
+
+Consider doing a [[:docs:guide-user:troubleshooting:backup_restore|backup]] first. With that said, if you still want to update packages: ''apk upgrade'' searches online repositories for package updates and upgrades them.
+
+==== Invocation ====
+==== Package manipulation ====
+==== Informational commands ====
+==== Options =====
+==== Configuration ====
+==== Adjust repositories ====
+==== Change architectures ====
+==== Proxy support ====
+Apk uses the environment variables http_proxy and https_proxy for proxy support.  For a one-off operation you can set it on the command line:
+
+<code>
+$ https_proxy=http://yourproxyserver:3128/ apk upgrade
+</code>
+
+==== Troubleshooting ====
+OpenWrt 25.12 onward uses apk version 3. Be aware that some other Linux distros and tooling may still be on version 2, so make sure any man pages or tools you're running are version 3 before you try to apply what you learn there to OpenWrt. For example, Alpine Linux is on version 3, but Wolfi, Apko, Melange, and Chainguard may still use apk version 2 so there would be internal/external differences etc.
+
+==== Out of space ====
+==== Non-standard installation destinations ====
+==== Known Issues ====
+  * ''apk adbdump'' produces non-standard YAML in certain edge cases.  If you run into this, please report it [[https://gitlab.alpinelinux.org/alpine/apk-tools/-/issues/10740|here]].

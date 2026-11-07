@@ -1,0 +1,82 @@
+name = "ow-dns-05-https-dns-proxy"
+description = "OW-DNS-05 with the package it needs. The setup step https_dns_proxy_install installs https-dns-proxy with apk, outside Newton's rollback, and the package starts itself with its shipped defaults: two DoH instances (Cloudflare on 127.0.0.1:5053, Google on :5054), dnsmasq switched to them (the init script sets noresolv=1 and adds the two server lines, the iCloud and Mozilla canary names and its doh_* bookkeeping to /etc/config/dhcp, commits it and restarts dnsmasq) and fw4 rules for the interface `lan`, which is the MGMT side on lab-r1. The batch is what a profile would send through Newton: instance 0 gets Quad9 as its resolver (resolver_url, bootstrap_dns) and the forced interface becomes the client LAN (force_dns_src_interface 'lab'). The plan holds only https-dns-proxy lines; the init script rewrites dhcp and the firewall by itself afterwards. Effects: the 5053 proxy runs with the Quad9 URL and Cloudflare is gone; fw4 redirects tcp/udp 53 from the lab zone to the router's dnsmasq and rejects tcp/udp 853 in forward_lab, both tagged ubus:https-dns-proxy, and the lan zone no longer has them; lab-client asks 1.1.1.1 (udp and tcp) for lab-r1.lan, a name only dnsmasq knows, and gets the router's address. breaks = [client_dot]. Posts, which show where the queries go: after one lookup of a fixed name through 192.168.150.1, dnsmasq's log shows it forwarded only to 127.0.0.1#5053 or #5054 and never to lab-isp (10.100.0.1, 10.101.0.1), the running conf has no-resolv, the 5053 proxy holds an established tcp 443 connection to a Quad9 address, and /etc/config/dhcp carries the init script's edits (noresolv, the two server lines), none of which is in the plan diff. Regression: the default list plus client_ext_dns, so a client still gets answers from 1.1.1.1 (now from dnsmasq through DoH). The package, its dhcp edits and its firewall rules stay in place until the next reset; the dhcp backup bug and the stale-server leftover found by hand are in the results file."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on", "https_dns_proxy_install", "dns_logqueries_on"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_luci", "client_internet", "client_dns", "client_dhcp", "portfwd", "client_ext_dns"]
+breaks = ["client_dot"]
+probes = [["proc-args", "https-dns-proxy", "-p 5053", "-r https://dns.quad9.net/dns-query"], ["nft-rule", "inet", "fw4", "dstnat_lab", "present", "ubus:https-dns-proxy"], ["nft-rule", "inet", "fw4", "forward_lab", "present", "ubus:https-dns-proxy"]]
+batch = '''
+set https-dns-proxy.@https-dns-proxy[0].resolver_url='https://dns.quad9.net/dns-query'
+set https-dns-proxy.@https-dns-proxy[0].bootstrap_dns='9.9.9.9,149.112.112.112'
+delete https-dns-proxy.config.force_dns_src_interface
+add_list https-dns-proxy.config.force_dns_src_interface='lab'
+'''
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+q=$(ps w | grep -c '[h]ttps-dns-proxy -r https://dns.quad9.net/dns-query -p 5053 '); c=$(ps w | grep -c '[h]ttps-dns-proxy -r https://cloudflare-dns.com/dns-query')
+echo "https-dns-proxy processes: quad9 on 5053=$q cloudflare=$c"; [ "$q" = 1 ] && [ "$c" = 0 ]
+'''
+expect_stdout = '^https-dns-proxy processes: quad9 on 5053=1 cloudflare=0$'
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+rl=$(nft list chain inet fw4 dstnat_lab 2>/dev/null | grep -c 'redirect to :53.*ubus:https-dns-proxy')
+fl=$(nft list chain inet fw4 forward_lab 2>/dev/null | grep -c 'dport 853 .*jump handle_reject.*ubus:https-dns-proxy')
+rn=$(nft list chain inet fw4 dstnat_lan 2>/dev/null | grep -c 'ubus:https-dns-proxy'); fn=$(nft list chain inet fw4 forward_lan 2>/dev/null | grep -c 'ubus:https-dns-proxy')
+echo "lab zone: redirects to :53=$rl rejects of 853=$fl; lan zone: https-dns-proxy rules=$((rn + fn))"; [ "$rl" = 2 ] && [ "$fl" = 2 ] && [ "$((rn + fn))" = 0 ]
+'''
+expect_stdout = '^lab zone: redirects to :53=2 rejects of 853=2; lan zone: https-dns-proxy rules=0$'
+
+[[effect]]
+device = "lab-client"
+timeout = 45
+cmd = '''
+u=$(host -W 5 -t A lab-r1.lan 1.1.1.1 | tail -1)
+t=$(host -W 5 -T -t A lab-r1.lan 1.1.1.1 | tail -1)
+echo "udp to 1.1.1.1: $u"; echo "tcp to 1.1.1.1: $t"
+[ "$u" = "lab-r1.lan has address 192.168.150.1" ] && [ "$t" = "$u" ]
+'''
+expect_stdout = '^udp to 1\.1\.1\.1: lab-r1\.lan has address 192\.168\.150\.1\ntcp to 1\.1\.1\.1: lab-r1\.lan has address 192\.168\.150\.1$'
+
+[[post]]
+device = "lab-client"
+timeout = 45
+cmd = "host -W 8 -t A newton-doh-probe.example.com 192.168.150.1 | tail -1"
+expect_stdout = '^(newton-doh-probe\.example\.com (has no A record|has address \S+)|Host newton-doh-probe\.example\.com not found: 3\(NXDOMAIN\))$'
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+l=$(logread)
+d=$(echo "$l" | grep -c 'forwarded newton-doh-probe\.example\.com to 127\.0\.0\.1#505[34]'); p=$(echo "$l" | grep -c 'forwarded newton-doh-probe\.example\.com to 10\.10[01]\.0\.1')
+n=$(grep -c '^no-resolv$' /var/etc/dnsmasq.conf.*)
+echo "newton-doh-probe.example.com forwarded to the DoH proxies=$d, to lab-isp=$p; no-resolv lines=$n"; [ "$d" -ge 1 ] && [ "$p" = 0 ] && [ "$n" = 1 ]
+'''
+expect_stdout = '^newton-doh-probe\.example\.com forwarded to the DoH proxies=[1-9]\d*, to lab-isp=0; no-resolv lines=1$'
+
+[[post]]
+device = "lab-r1"
+timeout = 40
+cmd = '''
+i=0
+while [ $i -lt 15 ]; do
+  pid=$(ps w | sed -n 's#^ *\([0-9][0-9]*\) .*[h]ttps-dns-proxy -r https://dns.quad9.net/dns-query -p 5053 .*#\1#p' | head -1)
+  peer=$(netstat -tnp 2>/dev/null | awk -v p="$pid/" '$7 ~ "^" p && $6 == "ESTABLISHED" {split($5, a, ":"); print a[1] ":" a[2]}' | head -1)
+  case "$peer" in 9.9.9.*:443|149.112.112.*:443) echo "quad9 proxy (pid $pid) holds an established connection to $peer"; exit 0;; esac
+  sleep 1; i=$((i+1))
+done
+echo "no established tcp 443 connection from the quad9 proxy to a Quad9 address (pid [$pid], peer [$peer])"; exit 1
+'''
+expect_stdout = '^quad9 proxy \(pid \d+\) holds an established connection to (9\.9\.9|149\.112\.112)\.\d+:443$'
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+echo "dhcp: noresolv=$(uci -q get dhcp.@dnsmasq[0].noresolv) servers=[$(uci -q get dhcp.@dnsmasq[0].server | tr ' ' ',')] doh_server=[$(uci -q get dhcp.@dnsmasq[0].doh_server | tr ' ' ',')]"
+'''
+expect_stdout = "^dhcp: noresolv=1 servers=\\[[^]]*127\\.0\\.0\\.1#5053[^]]*127\\.0\\.0\\.1#5054[^]]*\\] doh_server=\\[127\\.0\\.0\\.1#5053,127\\.0\\.0\\.1#5054\\]$"

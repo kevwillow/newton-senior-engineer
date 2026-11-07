@@ -1,0 +1,54 @@
+# PORT of ow-dns-04a-dnssec-stock-rolls-back. Changed: lab-r1 -> pulsar, r1_wan_ip -> p_wan_ip, regression -> pulsar's default list. verify_observer_* are cloned steps. Pulsar runs stock dnsmasq 2.93 (no DNSSEC), like lab-r1.
+name = "p-ow-dns-04a-dnssec-stock-rolls-back"
+description = "OW-DNS-04 on the STOCK image: dhcp.@dnsmasq[0].dnssec='1' while the installed dnsmasq 2.93 is built without DNSSEC (dnsmasq --version says no-DNSSEC). The init script refuses the option and exits 1 (\"dnssec requested, but dnssec support is not available\"), so the change cannot take effect and the protocol must not confirm it: expect = rolled_back, with DNS and DHCP working from the old config afterwards (default regression, which includes client_dns and client_dhcp). The scenario seals NO probes itself; the touched-control derivation (ADR-010) adds the OW-DNS-04 probes (conf-has dnssec line, trust-anchors substr, DNSSEC validation enabled log line) to the plan. On the stock build the old dnsmasq keeps running on its old conf after the reload (the init script exits 1 before it replaces anything), so those probes fail in the verify and Newton rolls back. Before ADR-010 nothing ran a check here: the verify (ping, nslookup via 127.0.0.1) passed three times in a row, the change was confirmed, and the persisted config then killed dnsmasq at the next restart or boot. The posts say what the safe outcome looks like: the option is gone, dnsmasq runs with DNS on 53 and DHCP on 67, and a restart of dnsmasq brings it back up and resolving. Effect: the running dnsmasq's conf still has no dnssec line; it must be absent before and stay absent after. A sampler on pulsar (steps verify_observer_*) records the clauses of the verify while the option was applied, and the last post requires that ping 1.1.1.1 worked in at least 90 percent of those samples, so that a rollback caused by a network fault cannot make this scenario pass. ow-dns-04c is the same batch with the probes sealed explicitly by the scenario."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "rolled_back"
+setup = ["portfwd_on", "verify_observer_start"]
+cleanup = ["verify_observer_stop"]
+regression = "default"
+batch = '''
+set dhcp.@dnsmasq[0].dnssec='1'
+'''
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+n=$(cat /var/etc/dnsmasq.conf.* | grep -c '^dnssec$')
+echo "running dnsmasq conf: dnssec lines=$n"; [ "$n" = 1 ]
+'''
+expect_stdout = '^running dnsmasq conf: dnssec lines=1$'
+
+[[post]]
+device = "pulsar"
+cmd = "echo \"dnssec option: [$(uci -q get dhcp.@dnsmasq[0].dnssec)]\""
+expect_stdout = '^dnssec option: \[\]$'
+
+[[post]]
+device = "pulsar"
+cmd = '''
+p=$(ps w | grep -c '[d]nsmasq -C'); d=$(netstat -lun | grep -c '127.0.0.1:53 '); h=$(netstat -lun | grep -c ':67 ')
+echo "dnsmasq processes=$p dns listener=$d dhcp listener=$h"; [ "$p" -ge 1 ] && [ "$d" = 1 ] && [ "$h" -ge 1 ]
+'''
+expect_stdout = '^dnsmasq processes=[1-9]\d* dns listener=1 dhcp listener=[1-9]\d*$'
+
+[[post]]
+device = "pulsar"
+timeout = 60
+cmd = '''
+/etc/init.d/dnsmasq restart >/dev/null 2>&1
+i=0
+while [ $i -lt 20 ]; do
+  if ps w | grep -q '[d]nsmasq -C' && nslookup openwrt.org 127.0.0.1 2>&1 | grep -q '^Name:'; then echo "dnsmasq restarts with the persisted config and resolves"; exit 0; fi
+  sleep 1; i=$((i+1))
+done
+echo "dnsmasq did not come back after a restart"; exit 1
+'''
+expect_stdout = '^dnsmasq restarts with the persisted config and resolves$'
+
+[[post]]
+device = "pulsar"
+cmd = '''
+awk -F'|' '$2 == "cfg=1" {t++; if ($3 != "ping=ok") f++} END {print "while the option was applied: samples=" t + 0 ", ping failed in " f + 0; exit !(t >= 1 && f * 10 <= t)}' /tmp/verify-observer.log
+'''
+expect_stdout = '^while the option was applied: samples=[1-9]\d*, ping failed in \d+$'

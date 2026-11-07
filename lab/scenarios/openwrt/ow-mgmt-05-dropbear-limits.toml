@@ -1,0 +1,35 @@
+name = "ow-mgmt-05-dropbear-limits"
+description = "OW-MGMT-05: dropbear MaxAuthTries='3' and IdleTimeout='600'. MaxAuthTries 3 is already the init default (-T 3 on the stock command line), so it is staged as a new option with no visible change; IdleTimeout is the effect: the live dropbear command line gains -I 600. The state post checks that -T 3 is still there (it can fail: MaxAuthTries=5 gives -T 5, results file). This is the one scenario that outlives the rollback window: the rollback timer is 60 s, confirm comes 16 to 17 s after the apply and the AFTER probes take about 11 s more, and the last post then sleeps 50 s (so it reads the state about 75 s after the apply, 15 s past the deadline) and re-reads the live command line and the uci value, so a confirm that did not really cancel the rollback would show here. The behavioural idle test is ow-mgmt-05b."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 60
+setup = ["portfwd_on"]
+regression = "default"
+approval = true
+probes = [["proc-args", "dropbear", "-I 600"]]
+batch = '''
+set dropbear.@dropbear[0].MaxAuthTries='3'
+set dropbear.@dropbear[0].IdleTimeout='600'
+'''
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+tr '\0' ' ' < /proc/$(cat /var/run/dropbear.main.pid)/cmdline | grep -- ' -I 600 '
+'''
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+tr '\0' ' ' < /proc/$(cat /var/run/dropbear.main.pid)/cmdline | grep -- ' -T 3 '
+'''
+
+[[post]]
+device = "lab-r1"
+timeout = 90
+cmd = '''
+sleep 50
+tr '\0' ' ' < /proc/$(cat /var/run/dropbear.main.pid)/cmdline | grep -q -- ' -I 600 ' && [ "$(uci -q get dropbear.@dropbear[0].IdleTimeout)" = 600 ] && echo "still applied after the rollback window"
+'''
+expect_stdout = '^still applied after the rollback window$'

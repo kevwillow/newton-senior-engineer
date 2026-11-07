@@ -1,0 +1,117 @@
+# VyOS intent -> revert-wrapped snippet mapping.
+#
+# Audit ids name the enabled getters of this platform
+# (``mcp/newton_mcp/adapters/vyos/getters.toml``); ``mgmt_services``,
+# ``admins``, ``logging`` and ``running_config`` do NOT ship on this
+# platform (VyOS has no read-only role, so the wall is the getter
+# allowlist, not the device). Every snippet is UNVERIFIED until a lab capture
+# confirms it on a VyOS lab device.
+#
+# Keys of an [[intent]] entry, in this order:
+#   id, explanation, doc, ledger, audit, check, good, snippet, confirm.
+# Reserved keys refused by the loader: control_id, tier, form_of.
+# Only the four service-off intents may carry ``snippet`` / ``confirm``.
+#
+# Intents not listed here are returned by ``recommend()`` with
+# guidance "none" and explanation "no guidance for <platform> yet".
+[[intent]]
+id = 'INT-MGMT-SRC'
+explanation = 'Decide which source prefixes may reach the admin plane on the VyOS instance.'
+doc = 'profiles/vyos/notes.md'
+ledger = ''
+audit = []
+check = 'Confirm the chosen source restriction is applied at the admin boundary before any user accounts are reachable from outside it.'
+good = 'Admin reachability on every enabled service is constrained to the recorded source set; nothing else responds.'
+
+[[intent]]
+id = 'INT-MGMT-NO-TELNET'
+explanation = 'Disable VyOS telnet; only SSH reaches the admin plane.'
+doc = 'profiles/vyos/notes.md'
+ledger = ''
+audit = []
+check = 'Audit the running config for the presence of a ``service telnet`` stanza; expect none after the snippet runs.'
+good = 'The telnet service is absent from the active configuration; only ssh listens on the admin plane.'
+snippet = """\
+configure
+delete service telnet
+commit-confirm 10
+exit"""
+confirm = 'Run ``configure`` then ``confirm`` then ``exit`` within 10 minutes; otherwise the device rolls the change back.'
+
+[[intent]]
+id = 'INT-MGMT-NO-WEB'
+explanation = 'Disable the VyOS HTTPS web UI; admin traffic stays on the CLI.'
+doc = 'profiles/vyos/notes.md'
+ledger = ''
+audit = []
+check = 'Audit the running config for the presence of an HTTPS service stanza; expect none after the change.'
+good = 'The HTTPS web UI is absent from the active configuration; only ssh listens on the admin plane.'
+
+[[intent]]
+id = 'INT-MGMT-NO-API'
+explanation = 'Disable the VyOS HTTP API; admin automation must use ssh.'
+doc = 'profiles/vyos/notes.md'
+ledger = ''
+audit = []
+check = 'Audit the running config for the presence of an ``api`` sub-tree under ``service https``; expect none after the change.'
+good = 'The HTTP API subtree is absent from the active configuration; the device accepts only ssh on the admin plane.'
+
+[[intent]]
+id = 'INT-SNMP-V3-ONLY'
+explanation = 'When SNMP is needed, run it on v3 with auth + priv on VyOS; never advertise a community.'
+doc = 'profiles/vyos/notes.md'
+ledger = ''
+audit = []
+check = 'If SNMP is required, audit the running snmp stanza for v3-only mode with auth and priv; community lines must be absent.'
+good = 'SNMP, when present, responds to v3 requests with auth+priv only; no v1/v2 community line remains.'
+
+[[intent]]
+id = 'INT-SNMP-OFF'
+explanation = 'Turn VyOS SNMP off entirely; no v3 listener, no community, no traps.'
+doc = 'profiles/vyos/notes.md'
+ledger = ''
+audit = []
+check = 'Audit the running config for the presence of a ``service snmp`` stanza; expect none after the snippet runs.'
+good = 'The snmp service is absent from the active configuration; the device ignores UDP/161 probes.'
+snippet = """\
+configure
+delete service snmp
+commit-confirm 10
+exit"""
+confirm = 'Run ``configure`` then ``confirm`` then ``exit`` within 10 minutes; otherwise the device rolls the change back.'
+
+[[intent]]
+id = 'INT-SSH-KEYS-ONLY'
+explanation = 'Disable SSH password login after a key login is proven on the VyOS account.'
+doc = 'profiles/vyos/notes.md'
+ledger = ''
+audit = []
+check = 'Audit the running config for ``system login user ... disable`` and the absence of a password for any admin account.'
+good = 'Every login user authenticates only with a key; passwords are not accepted on ssh.'
+
+[[intent]]
+id = 'INT-INBOUND-NONE'
+explanation = 'No inbound services; firewall and NAT rules should not accept anything from outside the WAN.'
+doc = 'profiles/vyos/notes.md'
+ledger = ''
+audit = ['firewall_policy', 'nat']
+check = 'Audit firewall_policy and nat for any inbound rule with a destination on a LAN interface; expect none after the change.'
+good = 'firewall and NAT hold no inbound accept; nothing from outside reaches a LAN port.'
+
+[[intent]]
+id = 'INT-LOG-REMOTE'
+explanation = 'Forward VyOS logs to a syslog server; the device keeps an on-box log too.'
+doc = 'profiles/vyos/notes.md'
+ledger = ''
+audit = []
+check = 'Audit the running config for a ``system syslog`` remote stanza; expect at least one remote host after the change.'
+good = 'logs reach the configured syslog endpoint; the on-box log reflects the same events.'
+
+[[intent]]
+id = 'INT-NTP-SERVERS'
+explanation = 'List the NTP servers VyOS syncs against; the device clock must be right for every auth check.'
+doc = 'profiles/vyos/notes.md'
+ledger = ''
+audit = ['ntp']
+check = 'Audit ntp for the configured servers; expect at least one reachable server after the change.'
+good = 'At least one configured NTP server is reachable and the device reports its clock as synchronised.'

@@ -1,0 +1,528 @@
+/* source: https://openwrt.org/docs/guide-user/firewall/fw3_configurations/fw3_nat?do=export_raw | retrieved 2026-10-03 by Kev (browser) | CC BY-SA 4.0, (c) OpenWrt contributors | raw DokuWiki markup, unmodified below this line */
+====== NAT examples ======
+The [[docs:guide-user:firewall:overview|fw4 application]] has extensive support for [[https://en.wikipedia.org/wiki/Network_address_translation|NAT]] filtering.
+NAT is a powerful feature for network redirection and is credited with extending the life of the IPv4 protocol.
+
+This section contains typical uses of the fw4 NAT features.
+As with other firewall sections, this section will not delve into NAT background
+and theory. Some useful links for going deeper are:
+  * https://www.netfilter.org/documentation/HOWTO/NAT-HOWTO.html
+  * https://www.karlrupp.net/en/computer/nat_tutorial
+  * https://www.systutorials.com/816/port-forwarding-using-iptables/
+
+For NAT diagnostics please see 
+[[docs:guide-user:firewall:netfilter_iptables:netfilter_management|Netfilter Management]]
+to analyze the netfilter rules and investigate conntrack sessions.
+
+===== NAT example configurations =====
+
+OpenWrt's fw4 application supports DNAT, SNAT, and MASQUERADING. The following examples could be used in fw4's config file [[commit>?p=project/firewall4.git;a=blob;f=root/etc/config/firewall| /etc/config/firewall]].
+==== Destination NAT (DNAT) ====
+
+For public servers behind a firewall the 
+<abbr title="Destination Native Address Translation">DNAT</abbr> 
+target is used to translate the public IP address on the WAN-side
+to the server's private LAN address.
+
+:!: A server publicly accessible from the Internet is highly
+visible. Consider putting your public servers in a 
+[[docs:guide-user:firewall:fw3_configurations:fw3_dmz|DMZ]]
+for security.
+
+=== DNAT: Port forwarding for IPv4 ===
+The goal of this rule is to redirect all WAN-side SSH access on port 2222 to a
+the SSH port (22) of a single LAN-side station. 
+
+<code bash>
+config redirect
+       option name            'Example of SSH DNAT'
+       option target          DNAT
+       option src             wan
+       option dest            lan
+       option proto           tcp
+       option src_dport       2222
+       option dest_ip         192.168.10.20
+       option dest_port       22
+       option enabled         1
+</code>
+
+To test from a WAN-side station (STA1), SSH to the externally visible 
+IP address on port 2222:
+
+<code bash>
+ssh -p 2222 203.0.113.8 "hostname; cat /proc/version"
+</code>
+
+When the rule is enabled STA2 will reply with its hostname and kernel version.
+When the rule is disabled, the connection is refused.
+
+While this is all that one needs to know to use OpenWRT's fw4, the passionate reader may well ask "So what netfilter rules does this generate?"
+<code bash>
+# fw4 print | awk '/\{/ { p=$0 }; /Example/ { print p, $0, "}"; }' | tr -d '\t'
+chain dstnat_wan { meta nfproto ipv4 tcp dport 2222 counter dnat 192.168.10.20:22                     comment "!fw4: Example of SSH DNAT" }
+chain dstnat_lan { ip saddr 192.168.10.0/24 ip daddr 203.0.113.8 tcp dport 2222 dnat 192.168.10.20:22 comment "!fw4: Example of SSH DNAT (reflection)" }
+chain srcnat_lan { ip saddr 192.168.10.0/24 ip daddr 192.168.10.20 tcp dport 22 snat 192.168.10.1     comment "!fw4: Example of SSH DNAT (reflection)" }
+</code>
+
+Netfilter uses these rules by matching entries in the [[:docs:guide-user:firewall:netfilter_iptables:netfilter_management#conntrack_diagnostics| conntrack]] table and taking the specified action.  
+
+The first rule matches connections coming in the WAN-side sent to TCP port 2222 and translates the destination to the server's LAN IP address, ''192.168.10.20:22''.
+The second rule is like the first but for LAN-side machines, STA3, that SSH to the WAN IP address and port; this rule causes the connection to be reflected directly to the server, STA2, instead of going out onto the WAN.
+Connections modified by the second rule will additionally match the third rule which rewrites the source address to be that of the OpenWRT device, 192.168.10.1; a necessity if the server is isolated from the rest of the LAN.
+
+The next thought of the passionate reader is "So what is in the conntrack table?" 
+
+<code bash>
+# grep 2222 /proc/net/nf_conntrack
+ipv4     2 tcp      6 7424 ESTABLISHED src=198.51.100.171 dst=203.0.113.8 sport=51390 dport=2222 packets=21 bytes=4837 src=192.168.10.20 dst=198.51.100.171 sport=22 dport=51390 packets=23 bytes=4063 [ASSURED] mark=0 zone=0 use=2
+</code>
+
+This record shows the WAN-side src=STA1 and dst=STA2:2222 and the reverse direction
+LAN-side src=STA2:22, dst=STA1.
+
+=== DNAT: Ping a LAN-side server from a specific WAN IP ===
+This redirect rule will cause the router to translate the WAN-side source of 1.2.3.4 to the LAN-side STA2 and route the ICMP echo to it. The rule is reflexive in that STA2 will be translated to 1.2.3.4 on the WAN-side. 
+
+<code bash>
+config redirect
+        option src      wan
+        option src_dip  1.2.3.4
+        option proto    icmp
+        option dest     lan
+        option dest_ip  192.168.10.20
+        option target   DNAT
+	option name     DNAT-ICMP-WAN-LAN
+	option enabled  1
+</code>
+
+=== DNAT: LAN-side public server ===
+
+{{ https://upload.wikimedia.org/wikipedia/commons/c/c3/DNAT-nofonts.svg?400| Diagram of DNAT }}
+
+In this example, STA2 is inside the LAN running an email server (e.g. postfix) listening on port 2525 for incoming email.
+
+<code>
+config redirect
+        option target DNAT
+        option src wan
+        option src_dport 25
+        option proto tcp
+        option family ipv4
+        option dest lan
+        option dest_ip 192.168.10.20
+        option dest_port 2525
+        option name DNAT-MAIL-SERVER
+        option enabled 1
+</code>
+
+This redirect rule states: any incoming traffic from the WAN on port 25, redirect to STA2 port 2525.
+
+To verify what is going on dump ''/proc/net/nf_conntrack'' to observe the dynamic connection for incoming traffic.
+There can be quite a few conntrack records in it so we will search on just the ones using port 2525:
+
+<code bash>
+# grep port=2525 /proc/net/nf_conntrack
+...
+ipv4     2 tcp      6 7436 ESTABLISHED src=198.51.100.171 dst=203.0.113.8 sport=41370 dport=25 packets=4 bytes=229 src=192.168.10.20 dst=198.51.100.171 sport=2525 dport=41370 packets=3 bytes=164 [ASSURED] mark=0 use=2
+...
+</code>
+
+The connection is coming from STA1 port 25 to the <abbr title="Device Under Test">DUT</abbr> and is translated to STA2
+on port 2525 with a response destination to STA1.
+
+The relevant traffic matches the DNAT conntrack state which is allowed to traverse zones by OpenWrt firewall, so no extra permissive rules are required.
+
+==== Source NAT (SNAT) ====
+The goal of this rule is to translate the source IP address from a real station to
+a fictitious one on port 8080.
+
+<code bash>
+config redirect
+        option target           SNAT
+        option src              lan
+        option dest             wan
+	option proto            tcp
+        option src_ip           192.168.10.20
+        option src_dip          192.168.10.13
+        option dest_port        8080
+	option enabled          1
+</code>
+
+To test:
+  - use netcat to listen on the STA1, the WAN-side station: ''nc -l 8080''
+  - use netcat to connect on the STA2, the LAN-side station: ''nc -v 192.168.3.171 8080''
+
+Type something on the LAN-side station and see it echoed on the WAN-side station.
+Check the connection on the WAN-side station using ''netstat -ntap'' and see the line:
+
+<code>
+tcp        0      0 192.168.3.171:8080      192.168.10.13:47970 ESTABLISHED 16746/nc
+</code>
+
+The WAN-side station shows the SNAT address connecting to it on port 8080!
+
+When used alone, Source NAT is used to restrict a computer's access to the internet while allowing it to access a few services by forwarding what appears to be
+a few local services, e.g. [[http://en.wikipedia.org/wiki/Network_time_protocol|NTP]], to the internet.
+While DNAT hides the local network from the internet, SNAT hides the internet from the local network.
+
+==== MASQUERADE ====
+This is the most used and useful NAT function.
+It translates a local private network on the LAN-side to a single public address/port num on the WAN-side and then the reverse.
+It is the default firewall configuration for **every** IPv4 router.
+As a result it is a very simple fw4 configuration
+
+The LAN-side uses a [[https://en.wikipedia.org/wiki/Private_network|private network]].
+The router translates the private addresses to the router address:port and the netfilter conntrack module manages the connection.
+
+The masquerade is set on the WAN-side
+
+<code bash>
+config zone
+	option name 'wan'
+	list network 'wan'
+	....
+	option masq '1'
+</code>
+
+Simple, no?
+
+The router will generally get its WAN ip address from the upstream DHCP server and be the DHCP server (and usually DNS server) for LAN stations.
+The ''network'' configuration file defines the private network and the ''dhcp'' configuration file defines how the OpenWrt router assigns LAN-side IPv4 addresses.
+
+When MASQUERADE is enabled, **all** forwarded traffic between WAN and LAN is translated.
+Essentially, there is very little that can go wrong with the MASQUERADE firewall rules.
+
+Dump ''/proc/net/nf_conntrack'' to inspect the current MASQUERADE connections.
+The following connection tracks SSH (22) access from STA1 to STA2.
+
+<code>
+ipv4     2 tcp      6 4615 ESTABLISHED src=192.168.3.171 dst=192.168.10.20 sport=60446 dport=22 packets=27 bytes=1812 src=192.168.10.20 dst=192.168.3.171 sport=22 dport=60446 packets=21 bytes=2544 [ASSURED] mark=0 use=2
+</code>
+
+:!: MASQUERADE supports two or more private LAN zones
+
+==== Transparent proxy rule (external) ====
+:!: not tested
+
+The following rule redirects all LAN-side HTTP traffic through an external proxy at 192.168.1.100 listening on port 3128.
+It assumes the //lan// address to be 192.168.1.1 - this is needed to masquerade redirected traffic towards the proxy.
+
+<code bash>
+config redirect
+        option src              lan
+        option proto            tcp
+        option src_ip           !192.168.1.100
+        option src_dport        80
+        option dest_ip          192.168.1.100
+        option dest_port        3128
+        option target           DNAT
+
+config redirect
+        option dest             lan
+        option proto            tcp
+        option src_dip          192.168.1.1
+        option dest_ip          192.168.1.100
+        option dest_port        3128
+        option target           SNAT
+</code>
+
+===== Extras =====
+==== NAT ====
+Enable masquerading aka NAT on the WAN zone.
+
+<code bash>
+uci set firewall.@zone[1].masq="1"
+uci commit firewall
+service firewall restart
+</code>
+
+==== IPv6 NAT ====
+Enable IPv6 masquerading aka NAT66 on the WAN zone.
+
+<code bash>
+uci set firewall.@zone[1].masq6="1"
+uci commit firewall
+service firewall restart
+</code>
+
+Announce IPv6 default route for the ULA prefix.
+
+<code bash>
+uci set dhcp.lan.ra_default="1"
+uci commit dhcp
+service odhcpd restart
+</code>
+
+Disable IPv6 source filter on the upstream interface.
+
+<code bash>
+uci set network.wan6.sourcefilter="0"
+uci commit network
+service network restart
+</code>
+
+==== Selective NAT ====
+Enable masquerading selectively for a specific source subnet.
+
+<code bash>
+uci -q delete firewall.nat
+uci set firewall.nat="nat"
+uci set firewall.nat.family="ipv4"
+uci set firewall.nat.proto="all"
+uci set firewall.nat.src="wan"
+uci set firewall.nat.src_ip="192.168.2.0/24"
+uci set firewall.nat.target="MASQUERADE"
+uci commit firewall
+service firewall restart
+</code>
+
+==== IPv6 selective NAT ====
+Enable IPv6 masquerading selectively for a specific source subnet.
+
+<code bash>
+uci -q delete firewall.nat6
+uci set firewall.nat6="nat"
+uci set firewall.nat6.family="ipv6"
+uci set firewall.nat6.proto="all"
+uci set firewall.nat6.src="wan"
+uci set firewall.nat6.src_ip="fd00:2::/64"
+uci set firewall.nat6.target="MASQUERADE"
+uci commit firewall
+service firewall restart
+</code>
+
+==== NPT ====
+Enable IPv4 to IPv4 network prefix translation.
+
+<code bash>
+cat << "EOF" > /etc/nftables.d/npt.sh
+LAN_PFX="192.168.1.0/24"
+WAN_PFX="192.168.2.0/24"
+. /lib/functions/network.sh
+network_flush_cache
+network_find_wan WAN_IF
+network_get_device WAN_DEV "${WAN_IF}"
+nft add rule inet fw4 srcnat \
+oifname "${WAN_DEV}" snat ip prefix to ip \
+saddr map { "${LAN_PFX}" : "${WAN_PFX}" }
+EOF
+uci -q delete firewall.npt
+uci set firewall.npt="include"
+uci set firewall.npt.path="/etc/nftables.d/npt.sh"
+uci commit firewall
+service firewall restart
+</code>
+
+==== IPv6 NPT ====
+Enable IPv6 to IPv6 network prefix translation.
+
+<code bash>
+cat << "EOF" > /etc/nftables.d/npt6.sh
+LAN_PFX="$(uci -q get network.globals.ula_prefix)"
+. /lib/functions/network.sh
+network_flush_cache
+network_find_wan6 WAN_IF
+network_get_device WAN_DEV "${WAN_IF}"
+network_get_prefix6 WAN_PFX "${WAN_IF}"
+nft add rule inet fw4 srcnat \
+oifname "${WAN_DEV}" snat ip6 prefix to ip6 \
+saddr map { "${LAN_PFX}" : "${WAN_PFX}" }
+EOF
+uci -q delete firewall.npt6
+uci set firewall.npt6="include"
+uci set firewall.npt6.path="/etc/nftables.d/npt6.sh"
+uci commit firewall
+service firewall restart
+</code>
+
+==== Multi-WAN IPv6 NPT ====
+Enable IPv6 network prefix translation with multiple WAN interfaces (e.g. for [[docs:guide-user:network:wan:multiwan:mwan3 | mwan3]]).
+
+<code bash>
+cat << "EOF" > /etc/nftables.d/npt6.sh
+LAN_IF="lan"
+WAN_IF="wana6 wanb6"
+. /lib/functions/network.sh
+network_flush_cache
+network_get_prefix_assignment6 LAN_PFX "${LAN_IF}"
+for WAN_IF in ${WAN_IF}
+do
+network_get_device WAN_DEV "${WAN_IF}"
+network_get_prefix6 WAN_PFX "${WAN_IF}"
+nft add rule inet fw4 srcnat \
+oif "${WAN_DEV}" snat ip6 prefix to ip6 \
+saddr map { "${LAN_PFX}" : "${WAN_PFX}" }
+done
+EOF
+uci -q delete firewall.npt6
+uci set firewall.npt6="include"
+uci set firewall.npt6.path="/etc/nftables.d/npt6.sh"
+uci commit firewall
+service firewall restart
+</code>
+
+==== Symmetric dynamic IPv6 NPT ====
+Enable symmetric dynamic IPv6 to IPv6 network prefix translation.
+
+<code bash>
+cat << "EOF" > /etc/nftables.d/npt6.sh
+LAN_IF="lan"
+sleep 5
+. /lib/functions/network.sh
+network_flush_cache
+network_get_device LAN_DEV "${LAN_IF}"
+network_get_prefix_assignment6 LAN_PFX "${LAN_IF}"
+network_find_wan6 WAN_IF
+network_get_device WAN_DEV "${WAN_IF}"
+network_get_prefix6 WAN_PFX "${WAN_IF}"
+nft add rule inet fw4 srcnat \
+oifname "${WAN_DEV}" snat ip6 prefix to ip6 \
+saddr map { "${LAN_PFX}" : "${WAN_PFX}" }
+nft add rule inet fw4 srcnat \
+oifname "${LAN_DEV}" snat ip6 prefix to ip6 \
+saddr map { "${WAN_PFX}" : "${LAN_PFX}" }
+EOF
+uci -q delete firewall.npt6
+uci set firewall.npt6="include"
+uci set firewall.npt6.path="/etc/nftables.d/npt6.sh"
+uci commit firewall
+service firewall restart
+</code>
+
+==== IPv6 to IPv4 NAT with Jool ====
+Enable IPv6 to IPv4 NAT aka NAT64 for IPv6-only networks with Jool.
+Use DNS64 to resolve domain names.
+
+<code bash>
+opkg update
+opkg install jool-tools-netfilter
+. /usr/share/libubox/jshn.sh
+json_init
+json_add_string "instance" "default"
+json_add_string "framework" "netfilter"
+json_add_object "global"
+json_add_string "pool6" "64:ff9b::/96"
+json_close_object
+json_dump > /etc/jool/jool-nat64.conf.json
+uci set jool.general.enabled="1"
+uci set jool.nat64.enabled="1"
+uci commit jool
+service jool restart
+</code>
+
+==== IPv6 to IPv4 NAT with Tayga ====
+Enable IPv6 to IPv4 NAT aka NAT64 for IPv6-only networks with Tayga.
+Use DNS64 to resolve domain names.
+
+<code bash>
+opkg update
+opkg install tayga
+uci del_list firewall.lan.network="nat64"
+uci add_list firewall.lan.network="nat64"
+uci commit firewall
+service firewall restart
+uci -q delete network.nat64
+uci set network.nat64="interface"
+uci set network.nat64.proto="tayga"
+uci set network.nat64.prefix="64:ff9b::/96"
+uci set network.nat64.ipv6_addr="fd00:ffff::1"
+uci set network.nat64.dynamic_pool="192.168.255.0/24"
+uci set network.nat64.ipv4_addr="192.168.255.1"
+uci commit network
+service network restart
+</code>
+
+==== Custom TTL and Hop Limit ====
+
+To bypass tethering restrictions on OpenWrt, you need to modify the ''TTL'' (IPv4) and ''Hop Limit'' (IPv6) using ''nftables''. This makes all router traffic mimic a single mobile device, hiding your network from the carrier.
+
+=== How TTL and Hop Limit Bypassing Works ===
+
+Carriers (primarily in the United States) inspect packet headers to detect whether a SIM card is inserted into a router or a phone. Standard mobile devices typically originate traffic with a default ''TTL'' / ''Hop Limit'' of **64**. Every network hop decreases the ''TTL'' / ''Hop Limit'' value by 1.
+
+To ensure packets reach the carrier's network with the expected value, set your ''TTL'' (IPv4) and ''Hop Limit'' (IPv6) based on your device's operating mode:
+
+  * **Direct Mode (QMI / MBIM):** The modem acts as a standard network interface. Set ''TTL'' / ''Hop Limit'' = **64** so packets arrive at the carrier as 64.
+  * **Hostless Mode (USB Tethering / ECM / RNDIS):** The attached device (phone or modem) acts as an internal router, adding an extra network hop. Set ''TTL'' / ''Hop Limit'' = **65** so it decrements to 64 inside the device and arrives at the carrier as 64.
+
+//**Note:** While ''TTL'' / ''Hop Limit'' modification bypasses the most common detection method, some carriers may also check secondary parameters (such as voice/SMS activity, DNS requests, or HTTP User-Agents).//
+
+=== Configuration ===
+
+Run the following commands via SSH on your OpenWrt router to create the custom ''nftables'' rules:
+
+<code bash>
+# Define custom TTL/Hop Limit values and specify network devices to bypass tethering restrictions
+# - Use 64 for modems in QMI/MBIM mode (Direct Mode)
+# - Use 65 for tethered phones and modems in ECM/RNDIS mode (Hostless Mode)
+WAN_TTL="65"
+WAN_HLIM="65"
+WAN_DEV="eth1, ppp*, usb*, wwan*"
+
+# Create the custom nftables rules file
+cat << EOF > /etc/nftables.d/custom-ttl-and-hlim-rules
+oifname { $WAN_DEV } counter ip ttl set $WAN_TTL comment "IPv4: Bypass tethering"
+oifname { $WAN_DEV } meta l4proto != ipv6-icmp counter ip6 hoplimit set $WAN_HLIM comment "IPv6: Bypass tethering (excluding ICMPv6)"
+EOF
+
+# Include custom nftables rules file in firewall config
+uci -q del firewall.custom_ttl_and_hlim
+uci set firewall.custom_ttl_and_hlim="include"
+uci set firewall.custom_ttl_and_hlim.enabled="1"
+uci set firewall.custom_ttl_and_hlim.type="nftables"
+uci set firewall.custom_ttl_and_hlim.path="/etc/nftables.d/custom-ttl-and-hlim-rules"
+uci set firewall.custom_ttl_and_hlim.position="chain-post"
+uci set firewall.custom_ttl_and_hlim.chain="mangle_postrouting"
+uci commit firewall
+
+# Reload the firewall to apply changes
+fw4 reload
+</code>
+
+**Technical Notes:**
+  * **Wildcard Matching:** Using ''*'' in ''WAN_DEV'' matches multiple WAN devices.
+  * **Traffic Monitoring (''counter''):** Recommended for verifying that the traffic is actively matching the rules.
+  * **Mandatory ICMPv6 Exclusion:** Excluding ICMPv6 (''meta l4proto != ipv6-icmp'') is mandatory when modifying the ''Hop Limit'' (per **RFCs 4443**, **4861**, and **8201**)—skipping this breaks IPv6 network autoconfiguration (Router Advertisements/Neighbor Discovery) completely.
+
+=== Verification ===
+
+To verify that the custom rules are loaded correctly in ''nftables'', run:
+
+<code bash>
+nft list chain inet fw4 mangle_postrouting
+</code>
+
+=== References ===
+
+  * **OpenWrt Wiki:** [[https://openwrt.org/docs/guide-user/firewall/firewall_configuration#config_include_section_with_nftables_snippets|firewall4 config include section with nftables snippets]]
+  * **Whirlpool Forum:** [[https://forums.whirlpool.net.au/thread/3vx1k1r3?p=1606#r72899406|Explanation of TTL values, carrier restrictions, and ECM extra-hop logic]]
+  * **Whirlpool Forum:** [[https://forums.whirlpool.net.au/thread/3vx1k1r3?p=1839#r75039555|How ISPs check TTL and why ECM/RNDIS modems need TTL +1]]
+  * **Whirlpool Forum:** [[https://forums.whirlpool.net.au/thread/3vx1k1r3?p=1296#r70860035|Recommended TTL values (64 vs 65) for modem modes]]
+  * **GitHub:** [[https://github.com/ofmodemsandmen/SourceMaster/blob/main/configfiles/huasifei/files1698/usr/lib/custom/ttlx.sh#L28|ROOter custom TTL (IPv4) and Hop Limit (IPv6) rules]]
+
+==== FTP passthrough ====
+Enable NAT passthrough for FTP using [[packages:pkgdata:kmod-nf-nathelper]].
+
+<code bash>
+opkg update
+opkg install kmod-nf-nathelper
+service firewall restart
+</code>
+
+==== SIP passthrough ====
+Enable NAT passthrough for SIP, PPTP, GRE, etc. using [[packages:pkgdata:kmod-nf-nathelper-extra]].
+
+<code bash>
+opkg update
+opkg install kmod-nf-nathelper-extra
+service firewall restart
+</code>
+
+==== RTSP passthrough ====
+Enable NAT passthrough for RTSP using [[packages:pkgdata:kmod-ipt-nathelper-rtsp]].
+
+<code bash>
+opkg update
+opkg install kmod-ipt-nathelper-rtsp
+service firewall restart
+</code>

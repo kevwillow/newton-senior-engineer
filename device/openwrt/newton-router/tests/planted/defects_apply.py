@@ -1,0 +1,33 @@
+"""Planted defects for apply (design 6.2, 5.4, 9.3). Used by tests/planted/runner.py with test_apply.py and test_approval.py."""
+B = "device/openwrt/newton-router/tests"
+T = [f"{B}/test_apply.py", f"{B}/test_approval.py", f"{B}/test_apply_more.py"]
+MUTANTS = [
+    ('A01', 'M22: apply skips the base recompute compare', '[ "$base" = "$base_sealed" ] || fail stale-base 3', ':', T),
+    ('A02', 'M23a: apply skips the diff compare', '[ "$diff" = "$diff_sealed" ] || fail plan-changed 3 diff', ':', T),
+    ('A03', 'M23b: apply skips the probes compare', '[ "$psha" = "$psha_sealed" ] || fail plan-changed 3 probes', ':', T),
+    ('A04', 'M35a: stage age check skipped', '[ $(( UP_NOW - stage_up )) -le "$age_limit" ] || fail stale-stage 3', ':', T),
+    ('A05', 'M35b: boot id check skipped', '[ "$BOOT_ID_OUT" = "$boot_sealed" ] || fail stale-stage 3', ':', T),
+    ('A06', 'M38a: retried apply (applied present) refused with exit 3', '[ ! -e "$txn/applied" ] || fail already-applied 1', '[ ! -e "$txn/applied" ] || fail already-applied 3', T),
+    ('A07', 'M38b: retried apply (applying present) refused with exit 3', '[ ! -e "$txn/applying" ] || fail already-applied 1', '[ ! -e "$txn/applying" ] || fail already-applied 3', T),
+    ('A08', 'M25: guard arm refusal ignored', 'if [ "$rc" -ne 0 ] || [ "$first" != "$out" ]; then\n\t\tfail guard 3 "$first"\n\tfi\n', '', T),
+    ('A09', 'M33: token compared on an 8 character prefix', '[ "$TOKEN_OUT" = "$token" ] || fail bad-approval 3', '[ "${TOKEN_OUT%"${TOKEN_OUT#????????}"}" = "${token%"${token#????????}"}" ] || fail bad-approval 3', T),
+    ('A10', 'approval skipped when required', 'check_approval "$sid" "$token" "$nbf" "$exp" "$codes" "$DIGEST_OUT"', ':', T),
+    ('A11', 'required ignores the sealed leash codes', 'grep -q \'^leash \' "$txn/leash" 2>/dev/null', 'false', T),
+    ('A12', 'M47: the guard arm line reaches stdout', 'deadline=$3\n', 'deadline=$3\n\tprintf \'%s\\n\' "$first"\n', T),
+    ('A13', 'apply-failed: the guard restore is skipped', 'gout=$("$GUARD" restore apply-failed </dev/null 2>/dev/null)', 'gout=skipped', T),
+    ('A14', 'no crash point after the applying write', 'printf \'%s\\n\' "$UP_NOW $BOOT_ID_OUT" > "$txn/applying"\n\tcrash_point\n', 'printf \'%s\\n\' "$UP_NOW $BOOT_ID_OUT" > "$txn/applying"\n', T),
+    ('A15', 'post is not written', 'printf \'%s\\n\' "$post" > "$txn/post"\n\tcrash_point\n', '', T),
+    ('A16', 'helper-format .applied holds the wrong time (no T)', 'printf \'up %s\\n\' "$((UP_NOW + t))" > "$LOCK/$sid.applied"', 'printf \'up %s\\n\' "$UP_NOW" > "$LOCK/$sid.applied"', T),
+    ('A17', 'applied rpcd deadline off by 30', 'printf \'%s\\n\' "$((UP_NOW + t)) $deadline $BOOT_ID_OUT" > "$txn/applied"', 'printf \'%s\\n\' "$((UP_NOW + t + 30)) $deadline $BOOT_ID_OUT" > "$txn/applied"', T),
+    ('A18', 'session-gone not refused', '[ ! -e "$txn/applied" ] || fail already-applied 1\n\tsession_live "$sid" || fail session-gone 3', '[ ! -e "$txn/applied" ] || fail already-applied 1\n\t:', T),
+    ('A19', 'no-health-snapshot not refused', '[ -d "$LOCK/$sid.health" ] || fail no-health-snapshot 3', ':', T),
+    ('A20', 'guard state not checked before arming', 'case "$G_LINE" in\n\t\tidle|restored\\ *) ;;\n\t\t*) fail guard 3 "$G_LINE" ;;\n\tesac\n', '', T),
+    ('A21', 'T equality with the sealed T not checked', '[ "$t" = "$t_sealed" ] || fail plan-changed 3 t', ':', T),
+    ('A22', 'not-sealed not refused', '[ -e "$txn/sealed" ] || fail not-sealed 3', ':', T),
+    ('A23', 'stage age limit off by one (59)', 'age_limit=$(( 2700 - t - 60 ))', 'age_limit=$(( 2700 - t - 59 ))', T),
+    ('A24', 'M41: guard window T+1 (arm argument and the check)', '"$GUARD" arm "$sid" "$((t + 30))"', '"$GUARD" arm "$sid" "$((t + 1))"', T),
+    ('A25', 'an exit 0 of uci apply is not needed: apply failure ignored', 'if ! "$UBUS" call uci apply "{\\"rollback\\":true,\\"timeout\\":$t,\\"ubus_rpc_session\\":\\"$sid\\"}" >/dev/null 2>&1; then', 'if false; then', T),
+    ('A26', 'stale-stage digits check removed', 'case "$stage_up" in\n\t\t\'\'|*[!0-9]*) fail stale-stage 3 ;;\n\tesac\n', '', T),
+    ('A27', 'the applied txn file records the boot id wrongly', 'printf \'%s\\n\' "$((UP_NOW + t)) $deadline $BOOT_ID_OUT" > "$txn/applied"', 'printf \'%s\\n\' "$((UP_NOW + t)) $deadline x" > "$txn/applied"', T),
+    ('A28', 'profile-prod code dropped when the profile changed to prod', 'if [ "$profile" = prod ]; then\n\t\t\tcase ",$codes," in\n\t\t\t\t*",profile-prod,"*) ;;\n\t\t\t\t*) codes=${codes:+$codes,}profile-prod ;;\n\t\t\tesac\n\t\tfi\n', '', T),
+]

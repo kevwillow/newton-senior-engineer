@@ -1,0 +1,27 @@
+name = "ow-fw-12-invalid-log-limit-rolls-back"
+description = "setting the wan zone log limit to an invalid rate makes fw4 check fail. Newton must not confirm the change; after rollback the wan zone is present in the live ruleset and the invalid log_limit is absent from UCI."
+target = "lab-r1"
+reset = ["lab-r1"]
+setup = ["portfwd_on"]
+expect = "rolled_back"
+timeout = 60
+regression = "default"
+approval = true
+batch = '''
+set firewall.{fw_wan_zone}.log='1'
+set firewall.{fw_wan_zone}.log_limit='bogus/second'
+'''
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+nft list ruleset | grep -q 'chain input_wan' && echo 'wan zone present in live ruleset'
+'''
+expect_stdout = '^wan zone present in live ruleset$'
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+[ -z "$(uci -q get firewall.{fw_wan_zone}.log_limit)" ] && echo 'wan log_limit unset'
+'''
+expect_stdout = '^wan log_limit unset$'

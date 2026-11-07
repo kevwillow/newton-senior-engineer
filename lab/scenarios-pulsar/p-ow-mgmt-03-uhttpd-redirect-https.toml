@@ -1,0 +1,31 @@
+# PORT of ow-mgmt-03. Changed: lab-r1 -> pulsar; 192.168.150.1 -> 192.168.1.1; the curl effect runs on the agent host (device local).
+name = "p-ow-mgmt-03-uhttpd-redirect-https"
+description = "OW-MGMT-03 on pulsar: uhttpd redirect_https='1'; a plain http GET from the agent host gets a 30x to https."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+approval = true
+probes = [["proc-args", "uhttpd", "-q"]]
+batch = '''
+set uhttpd.main.redirect_https='1'
+'''
+
+[[effect]]
+device = "local"
+cmd = '''
+curl -s -o /dev/null -D - --max-time 8 http://192.168.1.1/ | tr -d '\r' | awk 'NR==1{s=$2} tolower($1)=="location:"{l=$2} END{print s, l}'
+'''
+expect_stdout = '^30[1-8] https://192\.168\.1\.1/$'
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+tr '\0' '\n' < /proc/$(pidof uhttpd | cut -d' ' -f1)/cmdline | grep -x -- -q
+'''
+
+[[post]]
+device = "pulsar"
+cmd = "uci -q get uhttpd.main.redirect_https"
+expect_stdout = '^1$'

@@ -1,0 +1,13 @@
+# synthetic
+Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP
+       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area
+       N1 - OSPF NSSA external type 1, N2 - OSPF NSSA external type 2
+       E1 - OSPF external type 1, E2 - OSPF external type 2
+
+Gateway of last resort is 198.51.100.1 to network 0.0.0.0
+
+S*    0.0.0.0/0 [1/0] via 198.51.100.1
+C        192.0.2.0/24 is directly connected, Loopback0
+C        198.51.100.0/24 is directly connected, GigabitEthernet1
+C        203.0.113.0/32 is directly connected, Loopback1
+O        198.51.100.0/24 [110/20] via 198.51.100.1, GigabitEthernet1

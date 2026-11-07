@@ -1,0 +1,20 @@
+# PORT of 08-partial-batch. Changed: device -> pulsar; reset = [] -> ["pulsar"].
+name = "p-08-partial-batch"
+description = "Valid line then a failing line; plan must reject the whole batch and leave nothing staged. (port of 08-partial-batch)"
+target = "pulsar"
+reset = ["pulsar"]
+expect = "rejected"
+reject_match = 'uci batch rejected the changes \(exit 0\), nothing staged: uci: (Invalid argument|Entry not found)'
+timeout = 60
+batch = """set system.@system[0].description='newton-neg-test'
+set dhcp.@host[99].name='bad'"""
+
+[[post]]
+device = "pulsar"
+cmd = "echo deltas=$(ls /var/run/rpcd 2>/dev/null | grep -c '^uci-') lock=$([ -e /tmp/owrt-safe-apply.lock ] && echo 1 || echo 0)"
+expect_stdout = "^deltas=0 lock=0$"
+
+[[post]]
+device = "pulsar"
+cmd = "uci -q get system.@system[0].description; echo rc=$?"
+expect_stdout = "rc=1"

@@ -1,0 +1,81 @@
+#!/bin/sh
+# Forced command for a Newton scan vantage. The original command is data:
+# parse it with parameter expansion, then execute one of four fixed argv lists.
+set -eu
+
+refuse() {
+	printf '%s\n' 'newton-scan: refused' >&2
+	exit 2
+}
+
+valid_octet() {
+	case $1 in
+		0|[1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;;
+		*) return 1 ;;
+	esac
+	[ "$1" -le 255 ]
+}
+
+command=${SSH_ORIGINAL_COMMAND-}
+case $command in
+	''|*[!A-Za-z0-9./\ -]*|' '*|*' '|*'  '*) refuse ;;
+esac
+
+verb=${command%% *}
+rest=${command#* }
+[ "$rest" != "$command" ] || refuse
+profile=${rest%% *}
+next=${rest#* }
+[ "$next" != "$rest" ] || refuse
+rest=$next
+kind=${rest%% *}
+target=${rest#* }
+[ "$target" != "$rest" ] || refuse
+case $target in *' '*) refuse ;; esac
+
+[ "$verb" = scan ] || refuse
+case $profile in quick|full-tcp) ;; *) refuse ;; esac
+case $kind in inside|outside) ;; *) refuse ;; esac
+
+# full-tcp is host-scoped on the vantage; the host only ever sends
+# a single address (no /prefix), so refuse any /target on full-tcp.
+case $target in
+	*/*)
+		[ "$profile" = full-tcp ] && refuse
+		ip=${target%/*}
+		prefix=${target##*/}
+		case $ip in */*) refuse ;; esac
+		case $prefix in 24|25|26|27|28|29|30|31|32) ;; *) refuse ;; esac
+		;;
+	*)
+		ip=$target
+		;;
+esac
+
+octet1=${ip%%.*}
+rest=${ip#*.}
+[ "$rest" != "$ip" ] || refuse
+octet2=${rest%%.*}
+next=${rest#*.}
+[ "$next" != "$rest" ] || refuse
+rest=$next
+octet3=${rest%%.*}
+octet4=${rest#*.}
+[ "$octet4" != "$rest" ] || refuse
+case $octet4 in *.*) refuse ;; esac
+valid_octet "$octet1" || refuse
+valid_octet "$octet2" || refuse
+valid_octet "$octet3" || refuse
+valid_octet "$octet4" || refuse
+
+if [ "$profile" = quick ]; then
+	if [ "$kind" = outside ]; then
+		exec timeout 300 nmap -sT -Pn -T3 --max-rate 50 --host-timeout 60s \
+			--max-retries 1 --top-ports 100 -oG - "$target"
+	fi
+	exec timeout 300 nmap -sT -T3 --max-rate 50 --host-timeout 60s \
+		--max-retries 1 --top-ports 100 -oG - "$target"
+fi
+
+exec timeout 300 nmap -sT -Pn -T3 --min-rate 300 --max-rate 300 --host-timeout 270s \
+	--max-retries 0 -p 1-65535 -oG - "$target"

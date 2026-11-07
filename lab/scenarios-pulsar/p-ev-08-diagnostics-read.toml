@@ -1,0 +1,94 @@
+# PORT of ev-08. Changed: lab-r1 -> pulsar; key lane goes direct to 192.168.1.1 (pulsar known_hosts + restricted key, no proxy); nslookup name pulsar.lan -> 192.168.1.1; ping/traceroute target 10.100.0.1 (lab-isp) unchanged since Pulsar's WAN is ISP-A; the iwinfo post was corrected twice. P7 measured the truth: /usr/bin/iwinfo EXISTS on Pulsar (a 6 KB ucode script, with rpcd-mod-iwinfo and the ubus object), and `read iwinfo` exits 0 with no output because no wireless interface exists at all in the baseline (both default_radio sections are disabled '1'). So r1's tool-missing case (rc 127) was never true and r2's rc=0-with-any-lines was too loose: the post now requires rc 0 and an output that does not name a test SSID.
+name = "p-ev-08-diagnostics-read"
+description = "EV-08 (audit, no batch): read-only audit of newton-router's `read` subcommand over the restricted key lane. The router-side binary /usr/libexec/newton/newton-router accepts a fixed table of `read VERB ARGS` forms (uci, ubus, ip, ifstatus, fw4, nft, cat, iwinfo, netstat, df, free, uptime, uname, wifi, logread, apk, ping, traceroute, nslookup); each verb accepts a closed argument shape (e.g. `ping -c 1..5 HOST`, `traceroute HOST`, `ifstatus IFACE`, `iwinfo [IFACE [info|...]]`). Six posts drive the same key lane as mgmt_ssh_newton to call ping (1 packet to lab-isp at 10.100.0.1, must see 0% loss), traceroute (10.100.0.1, must see the traceroute header), nslookup (pulsar.lan via 127.0.0.1, the router's own dnsmasq must answer 192.168.1.1), ifstatus wan (must be up with an ipv4 address), logread -l 5 (at most 5 lines), and iwinfo (measured 2026-10-22: /usr/bin/iwinfo is present on Pulsar, a 6 KB ucode script, and `read iwinfo` exits 0 with no output because the baseline has no wireless interface at all - both default_radio sections are disabled '1'. The post therefore requires rc 0 and refuses an output that names a test SSID, which is the check that matters: a Wi-Fi scenario must not have left one behind. The old r1 form of this post, which wanted rc 127 and `error tool-missing iwinfo`, was factually wrong and is gone). The seventh post calls a verb outside the table (`read ls`) and asserts the router refuses it (rc 2, the `error bad-arg` line on stderr). Regression is the explicit list (no portfwd): mgmt_ssh_newton proves the key lane works, the rest prove the baseline."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "none"
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen"]
+
+[[post]]
+device = "local"
+cmd = '''
+o=$(timeout 40 ssh -i {pulsar_runner_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 '/usr/libexec/newton/newton-router read ping -c 1 10.100.0.1' 2>&1)
+rc=$?
+if [ "$rc" = "0" ] && printf '%s' "$o" | grep -q '1 packets transmitted, 1 packets received, 0% packet loss'; then
+  echo "ping 10.100.0.1: 0% loss"; exit 0
+fi
+echo "ping 10.100.0.1: rc=$rc no loss"; exit 1
+'''
+expect_stdout = '^ping 10\.100\.0\.1: 0% loss$'
+
+[[post]]
+device = "local"
+timeout = 60
+cmd = '''
+o=$(timeout 40 ssh -i {pulsar_runner_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 '/usr/libexec/newton/newton-router read traceroute 10.100.0.1' 2>&1)
+rc=$?
+if [ "$rc" = "0" ] && printf '%s' "$o" | head -1 | grep -q '^traceroute to 10\.100\.0\.1'; then
+  echo "traceroute 10.100.0.1: header ok"; exit 0
+fi
+echo "traceroute 10.100.0.1: rc=$rc no header"; exit 1
+'''
+expect_stdout = '^traceroute 10\.100\.0\.1: header ok$'
+
+[[post]]
+device = "local"
+cmd = '''
+o=$(timeout 40 ssh -i {pulsar_runner_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 '/usr/libexec/newton/newton-router read nslookup pulsar.lan 127.0.0.1' 2>&1)
+rc=$?
+if [ "$rc" = "0" ] && printf '%s' "$o" | grep -q 'pulsar\.lan' && printf '%s' "$o" | grep -q '192\.168\.1\.1'; then
+  echo "nslookup pulsar.lan 127.0.0.1: own address 192.168.1.1"; exit 0
+fi
+echo "nslookup: rc=$rc missing answer"; exit 1
+'''
+expect_stdout = '^nslookup pulsar\.lan 127\.0\.0\.1: own address 192\.168\.1\.1$'
+
+[[post]]
+device = "local"
+cmd = '''
+o=$(timeout 40 ssh -i {pulsar_runner_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 '/usr/libexec/newton/newton-router read ifstatus wan' 2>&1)
+rc=$?
+if [ "$rc" = "0" ] && printf '%s' "$o" | grep -q '"up":\s*true' && printf '%s' "$o" | grep -q '"address":'; then
+  echo "ifstatus wan: up with ipv4 address"; exit 0
+fi
+echo "ifstatus wan: rc=$rc not up"; exit 1
+'''
+expect_stdout = '^ifstatus wan: up with ipv4 address$'
+
+[[post]]
+device = "local"
+cmd = '''
+o=$(timeout 40 ssh -i {pulsar_runner_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 '/usr/libexec/newton/newton-router read logread -l 5' 2>&1)
+rc=$?
+if [ -z "$o" ]; then lines=0; else lines=$(printf '%s' "$o" | wc -l); fi
+if [ "$rc" = "0" ] && [ "$lines" -le 5 ]; then
+  echo "logread -l 5: $lines lines"; exit 0
+fi
+echo "logread: rc=$rc lines=$lines"; exit 1
+'''
+expect_stdout = '^logread -l 5: [0-5] lines$'
+
+[[post]]
+device = "local"
+expect_rc = 0
+cmd = '''
+o=$(timeout 40 ssh -i {pulsar_runner_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 '/usr/libexec/newton/newton-router read iwinfo' 2>&1)
+rc=$?
+if [ "$rc" != 0 ]; then echo "iwinfo: rc=$rc $(printf '%s' "$o" | head -1 | cut -c1-80)"; exit 1; fi
+if printf '%s' "$o" | grep -q newton-test; then
+  echo "iwinfo: the output names a test SSID, so a Wi-Fi interface is up"; exit 1
+fi
+lines=0; [ -n "$o" ] && lines=$(printf '%s\n' "$o" | grep -c .)
+echo "iwinfo: rc=0, $lines lines, no test SSID (iwinfo exists; the baseline has no wireless interface)"
+'''
+expect_stdout = '^iwinfo: rc=0, [0-9]+ lines, no test SSID'
+
+[[post]]
+device = "local"
+cmd = '''
+out=$(timeout 40 ssh -i {pulsar_runner_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 '/usr/libexec/newton/newton-router read ls' 2>&1); rc=$?
+echo "$out" | head -1
+exit $rc
+'''
+expect_rc = 2
+expect_stdout = '^error bad-arg 1$'

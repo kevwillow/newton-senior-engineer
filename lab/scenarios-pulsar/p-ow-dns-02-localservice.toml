@@ -1,0 +1,79 @@
+# PORT of ow-dns-02-localservice. Changed: lab-r1 -> pulsar; the lab-client non-local-source address 198.51.100.7 is replaced by the agent host's own second address 192.0.2.10 (an address the agent host owns on its house-network NIC, outside every subnet pulsar has); lab-r1's runtime route 198.51.100.7/32 via lab-client becomes pulsar's runtime route {agent_nonlocal_ip}/32 via {agent_ip} dev br-lan (replies reach the agent host); 192.168.150.1 -> 192.168.1.1 in the client post; the lab-isp post probes only {p_wan_ip} (pulsar has one WAN, not two).
+name = "p-ow-dns-02-localservice"
+description = "OW-DNS-02: dhcp.@dnsmasq[0].localservice='1' and nonwildcard='1', both already the stock values, so the plan stages nothing and the expected outcome is noop. The posts prove that the state is really in place and does what it is for. State: the options, and the conf that the running dnsmasq was started with (local-service and bind-dynamic, and no interface= or listen-address= line, which would make local-service moot). Behaviour, from the client LAN side: a DNS query from a source address outside every subnet attached to pulsar gets no answer and dnsmasq logs 'ignoring query from non-local network' once, while a query from the client's own address is answered. The setup steps check that the agent host owns {agent_nonlocal_ip} (its own second address, outside every subnet pulsar has), and have pulsar install a runtime route {agent_nonlocal_ip}/32 via {agent_ip} dev br-lan so the return path works; the steps are undone by the cleanup (which removes only the route -- no step adds or removes an address on the agent host, and the agent host has had 192.0.2.10 since the lab was set up). Behaviour, from the WAN side: lab-isp asks {p_wan_ip} (pulsar has one WAN) and is refused. That refusal is the firewall's doing (wan zone input REJECT), not this option: dnsmasq binds the WAN addresses too, and with the firewall opened it answers a host on the WAN subnet, because local-service counts every attached subnet as local (hand run, results file). Each post was shown to fail against the opposite state (results file)."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "noop"
+setup = ["portfwd_on", "dns_nonlocal_src_check", "dns_nonlocal_route_on"]
+cleanup = ["dns_nonlocal_route_off"]
+regression = "default"
+batch = '''
+set dhcp.@dnsmasq[0].localservice='1'
+set dhcp.@dnsmasq[0].nonwildcard='1'
+'''
+
+[[post]]
+device = "pulsar"
+cmd = "echo \"localservice=$(uci -q get dhcp.@dnsmasq[0].localservice) nonwildcard=$(uci -q get dhcp.@dnsmasq[0].nonwildcard)\""
+expect_stdout = '^localservice=1 nonwildcard=1$'
+
+[[post]]
+device = "pulsar"
+cmd = '''
+c=; for p in $(pidof dnsmasq); do c=$(tr '\0' ' ' < /proc/$p/cmdline | sed -n 's/.*dnsmasq -C \([^ ]*\).*/\1/p'); [ -n "$c" ] && break; done
+[ -f "$c" ] || { echo "no conf found for the running dnsmasq"; exit 1; }
+ls=$(grep -c '^local-service$' $c); bd=$(grep -c '^bind-dynamic$' $c); ia=$(grep -c -e '^interface=' -e '^listen-address=' $c)
+echo "running dnsmasq conf: local-service=$ls bind-dynamic=$bd interface-or-listen-address-lines=$ia"; [ "$ls" = 1 ] && [ "$bd" = 1 ] && [ "$ia" = 0 ]
+'''
+expect_stdout = '^running dnsmasq conf: local-service=1 bind-dynamic=1 interface-or-listen-address-lines=0$'
+
+[[post]]
+device = "lab-isp"
+timeout = 90
+cmd = '''
+o=$(nslookup openwrt.org {p_wan_ip} 2>&1)
+case "$o" in
+  *"Name:"*) s=answered;;
+  *"Connection refused"*) s=refused;;
+  *) s="no answer";;
+esac
+echo "{p_wan_ip}: $s"
+'''
+expect_stdout = '^10\.100\.0\.\d+: refused$'
+
+[[post]]
+device = "local"
+timeout = 60
+cmd = '''
+if ping -c 1 -W 2 -I {agent_nonlocal_ip} 192.168.1.1 >/dev/null 2>&1; then echo "return path (ping from {agent_nonlocal_ip}): ok"; else echo "return path (ping from {agent_nonlocal_ip}): failed"; fi
+python3 - <<'PYEOF'
+import random, socket, struct
+
+def ask(src):
+    q = b''.join(bytes([len(p)]) + p.encode() for p in 'openwrt.org'.split('.')) + b'\0' + struct.pack('!HH', 1, 1)
+    msg = struct.pack('!HHHHHH', random.getrandbits(16), 0x0100, 1, 0, 0, 0) + q
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind((src, 0))
+    s.settimeout(3)
+    for attempt in range(2):
+        s.sendto(msg, ('192.168.1.1', 53))
+        try:
+            d, a = s.recvfrom(4096)
+        except socket.timeout:
+            continue
+        return 'answered'
+    return 'no answer'
+
+print('query from the client LAN address: %s' % ask('0.0.0.0'))
+print('query from {agent_nonlocal_ip}: %s' % ask('{agent_nonlocal_ip}'))
+PYEOF
+'''
+expect_stdout = '^return path \(ping from 192\.168\.10\.10\): ok\nquery from the client LAN address: answered\nquery from 192\.168\.10\.10: no answer$'
+
+[[post]]
+device = "pulsar"
+cmd = '''
+n=$(logread | grep -c 'ignoring query from non-local network {agent_nonlocal_ip}')
+echo "dnsmasq log lines 'ignoring query from non-local network {agent_nonlocal_ip}': $n"; [ "$n" -ge 1 ]
+'''
+expect_stdout = "^dnsmasq log lines 'ignoring query from non-local network 192\\.168\\.10\\.10': [1-9][0-9]*$"

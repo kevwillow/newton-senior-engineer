@@ -1,0 +1,91 @@
+platform = "fortios"
+
+[[getter]]
+id = "version"
+command = "get system status"
+why = "Shows the FortiOS version, build and signature database versions."
+expect = ["Version: Forti*"]
+enabled = false
+verified = "unverified"
+source = "https://docs.fortinet.com/product/fortigate"
+error_markers = ["Command fail\\. Return code", "Unknown action", "command parse error", "(?m)^Permission denied"]
+
+[[getter]]
+id = "interfaces"
+command = "get system interface physical"
+why = "Lists the physical interfaces with status, speed and address."
+expect = ["== [ * ]"]
+enabled = false
+verified = "unverified"
+source = "https://docs.fortinet.com/product/fortigate"
+error_markers = ["Command fail\\. Return code", "Unknown action", "command parse error", "(?m)^Permission denied"]
+
+[[getter]]
+id = "routes"
+command = "get router info routing-table all"
+why = "Shows the active IPv4 routing table of the current VDOM."
+expect = ["Codes: * - *"]
+enabled = false
+verified = "unverified"
+source = "https://docs.fortinet.com/product/fortigate"
+error_markers = ["Command fail\\. Return code", "Unknown action", "command parse error", "(?m)^Permission denied"]
+
+[[getter]]
+id = "firewall_policy"
+command = "show firewall policy"
+why = "Shows the configured firewall policies as FortiOS config text."
+expect = ["config firewall policy"]
+enabled = false
+verified = "unverified"
+source = "https://docs.fortinet.com/product/fortigate"
+error_markers = ["Command fail\\. Return code", "Unknown action", "command parse error", "(?m)^Permission denied"]
+
+[[getter]]
+id = "nat"
+command = "show firewall vip"
+why = "Shows the virtual IPs (destination NAT) as FortiOS config text."
+expect = ["config firewall vip"]
+enabled = false
+verified = "unverified"
+source = "https://docs.fortinet.com/product/fortigate"
+error_markers = ["Command fail\\. Return code", "Unknown action", "command parse error", "(?m)^Permission denied"]
+
+[[getter]]
+id = "ntp"
+command = "show system ntp"
+why = "Shows the NTP client settings as FortiOS config text."
+expect = ["config system ntp"]
+enabled = false
+verified = "unverified"
+source = "https://docs.fortinet.com/product/fortigate"
+error_markers = ["Command fail\\. Return code", "Unknown action", "command parse error", "(?m)^Permission denied"]
+
+[[getter]]
+id = "logging"
+command = "show log syslogd setting"
+why = "Shows the syslog server settings as FortiOS config text."
+expect = ["config log syslogd setting"]
+enabled = false
+verified = "unverified"
+source = "https://docs.fortinet.com/product/fortigate"
+error_markers = ["Command fail\\. Return code", "Unknown action", "command parse error", "(?m)^Permission denied"]
+
+[[getter]]
+id = "vpn"
+command = "show vpn ipsec phase1-interface"
+why = "Shows the IPsec phase 1 interface definitions as FortiOS config text."
+expect = ["config vpn ipsec phase1-interface"]
+enabled = false
+verified = "unverified"
+source = "https://docs.fortinet.com/product/fortigate"
+error_markers = ["Command fail\\. Return code", "Unknown action", "command parse error", "(?m)^Permission denied"]
+
+[[getter]]
+id = "running_config"
+command = "show full-configuration"
+why = "Shows the full configuration with defaults (disabled until a lab proves it)."
+expect = ["#config-version=*"]
+enabled = false
+verified = "unverified"
+source = "https://docs.fortinet.com/product/fortigate"
+error_markers = ["Command fail\\. Return code", "Unknown action", "command parse error", "(?m)^Permission denied"]

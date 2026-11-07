@@ -1,0 +1,17 @@
+# PORT of 01-static-lease. Changed: target/reset/post device lab-r1 -> pulsar; lease IP 192.168.150.77 -> 192.168.1.77 (pulsar's LAN).
+name = "p-01-static-lease"
+description = "Add a static DHCP lease on pulsar and verify UCI shows it. (port of 01-static-lease)"
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+timeout = 60
+probes = [["conf-has", "dnsmasq", "substr", "present", "02:00:00:00:00:77"]]
+batch = """set dhcp.labtest=host
+set dhcp.labtest.name='labtest'
+set dhcp.labtest.mac='02:00:00:00:00:77'
+set dhcp.labtest.ip='192.168.1.77'"""
+
+[[post]]
+device = "pulsar"
+cmd = "uci get dhcp.labtest.ip"
+expect_stdout = "^192\\.168\\.1\\.77$"

@@ -1,0 +1,16 @@
+name = "n-04-commit-smuggling"
+description = "No-install: a batch that smuggles a commit verb is refused at plan time. (no-install port of p-04)"
+target = "pulsar"
+access = "no-install"
+expect = "none"
+
+[[post]]
+device = "local"
+timeout = 300
+cmd = '{ni_env} {ni_py} -I {ni_shape} n04'
+expect_stdout = '== END fails=0'
+
+[[post]]
+device = "local"
+cmd = '''{pr} '[ "$(uci -q get system.@system[0].description)" != x ] && echo unchanged''''
+expect_stdout = '^unchanged$'

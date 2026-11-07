@@ -1,0 +1,45 @@
+# The router program 1.2.0's `read wifiscan radioN` verb on a router with no
+# radio at all: lab-r1 is an x86 VM with no wireless hardware, so the radio
+# cannot be resolved and the verb refuses it (rc 2, `error no-radio`).  The
+# two other posts prove the closed shape of the verb's argument: a radio
+# name with a shell metacharacter in it and a phy name are both refused with
+# `error bad-arg`.
+name = "ev-wifiscan-no-radio"
+description = "EV-WIFISCAN (audit, no batch): the Wi-Fi scan verb of newton-router on a router that has no radio. lab-r1 is a Proxmox VM with no wireless hardware, so the first post reads `wifiscan radio0` over the restricted key lane and expects the refusal: rc 2 and `error no-radio` on stderr (the router resolves the radio name to a phy with ubus and there is no phy to resolve it to). The second and the third post prove the closed grammar of the argument: `wifiscan radio0;id` (a radio name with a shell metacharacter in it) and `wifiscan phy0` (a phy name instead of a radio name) are refused with rc 2: the metacharacter by the outer character check (`error bad-character`, measured live 2026-10-24) and the phy name by the verb (`error bad-arg 2`). Nothing of a neighbour is printed or stored: the posts print the router's own refusal lines and nothing else, no SSID and no BSSID."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "none"
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "client_internet", "client_dns", "client_dhcp"]
+
+[[post]]
+device = "local"
+timeout = 60
+cmd = '''
+out=$(timeout 40 ssh -i ~/.ssh/newton-lab-runner -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" root@10.109.0.11 '/usr/libexec/newton/newton-router read wifiscan radio0' 2>&1); rc=$?
+printf '%s\n' "$out" | head -1
+exit $rc
+'''
+expect_rc = 2
+expect_stdout = '^error no-radio$'
+
+[[post]]
+device = "local"
+timeout = 60
+cmd = '''
+out=$(timeout 40 ssh -i ~/.ssh/newton-lab-runner -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" root@10.109.0.11 '/usr/libexec/newton/newton-router read wifiscan radio0;id' 2>&1); rc=$?
+printf '%s\n' "$out" | head -1
+exit $rc
+'''
+expect_rc = 2
+expect_stdout = '^error bad-character$'
+
+[[post]]
+device = "local"
+timeout = 60
+cmd = '''
+out=$(timeout 40 ssh -i ~/.ssh/newton-lab-runner -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" root@10.109.0.11 '/usr/libexec/newton/newton-router read wifiscan phy0' 2>&1); rc=$?
+printf '%s\n' "$out" | head -1
+exit $rc
+'''
+expect_rc = 2
+expect_stdout = '^error bad-arg 2$'

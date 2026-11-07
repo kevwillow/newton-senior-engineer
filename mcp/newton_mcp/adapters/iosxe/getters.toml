@@ -1,0 +1,41 @@
+platform = "iosxe"
+
+[[getter]]
+id = "version"
+command = "show version"
+why = "Shows the IOS XE software version, image, uptime and hardware summary."
+expect = ["Cisco IOS XE Software, Version"]
+enabled = true
+verified = "unverified"
+source = "https://www.cisco.com/c/en/us/support/ios-nx-os-software/ios-xe-17/series.html"
+error_markers = ["% Incomplete command", "% Ambiguous command", "Command authorization failed", "% Unrecognized command"]
+
+[[getter]]
+id = "interfaces"
+command = "show ip interface brief"
+why = "Lists every interface with its IP address and up/down state in one table."
+expect = ["Interface IP-Address OK?"]
+enabled = true
+verified = "unverified"
+source = "https://www.cisco.com/c/en/us/support/ios-nx-os-software/ios-xe-17/series.html"
+error_markers = ["% Incomplete command", "% Ambiguous command", "Command authorization failed", "% Unrecognized command"]
+
+[[getter]]
+id = "routes"
+command = "show ip route"
+why = "Shows the IPv4 routing table with the gateway of last resort."
+expect = ["Codes: * - *", "Gateway of last resort"]
+enabled = true
+verified = "unverified"
+source = "https://www.cisco.com/c/en/us/support/ios-nx-os-software/ios-xe-17/series.html"
+error_markers = ["% Incomplete command", "% Ambiguous command", "Command authorization failed", "% Unrecognized command"]
+
+[[getter]]
+id = "running_config"
+command = "show running-config"
+why = "Shows the full running configuration (disabled until a lab proves it)."
+expect = ["Building configuration* || Current configuration*"]
+enabled = false
+verified = "unverified"
+source = "https://www.cisco.com/c/en/us/support/ios-nx-os-software/ios-xe-17/series.html"
+error_markers = ["% Incomplete command", "% Ambiguous command", "Command authorization failed", "% Unrecognized command"]

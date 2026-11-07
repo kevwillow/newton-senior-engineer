@@ -1,0 +1,5 @@
+# recorded lab:vyos:2026.10.01-0035-rolling:2026-10-18
+Rule    Source            Destination    Proto    Out-Int    Translation
+------  ----------------  -------------  -------  ---------  -------------
+100     198.51.100.0/24  0.0.0.0/0      any      eth0       masquerade
+        sport any         dport any

@@ -1,0 +1,2 @@
+# synthetic
+Invalid command: show foo [at sub-mode]

@@ -1,0 +1,80 @@
+name = "ow-zone-02-iot"
+description = "OW-ZONE-02, which also covers OW-FW-08 (default-deny outbound for a zone, the ZONE-02 form: zone forward REJECT plus only the forwarding and rules that are wanted; there is no scenario file of its own for FW-08). An IoT network: interface iot on device eth3.40 (VLAN 40 on the client LAN port, 192.168.40.1/24), dhcp section iot, zone iot (input REJECT, output ACCEPT, forward REJECT) with forwarding lab to iot only (nothing from iot to wan or to lab) and the two rules udp 67 and tcp/udp 53 to the router. The IoT device is a network namespace iot on lab-client (eth0.40, 192.168.40.50/24, default via 192.168.40.1) running a tcp greeter on 8080 (setup steps; the cleanup kills it and removes the namespace and the link even after a failure). Effects: lab-client's own namespace connects to 192.168.40.50:8080 through the lab to iot forwarding and reads the greeting (the reply path works); inside iot a DHCPDISCOVER gets an OFFER from 192.168.40.1 and the router's dnsmasq resolves openwrt.org, so the zone works. Post, paired with those: from the iot namespace tcp 192.168.40.1:53 connects (control), and new connections to the router (ssh, http, https on its iot, mgmt and client LAN addresses), to the client LAN host's ssh port (lab-client's own DHCP address, read at run time) and to the internet (1.1.1.1 tcp 443 and 53) are all refused by the firewall, and a query to 1.1.1.1 gets no answer from the resolver. The router-side check makes Newton confirm only if the default deny is rendered: the iot interface is up, forward_lab accepts to iot, input_iot ends in a reject, and forward_iot rejects and has no accept_to_ jump at all (a zone with input or forward ACCEPT, or any forwarding out of iot, would be rolled back). The default regression runs from lab-client's own namespace and must still pass."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on", "zone_probe_on", "iot_ns_on"]
+cleanup = ["iot_ns_off", "zone_probe_off"]
+regression = "default"
+probes = [["iface-field", "iot", "up", "true"], ["nft-rule", "inet", "fw4", "forward_lab", "present", "jump accept_to_iot"], ["nft-rule", "inet", "fw4", "input_iot", "present", "jump reject_from_iot"], ["nft-rule", "inet", "fw4", "forward_iot", "present", "jump reject_to_iot"], ["nft-rule", "inet", "fw4", "forward_iot", "absent", "jump accept_to_"]]
+batch = '''
+set network.iot=interface
+set network.iot.proto='static'
+set network.iot.device='eth3.40'
+set network.iot.ipaddr='192.168.40.1'
+set network.iot.netmask='255.255.255.0'
+set dhcp.iot=dhcp
+set dhcp.iot.interface='iot'
+set dhcp.iot.start='100'
+set dhcp.iot.limit='100'
+set dhcp.iot.leasetime='1h'
+set firewall.iot_zone=zone
+set firewall.iot_zone.name='iot'
+set firewall.iot_zone.network='iot'
+set firewall.iot_zone.input='REJECT'
+set firewall.iot_zone.output='ACCEPT'
+set firewall.iot_zone.forward='REJECT'
+set firewall.lab_iot=forwarding
+set firewall.lab_iot.src='lab'
+set firewall.lab_iot.dest='iot'
+set firewall.iot_dhcp=rule
+set firewall.iot_dhcp.name='Allow-IoT-DHCP'
+set firewall.iot_dhcp.src='iot'
+set firewall.iot_dhcp.proto='udp'
+set firewall.iot_dhcp.dest_port='67'
+set firewall.iot_dhcp.target='ACCEPT'
+set firewall.iot_dns=rule
+set firewall.iot_dns.name='Allow-IoT-DNS'
+set firewall.iot_dns.src='iot'
+set firewall.iot_dns.proto='tcp udp'
+set firewall.iot_dns.dest_port='53'
+set firewall.iot_dns.target='ACCEPT'
+'''
+
+[[effect]]
+device = "lab-client"
+timeout = 30
+cmd = '''
+timeout 8 bash -c 'exec 3<>/dev/tcp/192.168.40.50/8080; read -t 4 l <&3; echo "iot host says: $l"'
+'''
+expect_stdout = '^iot host says: iot-host-ok$'
+
+[[effect]]
+device = "lab-client"
+timeout = 40
+cmd = "sudo ip netns exec iot python3 /tmp/newton-dhcp-offer.py eth0.40 192.168.40.1"
+expect_stdout = '^DHCPOFFER from 192\.168\.40\.1 yiaddr=192\.168\.40\.(1\d\d) '
+
+[[effect]]
+device = "lab-client"
+timeout = 30
+cmd = "sudo ip netns exec iot host -W 4 openwrt.org 192.168.40.1"
+expect_stdout = 'Address: 192\.168\.40\.1#53(.|\n)*openwrt\.org has address'
+
+[[post]]
+device = "lab-client"
+timeout = 120
+cmd = '''
+sudo ip netns exec iot bash -c '
+tcp() { LC_ALL=C timeout 6 bash -c "exec 3<>/dev/tcp/$1/$2" 2>&1; }
+tcp 192.168.40.1 53 >/dev/null || { echo "control failed: no tcp connect from the iot netns to the allowed 192.168.40.1:53"; exit 1; }
+bad=""
+for t in 192.168.40.1:22 192.168.40.1:80 192.168.40.1:443 10.109.0.11:22 10.109.0.11:443 192.168.150.1:22 192.168.150.1:443 {client_lab_ip}:22 1.1.1.1:443 1.1.1.1:53; do
+  tcp ${t%:*} ${t#*:} | grep -q "Connection refused" || bad="$bad $t"
+done
+[ -z "$bad" ] || { echo "not refused:$bad"; exit 1; }
+if host -W 3 -t A openwrt.org 1.1.1.1 | grep -q "has address"; then echo "a query to 1.1.1.1 was answered"; exit 1; fi
+echo "iot netns: 192.168.40.1:53 open; refused: router 22/80/443 on 192.168.40.1, 22/443 on 10.109.0.11 and 192.168.150.1, client LAN host {client_lab_ip}:22, internet 1.1.1.1:443 and :53; no answer from a resolver at 1.1.1.1"
+'
+'''
+expect_stdout = '^iot netns: 192\.168\.40\.1:53 open; refused: '

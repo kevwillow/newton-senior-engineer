@@ -1,0 +1,101 @@
+#!/usr/bin/python3
+"""Fake OpenWrt jsonfilter (design 9.2 group 9): -e EXPR with -i FILE or stdin.
+
+Path steps .name, ["name"], [*], [N]; one line per match (true/false for
+booleans); exit 0 when at least one match, 1 when none, and 2 for bad input.
+The control/jsonfilter.{out,err,rc} files override parsing. Logs the call.
+"""
+import json
+import os
+import re
+import sys
+
+
+def emit(value):
+    if isinstance(value, bool):
+        print("true" if value else "false")
+    else:
+        print(value)
+
+
+def controlled(root):
+    paths = {
+        suffix: os.path.join(root, "control", "jsonfilter." + suffix)
+        for suffix in ("out", "err", "rc")
+    }
+    if not any(os.path.exists(path) for path in paths.values()):
+        return False
+    if os.path.exists(paths["out"]):
+        with open(paths["out"]) as f:
+            sys.stdout.write(f.read())
+    if os.path.exists(paths["err"]):
+        with open(paths["err"]) as f:
+            sys.stderr.write(f.read())
+    rc = 0
+    if os.path.exists(paths["rc"]):
+        try:
+            with open(paths["rc"]) as f:
+                rc = int(f.read().strip())
+        except ValueError:
+            rc = 0
+    sys.exit(rc)
+
+
+def main():
+    args = sys.argv[1:]
+    expr = None
+    infile = None
+    i = 0
+    while i < len(args):
+        if args[i] == "-e" and i + 1 < len(args):
+            expr = args[i + 1]
+            i += 2
+        elif args[i] == "-i" and i + 1 < len(args):
+            infile = args[i + 1]
+            i += 2
+        else:
+            i += 1
+    root = os.environ.get("NEWTON_ROUTER_ROOT", "")
+    if root:
+        with open(os.path.join(root, "control", "calls.log"), "a") as f:
+            f.write("jsonfilter " + " ".join(args) + "\n")
+        controlled(root)
+    try:
+        data = json.load(open(infile) if infile else sys.stdin)
+    except Exception:
+        sys.exit(2)
+    body = expr[1:] if expr and expr.startswith("@") else (expr or "")
+    steps = []
+    for m in re.finditer(r'\.([A-Za-z0-9_]+)|\["([^"]*)"\]|\[\*\]|\[(\d+)\]', body):
+        if m.group(1) is not None:
+            steps.append(("key", m.group(1)))
+        elif m.group(2) is not None:
+            steps.append(("key", m.group(2)))
+        elif m.group(0) == "[*]":
+            steps.append(("all", None))
+        else:
+            steps.append(("idx", int(m.group(3))))
+    values = [data]
+    for kind, arg in steps:
+        nxt = []
+        for v in values:
+            if kind == "key":
+                if isinstance(v, dict) and arg in v:
+                    nxt.append(v[arg])
+            elif kind == "idx":
+                if isinstance(v, list) and -len(v) <= arg < len(v):
+                    nxt.append(v[arg])
+            else:
+                if isinstance(v, list):
+                    nxt.extend(v)
+                elif isinstance(v, dict):
+                    nxt.extend(v.values())
+        values = nxt
+    n = 0
+    for v in values:
+        emit(v)
+        n += 1
+    sys.exit(0 if n else 1)
+
+
+main()

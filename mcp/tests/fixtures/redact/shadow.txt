@@ -1,0 +1,5 @@
+root:$6$fakesalt$abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG.:18000:0:99999:7:::
+nobody:*:0:0:99999:7:::
+daemon:*:0:0:99999:7:::
+fake-user:$5$anothersalt$zyxwvutsrqponmlkjihgfedcba9876543210ABCD.:18000:0:99999:7:::
+bin:$2y$twicemoresalt$MnbVCxYzAsDfGhJkLpQwErTyUiOpIsDfGhJkLzXcVb.:18000:0:99999:7:::

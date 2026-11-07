@@ -1,0 +1,15 @@
+# PORT of 07-wan-down-isolation. Changed: device -> pulsar; pulsar has wan + wan6 (both on device `wan`) and, since P6, wan2 (on `wan.101`), so all three are disabled.
+name = "p-07-wan-down-isolation"
+description = "Disable every uplink (wan, wan6, wan2); the default internet probe must fail and trigger rollback. (port of 07-wan-down-isolation)"
+target = "pulsar"
+reset = ["pulsar"]
+expect = "rolled_back"
+timeout = 120
+batch = """set network.wan.disabled='1'
+set network.wan6.disabled='1'
+set network.wan2.disabled='1'"""
+
+[[post]]
+device = "pulsar"
+cmd = "uci -q get network.wan.disabled; echo rc=$?"
+expect_stdout = "rc=1"

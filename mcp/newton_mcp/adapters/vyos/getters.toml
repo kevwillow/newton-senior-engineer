@@ -1,0 +1,88 @@
+platform = "vyos"
+
+[[getter]]
+id = "version"
+command = "show version"
+why = "Shows the VyOS version, build type and build details."
+expect = ["Version: VyOS"]
+enabled = true
+verified = "lab:vyos:2026.10.01-0035-rolling:2026-10-18"
+os_range = "2026.10.01-0035-rolling"
+source = "https://docs.vyos.io/en/latest/"
+error_markers = ["Invalid command", "Incomplete command", "Ambiguous command", "command not found"]
+
+[[getter]]
+id = "interfaces"
+command = "show interfaces"
+why = "Lists interfaces with address, link state and description in one table."
+expect = ["Interface IP Address"]
+enabled = true
+verified = "lab:vyos:2026.10.01-0035-rolling:2026-10-18"
+os_range = "2026.10.01-0035-rolling"
+source = "https://docs.vyos.io/en/latest/"
+error_markers = ["Invalid command", "Incomplete command", "Ambiguous command", "command not found"]
+
+[[getter]]
+id = "routes"
+command = "show ip route"
+why = "Shows the IPv4 routing table with the route-code legend."
+expect = ["Codes: * - *"]
+enabled = true
+verified = "lab:vyos:2026.10.01-0035-rolling:2026-10-18"
+os_range = "2026.10.01-0035-rolling"
+source = "https://docs.vyos.io/en/latest/"
+error_markers = ["Invalid command", "Incomplete command", "Ambiguous command", "command not found"]
+
+[[getter]]
+id = "firewall_policy"
+command = "show firewall"
+why = "Shows the firewall rulesets with rule actions and packet counters."
+expect = ["Ruleset* Information"]
+enabled = true
+verified = "lab:vyos:2026.10.01-0035-rolling:2026-10-18"
+os_range = "2026.10.01-0035-rolling"
+source = "https://docs.vyos.io/en/latest/"
+error_markers = ["Invalid command", "Incomplete command", "Ambiguous command", "command not found"]
+
+[[getter]]
+id = "nat"
+command = "show nat source rules"
+why = "Shows the source NAT rules and their translations."
+expect = ["Rule Source Destination || NAT is not configured"]
+enabled = true
+verified = "lab:vyos:2026.10.01-0035-rolling:2026-10-18"
+os_range = "2026.10.01-0035-rolling"
+source = "https://docs.vyos.io/en/latest/"
+error_markers = ["Invalid command", "Incomplete command", "Ambiguous command", "command not found"]
+
+[[getter]]
+id = "ntp"
+command = "show ntp"
+why = "Shows the time sources chrony is using and their offsets."
+expect = ["Name/IP Address NP NR Span"]
+enabled = true
+verified = "lab:vyos:2026.10.01-0035-rolling:2026-10-18"
+os_range = "2026.10.01-0035-rolling"
+source = "https://docs.vyos.io/en/latest/"
+error_markers = ["Invalid command", "Incomplete command", "Ambiguous command", "command not found"]
+
+[[getter]]
+id = "vpn"
+command = "show vpn ipsec sa"
+why = "Shows IPsec security associations, or says IPsec is not initialized."
+expect = ["Peer-id || IPsec not initialized"]
+enabled = true
+verified = "lab:vyos:2026.10.01-0035-rolling:2026-10-18"
+os_range = "2026.10.01-0035-rolling"
+source = "https://docs.vyos.io/en/latest/"
+error_markers = ["Invalid command", "Incomplete command", "Ambiguous command", "command not found"]
+
+[[getter]]
+id = "running_config"
+command = "show configuration commands"
+why = "Shows the configuration as set commands (disabled until a lab proves it)."
+expect = ["set *"]
+enabled = false
+verified = "unverified"
+source = "https://docs.vyos.io/en/latest/"
+error_markers = ["Invalid command", "Incomplete command", "Ambiguous command", "command not found"]

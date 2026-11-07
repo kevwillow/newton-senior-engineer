@@ -1,0 +1,24 @@
+# PORT of ow-ref-04-leash-no-token. Changed: lab-r1 -> pulsar, r1_wan_ip -> p_wan_ip, regression list -> pulsar's default list (pulsar checks come from the local config); no other change.
+name = "p-ow-ref-04-leash-no-token"
+description = "Negative scenario for design 5.1: a leash-flagged batch (set dropbear.@dropbear[0].IdleTimeout='600' fires mgmt-config, design 5.2 code table) is refused at apply when no approval token is supplied. The router returns 'error needs-approval mgmt-config' (device/openwrt/newton-router/tests/test_approval.py test_apply_prod_none_needs_approval and test_apply_lab_leash_change_requires_token), and scripts/owrt-change.sh's apply branch wraps that as 'apply refused, nothing applied: error needs-approval mgmt-config'. The session is destroyed (single use); uci changes stays empty, the live dropbear config is unchanged. approval = 'none' tells the runner to omit OWRT_APPROVAL_TOKEN (no token at all, the literal 'none'). The refuse_match regex pins both the wrapper and the router's reason so a future change to either fails the test."
+target = "pulsar"
+reset = ["pulsar"]
+timeout = 60
+setup = ["portfwd_on"]
+regression = "default"
+expect = "refused"
+refuse_match = "apply refused, nothing applied: .* needs-approval mgmt-config"
+batch = '''
+set dropbear.@dropbear[0].IdleTimeout='600'
+'''
+approval = "none"
+
+[[post]]
+device = "pulsar"
+cmd = "uci changes | wc -l"
+expect_stdout = "^0$"
+
+[[post]]
+device = "pulsar"
+cmd = "uci -q get dropbear.@dropbear[0].IdleTimeout || true"
+expect_stdout = "^$"

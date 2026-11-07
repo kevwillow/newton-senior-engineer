@@ -1,0 +1,7 @@
+name = "ow-00-baseline"
+description = "Baseline: with the WAN port forward on, every default regression check passes before and after; nothing is changed."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "none"
+setup = ["portfwd_on"]
+regression = "default"

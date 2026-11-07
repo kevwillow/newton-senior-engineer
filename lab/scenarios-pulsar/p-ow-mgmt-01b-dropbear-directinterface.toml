@@ -1,0 +1,30 @@
+# PORT of ow-mgmt-01b. Changed: lab-r1 -> pulsar; the lab-client effects (refused on the client LAN, SO_BINDTODEVICE per-NIC probe, needs root) are dropped:
+# pulsar has one LAN. Kept: the dropbear command line has -l br-lan; the agent host still reaches ssh on 192.168.1.1.
+name = "p-ow-mgmt-01b-dropbear-directinterface"
+description = "OW-MGMT-01 variant on pulsar: dropbear DirectInterface='lan' (-l br-lan)."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+approval = true
+probes = [["proc-args", "dropbear", "-l br-lan"]]
+batch = '''
+set dropbear.@dropbear[0].DirectInterface='lan'
+'''
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+tr '\0' ' ' < /proc/$(cat /var/run/dropbear.main.pid)/cmdline | grep -- ' -l br-lan '
+'''
+
+[[post]]
+device = "pulsar"
+cmd = "uci -q get dropbear.@dropbear[0].DirectInterface"
+expect_stdout = '^lan$'
+
+[[post]]
+device = "local"
+cmd = "timeout 6 bash -c 'exec 3<>/dev/tcp/192.168.1.1/22' && echo agent-ssh-open"
+expect_stdout = '^agent-ssh-open$'

@@ -1,0 +1,47 @@
+# PORT of ow-log-01-remote-syslog. Changed: lab-r1 -> pulsar; {client_lab_ip} -> {agent_ip}; 192.168.150.1 -> 192.168.1.1; lab-r1 -> pulsar (hostname); log_port 514 -> 5514 (unprivileged; the agent host has no root); the SSDP-style setup uses the local [steps.syslog_listen_on] / [steps.syslog_listen_off] pair, both no sudo and port 5514; pulsar's three marker loggers reach the receiver over the pinned admin path (no ProxyCommand, LAN-direct ssh to 192.168.1.1).
+name = "p-ow-log-01-remote-syslog"
+description = "OW-LOG-01: remote syslog to a LAN client on an unprivileged port. system.@system[0].log_ip = {agent_ip}, log_port='5514', log_proto='udp', log_remote='1' (the default, staged explicitly). The log init script starts a second logread instance: `logread -f -h pulsar -r {agent_ip} 5514 -p <pidfile> -u` (logd itself keeps running, same pid). The probe and effect read that instance's arguments from /proc, so Newton rolls the change back if the forwarder was not started. Effects: (1) the forwarder process exists with `-r {agent_ip} 5514` and `-u` (the `-h` hostname is whatever Pulsar's hostname is -- a check format that matches `-h \\S+` generically); (2) a local probe starts a real UDP receiver (port 5514, the receiver script is the setup-installed /tmp/newton-syslog-listen.py taking `<port> <seconds>`), has pulsar log three `logger` lines tagged newton-log01 with a random marker over the pinned admin path, and requires all three to arrive from 192.168.1.1 with the router's hostname and the tag; before the change nothing is sent. Port 5514 is unprivileged so the agent host can run the receiver without root. Post: the four uci options. The default regression must still pass."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on", "syslog_listen_on"]
+cleanup = ["syslog_listen_off"]
+regression = "default"
+probes = [["proc-args", "logread", "-r {agent_ip} 5514", "-u"]]
+batch = '''
+set system.@system[0].log_ip='{agent_ip}'
+set system.@system[0].log_port='5514'
+set system.@system[0].log_proto='udp'
+set system.@system[0].log_remote='1'
+'''
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+for p in $(pidof logread); do
+  c=" $(tr '\0' ' ' < /proc/$p/cmdline)"
+  case "$c" in *" -r {agent_ip} 5514 "*) case "$c" in *" -u "*) echo "logread forwarder:$c"; exit 0;; esac;; esac
+done
+echo "no logread forwarder with -r {agent_ip} 5514 -u"; exit 1'''
+expect_stdout = '^logread forwarder: /sbin/logread -f -h \S+ -r 192\.168\.1\.242 5514 -p /var/run/logread\.\d+\.pid -u $'
+
+[[effect]]
+device = "local"
+timeout = 90
+cmd = '''
+M="newton-log01-$RANDOM$RANDOM"
+rm -f /tmp/newton-syslog.out
+setsid python3 /tmp/newton-syslog-listen.py 5514 12 > /tmp/newton-syslog.out 2>&1 < /dev/null &
+sleep 2
+for i in 1 2 3; do timeout 50 ssh -i {pulsar_admin_key} -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR -o ConnectTimeout=8 root@192.168.1.1 "logger -t newton-log01 $M-$i"; sleep 1; done
+sleep 8
+n=$(grep -c "newton-log01: $M-" /tmp/newton-syslog.out)
+echo "$n of 3 marker lines reached the receiver on the agent host; first: $(grep "newton-log01: $M-" /tmp/newton-syslog.out | head -1 | cut -c1-110)"
+[ "$n" = 3 ]
+'''
+expect_stdout = '^3 of 3 marker lines reached the receiver on the agent host; first: 192\.168\.1\.1 <\d+>\w+ +\d+ [0-9:]+ \S+ newton-log01: newton-log01-\d+-1$'
+
+[[post]]
+device = "pulsar"
+cmd = "echo \"log_ip_is_client=$([ \"$(uci -q get system.@system[0].log_ip)\" = \"{agent_ip}\" ] && echo yes || echo no) log_port=$(uci -q get system.@system[0].log_port) log_proto=$(uci -q get system.@system[0].log_proto) log_remote=$(uci -q get system.@system[0].log_remote)\""
+expect_stdout = '^log_ip_is_client=yes log_port=5514 log_proto=udp log_remote=1$'

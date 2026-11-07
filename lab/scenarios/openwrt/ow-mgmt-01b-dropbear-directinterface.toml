@@ -1,0 +1,60 @@
+name = "ow-mgmt-01b-dropbear-directinterface"
+description = "OW-MGMT-01 variant: dropbear.@dropbear[0].DirectInterface='lan' (per the init script it fails closed: dropbear gets -l br-lan and does not start while lan is down; that part is not exercised here). Effects: the live dropbear command line has '-l br-lan', and lab-client is refused on 192.168.150.1:22 while dnsmasq on the same address still answers. The listener check of ow-mgmt-01 does not apply: a device-bound socket still shows as 0.0.0.0:22 and :::22 in netstat (measured), so the proof is the command line plus two refusals from the client side. The third effect is what separates it from Interface (ow-mgmt-01): a connection that leaves lab-client through eth0 (client LAN, SO_BINDTODEVICE) to the router's mgmt address 10.109.0.11:22 is refused, while the same connection through eth1 (mgmt) is accepted. With Interface='lan' the eth0 connection is still accepted (measured by hand, results file)."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+approval = true
+probes = [["proc-args", "dropbear", "-l br-lan"]]
+batch = '''
+set dropbear.@dropbear[0].DirectInterface='lan'
+'''
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+tr '\0' ' ' < /proc/$(cat /var/run/dropbear.main.pid)/cmdline | grep -- ' -l br-lan '
+'''
+
+[[effect]]
+device = "lab-client"
+cmd = '''
+tcp() { LC_ALL=C timeout 6 bash -c "exec 3<>/dev/tcp/$1/$2" 2>&1; }
+tcp 192.168.150.1 53 >/dev/null || { echo "router not reachable on 192.168.150.1:53"; exit 1; }
+tcp 192.168.150.1 22 | grep -q 'Connection refused' && echo "192.168.150.1:22 refused, 192.168.150.1:53 open"
+'''
+expect_stdout = '^192\.168\.150\.1:22 refused'
+
+[[effect]]
+device = "lab-client"
+cmd = '''
+sudo timeout 30 python3 - <<'EOF'
+import socket
+
+def probe(dev, host):
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, dev.encode())
+    s.settimeout(5)
+    try:
+        s.connect((host, 22))
+        return "open"
+    except ConnectionRefusedError:
+        return "refused"
+    except Exception as e:
+        return "error:" + type(e).__name__
+    finally:
+        s.close()
+
+a = probe("eth0", "10.109.0.11")
+b = probe("eth1", "10.109.0.11")
+print("10.109.0.11:22 via eth0 (client LAN) = %s, via eth1 (mgmt) = %s" % (a, b))
+raise SystemExit(0 if (a, b) == ("refused", "open") else 1)
+EOF
+'''
+expect_stdout = '^10\.109\.0\.11:22 via eth0 \(client LAN\) = refused, via eth1 \(mgmt\) = open$'
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get dropbear.@dropbear[0].DirectInterface"
+expect_stdout = '^lan$'

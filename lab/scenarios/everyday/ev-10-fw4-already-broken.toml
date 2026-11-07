@@ -1,0 +1,24 @@
+name = "ev-10-fw4-already-broken"
+description = "EV-10 (the runner covers the apply-time gate and the read lane; the MCP plan() precheck text 'fix the firewall first' is unit-tested only): when the firewall config already fails `fw4 check` before the change, the runner plans successfully (Newton's MCP `plan()` would have refused at the precheck with 'fix the firewall first', but the lab runner reaches the router only through scripts/owrt-change.sh and does not call MCP plan(), so that precheck text is unreachable from the runner and lives in the unit-test suite). The setup step fw4_break_on adds a bad firewall rule (src=wan, proto=nosuchproto, target=ACCEPT) by direct uci + commit, which makes `fw4 check` exit 1 with a line like 'Could not resolve protocol name'; the firewall is NOT reloaded, so the live nftables ruleset is unchanged and the regression (no portfwd: mgmt_ssh, mgmt_ssh_pw, mgmt_ssh_newton, mgmt_luci, client_internet, client_dns, client_dhcp) still passes both before and after. The plan succeeds (Newton stages a harmless one-line batch that sets system.@system[0].description='ev10'), but scripts/owrt-change.sh's apply branch dies in the apply-time health gate (the router's `health-snapshot` helper, called between plan and apply), which owrt-change.sh wraps as 'cannot record service and firewall health before the apply; nothing applied, session <SID> is still staged; helper said: the firewall config already fails fw4 check before the change: Could not resolve protocol name; fix it first'. The runner classifies the apply as refused (classify_apply matches the wrapper, not the helper's reason), the refuse_match pins the helper's reason so a future change to either fails the test, and the runner calls owrt-change.sh abort to clean the staged session up. The single post on `local` runs `/usr/libexec/newton/newton-router read fw4 check` over the runner's restricted key lane (the same one mgmt_ssh_newton proves works) and requires rc 1 (fw4 check died) and an output line containing 'Could not resolve protocol name' or 'Error:' (fw4's own diagnostic). This is the first live proof that the read lane forwards fw4's exit 1 to the runner, so a future change to read_fw4 that swallows the rc fails this post. Cleanup fw4_break_off deletes every rule section whose name is ev10_broken (tolerant of none) and commits; the next lab-r1 reset (and the regression's next run) starts from a clean baseline."
+target = "lab-r1"
+reset = ["lab-r1"]
+timeout = 60
+setup = ["fw4_break_on"]
+cleanup = ["fw4_break_off"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "client_internet", "client_dns", "client_dhcp"]
+expect = "refused"
+refuse_match = "already fails fw4 check"
+batch = "set system.@system[0].description='ev10'"
+
+[[post]]
+device = "local"
+timeout = 60
+cmd = '''
+o=$(timeout 40 ssh -i ~/.ssh/newton-lab-runner -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" root@10.109.0.11 '/usr/libexec/newton/newton-router read fw4 check' 2>&1); rc=$?
+if [ "$rc" = "1" ] && printf '%s' "$o" | grep -qE 'Could not resolve protocol name|Error:'; then
+  echo "read fw4 check: rc=1 with fw4 diagnostic"; exit 0
+fi
+echo "read fw4 check: rc=$rc (expected 1), no fw4 diagnostic in output"
+exit 1
+'''
+expect_stdout = '^read fw4 check: rc=1 with fw4 diagnostic$'

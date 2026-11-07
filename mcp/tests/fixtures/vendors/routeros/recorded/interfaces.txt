@@ -1,0 +1,8 @@
+# recorded lab:chr:7.24.5:2026-10-18
+Flags: R - RUNNING
+Columns: NAME, TYPE, ACTUAL-MTU, MAC-ADDRESS
+#   NAME    TYPE      ACTUAL-MTU  MAC-ADDRESS      
+0 R ether1  ether           1500  00:00:5E:00:53:01
+1 R ether2  ether           1500  00:00:5E:00:53:02
+2 R lo      loopback       65536  00:00:00:00:00:00
+

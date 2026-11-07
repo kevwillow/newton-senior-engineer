@@ -1,0 +1,26 @@
+subcommand	role	owner	argmin	argmax	classes	stdin	stdout	exit	sample
+hello	read	no	1	1	nonce	none	hello .+ api=1 version=1\.3\.0 mode=(prod|test) .+	0,1	hello 0123456789abcdef
+hostname	read	no	0	0	-	none	.*	0,1	hostname
+backup	change	no	0	0	-	none	.*	0,1	backup
+stage	change	no	0	0	-	uci-batch	[0-9a-f]{32}	0,1,2,3	stage
+seal	change	yes	2	2	sid t	probe-lines	.*	0,1,2,3	seal 0123456789abcdef0123456789abcdef 60
+diff	change	yes	1	1	sid	none	.*	0,1	diff 0123456789abcdef0123456789abcdef
+named	change	yes	1	1	sid	none	.*	0,1	named 0123456789abcdef0123456789abcdef
+check-staged	change	yes	1	1	sid	none	fw4 (pass|skipped-untouched|not-checked [a-z0-9-]{1,40}|(fail|running-fails) .{1,300})	0,2,3	check-staged 0123456789abcdef0123456789abcdef
+confighash	read	no	0	0	-	none	[0-9a-f]{32} .+	0,1	confighash
+fw-loaded	read	no	0	0	-	none	[01]	0	fw-loaded
+logd-pid	read	no	0	0	-	none	.*	0	logd-pid
+health-snapshot	change	yes	1	1	sid	none	-	0,1	health-snapshot 0123456789abcdef0123456789abcdef
+apply	change	yes	5	5	sid t token epoch epoch	none	applied [0-9a-f]{32} t=[1-9][0-9]{1,2} guard=[0-9]+	0,1,3	apply 0123456789abcdef0123456789abcdef 60 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0 0
+fwrestart	change	special	1	1	fw	none	.*	0,1,2,3,98,99	fwrestart 1
+dnsmasq-repair	change	special	0	0	-	none	(restarted rc=[0-9]+ dhcp=[01]|not-running)	0	dnsmasq-repair
+verify	change	yes	2	2	sid dhcp	none	-	0,1	verify 0123456789abcdef0123456789abcdef 0
+confirm	change	yes	1	1	sid	none	confirmed [0-9a-f]{32}( rpcd-timer-lost)?	0,1,3	confirm 0123456789abcdef0123456789abcdef
+status	read	no	1	1	sid	none	.*	0	status 0123456789abcdef0123456789abcdef
+abort	change	special	1	1	sid	none	aborted [0-9a-f]{32} .+	0,1	abort 0123456789abcdef0123456789abcdef
+health-check	change	special	1	2	sid hcmode	none	-	0,1	health-check 0123456789abcdef0123456789abcdef after-rollback
+dnsmasq-ensure	change	special	0	0	-	none	(running|started rc=[0-9]+)	0	dnsmasq-ensure
+dns-dhcp-check	read	no	1	1	dhcp	none	-	0,1	dns-dhcp-check 0
+probe	read	no	0	0	-	probe-line	probe .+ (ok|fail .+)	0,1,2,3	probe
+read	read	no	1	15	*	none	.*	0,1,2,124,125,127	read uci show
+approval-selftest	direct	no	1	1	nonce	none	approval-selftest [0-9a-f]{16,64} [0-9a-f]{64}	0,3	approval-selftest 0123456789abcdef

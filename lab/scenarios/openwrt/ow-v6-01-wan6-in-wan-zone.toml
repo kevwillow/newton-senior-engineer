@@ -1,0 +1,48 @@
+name = "ow-v6-01-wan6-in-wan-zone"
+description = "OW-V6-01 (not UCI, audit only): IPv6 gets the same WAN input policy as IPv4 because wan6 is in the wan zone and fw4 renders one inet chain per zone. No batch, so expect none. The default regression runs before and after only to show that the baseline is healthy while the audit runs. Posts: (1) config: the wan zone (found by name) lists wan6 among its networks and network.wan6 is the dhcpv6 uplink; (2) ruleset: the `input` chain hands the wan devices to input_wan with fw4's 'IPv4/IPv6' comment, input_wan holds IPv6-specific rules (icmpv6 or nfproto ipv6) next to the IPv4 ones in the same chain, and its final rule is a plain jump to reject_from_wan or drop_from_wan with no family match, so unsolicited v4 and v6 packets meet the same policy; (3) behaviour with the only v6 addresses the lab has, the link-local ones: lab-isp sends IPv6 SYNs to a closed port on lab-r1's WAN link-local address and the packet counter of reject_from_wan (plus drop_from_wan if it exists) rises by at least 1 while it did not move in the 3 s before (the counters are quiet at idle on lab-r1). It rises by 3 in the runs, because busybox nc retransmits its SYN: no tcp reset ever gets back to it from a link-local reject (not investigated), so the post does not depend on the retransmissions. Not shown, because the lab has no IPv6 upstream: a global-address scan from the upstream (the catalogue's nmap -6), and anything about forwarded inbound v6. Hand run: with the wan zone input set to ACCEPT the final jump becomes accept_from_wan, post 2 and 3 fail, and with wan6 removed from the zone's list post 1 fails (results file)."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "none"
+setup = ["portfwd_on"]
+regression = "default"
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+nets=$(uci -q get firewall.{fw_wan_zone}.network); inz=no
+for n in $nets; do [ "$n" = wan6 ] && inz=yes; done
+proto=$(uci -q get network.wan6.proto)
+echo "wan zone networks: $nets; wan6 in the zone: $inz; network.wan6 proto: $proto"
+[ $inz = yes ] && [ "$proto" = dhcpv6 ]'''
+expect_stdout = '^wan zone networks: .*\bwan6\b.*; wan6 in the zone: yes; network\.wan6 proto: dhcpv6$'
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+ch=$(nft list chain inet fw4 input_wan 2>/dev/null) || { echo "no chain input_wan in table inet fw4"; exit 1; }
+v6=$(echo "$ch" | grep -c -e 'icmpv6' -e 'nfproto ipv6')
+v4=$(echo "$ch" | grep -c -e 'nfproto ipv4' -e 'icmp type' -e 'igmp')
+last=$(echo "$ch" | awk '/^\t\t/ {l=$0} END {sub(/^[[:space:]]+/, "", l); print l}')
+hook=$(nft list chain inet fw4 input | grep 'jump input_wan' | sed 's/^[[:space:]]*//')
+echo "input_wan: ipv6-specific rules=$v6, ipv4-specific rules=$v4; final rule: $last; hook: $hook"
+case "$last" in "jump reject_from_wan"|"jump drop_from_wan") :;; *) exit 1;; esac
+[ "$v6" -ge 1 ] && case "$hook" in *"IPv4/IPv6"*) exit 0;; esac
+exit 1'''
+expect_stdout = '^input_wan: ipv6-specific rules=[1-9]\d*, ipv4-specific rules=\d+; final rule: jump (reject|drop)_from_wan; hook: iifname .* jump input_wan comment "!fw4: Handle wan IPv4/IPv6 input traffic"$'
+
+[[post]]
+device = "local"
+timeout = 90
+cmd = '''
+sshx() { h=$1; shift; timeout 30 ssh -i "$LAB_SSH_KEY" -o BatchMode=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" "$h" "$@"; }
+wd=$(sshx root@10.109.0.11 "ifstatus wan | jsonfilter -e '@.l3_device'")
+ll=$(sshx root@10.109.0.11 "ip -6 addr show dev $wd | awk '/inet6 fe80/ {print \$2}' | cut -d/ -f1")
+idev=$(sshx root@10.109.0.10 "uci -q get network.ispa.device")
+cnt2() { sshx root@10.109.0.11 'n=0; for c in reject_from_wan drop_from_wan; do v=$(nft list chain inet fw4 $c 2>/dev/null | grep -o "packets [0-9]*" | head -1 | cut -d" " -f2); n=$((n + ${v:-0})); done; echo $n'; }
+c0=$(cnt2); sleep 3; c1=$(cnt2)
+P=$(( 40000 + RANDOM % 20000 ))
+sshx root@10.109.0.10 "nc $ll%$idev $P </dev/null >/dev/null 2>&1 & p=\$!; sleep 3; kill \$p 2>/dev/null; true"
+c2=$(cnt2)
+echo "IPv6 SYNs from lab-isp ($idev) to closed port $P on $ll: reject/drop_from_wan packets before idle=$c0, after idle=$c1, after the SYNs=$c2"
+[ -n "$ll" ] && [ "$c1" = "$c0" ] && [ $((c2 - c1)) -ge 1 ]'''
+expect_stdout = '^IPv6 SYNs from lab-isp \(eth2\) to closed port \d+ on fe80::[0-9a-f:]+: reject/drop_from_wan packets before idle=\d+, after idle=\d+, after the SYNs=\d+$'

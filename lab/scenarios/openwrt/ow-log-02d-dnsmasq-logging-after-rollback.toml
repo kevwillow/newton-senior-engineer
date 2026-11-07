@@ -1,0 +1,43 @@
+name = "ow-log-02d-dnsmasq-logging-after-rollback"
+description = "OW-LOG-02, the rolled-back path of the logd side effect: the same batch as ow-log-02c (log_size='512'), but the check is `false`, so every verify round fails and Newton lets the change roll back. Measured with a sampler (old protocol): the apply makes the log init script restart logd 1.2 s after the commit, and the rpcd rollback, which re-applies the old system config, restarts logd AGAIN 1.2 s after the rollback; dnsmasq keeps its pid both times and so logs to the old /dev/log. Newton's rule: when logd's pid differs from the one it last accounted for, restart dnsmasq (only if it runs), then check DNS and DHCP; it applies the rule after the apply and again after the rollback window. The post asserts that dnsmasq logs after the rollback: a fresh DHCPDISCOVER from a random MAC (the dhcp probe, no REQUEST, no lease) must appear in lab-r1's log as 'DHCPDISCOVER(eth3) <that mac>'. On the earlier protocol this post fails with 0 lines (measured); with the post-rollback repair removed from the new code it fails too (planted fault, results notes). The effect (logd -S 512) must fail after the rollback, which shows the change is gone; the second post shows the config and logd back at 128."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "rolled_back"
+timeout = 60
+setup = ["portfwd_on", "dhcp_probe_on"]
+cleanup = ["dhcp_probe_off"]
+regression = "default"
+probes = [["fail"]]
+batch = '''
+set system.@system[0].log_size='512'
+'''
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+c=" $(tr '\0' ' ' < /proc/$(pidof logd | cut -d' ' -f1)/cmdline)"
+echo "logd command:$c"
+case "$c" in " /sbin/logd -S 512 "*) exit 0;; esac
+exit 1'''
+expect_stdout = '^logd command: /sbin/logd -S 512 $'
+
+[[post]]
+device = "local"
+timeout = 90
+cmd = '''
+sshx() { h=$1; shift; timeout 50 ssh -i "$LAB_SSH_KEY" -o BatchMode=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" "$h" "$@"; }
+out=$(sshx {client_lab_user}@10.109.0.50 'sudo python3 /tmp/newton-dhcp-probe.py eth0 192.168.150.1 none')
+mac=$(echo "$out" | sed -n 's/.* chaddr \([0-9a-f:]*\)$/\1/p')
+sleep 2
+n=$(sshx root@10.109.0.11 "logread | grep -c 'DHCPDISCOVER(eth3) $mac'")
+echo "probe: $out"
+echo "dnsmasq log lines for DHCPDISCOVER from $mac: $n"
+[ -n "$mac" ] && [ "$n" -ge 1 ]'''
+expect_stdout = 'dnsmasq log lines for DHCPDISCOVER from 02:[0-9a-f:]+: [1-9]'
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+c=" $(tr '\0' ' ' < /proc/$(pidof logd | cut -d' ' -f1)/cmdline)"
+echo "log_size=$(uci -q get system.@system[0].log_size) logd command:$c"'''
+expect_stdout = '^log_size=128 logd command: /sbin/logd -S 128 $'

@@ -1,0 +1,14 @@
+# PORT of 03-mgmt-firewall-drop. Changed: device -> pulsar; the literal @zone[0] becomes the lan zone found by name ({fw_lan_zone}, resolved on pulsar).
+name = "p-03-mgmt-firewall-drop"
+description = "Drop INPUT on pulsar's lan zone; expect automatic rollback. (port of 03-mgmt-firewall-drop)"
+target = "pulsar"
+reset = ["pulsar"]
+expect = "rolled_back"
+timeout = 90
+approval = true
+batch = "set firewall.{fw_lan_zone}.input='DROP'"
+
+[[post]]
+device = "pulsar"
+cmd = "uci get firewall.{fw_lan_zone}.input"
+expect_stdout = "^ACCEPT$"

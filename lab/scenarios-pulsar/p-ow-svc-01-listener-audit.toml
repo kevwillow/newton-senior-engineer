@@ -1,0 +1,36 @@
+# PORT of ow-svc-01-listener-audit. Changed: lab-r1 -> pulsar, regression -> pulsar's default list. The expected listener set is lab-r1's measured baseline; pulsar's baseline is checked as-is first.
+name = "p-ow-svc-01-listener-audit"
+description = "OW-SVC-01 (not UCI, audit only): the set of listening sockets equals the measured baseline of pulsar. `ss` is not on the image, so the post reads `netstat -tulpn` and reduces every listener to 'protocol port program address class' (protocol without the 6, address class wildcard for 0.0.0.0, :: and an empty address, loopback for 127.x and ::1, specific for everything else), sorted and de-duplicated, so that the addresses that change from boot to boot (the WAN leases, link-local addresses made from the MACs) do not matter. dnsmasq binds every address of every interface (bind-dynamic), which is why its tcp and udp 53 appear as loopback and specific, and udp 67 as a wildcard. The allowlist is the ten lines measured on a fresh baseline-pw: tcp 22 dropbear wildcard, tcp 80 and 443 uhttpd wildcard, tcp and udp 53 dnsmasq loopback and specific, udp 67 dnsmasq wildcard, udp 546 odhcp6c wildcard, udp 547 odhcpd wildcard. One documented exception: an unconnected udp socket of ntpd on an ephemeral port (inside the kernel's ip_local_port_range, 32768 to 60999 on pulsar, and never 123) is a client socket for a query in flight, not a listener, and is skipped (measured: `udp 60221 ntpd wildcard` showed up in two consecutive hand runs and was gone minutes later, while 90 one-second samples taken afterwards saw none). Everything else counts: any other program on a high port, ntpd on a low port, and udp 123 itself, which OW-NTP-01 opens on purpose with enable_server; the audit reports it, like it reports the bind controls of OW-MGMT-01 and 02. The post prints what is unexpected and what is missing and passes only when both are empty. The address class makes the audit sensitive to the bind controls too: after OW-MGMT-01 or 02 the listeners of dropbear and uhttpd are 'specific', not 'wildcard', after OW-NTP-01 there is a 'udp 123 ntpd wildcard' row, and this audit would flag them all; the allowlist of a profile has to be the baseline plus the controls it applies. No batch, so expect none; the default regression runs before and after as in ow-00-baseline. Hand runs (results file): a second uhttpd on tcp 8081 and one on 45000, a stopped uhttpd, installed samba4-server and snmpd-nossl (which start at install and open tcp 139 and 445, udp 137, 138 and 161), and OW-NTP-01 applied by hand (`udp 123 ntpd wildcard`) each make the post fail with the right line."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "none"
+setup = ["portfwd_on"]
+regression = "default"
+
+[[post]]
+device = "pulsar"
+cmd = '''
+exp='tcp 22 dropbear wildcard
+tcp 443 uhttpd wildcard
+tcp 53 dnsmasq loopback
+tcp 53 dnsmasq specific
+tcp 80 uhttpd wildcard
+udp 53 dnsmasq loopback
+udp 53 dnsmasq specific
+udp 546 odhcp6c wildcard
+udp 547 odhcpd wildcard
+udp 67 dnsmasq wildcard'
+set -- $(cat /proc/sys/net/ipv4/ip_local_port_range); lo=$1; [ -n "$lo" ] || lo=32768
+act=$(netstat -tulpn 2>/dev/null | awk -v lo="$lo" '
+NR > 2 {
+  proto = $1; sub(/6$/, "", proto)
+  n = split($4, a, ":"); port = a[n]; addr = substr($4, 1, length($4) - length(port) - 1)
+  split($NF, b, "/"); prog = b[2]; if (prog == "") prog = "-"
+  if (proto == "udp" && prog == "ntpd" && port + 0 != 123 && port + 0 >= lo + 0) next
+  if (addr == "0.0.0.0" || addr == "::" || addr == "") cls = "wildcard"; else if (addr ~ /^127\./ || addr == "::1") cls = "loopback"; else cls = "specific"
+  print proto, port, prog, cls
+}' | sort -u)
+extra=$(echo "$act" | grep -vxF "$exp" | tr '\n' ';'); missing=$(echo "$exp" | grep -vxF "$act" | tr '\n' ';')
+echo "listeners: $(echo "$act" | grep -c .), unexpected: ${extra:-none}, missing: ${missing:-none}"
+[ -z "$extra" ] && [ -z "$missing" ]'''
+expect_stdout = '^listeners: 10, unexpected: none, missing: none$'

@@ -1,0 +1,11 @@
+# synthetic
+Codes: K - kernel, C - connected, S - static, R - RIP, B - BGP
+       O - OSPF, IA - OSPF inter area
+       N1 - OSPF NSSA external type 1, N2 - OSPF NSSA external type 2
+       E1 - OSPF external type 1, E2 - OSPF external type 2
+
+S*      0.0.0.0/0 [10/0] via 198.51.100.1, port1
+C       192.0.2.0/24 is directly connected, port4
+C       198.51.100.0/24 is directly connected, port1
+C       203.0.113.0/24 is directly connected, mgmt
+O       198.51.100.0/24 [110/20] via 198.51.100.1, port1

@@ -1,0 +1,18 @@
+name = "02-mgmt-ip-lockout"
+description = "Move lab-r1 LAN IP to an unreachable address; expect automatic rollback."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "rolled_back"
+timeout = 60
+approval = true
+batch = "set network.lan.ipaddr='10.109.0.99'"
+
+[[post]]
+device = "lab-r1"
+cmd = "uci get network.lan.ipaddr"
+expect_stdout = "^10\\.109\\.0\\.11$"
+
+[[post]]
+device = "lab-r1"
+cmd = "uci changes | wc -l"
+expect_stdout = "^0$"

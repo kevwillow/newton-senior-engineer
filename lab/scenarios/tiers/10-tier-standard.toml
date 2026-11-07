@@ -1,0 +1,15 @@
+name = "10-tier-standard"
+description = "Live proof of the standard tier: roll lab-r1 back to its clean snapshot, apply every batch of profiles/openwrt/standard.uci in order through the same splitter newton_plan_tier uses, then reboot the router and re-run every batch's sealed probes plus the rollback-hash check. Standard fits one batch at the router cap and only needs the WAN firewall zone id; values come from lab.toml [vars] fw_wan_zone."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 180
+tier = "standard"
+tier_reboot = true
+tier_fail_probe = ["conf-has", "dnsmasq", "substr", "present", "newton-tier-rollback-marker-never-present"]
+tier_values = { fw_wan_zone = "{fw_wan_zone}" }
+
+[[post]]
+device = "lab-r1"
+cmd = "uci changes | wc -l"
+expect_stdout = "^0$"

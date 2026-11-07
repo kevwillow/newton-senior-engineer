@@ -1,0 +1,39 @@
+name = "ow-dns-07-block-dot"
+description = "OW-DNS-07: rule Block-DoT, src lab, dest wan, proto tcp, dest_port 853, target REJECT (DNS over TLS from the client LAN). breaks = [client_dot]: the check passes before (tcp 853 to 1.1.1.1 opens) and must fail after. Effects: forward_lab holds the one reject rule for tcp 853 (and none for udp 853: DNS over QUIC is not covered, which the catalogue does not claim either); lab-client's connect to 1.1.1.1:853 is refused at once (a REJECT, not a silent drop) while tcp 443 and plain DNS to 1.1.1.1 still work, so the rule is selective. Regression: the default list plus client_ext_dns."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_luci", "client_internet", "client_dns", "client_dhcp", "portfwd", "client_ext_dns"]
+breaks = ["client_dot"]
+probes = [["nft-rule", "inet", "fw4", "forward_lab", "present", "tcp dport 853", "jump reject_to_wan"]]
+batch = '''
+set firewall.block_dot=rule
+set firewall.block_dot.name='Block-DoT'
+set firewall.block_dot.src='lab'
+set firewall.block_dot.dest='wan'
+set firewall.block_dot.proto='tcp'
+set firewall.block_dot.dest_port='853'
+set firewall.block_dot.target='REJECT'
+'''
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+t=$(nft list chain inet fw4 forward_lab | grep -c 'tcp dport 853 .*jump reject_to_wan'); u=$(nft list chain inet fw4 forward_lab | grep -c 'udp dport 853')
+echo "forward_lab: tcp 853 reject rules=$t udp 853 rules=$u"; [ "$t" = 1 ] && [ "$u" = 0 ]
+'''
+expect_stdout = '^forward_lab: tcp 853 reject rules=1 udp 853 rules=0$'
+
+[[effect]]
+device = "lab-client"
+timeout = 45
+cmd = '''
+o=$(LC_ALL=C timeout 8 bash -c 'exec 3<>/dev/tcp/1.1.1.1/853' 2>&1); rc=$?
+case "$o" in *"Connection refused"*) a=refused;; *) a="not refused (rc $rc)";; esac
+if timeout 8 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null; then b=open; else b=closed; fi
+c=$(host -W 5 -t A openwrt.org 1.1.1.1 | tail -1)
+echo "tcp 853: $a; tcp 443: $b; dns to 1.1.1.1: $c"
+[ "$a" = refused ] && [ "$b" = open ] && case "$c" in *"has address "*) true;; *) false;; esac
+'''
+expect_stdout = '^tcp 853: refused; tcp 443: open; dns to 1\.1\.1\.1: openwrt\.org has address '

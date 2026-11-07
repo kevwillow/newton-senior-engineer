@@ -1,0 +1,3072 @@
+# Example lab config for the Pulsar scenarios in lab/scenarios-pulsar/ (see the README there).
+# Copy to a local file outside git (for example ~/.config/newton/pulsar/lab.toml), replace every
+# placeholder path and the baseline_sha256, then run:
+#   python3 lab/newton-lab-test.py --lab <your copy> --scenarios lab/scenarios-pulsar --lane key
+# It is a complete lab file because the runner reads one --lab file: [pve], [ssh] and lab-isp are the same as in
+# lab/lab.example.toml; [devices.pulsar] is the physical router; the vars, checks and steps below are everything the p-*
+# scenarios use. A test (lab/tests/test_pulsar_example.py) fails if a scenario names something missing here.
+# The Wi-Fi block at the end adds the Wi-Fi side: [devices.lab-wifi] (VM 9107, the Panda adapter passed through from
+# apollo), the secret [vars.wifi_psk], the [vars.p_wifi_bssid] the p-ow-wifi-* effects pin their monitor and client
+# to, the four wifi_* steps and the checks p_radios_off and p_wifi_client_ready.
+#
+# Placeholders: every path under ~/.config/newton/pulsar/ is yours to create (known-hosts is a pinned host key file for
+# Pulsar, admin-key the root key, change-key the restricted runner key, baseline.tar.gz a `sysupgrade -b` archive taken
+# with Newton installed). baseline_sha256 must be the sha256 of that archive. Nothing secret is stored in this file.
+# The scenarios and checks assume Pulsar's LAN address 192.168.1.1 (the OpenWrt default) and one LAN client at the
+# address in [vars.agent_ip]; change that var, and the literal client address in p-06, p-ev-06 and the http8080_on step,
+# if your client differs. Pulsar is the dev router. Never point this at a production router.
+
+[pve]
+host = "192.0.2.11"
+node = "Apollo"
+token_file = "~/.config/pve/apollo.token"
+pin_file = "~/.config/pve/apollo.pin"
+
+[ssh]
+proxy = "ssh -i ~/.ssh/claude-apollo -o BatchMode=yes -W %h:%p root@192.0.2.11"
+password_file = "~/.config/newton/lab-root.pw"
+key = "~/.ssh/claude-apollo"
+# The runner's restricted key and the lab approval passphrase (RD7 = A): both files are created at setup time by
+# `newton-router-setup lab-r1 add-key --new-key lab-runner change` and `approval-key`; they are lab-only, and the runner never
+# creates or reads the passphrase file except to derive the approval token for approval = true scenarios.
+router_key = "~/.ssh/newton-lab-runner"
+approve_passphrase_file = "~/.config/newton/lab-approve.pw"
+# Known hosts file for the key lane. Created once at lab setup from lab-r1's host key
+# (ssh-keyscan through the proxy); the runner never creates or updates it. Required when
+# --lane key is used: the key lane's hello preflight pins lab-r1 against this file with
+# StrictHostKeyChecking=yes, and scripts/owrt-change.sh does the same whenever
+# OWRT_KNOWN_HOSTS is set (otherwise ssh would fall back to the user's real
+# ~/.ssh/known_hosts and either refuse an unknown router under BatchMode, or silently
+# write lab-r1's key there after every snapshot reset).
+known_hosts = "~/.config/newton/lab-known-hosts"
+
+# SSH answers before OpenWrt finishes bringing interfaces up, and procd can restart dnsmasq afterward.
+# Require a stable boot fingerprint before setup captures any baseline state.
+[settle]
+quiet_s = 10   # Seconds the successful fingerprint must remain unchanged.
+timeout_s = 120 # Maximum seconds to wait for a device to settle.
+poll_s = 1     # Seconds between settle fingerprint polls.
+
+[devices.pulsar]
+kind = "physical"
+# The operator's statement that this device is a lab router. The loader refuses a physical device without it, and the
+# runner also reads /etc/newton/device-id (must equal the table name "pulsar") and /etc/newton/profile (must be "lab")
+# from the router before it changes anything. board_name is required too: it must equal /tmp/sysinfo/board_name on the
+# router (read it from there; Pulsar is an ASUS RT-AX57M, "asus,rt-ax57m"). The baseline archive must also hold
+# etc/newton/device-id = "pulsar" and etc/newton/profile = "lab".
+lab = true
+board_name = "asus,rt-ax57m"
+host = "192.168.1.1"
+user = "root"
+proxy = false
+known_hosts = "~/.config/newton/pulsar/known-hosts"
+admin_key = "~/.config/newton/pulsar/admin-key"
+router_key = "~/.config/newton/pulsar/change-key"
+baseline_backup = "~/.config/newton/pulsar/baseline.tar.gz"
+baseline_sha256 = "<sha256 of baseline.tar.gz>"
+settle_cmd = "{ ubus call service list; ubus call network.interface dump | jsonfilter -e '@.interface[*].interface' -e '@.interface[*].up'; } | md5sum"
+
+# ---- Pulsar vars, checks, regression (local only; Pulsar addresses) ----
+# A var may carry `secret = true`. Its value is then substituted into the
+# scenario `batch` only (a step, post, effect or check cmd that names it is
+# refused before any device contact), and the runner masks it out of the
+# records, the summary and the results file. None of these scenarios uses one
+# yet; the shape for a Wi-Fi key in a p-ow-wireless-* batch would be:
+#   [vars.wifi_psk]
+#   device = "local"
+#   cmd = "cat ~/.config/newton/pulsar/wifi-psk"
+#   secret = true
+# The file paths the scenarios and checks use. Keep each equal to the matching path above: a test compares them.
+[vars.pulsar_known_hosts]
+device = "local"
+cmd = "echo ~/.config/newton/pulsar/known-hosts"
+
+[vars.pulsar_admin_key]
+device = "local"
+cmd = "echo ~/.config/newton/pulsar/admin-key"
+
+[vars.pulsar_runner_key]
+device = "local"
+cmd = "echo ~/.config/newton/pulsar/change-key"
+
+[vars.pulsar_root_pw]
+device = "local"
+cmd = "echo ~/.config/newton/lab-root.pw"
+
+[vars.fw_wan_zone]
+device = "pulsar"
+cmd = '''
+n=$(uci show firewall | sed -n "s/^firewall\.\(@zone\[[0-9]*\]\)\.name='wan'\$/\1/p")
+[ "$(echo "$n" | grep -c .)" = 1 ] && echo "$n"
+'''
+
+[vars.fw_lan_zone]
+device = "pulsar"
+cmd = '''
+n=$(uci show firewall | sed -n "s/^firewall\.\(@zone\[[0-9]*\]\)\.name='lan'\$/\1/p")
+[ "$(echo "$n" | grep -c .)" = 1 ] && echo "$n"
+'''
+
+[vars.fw_allow_ping]
+device = "pulsar"
+cmd = '''
+n=$(uci show firewall | sed -n "s/^firewall\.\(@rule\[[0-9]*\]\)\.name='Allow-Ping'\$/\1/p")
+[ "$(echo "$n" | grep -c .)" = 1 ] && echo "$n"
+'''
+
+[vars.p_wan_ip]
+device = "pulsar"
+cmd = '''
+i=0; while [ $i -lt 25 ]; do a=$(ifstatus wan | jsonfilter -e '@["ipv4-address"][0].address'); [ -n "$a" ] && { echo "$a"; exit 0; }; sleep 1; i=$((i+1)); done; exit 1
+'''
+
+[checks.mgmt_ssh]
+device = "pulsar"
+cmd = "echo mgmt-ssh-ok"
+expect_stdout = '^mgmt-ssh-ok$'
+description = "The admin-key ssh path to Pulsar works."
+
+[checks.mgmt_ssh_pw]
+device = "local"
+timeout = 60
+cmd = '''
+D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
+printf '#!/bin/sh\nexec cat %s\n' {pulsar_root_pw} > "$D/askpass"; chmod 700 "$D/askpass"
+SSH_ASKPASS="$D/askpass" SSH_ASKPASS_REQUIRE=force DISPLAY=x timeout 40 ssh -o BatchMode=no -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 'echo mgmt-ssh-pw-ok'
+'''
+expect_stdout = '^mgmt-ssh-pw-ok$'
+description = "Password-only ssh to Pulsar (owrt-change.sh's auth path) from the agent host on the LAN."
+
+[checks.mgmt_ssh_newton]
+device = "local"
+timeout = 60
+cmd = '''
+timeout 40 ssh -i {pulsar_runner_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 '/usr/libexec/newton/newton-router hello 0011223344556677'
+'''
+expect_stdout = '^hello 0011223344556677 .*door=ssh'
+description = "The restricted key reaches Pulsar's newton-router (hello, door=ssh)."
+
+[checks.mgmt_luci]
+device = "local"
+cmd = "curl -sk -o /dev/null -D - --max-time 10 https://192.168.1.1/"
+expect_stdout = '^HTTP/\S+ 200'
+description = "uhttpd answers 200 on https://192.168.1.1/ to the agent host (the LAN client)."
+
+[checks.p_internet]
+device = "pulsar"
+cmd = "ping -c1 -W4 1.1.1.1 >/dev/null && echo internet-ok"
+expect_stdout = '^internet-ok$'
+description = "Pulsar itself reaches 1.1.1.1 (router-side; this is not a LAN-client NAT proof)."
+
+[checks.p_dns]
+device = "local"
+cmd = "dig +short +time=4 +tries=1 @192.168.1.1 openwrt.org A"
+expect_stdout = '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+description = "dnsmasq on 192.168.1.1 resolves an internet name for the agent host (a real LAN client query)."
+
+[checks.p_dhcp_listen]
+device = "pulsar"
+cmd = "netstat -uln | grep -c ':67 ' | sed 's/^[1-9].*/dhcp-listening/'"
+expect_stdout = '^dhcp-listening$'
+description = "dnsmasq listens on udp 67 (router-side stand-in for the lab's DISCOVER/OFFER probe; the agent host has no passwordless root for a raw DHCP probe)."
+
+[regression]
+default = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen", "portfwd", "p_client_on_pulsar"]
+
+# ---- lab-isp (ISP-A side of Pulsar's WAN), reset to its snapshot at run start ----
+[devices.lab-isp]
+vmid = 9101
+host = "10.109.0.10"
+user = "root"
+snapshot = "baseline"
+settle_cmd = "{ ubus call service list; ubus call network.interface dump | jsonfilter -e '@.interface[*].interface' -e '@.interface[*].up'; } | md5sum"
+
+# The LAN client that runs the local steps and checks (a real address on Pulsar's LAN).
+[vars.agent_ip]
+device = "local"
+cmd = "echo 192.168.1.242"
+
+# One of the agent host's own addresses that is outside every subnet Pulsar has
+# (Pulsar's LAN is 192.168.1.0/24, its WAN is 10.100.0.x from lab-isp).
+# Used by p-ow-dns-02 to send a DNS query from a non-local source: a packet
+# sourced from 192.0.2.10 and destined for 192.168.1.1 leaves on the
+# LAN NIC (Linux lets a socket bind any local address and send it out of
+# another interface), and dnsmasq logs `ignoring query from non-local
+# network 192.0.2.10` because 192.0.2.0/24 is not on the router.
+[vars.agent_nonlocal_ip]
+device = "local"
+cmd = "echo 192.0.2.10"
+
+# The agent host's USB NIC: the one on the router's LAN.  A scenario names
+# the var, so no interface name of the host is written down in the tree that
+# ships; the operator's copy names the real one.
+[vars.agent_usb_nic]
+device = "local"
+cmd = "echo enx02000000000x"
+
+[steps.dns_nonlocal_src_check]
+device = "local"
+cmd = '''
+a={agent_nonlocal_ip}
+case "$a" in 192.168.1.*) echo "dns_nonlocal_src_check: $a is inside Pulsar's LAN 192.168.1.0/24" >&2; exit 1;; esac
+ip -4 -o addr show | awk '{print $4}' | cut -d/ -f1 | grep -qxF "$a" || { echo "dns_nonlocal_src_check: the agent host does not own $a" >&2; exit 1; }
+echo "dns_nonlocal_src_check: the agent host owns $a, outside 192.168.1.0/24"
+'''
+description = "the agent host: fail unless the agent host owns {agent_nonlocal_ip} and it is outside 192.168.1.0/24. Used by p-ow-dns-02."
+
+[steps.dns_nonlocal_route_on]
+device = "pulsar"
+cmd = '''
+ip route del {agent_nonlocal_ip}/32 2>/dev/null
+ip route add {agent_nonlocal_ip}/32 via {agent_ip} dev br-lan
+ip route | grep -qF '{agent_nonlocal_ip} via {agent_ip} dev br-lan' || { echo "dns_nonlocal_route_on: no route {agent_nonlocal_ip} via {agent_ip} dev br-lan" >&2; exit 1; }
+'''
+description = "pulsar: runtime route {agent_nonlocal_ip}/32 via the agent host's LAN address, so DNS replies reach the agent host. Pair with dns_nonlocal_route_off."
+
+[steps.dns_nonlocal_route_off]
+device = "pulsar"
+cmd = '''
+ip route del {agent_nonlocal_ip}/32 2>/dev/null
+if ip route | grep -qF '{agent_nonlocal_ip} '; then echo "dns_nonlocal_route_off: the route {agent_nonlocal_ip}/32 is still there" >&2; exit 1; fi
+'''
+description = "pulsar: remove the runtime route {agent_nonlocal_ip}/32; fails if it is still there."
+
+[steps.portfwd_on]
+device = "pulsar"
+cmd = '''
+set -e
+uci -q delete firewall.pf_client || true
+uci set firewall.pf_client=redirect
+uci set firewall.pf_client.name='pf_client'
+uci set firewall.pf_client.src='wan'
+uci set firewall.pf_client.src_dport='2222'
+uci set firewall.pf_client.dest='lan'
+uci set firewall.pf_client.dest_ip='{agent_ip}'
+uci set firewall.pf_client.dest_port='22'
+uci set firewall.pf_client.proto='tcp'
+uci set firewall.pf_client.target='DNAT'
+uci -q delete firewall.pf_masq || true
+uci set firewall.pf_masq=nat
+uci set firewall.pf_masq.name='pf_masq'
+uci set firewall.pf_masq.src='lan'
+uci set firewall.pf_masq.dest_ip='{agent_ip}'
+uci set firewall.pf_masq.proto='tcp'
+uci set firewall.pf_masq.target='MASQUERADE'
+uci commit firewall
+/etc/init.d/firewall reload
+nft list ruleset | grep -q 'dport 2222' || { echo "portfwd_on: no dport 2222 rule after firewall reload" >&2; exit 1; }
+'''
+description = "Redirect pf_client: WAN tcp 2222 -> the agent host (the LAN client) port 22, direct uci."
+
+[checks.portfwd]
+device = "lab-isp"
+cmd = "(nc {p_wan_ip} 2222 </dev/null > /tmp/b 2>/dev/null &) ; sleep 3; head -c 7 /tmp/b; rm -f /tmp/b"
+expect_stdout = '^SSH-2\.0'
+description = "WAN tcp 2222 on pulsar reaches the agent host's sshd, tested from lab-isp. Needs step portfwd_on."
+
+[checks.wan_closed_refused]
+device = "lab-isp"
+timeout = 30
+cmd = '''
+t=$(mktemp); nc {p_wan_ip} 9 </dev/null >/dev/null 2>$t & n=$!
+i=0; while [ ! -s $t ] && [ $i -lt 4 ]; do sleep 1; i=$((i+1)); done
+r=$(cat $t); kill $n 2>/dev/null; rm -f $t
+case "$r" in *refused*) echo "closed port 9 on {p_wan_ip}: refused";; "") echo "closed port 9 on {p_wan_ip}: no answer in 4 s";; *) echo "closed port 9 on {p_wan_ip}: $r";; esac
+'''
+expect_stdout = ': refused$'
+description = "A closed tcp port on pulsar's WAN address is refused at once (wan zone input REJECT), tested from lab-isp."
+
+[steps.http8080_on]
+device = "local"
+timeout = 30
+cmd = '''
+set -e
+mkdir -p /tmp/ev-www-pulsar
+printf 'newton-ev-ok\n' > /tmp/ev-www-pulsar/index.html
+if [ -f /tmp/ev-http8080-pulsar.pid ]; then kill "$(cat /tmp/ev-http8080-pulsar.pid)" 2>/dev/null || true; rm -f /tmp/ev-http8080-pulsar.pid; fi
+nohup python3 -m http.server 8080 --bind 192.168.1.242 --directory /tmp/ev-www-pulsar </dev/null >/tmp/ev-http8080-pulsar.out 2>&1 &
+echo $! > /tmp/ev-http8080-pulsar.pid
+i=0
+while [ $i -lt 15 ]; do
+  if curl -sf --max-time 2 http://192.168.1.242:8080/ 2>/dev/null | grep -q 'newton-ev-ok'; then echo "http8080_on: listening on the agent host 192.168.1.242:8080"; exit 0; fi
+  sleep 1; i=$((i+1))
+done
+echo "http8080_on: listener did not answer" >&2; exit 1
+'''
+description = "the agent host: serve 'newton-ev-ok' on 192.168.1.242:8080 (python http.server, pid file)."
+
+[steps.http8080_off]
+device = "local"
+cmd = '''
+if [ -f /tmp/ev-http8080-pulsar.pid ]; then kill "$(cat /tmp/ev-http8080-pulsar.pid)" 2>/dev/null; fi
+rm -rf /tmp/ev-www-pulsar /tmp/ev-http8080-pulsar.pid /tmp/ev-http8080-pulsar.out
+exit 0
+'''
+description = "the agent host: stop the 8080 listener."
+
+[steps.fw4_break_on]
+device = "pulsar"
+timeout = 30
+cmd = '''
+set -e
+for s in $(uci show firewall | sed -n "s/^\(firewall\.[^.=]*\)\.name='ev10_broken'$/\1/p"); do uci delete "$s"; done
+uci add firewall rule
+uci set firewall.@rule[-1].name='ev10_broken'
+uci set firewall.@rule[-1].src='wan'
+uci set firewall.@rule[-1].proto='nosuchproto'
+uci set firewall.@rule[-1].target='ACCEPT'
+uci commit firewall
+fw4 check >/tmp/fw4.out 2>&1 || rc=$? || true
+rc=${rc:-0}
+[ "$rc" = "1" ] || { echo "fw4_break_on: fw4 check exited $rc, expected 1; output follows:" >&2; cat /tmp/fw4.out >&2; exit 1; }
+grep -q -E 'Could not resolve protocol name|Error:' /tmp/fw4.out || { echo "fw4_break_on: unexpected fw4 output" >&2; cat /tmp/fw4.out >&2; exit 1; }
+rm -f /tmp/fw4.out
+echo "fw4_break_on: rule ev10_broken committed; fw4 check exits 1"
+'''
+description = "pulsar: add a broken firewall rule by direct uci + commit (no reload)."
+
+[steps.fw4_break_off]
+device = "pulsar"
+timeout = 30
+cmd = '''
+set -e
+deleted=0
+for s in $(uci show firewall | sed -n "s/^\(firewall\.[^.=]*\)\.name='ev10_broken'$/\1/p"); do uci delete "$s"; deleted=$((deleted+1)); done
+uci commit firewall
+fw4 check >/tmp/fw4.out 2>&1; rc=$?
+[ "$rc" = "0" ] || { echo "fw4_break_off: fw4 check exited $rc after cleanup" >&2; cat /tmp/fw4.out >&2; exit 1; }
+rm -f /tmp/fw4.out
+echo "fw4_break_off: deleted $deleted rule(s); fw4 check exits 0"
+'''
+description = "pulsar: remove the broken rule."
+
+# ---- steps cloned from repo lab.toml with device lab-r1 -> pulsar (no lab-specific literals in their cmd) ----
+[steps.fw_ruleset_save]
+device = "pulsar"
+timeout = 120
+cmd = '''
+nft list ruleset | sed 's/packets [0-9]* bytes [0-9]*/packets N bytes N/' > /tmp/fw-ruleset.before
+[ "$(wc -l < /tmp/fw-ruleset.before)" -gt 50 ]
+'''
+description = "cloned from lab.toml (device pulsar)"
+
+[steps.fw_wan_log_on]
+device = "pulsar"
+timeout = 60
+cmd = '''
+set -e
+uci set firewall.{fw_wan_zone}.log='1'
+uci set firewall.{fw_wan_zone}.log_limit='10/minute'
+uci commit firewall
+/etc/init.d/firewall restart >/dev/null 2>&1
+nft list ruleset | grep -A3 'limit wan.log_limit' | grep -q 'rate 10/minute'
+'''
+description = "cloned from lab.toml (device pulsar)"
+
+[steps.fw_ipset_on]
+device = "pulsar"
+timeout = 60
+cmd = '''
+set -e
+uci -q delete firewall.nw_block || true
+uci -q delete firewall.nw_block_drop || true
+uci set firewall.nw_block=ipset
+uci set firewall.nw_block.name='nw_block'
+uci set firewall.nw_block.family='ipv4'
+uci set firewall.nw_block.match='src_ip'
+uci add_list firewall.nw_block.entry='192.0.2.1'
+uci add_list firewall.nw_block.entry='192.0.2.2'
+uci set firewall.nw_block_drop=rule
+uci set firewall.nw_block_drop.name='nw_block_drop'
+uci set firewall.nw_block_drop.src='wan'
+uci set firewall.nw_block_drop.ipset='nw_block'
+uci set firewall.nw_block_drop.proto='all'
+uci set firewall.nw_block_drop.target='DROP'
+uci commit firewall
+/etc/init.d/firewall restart >/dev/null 2>&1
+s=$(nft list set inet fw4 nw_block | tr -d ' \t\n')
+case "$s" in *"typeipv4_addr"*"elements={192.0.2.1,192.0.2.2}"*) ;; *) echo "fw_ipset_on: live set is not {192.0.2.1, 192.0.2.2}: $s" >&2; exit 1;; esac
+nft list chain inet fw4 input_wan | grep -q '@nw_block' || { echo "fw_ipset_on: input_wan has no rule using @nw_block" >&2; exit 1; }
+'''
+description = "cloned from lab.toml (device pulsar)"
+
+[steps.fw_rate_observer_start]
+device = "pulsar"
+timeout = 30
+cmd = '''
+rm -f /tmp/fw-rate.log /tmp/fw-rate.pid
+cat > /tmp/fw-rate.sh <<'EOS'
+last=""
+while :; do
+  r=$(nft list ruleset 2>/dev/null | grep -A3 'limit wan.log_limit' | grep -o 'rate [0-9]*/[a-z]*' | head -1)
+  [ -n "$r" ] || r=none
+  [ "$r" = "$last" ] || { echo "$(cut -d' ' -f1 /proc/uptime) $r" >> /tmp/fw-rate.log; last=$r; }
+  sleep 1
+done
+EOS
+setsid sh /tmp/fw-rate.sh </dev/null >/dev/null 2>&1 &
+echo $! > /tmp/fw-rate.pid
+sleep 3
+[ -s /tmp/fw-rate.log ] || { echo "fw_rate_observer_start: the sampler wrote nothing to /tmp/fw-rate.log" >&2; exit 1; }
+'''
+description = "cloned from lab.toml (device pulsar)"
+
+[steps.fw_rate_observer_stop]
+device = "pulsar"
+timeout = 120
+cmd = '''
+kill $(cat /tmp/fw-rate.pid) 2>/dev/null
+rm -f /tmp/fw-rate.sh /tmp/fw-rate.log /tmp/fw-rate.pid
+exit 0
+'''
+description = "cloned from lab.toml (device pulsar)"
+
+[steps.ssh_observer_start]
+device = "pulsar"
+timeout = 30
+cmd = '''
+rm -f /tmp/ssh-observer.log /tmp/ssh-observer.pid
+cat > /tmp/ssh-observer.sh <<'EOS'
+while :; do
+  cmd=$(tr '\0' ' ' < /proc/$(cat /var/run/dropbear.main.pid 2>/dev/null)/cmdline 2>/dev/null)
+  lst=$(netstat -tln | awk '$4 ~ /:22$/ {printf "%s ", $4}')
+  echo "$(date +%s)|$cmd|$lst" >> /tmp/ssh-observer.log
+  sleep 1
+done
+EOS
+setsid sh /tmp/ssh-observer.sh </dev/null >/dev/null 2>&1 &
+echo $! > /tmp/ssh-observer.pid
+sleep 3
+[ -s /tmp/ssh-observer.log ]
+'''
+description = "cloned from lab.toml (device pulsar)"
+
+[steps.ssh_observer_stop]
+device = "pulsar"
+timeout = 120
+cmd = '''
+kill $(cat /tmp/ssh-observer.pid) 2>/dev/null
+rm -f /tmp/ssh-observer.sh /tmp/ssh-observer.log /tmp/ssh-observer.pid
+exit 0
+'''
+description = "cloned from lab.toml (device pulsar)"
+
+[steps.dns_upstream_direct]
+device = "pulsar"
+timeout = 60
+cmd = '''
+set -e
+uci set dhcp.@dnsmasq[0].noresolv='1'
+uci -q delete dhcp.@dnsmasq[0].server || true
+uci add_list dhcp.@dnsmasq[0].server='1.1.1.1'
+uci commit dhcp
+/etc/init.d/dnsmasq reload
+i=0
+while [ $i -lt 30 ]; do
+  if grep -qx 'no-resolv' /var/etc/dnsmasq.conf.* && grep -qx 'server=1.1.1.1' /var/etc/dnsmasq.conf.* && nslookup openwrt.org 127.0.0.1 2>&1 | grep -q '^Name:'; then
+    echo "dns_upstream_direct: dnsmasq forwards to 1.1.1.1 only (no-resolv) and resolves"; exit 0
+  fi
+  sleep 1; i=$((i+1))
+done
+echo "dns_upstream_direct: dnsmasq does not resolve through 1.1.1.1 only after 30 s" >&2; exit 1
+'''
+description = "cloned from lab.toml (device pulsar)"
+
+[steps.dns_logqueries_on]
+device = "pulsar"
+timeout = 60
+cmd = '''
+set -e
+uci set dhcp.@dnsmasq[0].logqueries='1'
+uci commit dhcp
+/etc/init.d/dnsmasq reload
+i=0
+while [ $i -lt 30 ]; do
+  if grep -qx 'log-queries=extra' /var/etc/dnsmasq.conf.* && nslookup openwrt.org 127.0.0.1 2>&1 | grep -q '^Name:' && logread | grep -q 'query\[A\] openwrt.org from'; then
+    echo "dns_logqueries_on: dnsmasq logs every query and every forward"; exit 0
+  fi
+  sleep 1; i=$((i+1))
+done
+echo "dns_logqueries_on: dnsmasq does not log queries after 30 s" >&2; exit 1
+'''
+description = "cloned from lab.toml (device pulsar)"
+
+[steps.verify_observer_start]
+device = "pulsar"
+timeout = 30
+cmd = '''
+rm -f /tmp/verify-observer.log /tmp/verify-observer.pid /tmp/verify-observer.dns
+cat > /tmp/verify-observer.sh <<'EOS'
+while :; do
+  ping -c 1 -W 1 1.1.1.1 >/dev/null 2>&1 && p=ok || p=fail
+  nslookup openwrt.org 127.0.0.1 >/tmp/verify-observer.dns 2>&1 &
+  q=$!; i=0
+  while kill -0 $q 2>/dev/null && [ $i -lt 3 ]; do sleep 1; i=$((i+1)); done
+  if kill -0 $q 2>/dev/null; then kill $q 2>/dev/null; d=hang
+  elif grep -q '^Name:' /tmp/verify-observer.dns; then d=ok; else d=fail; fi
+  if cat /var/etc/dnsmasq.conf.* 2>/dev/null | grep -q '^dnssec$'; then c=yes; else c=no; fi
+  v=$(uci -q get dhcp.@dnsmasq[0].dnssec); [ -n "$v" ] || v=-
+  echo "$(date +%s)|cfg=$v|ping=$p|dns=$d|dnssec_in_conf=$c" >> /tmp/verify-observer.log
+  sleep 1
+done
+EOS
+setsid sh /tmp/verify-observer.sh </dev/null >/dev/null 2>&1 &
+echo $! > /tmp/verify-observer.pid
+sleep 5
+[ -s /tmp/verify-observer.log ] || { echo "verify_observer_start: the sampler wrote nothing to /tmp/verify-observer.log" >&2; exit 1; }
+'''
+description = "cloned from lab.toml (device pulsar)"
+
+[steps.verify_observer_stop]
+device = "pulsar"
+timeout = 120
+cmd = '''
+kill $(cat /tmp/verify-observer.pid) 2>/dev/null
+rm -f /tmp/verify-observer.sh /tmp/verify-observer.log /tmp/verify-observer.pid /tmp/verify-observer.dns
+exit 0
+'''
+description = "cloned from lab.toml (device pulsar)"
+
+[steps.dhcp_state_save]
+device = "pulsar"
+timeout = 120
+cmd = '''
+c=; for p in $(pidof dnsmasq); do c=$(tr '\0' ' ' < /proc/$p/cmdline | sed -n 's/.*dnsmasq -C \([^ ]*\).*/\1/p'); [ -n "$c" ] && break; done
+[ -f "$c" ] || { echo "dhcp_state_save: no conf found for the running dnsmasq" >&2; exit 1; }
+{ echo "dnsmasq-conf-md5 $(md5sum < $c | cut -d' ' -f1)"; echo "dnsmasq-pids $(pidof dnsmasq | tr ' ' ',')"; echo "odhcpd-pids $(pidof odhcpd | tr ' ' ',')"; echo "ra-state $(ubus call dhcp ipv6ra | tr -d ' \t\n')"; } > /tmp/dhcp-state.before
+[ "$(wc -l < /tmp/dhcp-state.before)" = 4 ] && ! grep -q 'pids $' /tmp/dhcp-state.before
+'''
+description = "cloned from lab.toml (device pulsar)"
+
+# ---- sntp steps cloned with device lab-client -> local (the agent host) ----
+[steps.sntp_on]
+device = "local"
+timeout = 120
+cmd = '''
+cat > /tmp/newton-sntp.py <<'EOF'
+import socket, struct, sys, time
+
+HOST, PORT = sys.argv[1], 123
+NTP_EPOCH = 2208988800
+
+def ntp_ts(t):
+    return struct.pack('!II', int(t) + NTP_EPOCH, int((t - int(t)) * 2**32))
+
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(1.0)
+t0 = time.time()
+tx = ntp_ts(t0)
+req = bytes([0x23]) + bytes(39) + tx
+got = None
+for attempt in range(3):
+    s.sendto(req, (HOST, PORT))
+    try:
+        d, a = s.recvfrom(512)
+    except socket.timeout:
+        continue
+    got = (d, a, time.time())
+    break
+if got is None:
+    print('sntp %s:%d no reply' % (HOST, PORT))
+    sys.exit(1)
+d, a, t3 = got
+if len(d) < 48:
+    print('sntp reply too short: %d bytes' % len(d))
+    sys.exit(1)
+mode = d[0] & 7
+srv_t = struct.unpack('!II', d[40:48])
+srv = srv_t[0] - NTP_EPOCH + srv_t[1] / 2**32
+echoed = d[24:32] == tx
+print('sntp reply from %s:%d mode=%d stratum=%d li=%d originate_echoed=%s offset=%.3fs' % (a[0], a[1], mode, d[1], d[0] >> 6, 'yes' if echoed else 'no', srv - (t0 + t3) / 2))
+sys.exit(0 if mode == 4 and echoed else 1)
+EOF
+python3 -c "import ast; ast.parse(open('/tmp/newton-sntp.py').read())" && [ -s /tmp/newton-sntp.py ]
+'''
+description = "cloned (device local)"
+
+[steps.sntp_off]
+device = "local"
+timeout = 120
+cmd = '''
+rm -f /tmp/newton-sntp.py; [ ! -e /tmp/newton-sntp.py ]'''
+description = "cloned (device local)"
+
+[steps.agent_masq_on]
+device = "pulsar"
+timeout = 30
+cmd = '''
+set -e
+uci -q delete firewall.pf_masq || true
+uci set firewall.pf_masq=nat
+uci set firewall.pf_masq.name='pf_masq'
+uci set firewall.pf_masq.src='lan'
+uci set firewall.pf_masq.dest_ip='{agent_ip}'
+uci set firewall.pf_masq.proto='tcp'
+uci set firewall.pf_masq.target='MASQUERADE'
+uci commit firewall
+/etc/init.d/firewall reload
+nft list ruleset | grep -q 'masquerade' || { echo "agent_masq_on: no masquerade rule after reload" >&2; exit 1; }
+'''
+description = "pulsar: masquerade tcp towards the agent host on the lan zone. the agent host's default route is not via pulsar, so without it a forwarded WAN flow comes back asymmetrically (found by p-06)."
+
+# In-window reboot (G4 row r02 on real hardware): a detached watcher on pulsar waits until newton-guard reports `pending`, then reboots 8 s later.
+[steps.reboot_watch_on]
+device = "pulsar"
+timeout = 30
+description = "pulsar: start a detached watcher that reboots the router 8 s after the guard goes pending (cancelled by the reboot itself)."
+cmd = '''
+rm -f /tmp/reboot-watch.sh
+cat > /tmp/reboot-watch.sh <<'EOS'
+i=0
+while [ $i -lt 180 ]; do
+  s=$(/usr/libexec/newton-guard status 2>/dev/null | head -1)
+  case "$s" in pending*) sleep 8; echo "reboot-watch: guard pending ($s), rebooting" | logger -t reboot-watch; reboot; exit 0;; esac
+  sleep 1; i=$((i+1))
+done
+EOS
+setsid sh /tmp/reboot-watch.sh </dev/null >/dev/null 2>&1 &
+sleep 1
+[ -n "$(pidof sh)" ]
+'''
+
+# ---- package-install steps cloned from lab.toml with device lab-r1 -> pulsar ----
+# Package swap by direct apk (pulsar reaches downloads.openwrt.org through lab-isp). Newton's rollback does not cover a package:
+# only the next reset of pulsar removes it (the runner's package restore: apk del of every world entry added since the record).
+# apk replaces dnsmasq with dnsmasq-full in one transaction (about 5 s), keeps /etc/config/dhcp (a new default is left beside it
+# as dhcp.apk-new, which uci ignores) and the package's post-install restarts dnsmasq. The step fails loudly (rc 1 and a message
+# on stderr, shown by the runner as "setup <step> failed") unless the full build is installed and running with DNS and DHCP
+# bound, the stock package is gone, and ntpd has reported valid time (the init script adds --dnssec-no-timecheck until
+# /var/state/dnsmasqsec exists). A DHCP answer to a real client is checked by the scenario's regression before anything is applied.
+[steps.dnsmasq_full_install]
+device = "pulsar"
+timeout = 300
+cmd = '''
+fail() { echo "dnsmasq_full_install: $1" >&2; exit 1; }
+apk update >/dev/null 2>&1 || fail "apk update failed (no internet on pulsar?)"
+apk add dnsmasq-full >/dev/null 2>&1 || fail "apk add dnsmasq-full failed"
+apk info -e dnsmasq-full >/dev/null 2>&1 || fail "dnsmasq-full is not installed after apk add"
+[ "$(apk list -I | grep -c '^dnsmasq-[0-9]')" = 0 ] || fail "the stock dnsmasq package is still installed next to dnsmasq-full"
+dnsmasq --version | grep -q ' DNSSEC ' || fail "dnsmasq --version does not report DNSSEC"
+i=0
+while [ $i -lt 40 ]; do
+  if logread | grep 'dnsmasq\[' | grep 'compile time options' | tail -1 | grep -q ' DNSSEC ' && netstat -lun | grep -q ':67 ' && netstat -lun | grep -q '127.0.0.1:53 ' && nslookup openwrt.org 127.0.0.1 2>&1 | grep -q '^Name:'; then break; fi
+  sleep 1; i=$((i+1))
+done
+[ $i -lt 40 ] || fail "dnsmasq-full is not running with DNS on 127.0.0.1:53 and DHCP on udp 67 after 40 s"
+j=0
+while [ ! -f /var/state/dnsmasqsec ] && [ $j -lt 120 ]; do sleep 1; j=$((j+1)); done
+[ -f /var/state/dnsmasqsec ] || fail "ntpd has not reported valid time after 120 s (dnssec would run with --dnssec-no-timecheck)"
+echo "dnsmasq_full_install: $(apk list -I dnsmasq-full | cut -d' ' -f1) running, DNSSEC compiled in, DNS answers, udp 67 bound, ntpd time valid ($(date -u +%H:%M:%S) UTC)"
+'''
+description = "cloned from lab.toml (device pulsar)"
+
+# https-dns-proxy by direct apk. The package starts itself at install with its shipped defaults (two DoH instances, Cloudflare
+# on 127.0.0.1:5053 and Google on :5054; force_dns for the interface `lan`; dnsmasq_config_update '*'), and its init script
+# then edits and commits /etc/config/dhcp (noresolv, the server list, doh_* bookkeeping), restarts dnsmasq, and hands fw4
+# redirect and reject rules through ubus. None of that is covered by Newton's rollback. Only the next reset of pulsar
+# removes it.
+[steps.https_dns_proxy_install]
+device = "pulsar"
+timeout = 240
+cmd = '''
+fail() { echo "https_dns_proxy_install: $1" >&2; exit 1; }
+apk update >/dev/null 2>&1 || fail "apk update failed (no internet on pulsar?)"
+apk add https-dns-proxy >/dev/null 2>&1 || fail "apk add https-dns-proxy failed"
+apk info -e https-dns-proxy >/dev/null 2>&1 || fail "https-dns-proxy is not installed after apk add"
+i=0
+while [ $i -lt 90 ]; do
+  if netstat -tln | grep -q '127.0.0.1:5053 ' && netstat -tln | grep -q '127.0.0.1:5054 ' \
+     && grep -qx 'no-resolv' /var/etc/dnsmasq.conf.* && grep -qx 'server=127.0.0.1#5053' /var/etc/dnsmasq.conf.* && grep -qx 'server=127.0.0.1#5054' /var/etc/dnsmasq.conf.* \
+     && nft list chain inet fw4 dstnat_lan 2>/dev/null | grep -q 'ubus:https-dns-proxy' \
+     && logread | grep -q 'https-dns-proxy.*Setting trigger for wan' \
+     && nslookup openwrt.org 127.0.0.1 2>&1 | grep -q '^Name:'; then
+    echo "https_dns_proxy_install: $(apk list -I | grep '^https-dns-proxy-' | cut -d' ' -f1) serves dnsmasq on 127.0.0.1#5053 and #5054 (no-resolv), fw4 redirects DNS from lan, lookups work"; exit 0
+  fi
+  sleep 1; i=$((i+1))
+done
+fail "the two DoH proxies, dnsmasq's conf, the fw4 rules and a lookup are not all in place after 90 s"
+'''
+description = "cloned from lab.toml (device pulsar)"
+
+[steps.miniupnpd_install]
+device = "pulsar"
+timeout = 180
+cmd = '''
+apk update >/dev/null 2>&1 || { echo "miniupnpd_install: apk update failed (no internet on pulsar?)" >&2; exit 1; }
+apk add miniupnpd-nftables >/dev/null 2>&1 || { echo "miniupnpd_install: apk add miniupnpd-nftables failed" >&2; exit 1; }
+apk info -e miniupnpd-nftables >/dev/null 2>&1 || { echo "miniupnpd_install: miniupnpd-nftables is not installed after apk add" >&2; exit 1; }
+[ -f /etc/config/upnpd ] || { echo "miniupnpd_install: /etc/config/upnpd is missing" >&2; exit 1; }
+[ "$(uci -q get upnpd.config.enabled)" = 0 ] || { echo "miniupnpd_install: shipped upnpd.config.enabled is not 0" >&2; exit 1; }
+if netstat -lun | grep -q ':1900 '; then echo "miniupnpd_install: something already listens on udp 1900" >&2; exit 1; fi
+'''
+description = "cloned from lab.toml (device pulsar)"
+
+# pulsar's clock is checked over the pinned admin path (the same one every
+# ssh step uses). On a real router an NTP-synced clock is the difference
+# between DNSSEC validation passing and SERVFAIL; the step fails loudly if
+# the clock is more than 60 s away from the runner host's.
+[steps.p_clock_ok]
+device = "local"
+timeout = 60
+cmd = '''
+fail() { echo "p_clock_ok: $1" >&2; exit 1; }
+r=$(timeout 30 ssh -i {pulsar_admin_key} -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR -o ConnectTimeout=8 root@192.168.1.1 'date +%s') || fail "cannot read pulsar's clock"
+l=$(date +%s)
+d=$((r - l)); [ $d -lt 0 ] && d=$((0 - d))
+[ $d -le 60 ] || fail "pulsar's clock is $d s away from this host's"
+echo "p_clock_ok: pulsar's clock is within $d s of this host's"
+'''
+description = "pulsar's clock is within 60 s of the runner host's (DNSSEC validation needs a valid time). Replaces r1_clock_ok from lab.toml."
+
+# UDP syslog receiver for ow-log-01 on Pulsar: a real socket matters (with nothing
+# listening, the sender answers each datagram with an ICMP port unreachable and the
+# router's `logread -r` forwarder then drops about every other message). No sudo on
+# the agent host, so the receiver binds an unprivileged port. The script takes `<port>
+# <seconds>` and prints "<sender ip> <datagram>" per received packet to stdout (the
+# caller redirects to /tmp/newton-syslog.out, owned by the user).
+[steps.syslog_listen_on]
+device = "local"
+cmd = '''
+cat > /tmp/newton-syslog-listen.py <<'EOF'
+import socket, sys, time
+
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(('0.0.0.0', int(sys.argv[1])))
+s.settimeout(0.5)
+end = time.time() + float(sys.argv[2])
+while time.time() < end:
+    try:
+        d, a = s.recvfrom(4096)
+    except socket.timeout:
+        continue
+    print('%s %s' % (a[0], d.decode('utf-8', 'replace').replace('\n', ' ')), flush=True)
+EOF
+python3 -c "import ast; ast.parse(open('/tmp/newton-syslog-listen.py').read())" && [ -s /tmp/newton-syslog-listen.py ]
+'''
+description = "the agent host: install the UDP syslog receiver /tmp/newton-syslog-listen.py taking <port> <seconds> (no sudo; the bound port must be unprivileged). Pair with syslog_listen_off."
+
+[steps.syslog_listen_off]
+device = "local"
+cmd = "rm -f /tmp/newton-syslog-listen.py /tmp/newton-syslog.out; [ ! -e /tmp/newton-syslog-listen.py ] && [ ! -e /tmp/newton-syslog.out ]"
+description = "the agent host: remove the syslog receiver script and its output file."
+
+# ---- lab-client on Pulsar's lab LAN (VLAN 151 on the WAN cable) ----
+# lab-client (VM 9105, Debian, the lab-client user with passwordless sudo) reaches Pulsar through the WAN cable, not
+# through br-lan: apollo bridges vmbr151 and vmbr101 between the lab VMs and Pulsar's WAN port, so
+# lab-client's eth0 is untagged inside VLAN 151 and lands on Pulsar's `lab` interface (192.168.151.1/24),
+# while Pulsar's wan2 is DHCP on wan.101 (VLAN 101) from lab-isp's ISP-B 10.101.0.1. The zone scenarios
+# add VLAN 30 and VLAN 40: lab-client's eth0.30/eth0.40 reach Pulsar's wan.30/wan.40. lab-isp (VM 9101) is
+# unchanged: its eth2 is ISP-A (Pulsar's wan) and its eth3 is ISP-B (Pulsar's wan2).
+# lab-client is reset from the snapshot `baseline-pulsar`, which holds exactly that layout; its management
+# side (eth1, 10.109.0.50) is unchanged, so every step and check that reaches it still uses the proxy.
+# A lab-r1 run (lab/lab.toml) resets lab-client back to its `baseline` snapshot, which puts it on lab-r1's
+# 192.168.150.0/24 instead, so the two runs must never overlap: both hold /tmp/newton-lab.lock.
+
+# Pulsar's second WAN: the VLAN 101 uplink from lab-isp's ISP-B. Same wait as [vars.p_wan_ip], because a
+# reset boots Pulsar and the runner starts as soon as ssh answers, which can be before the second lease.
+[vars.p_wan2_ip]
+device = "pulsar"
+cmd = '''
+i=0; while [ $i -lt 25 ]; do a=$(ifstatus wan2 | jsonfilter -e '@["ipv4-address"][0].address'); [ -n "$a" ] && { echo "$a"; exit 0; }; sleep 1; i=$((i+1)); done; exit 1
+'''
+
+# The DHCP address of lab-client on Pulsar's lab LAN (eth0, the VLAN 151 uplink), read at run time.
+[vars.client_lab_ip]
+device = "lab-client"
+cmd = "ip -4 -o addr show eth0 | awk '{print $4}' | cut -d/ -f1"
+
+[checks.p_client_on_pulsar]
+device = "lab-client"
+cmd = "ip -4 route show default"
+expect_stdout = '^default via 192\.168\.151\.1 dev eth0'
+description = "lab-client's default route is via 192.168.151.1 on eth0. It proves lab-client is on Pulsar's lab LAN (VLAN 151 on the WAN cable) and not on lab-r1's 192.168.150.0/24, which is what the wrong snapshot would restore."
+
+[checks.client_internet]
+device = "lab-client"
+cmd = "curl -sk -o /dev/null --max-time 8 https://1.1.1.1/"
+description = "A TLS exchange with an internet IP literal completes through Pulsar NAT (no DNS involved)."
+
+[checks.client_dns]
+device = "lab-client"
+cmd = "host -W 5 openwrt.org 192.168.151.1"
+expect_stdout = 'has address'
+description = "dnsmasq on 192.168.151.1 resolves an internet name for the client LAN."
+
+[checks.client_dhcp]
+device = "lab-client"
+timeout = 30
+# DISCOVER/OFFER only, on eth0 through a raw AF_PACKET socket: random locally administered chaddr, broadcast flag,
+# no REQUEST, so no lease is created on Pulsar and lab-client's own eth0 lease (systemd-networkd) is never touched.
+# dnsmasq pings the address before it offers, so a healthy OFFER takes about 3 s; the probe gives up after 12 s.
+cmd = '''
+sudo python3 - <<'EOF'
+import os, socket, struct, sys, time
+
+IFACE = 'eth0'
+SERVER = '192.168.151.1'
+WAIT = 12.0
+
+def csum(b):
+    s = sum(struct.unpack('!%dH' % (len(b) // 2), b))
+    s = (s >> 16) + (s & 0xffff)
+    s += s >> 16
+    return ~s & 0xffff
+
+def opts_of(buf):
+    out, i = {}, 0
+    while i < len(buf):
+        c = buf[i]
+        if c == 255:
+            break
+        if c == 0:
+            i += 1
+            continue
+        out[c] = buf[i + 2:i + 2 + buf[i + 1]]
+        i += 2 + buf[i + 1]
+    return out
+
+mac = bytes([0x02]) + os.urandom(5)
+xid = struct.unpack('!I', os.urandom(4))[0]
+nic = bytes.fromhex(open('/sys/class/net/' + IFACE + '/address').read().strip().replace(':', ''))
+
+body = struct.pack('!BBBBIHH4s4s4s4s16s64s128s4s', 1, 1, 6, 0, xid, 0, 0x8000,
+                   bytes(4), bytes(4), bytes(4), bytes(4), mac + bytes(10), bytes(64), bytes(128),
+                   b'\x63\x82\x53\x63')
+body += b'\x35\x01\x01' + b'\x3d\x07\x01' + mac + b'\x37\x05\x01\x03\x06\x0f\x33' + b'\xff'
+body += bytes(max(0, 300 - len(body)))
+udp = struct.pack('!HHHH', 68, 67, 8 + len(body), 0) + body
+ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0, bytes(4), b'\xff' * 4)
+ip = ip[:10] + struct.pack('!H', csum(ip)) + ip[12:]
+frame = b'\xff' * 6 + nic + b'\x08\x00' + ip + udp
+
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+s.bind((IFACE, 0))
+t0 = time.time()
+nxt = 0.0
+while time.time() - t0 < WAIT:
+    if time.time() - t0 >= nxt:
+        s.send(frame)
+        nxt += 4.0
+    s.settimeout(0.5)
+    try:
+        pkt, info = s.recvfrom(4096)
+    except socket.timeout:
+        continue
+    if info[2] == socket.PACKET_OUTGOING or len(pkt) < 14 + 20 + 8 + 240:
+        continue
+    ihl = (pkt[14] & 0x0f) * 4
+    if pkt[14 + 9] != 17:
+        continue
+    sport, dport = struct.unpack('!HH', pkt[14 + ihl:14 + ihl + 4])
+    d = pkt[14 + ihl + 8:]
+    if sport != 67 or dport != 68 or len(d) < 240 or d[0] != 2:
+        continue
+    if struct.unpack('!I', d[4:8])[0] != xid or d[28:34] != mac or d[236:240] != b'\x63\x82\x53\x63':
+        continue
+    o = opts_of(d[240:])
+    if o.get(53) != b'\x02':
+        continue
+    srv = socket.inet_ntoa(pkt[14 + 12:14 + 16])
+    if srv != SERVER:
+        continue
+    print('DHCPOFFER from %s yiaddr=%s after %.1fs (chaddr %s, no REQUEST sent)' % (
+        srv, socket.inet_ntoa(d[16:20]), time.time() - t0, ':'.join('%02x' % b for b in mac)))
+    sys.exit(0)
+print('no DHCPOFFER from %s on %s within %.0fs' % (SERVER, IFACE, WAIT))
+sys.exit(1)
+EOF
+'''
+expect_stdout = '^DHCPOFFER from 192\.168\.151\.1 '
+description = "Pulsar answers a fresh DHCPDISCOVER on the client LAN with an OFFER (random MAC, nothing leased)."
+
+[checks.client_ext_dns]
+device = "lab-client"
+cmd = "host -W 5 openwrt.org 1.1.1.1"
+expect_stdout = 'has address'
+description = "The client can query 1.1.1.1 on port 53 directly. Breaks target for p-ow-dns-08."
+
+[checks.client_dot]
+device = "lab-client"
+cmd = "timeout 6 bash -c 'exec 3<>/dev/tcp/1.1.1.1/853' && echo dot-open"
+expect_stdout = '^dot-open$'
+description = "The client can open tcp 853 to 1.1.1.1. Breaks target for p-ow-dns-07."
+
+[checks.client_isp_ssh]
+device = "lab-client"
+timeout = 30
+cmd = "timeout 6 bash -c 'exec 3<>/dev/tcp/10.100.0.1/22' && echo open"
+expect_stdout = '^open$'
+description = "The client can open tcp 22 to lab-isp at 10.100.0.1 (lab-isp's ispa-side address, reached through Pulsar NAT). Breaks target for p-ev-07."
+
+# ---- lab-client steps cloned from lab.toml (the probe scripts, the zone namespaces and the dualwan
+# lab-isp steps). lab-client's eth0, eth0.30, eth0.40 and eth1 are unchanged; only the router's
+# device names differ, and they appear nowhere in these cmds.
+[devices.lab-client]
+vmid = 9105
+host = "10.109.0.50"
+user = "labuser"
+snapshot = "baseline-pulsar"
+settle_cmd = 'systemctl is-system-running && [ "$(systemctl list-jobs --no-legend | wc -l)" = 0 ] && echo idle'
+
+# The user names the scenarios' own ssh commands use.  They are vars and not literals because a scenario
+# ships: the command names the var, the var resolves to the user of the device table (id -un over the
+# runner's own ssh), so the live lab keeps working and no user name is written down.  Replace the two
+# user names above with the ones the lab VMs really have.
+[vars.client_lab_user]
+device = "lab-client"
+cmd = "id -un"
+
+[vars.lab_wifi_user]
+device = "lab-wifi"
+cmd = "id -un"
+
+# Raw TCP segments from lab-client (python3 stdlib, run with sudo): `newton-tcpraw.py DST DPORT COUNT FLAGS [GAP_S]
+# [--min N] [--max N]` sends COUNT segments with the given TCP flags (0x02 SYN, 0x03 SYN+FIN) from distinct source
+# ports, counts the distinct ports that got any TCP answer (RST or SYN-ACK) within 2 s, prints one line and exits 1 when
+# the count is outside [--min, --max]. Used to measure the router's own input chain: SYN flood limiter (25/s, burst 50)
+# and the invalid-packet drop. The receive buffer is forced to 8 MB because the replies are read after the send loop.
+[steps.tcpraw_on]
+device = "lab-client"
+cmd = '''
+cat > /tmp/newton-tcpraw.py <<'EOF'
+import argparse, random, socket, struct, sys, time
+
+def csum(b):
+    if len(b) % 2:
+        b += b'\0'
+    s = sum(struct.unpack('!%dH' % (len(b) // 2), b))
+    s = (s >> 16) + (s & 0xffff)
+    s += s >> 16
+    return ~s & 0xffff
+
+def segment(src, dst, sport, dport, flags):
+    tcp = struct.pack('!HHIIBBHHH', sport, dport, random.getrandbits(32), 0, 5 << 4, flags, 1024, 0, 0)
+    pseudo = socket.inet_aton(src) + socket.inet_aton(dst) + struct.pack('!BBH', 0, 6, len(tcp))
+    tcp = tcp[:16] + struct.pack('!H', csum(pseudo + tcp)) + tcp[18:]
+    ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(tcp), random.getrandbits(16), 0, 64, 6, 0,
+                     socket.inet_aton(src), socket.inet_aton(dst))
+    return ip[:10] + struct.pack('!H', csum(ip)) + ip[12:] + tcp
+
+ap = argparse.ArgumentParser()
+ap.add_argument('dst')
+ap.add_argument('dport', type=int)
+ap.add_argument('count', type=int)
+ap.add_argument('flags')
+ap.add_argument('gap', type=float, nargs='?', default=0.0)
+ap.add_argument('--min', type=int, default=0)
+ap.add_argument('--max', type=int, default=None)
+a = ap.parse_args()
+dst, dport, count, flags, gap = a.dst, a.dport, a.count, int(a.flags, 0), a.gap
+lo, hi = a.min, (a.max if a.max is not None else a.count)
+probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+probe.connect((dst, 9))
+src = probe.getsockname()[0]
+probe.close()
+rx = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+rx.setsockopt(socket.SOL_SOCKET, getattr(socket, 'SO_RCVBUFFORCE', 33), 8 << 20)
+tx = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
+base = random.randint(20000, 50000)
+for i in range(count):
+    tx.sendto(segment(src, dst, base + i, dport, flags), (dst, 0))
+    if gap:
+        time.sleep(gap)
+got = set()
+rx.settimeout(0.3)
+end = time.time() + 2.0
+while time.time() < end:
+    try:
+        buf, addr = rx.recvfrom(4096)
+    except socket.timeout:
+        continue
+    if addr[0] != dst:
+        continue
+    ihl = (buf[0] & 15) * 4
+    sp, dp = struct.unpack('!HH', buf[ihl:ihl + 4])
+    if sp == dport and base <= dp < base + count:
+        got.add(dp)
+ok = lo <= len(got) <= hi
+print('sent=%d answered=%d flags=0x%02x to %s:%d (allowed %d..%d) %s' % (count, len(got), flags, dst, dport, lo, hi, 'OK' if ok else 'OUT OF RANGE'))
+sys.exit(0 if ok else 1)
+EOF
+python3 -c "import ast; ast.parse(open('/tmp/newton-tcpraw.py').read())" && [ -s /tmp/newton-tcpraw.py ]
+'''
+description = "Install the raw TCP segment sender /tmp/newton-tcpraw.py on lab-client (see the comment above). Pair with tcpraw_off."
+
+[steps.tcpraw_off]
+device = "lab-client"
+cmd = "rm -f /tmp/newton-tcpraw.py; [ ! -e /tmp/newton-tcpraw.py ]"
+description = "Remove /tmp/newton-tcpraw.py from lab-client."
+
+# Zone clients on lab-client (p-ow-zone-01 guest, p-ow-zone-02 IoT). A zone client is a network namespace holding one 802.1Q
+# sub-interface of eth0 (apollo's vmbr151 is a plain bridge, so tagged frames pass between lab-client and the WAN cable, where
+# the router side is an interface on device wan.<vid>). The `_on` steps are idempotent: they first kill the processes in the
+# namespace, delete the namespace and the link if they exist, then create everything; the `_off` steps do the same removal,
+# unload 8021q if nothing else uses it (it was not loaded before), and fail if anything is left.
+# The 8021q module is loaded by `ip link add ... type vlan` on demand.
+[steps.guest_ns_on]
+device = "lab-client"
+cmd = '''
+set -e
+sudo ip netns pids guest 2>/dev/null | xargs -r sudo kill 2>/dev/null || true
+sudo ip netns del guest 2>/dev/null || true
+sudo ip link del eth0.30 2>/dev/null || true
+sudo ip netns add guest
+sudo ip link add link eth0 name eth0.30 type vlan id 30
+sudo ip link set eth0.30 netns guest
+sudo ip netns exec guest ip link set lo up
+sudo ip netns exec guest ip link set eth0.30 up
+sudo ip netns exec guest ip addr add 192.168.30.50/24 dev eth0.30
+sudo ip netns exec guest ip route add default via 192.168.30.1
+sudo ip netns exec guest ip -4 -br addr show eth0.30 | grep -q 192.168.30.50
+'''
+description = "lab-client: namespace guest with eth0.30 (VLAN 30 on eth0), 192.168.30.50/24, default via 192.168.30.1 (Pulsar's wan.30)."
+
+[steps.guest_ns_off]
+device = "lab-client"
+cmd = '''
+sudo ip netns pids guest 2>/dev/null | xargs -r sudo kill 2>/dev/null || true
+sudo ip netns del guest 2>/dev/null || true
+sudo ip link del eth0.30 2>/dev/null || true
+sudo modprobe -r 8021q 2>/dev/null || true
+! ip netns list | grep -qw guest && ! ip link show eth0.30 >/dev/null 2>&1
+'''
+description = "lab-client: remove namespace guest and the eth0.30 link (also after a failed run); fails if either is left."
+
+[steps.iot_ns_on]
+device = "lab-client"
+cmd = '''
+set -e
+sudo ip netns pids iot 2>/dev/null | xargs -r sudo kill 2>/dev/null || true
+sudo ip netns del iot 2>/dev/null || true
+sudo ip link del eth0.40 2>/dev/null || true
+sudo ip netns add iot
+sudo ip link add link eth0 name eth0.40 type vlan id 40
+sudo ip link set eth0.40 netns iot
+sudo ip netns exec iot ip link set lo up
+sudo ip netns exec iot ip link set eth0.40 up
+sudo ip netns exec iot ip addr add 192.168.40.50/24 dev eth0.40
+sudo ip netns exec iot ip route add default via 192.168.40.1
+sudo ip netns exec iot ip -4 -br addr show eth0.40 | grep -q 192.168.40.50
+# the IoT "device": a tcp service on 8080 that greets and closes (socat, started detached inside the namespace)
+sudo ip netns exec iot setsid socat TCP-LISTEN:8080,fork,reuseaddr SYSTEM:'echo iot-host-ok' </dev/null >/dev/null 2>&1 &
+sleep 1
+sudo ip netns exec iot ss -ltn | grep -q ':8080 '
+'''
+description = "lab-client: namespace iot with eth0.40 (VLAN 40 on eth0), 192.168.40.50/24, default via 192.168.40.1 (Pulsar's wan.40), and a socat tcp 8080 greeter inside it."
+
+[steps.iot_ns_off]
+device = "lab-client"
+cmd = '''
+sudo ip netns pids iot 2>/dev/null | xargs -r sudo kill 2>/dev/null || true
+sleep 1
+sudo ip netns del iot 2>/dev/null || true
+sudo ip link del eth0.40 2>/dev/null || true
+sudo modprobe -r 8021q 2>/dev/null || true
+! ip netns list | grep -qw iot && ! ip link show eth0.40 >/dev/null 2>&1
+'''
+description = "lab-client: kill the processes in namespace iot, remove it and the eth0.40 link (also after a failed run); fails if either is left."
+
+# DHCP offer probe for a zone client: `python3 /tmp/newton-dhcp-offer.py IFACE SERVER`, run inside the namespace. Same
+# method as the client_dhcp check (random chaddr, raw AF_PACKET DISCOVER, wait for the OFFER, never send a REQUEST, so no
+# lease is taken), with the interface and the expected server as arguments.
+[steps.zone_probe_on]
+device = "lab-client"
+cmd = '''
+cat > /tmp/newton-dhcp-offer.py <<'EOF'
+import os, socket, struct, sys, time
+
+IFACE, SERVER, WAIT = sys.argv[1], sys.argv[2], 12.0
+
+def csum(b):
+    s = sum(struct.unpack('!%dH' % (len(b) // 2), b))
+    s = (s >> 16) + (s & 0xffff)
+    s += s >> 16
+    return ~s & 0xffff
+
+def opts_of(buf):
+    out, i = {}, 0
+    while i < len(buf):
+        c = buf[i]
+        if c == 255:
+            break
+        if c == 0:
+            i += 1
+            continue
+        out[c] = buf[i + 2:i + 2 + buf[i + 1]]
+        i += 2 + buf[i + 1]
+    return out
+
+mac = bytes([0x02]) + os.urandom(5)
+xid = struct.unpack('!I', os.urandom(4))[0]
+nic = bytes.fromhex(open('/sys/class/net/' + IFACE + '/address').read().strip().replace(':', ''))
+body = struct.pack('!BBBBIHH4s4s4s4s16s64s128s4s', 1, 1, 6, 0, xid, 0, 0x8000,
+                   bytes(4), bytes(4), bytes(4), bytes(4), mac + bytes(10), bytes(64), bytes(128),
+                   b'\x63\x82\x53\x63')
+body += b'\x35\x01\x01' + b'\x3d\x07\x01' + mac + b'\x37\x05\x01\x03\x06\x0f\x33' + b'\xff'
+body += bytes(max(0, 300 - len(body)))
+udp = struct.pack('!HHHH', 68, 67, 8 + len(body), 0) + body
+ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0, bytes(4), b'\xff' * 4)
+ip = ip[:10] + struct.pack('!H', csum(ip)) + ip[12:]
+frame = b'\xff' * 6 + nic + b'\x08\x00' + ip + udp
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+s.bind((IFACE, 0))
+t0 = time.time()
+nxt = 0.0
+while time.time() - t0 < WAIT:
+    if time.time() - t0 >= nxt:
+        s.send(frame)
+        nxt += 4.0
+    s.settimeout(0.5)
+    try:
+        pkt, info = s.recvfrom(4096)
+    except socket.timeout:
+        continue
+    if info[2] == socket.PACKET_OUTGOING or len(pkt) < 14 + 20 + 8 + 240:
+        continue
+    ihl = (pkt[14] & 0x0f) * 4
+    if pkt[14 + 9] != 17:
+        continue
+    sport, dport = struct.unpack('!HH', pkt[14 + ihl:14 + ihl + 4])
+    d = pkt[14 + ihl + 8:]
+    if sport != 67 or dport != 68 or len(d) < 240 or d[0] != 2:
+        continue
+    if struct.unpack('!I', d[4:8])[0] != xid or d[28:34] != mac or d[236:240] != b'\x63\x82\x53\x63':
+        continue
+    o = opts_of(d[240:])
+    if o.get(53) != b'\x02':
+        continue
+    srv = socket.inet_ntoa(pkt[14 + 12:14 + 16])
+    if srv != SERVER:
+        continue
+    print('DHCPOFFER from %s yiaddr=%s after %.1fs (no REQUEST sent)' % (srv, socket.inet_ntoa(d[16:20]), time.time() - t0))
+    sys.exit(0)
+print('no DHCPOFFER from %s on %s within %.0fs' % (SERVER, IFACE, WAIT))
+sys.exit(1)
+EOF
+python3 -c "import ast; ast.parse(open('/tmp/newton-dhcp-offer.py').read())" && [ -s /tmp/newton-dhcp-offer.py ]
+'''
+description = "Install the DHCP offer probe /tmp/newton-dhcp-offer.py on lab-client (see the comment above). Pair with zone_probe_off."
+
+[steps.zone_probe_off]
+device = "lab-client"
+cmd = "rm -f /tmp/newton-dhcp-offer.py; [ ! -e /tmp/newton-dhcp-offer.py ]"
+description = "Remove /tmp/newton-dhcp-offer.py from lab-client."
+
+# DHCP probe with requested addresses: `sudo python3 /tmp/newton-dhcp-probe.py IFACE SERVER [REQUESTED_IP|none]...`. One raw
+# AF_PACKET DISCOVER per argument (random chaddr, broadcast flag, option 50 = the requested address unless "none"), no REQUEST
+# ever sent, so no lease is taken. dnsmasq answers a DISCOVER with the requested address when it lies inside a dynamic range
+# and is free, otherwise with an address of its own choosing from the pool, so the offered address shows where the pool ends.
+# dnsmasq pings each candidate for about 3 s before it offers and handles one at a time, so the probe waits up to 30 s.
+# Prints one line per argument: "requested X offered Y chaddr M" or "requested X no OFFER from S within 30s"; exit 1 if any is missing.
+[steps.dhcp_probe_on]
+device = "lab-client"
+cmd = '''
+cat > /tmp/newton-dhcp-probe.py <<'EOF'
+import os, socket, struct, sys, time
+
+IFACE, SERVER = sys.argv[1], sys.argv[2]
+REQS = sys.argv[3:] or ['none']
+WAIT = 30.0
+
+def csum(b):
+    s = sum(struct.unpack('!%dH' % (len(b) // 2), b))
+    s = (s >> 16) + (s & 0xffff)
+    s += s >> 16
+    return ~s & 0xffff
+
+def opts_of(buf):
+    out, i = {}, 0
+    while i < len(buf):
+        c = buf[i]
+        if c == 255:
+            break
+        if c == 0:
+            i += 1
+            continue
+        out[c] = buf[i + 2:i + 2 + buf[i + 1]]
+        i += 2 + buf[i + 1]
+    return out
+
+nic = bytes.fromhex(open('/sys/class/net/' + IFACE + '/address').read().strip().replace(':', ''))
+
+def discover(mac, xid, req):
+    body = struct.pack('!BBBBIHH4s4s4s4s16s64s128s4s', 1, 1, 6, 0, xid, 0, 0x8000,
+                       bytes(4), bytes(4), bytes(4), bytes(4), mac + bytes(10), bytes(64), bytes(128),
+                       b'\x63\x82\x53\x63')
+    body += b'\x35\x01\x01' + b'\x3d\x07\x01' + mac
+    if req != 'none':
+        body += b'\x32\x04' + socket.inet_aton(req)
+    body += b'\x37\x05\x01\x03\x06\x0f\x33' + b'\xff'
+    body += bytes(max(0, 300 - len(body)))
+    udp = struct.pack('!HHHH', 68, 67, 8 + len(body), 0) + body
+    ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0, bytes(4), b'\xff' * 4)
+    ip = ip[:10] + struct.pack('!H', csum(ip)) + ip[12:]
+    return b'\xff' * 6 + nic + b'\x08\x00' + ip + udp
+
+want = {}
+for req in REQS:
+    mac = bytes([0x02]) + os.urandom(5)
+    xid = struct.unpack('!I', os.urandom(4))[0]
+    want[xid] = (req, mac, discover(mac, xid, req))
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+s.bind((IFACE, 0))
+got = {}
+t0 = time.time()
+nxt = 0.0
+while time.time() - t0 < WAIT and len(got) < len(want):
+    if time.time() - t0 >= nxt:
+        for xid, (req, mac, frame) in want.items():
+            if xid not in got:
+                s.send(frame)
+        nxt += 6.0
+    s.settimeout(0.5)
+    try:
+        pkt, info = s.recvfrom(4096)
+    except socket.timeout:
+        continue
+    if info[2] == socket.PACKET_OUTGOING or len(pkt) < 14 + 20 + 8 + 240:
+        continue
+    ihl = (pkt[14] & 0x0f) * 4
+    if pkt[14 + 9] != 17:
+        continue
+    sport, dport = struct.unpack('!HH', pkt[14 + ihl:14 + ihl + 4])
+    d = pkt[14 + ihl + 8:]
+    if sport != 67 or dport != 68 or len(d) < 240 or d[0] != 2:
+        continue
+    xid = struct.unpack('!I', d[4:8])[0]
+    if xid not in want or d[28:34] != want[xid][1] or d[236:240] != b'\x63\x82\x53\x63':
+        continue
+    if opts_of(d[240:]).get(53) != b'\x02':
+        continue
+    if socket.inet_ntoa(pkt[14 + 12:14 + 16]) != SERVER:
+        continue
+    got[xid] = socket.inet_ntoa(d[16:20])
+bad = 0
+for xid, (req, mac, frame) in want.items():
+    if xid in got:
+        print('requested %s offered %s chaddr %s' % (req, got[xid], ':'.join('%02x' % b for b in mac)))
+    else:
+        print('requested %s no OFFER from %s within %.0fs' % (req, SERVER, WAIT))
+        bad += 1
+sys.exit(1 if bad else 0)
+EOF
+python3 -c "import ast; ast.parse(open('/tmp/newton-dhcp-probe.py').read())" && [ -s /tmp/newton-dhcp-probe.py ]
+'''
+description = "Install the DHCP probe with requested addresses /tmp/newton-dhcp-probe.py on lab-client (see the comment above). Pair with dhcp_probe_off."
+
+[steps.dhcp_probe_off]
+device = "lab-client"
+cmd = "rm -f /tmp/newton-dhcp-probe.py; [ ! -e /tmp/newton-dhcp-probe.py ]"
+description = "Remove /tmp/newton-dhcp-probe.py from lab-client."
+
+# DHCP probe with a chosen chaddr: `sudo python3 /tmp/newton-dhcp-probe-mac.py IFACE SERVER MAC [MAC...]`. One raw AF_PACKET
+# DISCOVER per argument (the chaddr is the given MAC, broadcast flag, no option 50, no REQUEST ever sent, so no lease is
+# taken). A DISCOVER from a MAC that has a static lease gets the lease address back in yiaddr; one from a MAC that has no
+# lease gets a pool address. dnsmasq pings each candidate for about 3 s before it offers and handles one at a time, so the
+# probe waits up to 30 s. Prints one line per argument: "chaddr M offered Y" or "chaddr M no OFFER from S within 30s"; exit
+# 1 if any is missing.
+[steps.dhcp_probe_mac_on]
+device = "lab-client"
+cmd = '''
+cat > /tmp/newton-dhcp-probe-mac.py <<'EOF'
+import os, socket, struct, sys, time
+
+IFACE, SERVER = sys.argv[1], sys.argv[2]
+MACS = sys.argv[3:]
+WAIT = 30.0
+
+def csum(b):
+    s = sum(struct.unpack('!%dH' % (len(b) // 2), b))
+    s = (s >> 16) + (s & 0xffff)
+    s += s >> 16
+    return ~s & 0xffff
+
+def opts_of(buf):
+    out, i = {}, 0
+    while i < len(buf):
+        c = buf[i]
+        if c == 255:
+            break
+        if c == 0:
+            i += 1
+            continue
+        out[c] = buf[i + 2:i + 2 + buf[i + 1]]
+        i += 2 + buf[i + 1]
+    return out
+
+nic = bytes.fromhex(open('/sys/class/net/' + IFACE + '/address').read().strip().replace(':', ''))
+
+def discover(mac, xid):
+    body = struct.pack('!BBBBIHH4s4s4s4s16s64s128s4s', 1, 1, 6, 0, xid, 0, 0x8000,
+                       bytes(4), bytes(4), bytes(4), bytes(4), mac + bytes(10), bytes(64), bytes(128),
+                       b'\x63\x82\x53\x63')
+    body += b'\x35\x01\x01' + b'\x3d\x07\x01' + mac
+    body += b'\x37\x05\x01\x03\x06\x0f\x33' + b'\xff'
+    body += bytes(max(0, 300 - len(body)))
+    udp = struct.pack('!HHHH', 68, 67, 8 + len(body), 0) + body
+    ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0, bytes(4), b'\xff' * 4)
+    ip = ip[:10] + struct.pack('!H', csum(ip)) + ip[12:]
+    return b'\xff' * 6 + nic + b'\x08\x00' + ip + udp
+
+want = {}
+for mac_str in MACS:
+    mac = bytes.fromhex(mac_str.replace(':', '').replace('-', ''))
+    xid = struct.unpack('!I', os.urandom(4))[0]
+    want[xid] = (mac_str, mac, discover(mac, xid))
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+s.bind((IFACE, 0))
+got = {}
+t0 = time.time()
+nxt = 0.0
+while time.time() - t0 < WAIT and len(got) < len(want):
+    if time.time() - t0 >= nxt:
+        for xid, (mac_str, mac, frame) in want.items():
+            if xid not in got:
+                s.send(frame)
+        nxt += 6.0
+    s.settimeout(0.5)
+    try:
+        pkt, info = s.recvfrom(4096)
+    except socket.timeout:
+        continue
+    if info[2] == socket.PACKET_OUTGOING or len(pkt) < 14 + 20 + 8 + 240:
+        continue
+    ihl = (pkt[14] & 0x0f) * 4
+    if pkt[14 + 9] != 17:
+        continue
+    sport, dport = struct.unpack('!HH', pkt[14 + ihl:14 + ihl + 4])
+    d = pkt[14 + ihl + 8:]
+    if sport != 67 or dport != 68 or len(d) < 240 or d[0] != 2:
+        continue
+    xid = struct.unpack('!I', d[4:8])[0]
+    if xid not in want or d[28:34] != want[xid][1] or d[236:240] != b'\x63\x82\x53\x63':
+        continue
+    if opts_of(d[240:]).get(53) != b'\x02':
+        continue
+    if socket.inet_ntoa(pkt[14 + 12:14 + 16]) != SERVER:
+        continue
+    got[xid] = socket.inet_ntoa(d[16:20])
+bad = 0
+for xid, (mac_str, mac, frame) in want.items():
+    if xid in got:
+        print('chaddr %s offered %s' % (mac_str, got[xid]))
+    else:
+        print('chaddr %s no OFFER from %s within %.0fs' % (mac_str, SERVER, WAIT))
+        bad += 1
+sys.exit(1 if bad else 0)
+EOF
+python3 -c "import ast; ast.parse(open('/tmp/newton-dhcp-probe-mac.py').read())" && [ -s /tmp/newton-dhcp-probe-mac.py ]
+'''
+description = "Install the DHCP probe with a chosen chaddr /tmp/newton-dhcp-probe-mac.py on lab-client (see the comment above). Pair with dhcp_probe_mac_off."
+
+[steps.dhcp_probe_mac_off]
+device = "lab-client"
+cmd = "rm -f /tmp/newton-dhcp-probe-mac.py; [ ! -e /tmp/newton-dhcp-probe-mac.py ]"
+description = "Remove /tmp/newton-dhcp-probe-mac.py from lab-client."
+
+# ---- dualwan lab-isp steps (cloned from lab.toml; the ISP side is unchanged: eth2 is ISP-A, eth3 is ISP-B)
+[steps.dw_isp_target_on]
+device = "lab-isp"
+timeout = 30
+cmd = '''
+fail() { echo "dw_isp_target_on: $1" >&2; exit 1; }
+[ "$(ip -4 -o addr show dev lo | grep -c ' 198.51.100.9/32 ')" = 0 ] || exit 0
+ip addr add 198.51.100.9/32 dev lo || fail "ip addr add failed"
+ip -4 -o addr show dev lo | grep -q ' 198.51.100.9/32 ' || fail "198.51.100.9/32 not on lo after add"
+echo "dw_isp_target_on: 198.51.100.9/32 on lo"
+'''
+description = "lab-isp: add 198.51.100.9/32 to lo (the probe target both Pulsar WAN gateways reach). Idempotent. Pair with dw_isp_target_off."
+
+[steps.dw_isp_target_off]
+device = "lab-isp"
+cmd = '''
+ip addr del 198.51.100.9/32 dev lo 2>/dev/null
+if ip -4 -o addr show dev lo | grep -q ' 198.51.100.9/32 '; then echo "dw_isp_target_off: 198.51.100.9/32 is still on lo" >&2; exit 1; fi
+exit 0
+'''
+description = "lab-isp: remove 198.51.100.9/32 from lo; fails if it is still there."
+
+[steps.dw_isp_count_on]
+device = "lab-isp"
+timeout = 30
+cmd = '''
+fail() { echo "dw_isp_count_on: $1" >&2; exit 1; }
+# Pair with dw_isp_count_off: a clean state -> rebuild the table so the
+# counters start from 0 even when dw_cut_clear leaves a stale object behind.
+nft delete table inet nwcount 2>/dev/null || true
+nft add table inet nwcount || fail "add table inet nwcount"
+nft 'add chain inet nwcount input { type filter hook input priority -50; policy accept; }' || fail "add chain input"
+nft 'add rule inet nwcount input iifname "eth2" ip daddr 198.51.100.9 icmp type echo-request ip length 228 counter comment "nw-eth2"' || fail "input rule eth2"
+nft 'add rule inet nwcount input iifname "eth3" ip daddr 198.51.100.9 icmp type echo-request ip length 228 counter comment "nw-eth3"' || fail "input rule eth3"
+nft list ruleset | grep -q 'comment "nw-eth2"' || fail "eth2 counter rule not in ruleset"
+nft list ruleset | grep -q 'comment "nw-eth3"' || fail "eth3 counter rule not in ruleset"
+echo "dw_isp_count_on: inet nwcount with eth2 and eth3 200-byte-payload counters"
+'''
+description = "lab-isp: nft table `inet nwcount`, an input chain at -50, and two named counter rules keyed by iifname eth2/eth3 that count only ICMP echo-request 200-byte-payload (length 228) datagrams to 198.51.100.9 -- the runner's lib sends exactly 200-byte pings; the health tool's 56-byte probes do not match. eth2 is ISP-A (Pulsar's wan) and eth3 is ISP-B (Pulsar's wan2). Pair with dw_isp_count_off."
+
+[steps.dw_isp_count_off]
+device = "lab-isp"
+cmd = "nft delete table inet nwcount 2>/dev/null; exit 0"
+description = "lab-isp: delete the table `inet nwcount`; tolerates absence."
+
+# Cleanup for any dualwan scenario that may have crashed mid-run. Pinned as
+# a cleanup step on every dualwan scenario so a mid-run failure leaves no
+# `inet nwcut` table and ispa is up on lab-isp.
+[steps.dw_cut_clear]
+device = "lab-isp"
+timeout = 30
+cmd = '''
+nft delete table inet nwcut 2>/dev/null || true
+if nft list ruleset 2>/dev/null | grep -q 'inet nwcut'; then echo "dw_cut_clear: inet nwcut is still present" >&2; exit 1; fi
+ifup ispa 2>/dev/null || true
+exit 0
+'''
+description = "lab-isp: delete `inet nwcut` if present and `ifup ispa` (the dw-05 fault), so a crashed dualwan scenario leaves nothing behind."
+
+# WAN-health install, cloned from lab.toml with the ssh path rewritten for the physical router: the direct,
+# host-key-pinned admin-key path to 192.168.1.1 (no proxy, no LAB_SSH_KEY), the same two-file push, the same
+# sha256 read-back and the same re-runnability (the runner resets pulsar per scenario).
+[steps.dw_wanhealth_install]
+device = "local"
+timeout = 90
+cmd = '''
+fail() { echo "dw_wanhealth_install: $1" >&2; exit 1; }
+r() { timeout 40 ssh -i {pulsar_admin_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 "$@"; }
+LOCAL_SH="scripts/newton-wan-health.sh"
+LOCAL_INIT="scripts/newton-wan-health.init"
+[ -r "$LOCAL_SH" ] || fail "missing $LOCAL_SH on the runner host"
+[ -r "$LOCAL_INIT" ] || fail "missing $LOCAL_INIT on the runner host"
+WANT_SH=$(sha256sum "$LOCAL_SH" | awk '{print $1}')
+WANT_INIT=$(sha256sum "$LOCAL_INIT" | awk '{print $1}')
+# mkdir the dir, push the two files (cat >), chmod 755, ensure the UCI
+# config file exists (empty, 600 so uci set on an unknown package works on
+# a router that has never seen the package), enable the init symlink.
+r 'mkdir -p /usr/libexec/newton && cat > /usr/libexec/newton/newton-wan-health && chmod 755 /usr/libexec/newton/newton-wan-health' <"$LOCAL_SH" || fail "push of the script to pulsar failed"
+r 'cat > /etc/init.d/newton-wan-health && chmod 755 /etc/init.d/newton-wan-health' <"$LOCAL_INIT" || fail "push of the init to pulsar failed"
+r '[ -e /etc/config/newton_wanhealth ] || { : > /etc/config/newton_wanhealth && chmod 600 /etc/config/newton_wanhealth; }; /etc/init.d/newton-wan-health enable; /etc/init.d/newton-wan-health start' </dev/null || fail "config or enable failed on pulsar"
+# Re-verify by reading the two router files' sha256 from the router. If a
+# line is missing, mismatch, or the order is wrong, fail.
+OUT=$(r 'sha256sum /usr/libexec/newton/newton-wan-health /etc/init.d/newton-wan-health' </dev/null 2>/dev/null) || fail "cannot read sha256 from pulsar"
+GOT_SH=$(printf '%s\n' "$OUT" | awk '$2 == "/usr/libexec/newton/newton-wan-health" {print $1}')
+GOT_INIT=$(printf '%s\n' "$OUT" | awk '$2 == "/etc/init.d/newton-wan-health" {print $1}')
+[ "$GOT_SH" = "$WANT_SH" ] || fail "router sha256 of newton-wan-health does not match the runner copy: got $GOT_SH want $WANT_SH"
+[ "$GOT_INIT" = "$WANT_INIT" ] || fail "router sha256 of newton-wan-health.init does not match the runner copy: got $GOT_INIT want $WANT_INIT"
+echo "dw_wanhealth_install: scripts/newton-wan-health.sh and .init on pulsar, sha256 verified, init enabled"
+'''
+description = "pulsar: install the WAN-health tool (scripts/newton-wan-health.sh + .init) at /usr/libexec/newton/newton-wan-health and /etc/init.d/newton-wan-health (mode 755), create /etc/config/newton_wanhealth empty (mode 600) if absent, run `enable`, verify sha256 of both router files equals the runner copies'. Re-runnable: the runner resets pulsar per scenario."
+
+# ---- Pulsar Wi-Fi, the Panda adapter on lab-wifi (VM 9107) ----
+# The Wi-Fi scenarios (p-ow-wifi-01 to 04 and p-ev-09-wifi-radio) need a real
+# 802.11 client and a real monitor on the router's side. lab-client (VM 9105)
+# cannot host one: it is a Debian 12 kernel with no /sys/bus/usb, no iw and no
+# wpa_supplicant, and changing its kernel would change every snapshot the
+# lab-r1 and Pulsar sets reset to. lab-wifi is a new VM (707) cloned from
+# tmpl-ubuntu-24.04 with apollo's Panda MT7921AU passed through as USB
+# 0e8d:7961 (usb3=1, the host's USB 3 port 2-1): one NIC on vmbr109 (no default
+# route, never vmbr0), the lab-client user with passwordless sudo, snapshot baseline-wifi
+# (no vmstate, so the runner resets it exactly as it does lab-client). A VM stop
+# hands the Panda back to apollo's mt7921u untouched; apollo's own wlo1 is never
+# touched. Holding both locks (a build and every run) is required, as for
+# lab-client.
+#
+# Build (once, on this VM, over both locks): install linux-image-generic
+# linux-firmware iw wpasupplicant wireless-regdb tcpdump python3, reboot, and
+# check that mt7921u binds and that `iw list` shows monitor mode and SAE. If the
+# guest kernel has no driver or firmware for the Panda, prep exits 1 and the
+# phase stops there: no kernel swap without asking. `usb3=1` on a non-q35 clone
+# is unmeasured; a guest that sees 480M or errors wants `--machine q35`, which
+# changes the snapshot.
+#
+# The key: one random 32-character passphrase at rest in
+# ~/.config/newton/pulsar/wifi-psk (mode 0600, `openssl rand -base64 24 | tr
+# -d '\n'`). [vars.wifi_psk] reads it as a SECRET var, so it is substituted
+# into a scenario batch only -- a step, post, effect or check cmd that named it
+# would be refused before any device contact, and every record, the summary and
+# the results file are masked. Pulsar's /etc/config/wireless holds it in clear
+# by nature; the runner's posts never print it (p-ev-09-wifi-radio greps with
+# `grep -F -f FILE` and prints the count only). The VM's side gets it per run
+# from [steps.wifi_key_install]: the file is piped over ssh stdin into
+# `sudo sh -c "umask 077; cat > /run/newton-psk"`, so it is in no argv on either
+# host, in no snapshot, var or result, and it lives on the VM's tmpfs until
+# [steps.wifi_cleanup] deletes it. wpa_supplicant runs without -d and its logs
+# are never collected.
+#
+# [steps.wifi_script_install] writes lab/wifi/newton-wifi.py from this repo into
+# /usr/local/bin/newton-wifi.py with a heredoc; lab/tests/test_wifi_scenarios.py
+# fails if the heredoc text and the repo file ever differ.
+#
+# [vars.p_wifi_bssid] is the BSSID of the first AP on radio1: the radio's own MAC
+# in sysfs. Every monitor effect pins --bssid to it, and --min-beacons makes a
+# wrong pin fail loudly instead of quietly reading a neighbour.
+[devices.lab-wifi]
+vmid = 9107
+host = "10.109.0.51"
+user = "labuser"
+snapshot = "baseline-wifi"
+settle_cmd = 'systemctl is-system-running && [ "$(systemctl list-jobs --no-legend | wc -l)" = 0 ] && echo idle'
+
+# The secret var: read like any other var, substituted into the scenario batch
+# only, and masked out of every record. The shape at the top of this file is the
+# same one.
+[vars.wifi_psk]
+device = "local"
+cmd = "cat ~/.config/newton/pulsar/wifi-psk"
+secret = true
+
+# The path on its own (not a secret): a scenario post greps the key out of a log
+# with `grep -F -f <this file>`, and no scenario may name a path under ~/.config.
+# lab-wifi's pinned host key (ed25519 line for 10.109.0.51, taken from the VM restored from its baseline-wifi snapshot).
+# The key-carrying ssh in wifi_key_install uses it with StrictHostKeyChecking=yes.
+[vars.lab_wifi_known_hosts]
+device = "local"
+cmd = "echo ~/.config/newton/pulsar/lab-wifi-known-hosts"
+
+[vars.wifi_psk_file]
+device = "local"
+cmd = "echo ~/.config/newton/pulsar/wifi-psk"
+
+[vars.p_wifi_bssid]
+device = "pulsar"
+cmd = "cat /sys/class/ieee80211/phy1/macaddress"
+
+# The checkout the runner was started from (the README says: from the repo
+# root).  The look-alike post imports the host's own module out of
+# {repo_root}/mcp, so the scenario needs the path of the checkout; there is
+# no other way for a scenario to reach the host code.  It is not a secret.
+# The cmd fails when the runner was not started from the checkout root, so
+# the post says so instead of failing with an import error.
+[vars.repo_root]
+device = "local"
+cmd = "test -d mcp/newton_mcp && pwd"
+
+# Install the helper on the VM. The heredoc text is the repo file byte for byte
+# (a test proves it), the copy is parsed before it is installed, and the
+# installed file is root-owned mode 0755.
+[steps.wifi_script_install]
+device = "lab-wifi"
+timeout = 90
+cmd = '''
+cat > /tmp/newton-wifi.py <<'EOF'
+#!/usr/bin/env python3
+"""Pulsar Wi-Fi helper: the Panda MT7921AU's side of the p-ow-wifi-* scenarios.
+
+Runs as root on lab-wifi (VM 9107, Ubuntu 24.04, the Panda passed through from
+apollo as USB 0e8d:7961, its only radio). python3 standard library only.
+
+    newton-wifi.py prep
+        iw reg set US; rfkill unblock wifi; find the netdev by its USB id and
+        print `panda IFNAME PHY`. The 5 GHz band is PASSIVE-SCAN (no-IR) under
+        the world domain, so the client end needs a country too. Sets the
+        radio's txpower (mBm) and ignores a failure there.
+
+    newton-wifi.py monitor --freq MHZ --bssid AA:BB:.. --secs N [expectations]
+        A monitor vif on that phy, tuned to one channel, reading frames from an
+        AF_PACKET socket. Beacon and Probe Response frames from the pinned
+        BSSID only are parsed (SSID, DS param, RSN, vendor WPS); every other
+        frame is counted and dropped. Counts are the only thing that leaves:
+        no pcap, and no BSSID, MAC or SSID but the pinned one's.
+
+    newton-wifi.py client --mode sae|psk --ssid S --bssid AA:BB:.. --freq MHZ
+                          [--ieee80211w 0|1|2] [--scan-ssid] --secs N
+                          [--expect-fail]
+        wpa_supplicant on one network block pinned to the BSSID and the
+        channel, the key read from the 0600 file /run/newton-psk (never from
+        stdin, never in argv, never printed), then DHCP and a ping of the
+        gateway. Teardown always runs.
+
+    newton-wifi.py pair --ssid S --bssid AA:BB:.. --freq MHZ [--ieee80211w N]
+                        --secs N --expect-cross reachable|blocked [--count 8]
+        Two stations of the one Panda on the pinned BSSID: a second managed vif
+        (sta2) with a locally administered address, its own wpa_supplicant
+        (own conf, own ctrl dir, own pidfile), both waited for COMPLETED, power
+        save off on both (without it the latency is about a second), then one
+        VRF per station, an address outside the DHCP pool in each and a
+        permanent neighbour entry for the other station (broadcast ARP to the
+        second vif is not reliable). The gateway is pinged from each VRF, then
+        the cross ping leaves vrfa for the other station: reachable wants at
+        least half of --count replies (rounded up), blocked wants none. The key
+        is read from /run/newton-psk as always and reaches no argv. Teardown
+        always runs.
+
+    newton-wifi.py ap start --ssid-hex HEX --freq MHZ [--secs N]
+        The Panda as an OPEN access point (wpa_supplicant mode=2,
+        key_mgmt=NONE), so the router's own radio has something of ours to
+        find in a scan. The SSID is given as hex (1 to 32 bytes) and must
+        start with newton-test, so a quote or a markup tag in the name can
+        never reach a shell word or a config quoting rule. Only the non-DFS
+        5 GHz channels are allowed (5180 5200 5220 5240 5745 5765 5785 5805
+        5825), the txpower is the same fixed 1 dBm the client runs at, and
+        `timeout` is the watchdog: the access point cannot outlive --secs
+        (120 by default, 300 at most). Prints `ap: started ssid_len=N
+        freq=F`.
+
+    newton-wifi.py ap stop
+        Stop it. Idempotent: it exits 0 whether or not one was running.
+        Prints `ap: stopped`.
+
+    newton-wifi.py cleanup
+        mon0, wpa_supplicant, dhcpcd, the key file and the config go, and with
+        them the pair's leftovers: both of its supplicants, sta2, vrfa, vrfb
+        and its conf files, pidfiles and ctrl dirs. The access point goes
+        with them. Safe to run twice.
+
+Every subcommand prints ONE summary line to stdout and everything else to
+stderr, and exits 0 only if every expectation it was given holds.  The `ap`
+subcommands refuse with exit 2 and print nothing on stdout: a refusal is an
+answer about the request, not a failure of the box.
+"""
+import argparse
+import os
+import re
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import time
+
+# ---- fixed paths and the one radio ----------------------------------------
+
+PSK_PATH = "/run/newton-psk"
+CONF_PATH = "/run/newton-wpa.conf"
+CTRL_DIR = "/run/newton-wpa"
+PIDFILE = "/run/newton-wpa.pid"
+MON_IF = "mon0"
+PANDA_VID = "0e8d"
+PANDA_PID = "7961"
+CLIENT_NET = "192.168.152.0/24"
+GATEWAY = "192.168.152.1"
+TXPOWER_MBM = 100
+SYSFS_NET = "/sys/class/net"
+ETH_P_ALL = 0x0003
+
+# The pair (OW-ZONE-03): two stations of the one Panda, so the second one is a
+# vif we create and the addresses are ours. 192.168.152.201/.202 sit outside the
+# pool the scenarios' batch hands out (.100-.149), because both stations are
+# addressed by hand and never run DHCP.
+PAIR_IF_B = "sta2"
+PAIR_MAC_B = "02:00:00:00:00:b2"
+PAIR_CONF_A = "/run/newton-pair-a.conf"
+PAIR_CONF_B = "/run/newton-pair-b.conf"
+PAIR_CTRL_A = "/run/newton-wpa-a"
+PAIR_CTRL_B = "/run/newton-wpa-b"
+PAIR_PID_A = "/run/newton-wpa-a.pid"
+PAIR_PID_B = "/run/newton-wpa-b.pid"
+PAIR_VRF_A = "vrfa"
+PAIR_VRF_B = "vrfb"
+PAIR_TABLE_A = "11"
+PAIR_TABLE_B = "12"
+PAIR_IP_A = "192.168.152.201"
+PAIR_IP_B = "192.168.152.202"
+PAIR_CIDR = "/24"
+PAIR_COUNT = 8
+
+BEACON = 0x80
+PROBE_RESPONSE = 0x50
+
+# IEEE 802.11 Table 9-149 (cipher) and 9-151 (AKM) suite types under the OUI 00-0f-ac.
+CIPHER_SUITES = {
+    1: "wep40", 2: "tkip", 4: "ccmp", 5: "wep104", 6: "bip-cmac-128",
+    8: "gcmp-128", 9: "gcmp-256", 10: "ccmp-256", 11: "bip-gmac-128",
+    12: "bip-gmac-256", 13: "bip-cmac-256",
+}
+AKM_SUITES = {
+    1: "8021x", 2: "psk", 3: "ft-8021x", 4: "ft-psk", 5: "8021x-sha256",
+    6: "psk-sha256", 7: "tdls", 8: "sae", 9: "ft-sae", 10: "ap-peek-key",
+    11: "8021x-suite-b", 12: "8021x-suite-b-192", 13: "ft-8021x-sha384",
+    14: "fils-sha256", 15: "fils-sha384", 16: "ft-fils-sha256",
+    17: "ft-fils-sha384", 18: "owe",
+}
+WPS_OUI = b"\x00\x50\xf2"
+WPS_TYPE = 0x04
+RSN_MFPC = 0x80
+RSN_MFPR = 0x40
+
+
+class WifiError(Exception):
+    """Anything that makes a subcommand fail loudly instead of guessing."""
+
+
+def soft(argv, timeout=10):
+    """run() for the paths that must not fail a run: a teardown, or the
+    idempotent cleanup. A missing binary or a timeout is swallowed."""
+    try:
+        return run(argv, timeout=timeout)
+    except WifiError as e:
+        note("%s: %s" % (argv[0], e))
+        return None
+
+
+def note(text: str) -> None:
+    """A detail line: stderr, so stdout stays the one summary line."""
+    sys.stderr.write(text.rstrip("\n") + "\n")
+
+
+def run(argv, timeout=30):
+    """Run an external command with an argv list (never a shell string) and
+    return (rc, stdout, stderr). A missing binary or a timeout is a WifiError
+    at the call site, not here."""
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=timeout)
+    except FileNotFoundError as e:
+        raise WifiError("%s is not installed" % argv[0]) from e
+    except subprocess.TimeoutExpired as e:
+        raise WifiError("%s timed out after %ss" % (argv[0], timeout)) from e
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def spawn(argv):
+    """Start a long-lived process and return its pid.
+
+    The argv is a list, never a shell string, and the child gets a session of
+    its own, so the access point keeps beaconing after this process has
+    printed its line and exited. A missing binary is a WifiError at the call
+    site, not here."""
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+    except FileNotFoundError as e:
+        raise WifiError("%s is not installed" % argv[0]) from e
+    return proc.pid
+
+
+# ---- the radio -------------------------------------------------------------
+
+def _read(path: str) -> str:
+    with open(path) as fh:
+        return fh.read().strip()
+
+
+def find_panda(sysfs: str = SYSFS_NET):
+    """(netdev, phy) of the adapter with USB id 0e8d:7961, or None.
+
+    The netdev is found by walking from /sys/class/net/<if>/device up to the
+    USB device that carries idVendor/idProduct (never by the interface name,
+    which the USB stack chooses), and the phy from the phy80211 link beside
+    it.
+    """
+    try:
+        names = sorted(os.listdir(sysfs))
+    except OSError:
+        # no sysfs at all (a container without /sys, or a wrong path): the
+        # adapter is absent, which is what the caller reports
+        return None
+    for name in names:
+        base = os.path.realpath(os.path.join(sysfs, name, "device"))
+        for _ in range(4):
+            vid = os.path.join(base, "idVendor")
+            pid = os.path.join(base, "idProduct")
+            if os.path.exists(vid) and os.path.exists(pid):
+                try:
+                    if (_read(vid).lower() == PANDA_VID
+                            and _read(pid).lower() == PANDA_PID):
+                        return name, _phy_of(sysfs, name)
+                except OSError:
+                    pass
+                break
+            parent = os.path.dirname(base)
+            if parent == base:
+                break
+            base = parent
+    return None
+
+
+def _phy_of(sysfs: str, ifname: str):
+    try:
+        return os.path.basename(
+            os.readlink(os.path.join(sysfs, ifname, "phy80211")))
+    except OSError:
+        return None
+
+
+def require_panda():
+    panda = find_panda()
+    if panda is None or not panda[0] or not panda[1]:
+        raise WifiError("no %s:%s adapter under %s" % (PANDA_VID, PANDA_PID,
+                                                       SYSFS_NET))
+    return panda
+
+
+# ---- radiotap and 802.11 --------------------------------------------------
+
+def parse_radiotap(frame):
+    """The 802.11 frame after the radiotap header, or b"" when the header is
+    not one (a driver can hand over a frame without it)."""
+    if not isinstance(frame, (bytes, bytearray)) or len(frame) < 4:
+        return b""
+    it_len = struct.unpack_from("<H", frame, 2)[0]
+    if it_len < 4 or it_len > len(frame):
+        return b""
+    return bytes(frame[it_len:])
+
+
+def parse_ies(body):
+    """{element id: [element bodies]} from an IE block. Element 0 is the SSID
+    (a zero-length one is how a hidden network looks) and 0xFF ends the block;
+    an element whose length runs past the end of the buffer stops the walk too
+    (keeping what was parsed) rather than raising."""
+    out: dict[int, list] = {}
+    i, n = 0, len(body)
+    while i + 2 <= n:
+        eid = body[i]
+        elen = body[i + 1]
+        i += 2
+        if eid == 0xFF:
+            break
+        if i + elen > n:
+            break
+        out.setdefault(eid, []).append(bytes(body[i:i + elen]))
+        i += elen
+    return out
+
+
+def suite_type(selector: bytes) -> int:
+    """The type byte of a 4-byte suite selector (OUI + type). A selector under
+    another OUI than 00-0f-ac is reported as 1000 + its type, so it can never
+    be mistaken for a standard suite."""
+    return selector[3] if selector[:3] == b"\x00\x0f\xac" else 1000 + selector[3]
+
+
+def cipher_name(number: int) -> str:
+    return CIPHER_SUITES.get(number, "suite-%d" % number)
+
+
+def akm_name(number: int) -> str:
+    return AKM_SUITES.get(number, "suite-%d" % number)
+
+
+def parse_rsn(data):
+    """The RSN element as {group, pairwise, akm, mfpc, mfpr, caps}. akm holds
+    the 00-0f-ac:<n> suite selectors themselves, so an expectation can be the
+    exact set. Anything malformed yields what was readable so far."""
+    out = {"group": None, "pairwise": [], "akm": [], "mfpc": 0, "mfpr": 0,
+           "caps": None}
+    if len(data) < 2:
+        return out
+    pos = 0
+
+    def take(count):
+        nonlocal pos
+        if pos + count > len(data):
+            raise ValueError("short")
+        chunk = data[pos:pos + count]
+        pos += count
+        return chunk
+
+    try:
+        struct.unpack("<H", take(2))               # version
+        out["group"] = cipher_name(suite_type(take(4)))
+        count = struct.unpack("<H", take(2))[0]
+        for _ in range(min(count, 64)):
+            out["pairwise"].append(cipher_name(suite_type(take(4))))
+        count = struct.unpack("<H", take(2))[0]
+        for _ in range(min(count, 64)):
+            out["akm"].append(suite_type(take(4)))
+        if pos + 2 <= len(data):
+            caps = struct.unpack("<H", take(2))[0]
+            out["caps"] = caps
+            out["mfpc"] = 1 if caps & RSN_MFPC else 0
+            out["mfpr"] = 1 if caps & RSN_MFPR else 0
+    except (ValueError, struct.error):
+        pass
+    return out
+
+
+def _has_wps(ies) -> bool:
+    for body in ies.get(0xDD, ()):
+        if len(body) >= 4 and body[:3] == WPS_OUI and body[3] == WPS_TYPE:
+            return True
+    return False
+
+
+def _mac_bytes(text: str):
+    cleaned = str(text).replace(":", "").replace("-", "").lower()
+    if len(cleaned) != 12 or re.fullmatch(r"[0-9a-f]{12}", cleaned) is None:
+        raise WifiError("not a MAC address: %r" % text)
+    return bytes.fromhex(cleaned)
+
+
+def read_frame(frame, bssid: str):
+    """The facts of one captured frame, or None when it is not a beacon or
+    probe response from the pinned BSSID.
+
+    Pure, and deliberately narrow: only the SSID bytes, the DS channel, the
+    RSN suites and whether a WPS vendor IE is there. No address of any kind is
+    returned, so a neighbour cannot leak through a return value.
+    """
+    data = parse_radiotap(frame)
+    if len(data) < 24:
+        return None
+    fc1 = data[0]
+    if fc1 & 0x03 != 0x00:                        # not a management frame
+        return None
+    subtype = (fc1 >> 4) & 0x0F
+    if subtype not in (0x08, 0x05):
+        return None
+    try:
+        pinned = _mac_bytes(bssid)
+    except WifiError:
+        return None
+    if bytes(data[16:22]) != pinned:
+        return None
+    body = data[24:]
+    if len(body) < 12:                            # timestamp, interval, caps
+        return None
+    ies = parse_ies(body[12:])
+    ssid = ies.get(0x00, [b""])[0]
+    channel = None
+    if ies.get(0x03) and ies[0x03][0]:
+        channel = ies[0x03][0][0]
+    rsn = parse_rsn(ies[0x30][0]) if ies.get(0x30) else {}
+    return {"kind": "beacon" if subtype == 0x08 else "probe-response",
+            "ssid": ssid, "channel": channel, "rsn": rsn,
+            "wps": _has_wps(ies)}
+
+
+def escape_ssid(raw) -> str:
+    """The SSID as printable ASCII, everything else as \\xNN. An empty SSID and
+    an all-NUL SSID (both how a hidden network looks) print as nothing, which
+    the caller calls `empty`."""
+    if not raw:
+        return ""
+    if raw == b"\x00" * len(raw):
+        return ""
+    out = []
+    for byte in raw:
+        if 0x20 <= byte < 0x7F and byte not in (0x22, 0x5C):
+            out.append(chr(byte))
+        else:
+            out.append("\\x%02x" % byte)
+    return "".join(out)
+
+
+def summarise(*, beacons, ssid, akm, mfpc, mfpr, wps, ciphers, neighbours,
+              other_frames, channels) -> str:
+    """The one monitor line. Counts and the pinned SSID only: neighbours are a
+    distinct count, never an address."""
+    return ("monitor: beacons=%d ssid=%s akm=%s mfpc=%d mfpr=%d wps=%d "
+            "ciphers=%s neighbours=%d other_frames=%d channels=%d"
+            % (beacons, escape_ssid(ssid) or "empty",
+               ",".join(str(a) for a in sorted(akm)) or "-",
+               mfpc, mfpr, 1 if wps else 0,
+               ",".join(sorted(set(ciphers))) or "-",
+               neighbours, other_frames, channels))
+
+
+def client_line(state, address, pinged, scan_seen) -> str:
+    return ("client: state=%s ip=%s ping=%s scan_ssid_seen=%d"
+            % (state or "NONE", address or "none",
+               "ok" if pinged else "none", 1 if scan_seen else 0))
+
+
+def expected_fail_line(state) -> str:
+    return "client: state=%s expected-fail=ok" % (state or "NONE")
+
+
+PING_RECEIVED = re.compile(r"(?<![\d.-])(\d+)\s+received")
+
+
+def parse_ping_received(text) -> int:
+    """The `N received` of an iputils ping summary, or None when there is no
+    summary at all (ping never got that far, or an older wording). None and 0
+    are kept apart: 0 is what isolation measures, None is what nothing proved."""
+    if not text:
+        return None
+    match = PING_RECEIVED.search(text)
+    return int(match.group(1)) if match else None
+
+
+def pair_line(state_a, state_b, gw_ok, received, count) -> str:
+    """The one pair line: both wpa_states, whether the gateway answered from
+    both VRFs, and how many of the cross pings came back."""
+    return ("pair: a=%s b=%s gw=%s received=%d/%d"
+            % (state_a or "NONE", state_b or "NONE",
+               "ok" if gw_ok else "fail", received, count))
+
+
+def pair_pass(state_a, state_b, gw_ok, received, count, expect_cross) -> bool:
+    """The pair's exit rule, pure: both stations COMPLETED and the gateway
+    answered, then the cross ping is the expectation. reachable wants at least
+    half of count (rounded up), blocked wants not one reply. A missing summary
+    is never a pass: nothing was proven."""
+    if state_a != "COMPLETED" or state_b != "COMPLETED" or not gw_ok:
+        return False
+    if received is None:
+        return False
+    if expect_cross == "reachable":
+        return received >= (count + 1) // 2
+    if expect_cross == "blocked":
+        return received == 0
+    raise ValueError("expect_cross must be reachable or blocked, got %r"
+                     % (expect_cross,))
+
+
+# ---- expectations ----------------------------------------------------------
+
+def check_expectations(facts, args):
+    """One string per expectation that did not hold; empty means all held."""
+    bad = []
+    beacons = facts["beacons"]
+    if beacons < args.min_beacons:
+        bad.append("beacons %d is below --min-beacons %d"
+                   % (beacons, args.min_beacons))
+    if args.expect_akm is not None:
+        want = sorted(int(a) for a in args.expect_akm.split(","))
+        got = sorted(set(facts["akm"]))
+        if got != want:
+            bad.append("akm %s is not the expected set %s"
+                       % (got, want))
+    if args.expect_mfpc is not None and facts["mfpc"] != args.expect_mfpc:
+        bad.append("mfpc %d != %d" % (facts["mfpc"], args.expect_mfpc))
+    if args.expect_mfpr is not None and facts["mfpr"] != args.expect_mfpr:
+        bad.append("mfpr %d != %d" % (facts["mfpr"], args.expect_mfpr))
+    if args.expect_ssid_empty:
+        if escape_ssid(facts["ssid"]):
+            bad.append("ssid %r is not empty" % escape_ssid(facts["ssid"]))
+    elif args.expect_ssid is not None:
+        if escape_ssid(facts["ssid"]) != args.expect_ssid:
+            bad.append("ssid %r != %r"
+                       % (escape_ssid(facts["ssid"]), args.expect_ssid))
+    if args.expect_wps and not facts["wps"]:
+        bad.append("wps: no vendor ie 00:50:f2:4 in the beacons of the pinned "
+                   "bssid")
+    if args.expect_no_wps and facts["wps"]:
+        bad.append("wps: a vendor ie 00:50:f2:4 was seen")
+    if args.expect_rsn_ciphers is not None:
+        want = sorted(set(args.expect_rsn_ciphers.split(",")))
+        got = sorted(set(facts["ciphers"]))
+        if got != want:
+            bad.append("ciphers %s != %s" % (got, want))
+    return bad
+
+
+# ---- the wpa_supplicant config and the key --------------------------------
+
+def _quote(text: str) -> str:
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def build_wpa_conf(*, ssid, bssid, freq, mode, key, ieee80211w=2,
+                   scan_ssid=False, ctrl_dir=CTRL_DIR) -> str:
+    """One network block, pinned to the BSSID and the channel. No debug flag
+    and nothing that would let wpa_supplicant log or write the key back."""
+    if mode not in ("sae", "psk"):
+        raise ValueError("mode must be sae or psk, got %r" % mode)
+    lines = [
+        "ctrl_interface=" + ctrl_dir,
+        "update_config=0",
+        "ap_scan=1",
+        "",
+        "network={",
+        '    ssid="%s"' % _quote(ssid),
+        "    bssid=%s" % bssid,
+        "    freq_list=%d" % int(freq),
+        "    scan_freq=%d" % int(freq),
+        "    key_mgmt=%s" % ("SAE" if mode == "sae" else "WPA-PSK"),
+        '    %s="%s"' % ("sae_password" if mode == "sae" else "psk",
+                        _quote(key)),
+        "    ieee80211w=%d" % int(ieee80211w),
+        "    scan_ssid=%d" % (1 if scan_ssid else 0),
+        "}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def read_key(path: str = PSK_PATH) -> str:
+    """The PSK from the 0600 file the lab pushed to the VM. stdin is never a
+    key source, the value never reaches argv, and it is never printed."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as e:
+        raise WifiError("cannot read the key file %s: %s" % (path, e)) from e
+    key = raw.decode("utf-8", "replace").strip()
+    if not key:
+        raise WifiError("the key file %s is empty" % path)
+    return key
+
+
+def parse_wpa_status(text: str) -> dict:
+    """wpa_cli status output as {lowercased field: value}."""
+    out = {}
+    for line in (text or "").splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            out[key.strip().lower()] = value.strip()
+    return out
+
+
+def scan_result_seen(text: str, ssid: str, bssid: str) -> bool:
+    """True when wpa_cli's scan_results lists this SSID on the pinned BSSID."""
+    if not text or not ssid or not bssid:
+        return False
+    for line in text.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 5:
+            continue
+        if (fields[0].strip().lower() == bssid.lower()
+                and fields[4].strip() == ssid):
+            return True
+    return False
+
+
+def ipv4_in(address: str, cidr: str):
+    """True when address is inside cidr; False for anything unparseable."""
+    try:
+        addr = struct.unpack("!I", socket.inet_aton(address))[0]
+        network, bits = cidr.split("/")
+        base = struct.unpack("!I", socket.inet_aton(network))[0]
+        mask = (0xFFFFFFFF << (32 - int(bits))) & 0xFFFFFFFF
+    except (OSError, ValueError):
+        return False
+    return (addr & mask) == (base & mask)
+
+
+# ---- subcommands -----------------------------------------------------------
+
+def cmd_prep(args) -> int:
+    rc, _, err = run(["iw", "reg", "set", "US"])
+    if rc != 0:
+        note("prep: iw reg set US failed: %s" % err.strip()[:200])
+    try:
+        run(["rfkill", "unblock", "wifi"])
+    except WifiError as e:
+        note("prep: %s; a USB radio in a VM is not rfkill-blocked, going on" % e)
+    panda = find_panda()
+    if panda is None or not panda[0] or not panda[1]:
+        print("panda absent")
+        return 1
+    ifname, phy = panda
+    # 100 mBm is the lowest fixed txpower the Panda accepts; mBm, not dBm.
+    rc, _, err = run(["iw", "dev", ifname, "set", "txpower", "fixed",
+                      str(TXPOWER_MBM)])
+    if rc != 0:
+        note("prep: txpower fixed %d mBm was refused: %s"
+             % (TXPOWER_MBM, err.strip()[:200]))
+    print("panda %s %s" % (ifname, phy))
+    return 0
+
+
+def _monitor_setup(phy: str):
+    soft(["ip", "link", "del", MON_IF])
+    rc, _, err = run(["iw", "phy", phy, "interface", "add", MON_IF,
+                      "type", "monitor"])
+    if rc != 0:
+        raise WifiError("cannot add the monitor vif: %s" % err.strip()[:200])
+
+
+def _monitor_teardown(phy: str) -> None:
+    soft(["iw", "dev", MON_IF, "del"])
+    soft(["ip", "link", "del", MON_IF])
+    note("monitor: %s removed from %s" % (MON_IF, phy))
+
+
+def cmd_monitor(args) -> int:
+    _mac_bytes(args.bssid)
+    ifname, phy = require_panda()
+    pinned = _mac_bytes(args.bssid)
+    _monitor_setup(phy)
+    sock = None
+    try:
+        run(["ip", "link", "set", MON_IF, "up"])
+        rc, _, err = run(["iw", "dev", MON_IF, "set", "freq", str(args.freq)])
+        if rc != 0:
+            note("monitor: setting the frequency failed: %s" % err.strip()[:200])
+        sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW,
+                             socket.htons(ETH_P_ALL))
+        sock.bind((MON_IF, 0))
+        beacons = 0
+        others = 0
+        neighbours = set()
+        channels = set()
+        facts = {"ssid": b"", "akm": [], "mfpc": 0, "mfpr": 0, "wps": False,
+                 "ciphers": []}
+        deadline = time.monotonic() + args.secs
+        while time.monotonic() < deadline:
+            sock.settimeout(0.5)
+            try:
+                frame = sock.recv(4096)
+            except socket.timeout:
+                continue
+            except OSError as e:
+                note("monitor: read error: %s" % e)
+                break
+            data = parse_radiotap(frame)
+            if len(data) < 24 or data[0] & 0x03 != 0x00:
+                continue
+            if ((data[0] >> 4) & 0x0F) not in (0x08, 0x05):
+                continue
+            addr3 = bytes(data[16:22])
+            if addr3 != pinned:
+                others += 1
+                # counted in memory only, never printed, logged or written
+                neighbours.add(addr3)
+                continue
+            seen = read_frame(frame, args.bssid)
+            if seen is None:
+                continue
+            beacons += 1
+            if seen["channel"] is not None:
+                channels.add(seen["channel"])
+            if seen["kind"] == "beacon" or not facts["ssid"]:
+                facts = {"ssid": seen["ssid"], "akm": seen["rsn"]["akm"],
+                         "mfpc": seen["rsn"]["mfpc"], "mfpr": seen["rsn"]["mfpr"],
+                         "wps": seen["wps"],
+                         "ciphers": ([seen["rsn"]["group"]]
+                                     if seen["rsn"]["group"] else [])
+                         + list(seen["rsn"]["pairwise"])}
+        facts["beacons"] = beacons
+        bad = check_expectations(facts, args)
+        print(summarise(beacons=beacons, neighbours=len(neighbours),
+                        other_frames=others, channels=len(channels),
+                        **{k: facts[k] for k in
+                           ("ssid", "akm", "mfpc", "mfpr", "wps", "ciphers")}))
+        for line in bad:
+            note("monitor: %s" % line)
+        return 1 if bad else 0
+    finally:
+        if sock is not None:
+            sock.close()
+        _monitor_teardown(phy)
+        note("monitor: adapter %s left as it was found" % ifname)
+
+
+def _write_conf(text: str, path: str = None) -> None:
+    fd = os.open(path or CONF_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, text.encode())
+    finally:
+        os.close(fd)
+    os.chmod(path or CONF_PATH, 0o600)
+
+
+def _unlink(path: str) -> None:
+    """Remove a file if it is there: a teardown never fails on what a crashed
+    run left missing."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _wpa_running() -> bool:
+    try:
+        pid = int(_read(PIDFILE))
+    except (OSError, ValueError):
+        return False
+    return os.path.exists("/proc/%d" % pid)
+
+
+def _client_teardown(ifname: str) -> None:
+    try:
+        pid = int(_read(PIDFILE))
+    except (OSError, ValueError):
+        pid = 0
+    if pid:
+        soft(["kill", str(pid)])
+    soft(["wpa_cli", "-p", CTRL_DIR, "-i", ifname, "terminate"])
+    soft(["dhcpcd", "-k", ifname], timeout=20)
+    # dhcpcd's hook hands the router's DNS to systemd-resolved for this link; drop it again
+    soft(["resolvectl", "revert", ifname], timeout=10)
+    soft(["ip", "addr", "flush", "dev", ifname])
+    for path in (CONF_PATH, PIDFILE):
+        _unlink(path)
+    note("client: wpa_supplicant stopped, dhcpcd released, addresses flushed")
+
+
+def _wait_associated(ifname: str, bssid: str, secs: int,
+                     ctrl_dir: str = CTRL_DIR):
+    """(state, bssid seen) once wpa_state is COMPLETED on the pinned BSSID, or
+    after secs with whatever the last state was. ctrl_dir is the one station's
+    own control directory; the client subcommand's is the default."""
+    state = ""
+    seen = ""
+    deadline = time.monotonic() + secs
+    while time.monotonic() < deadline:
+        rc, out, _ = run(["wpa_cli", "-p", ctrl_dir, "-i", ifname, "status"])
+        if rc == 0:
+            status = parse_wpa_status(out)
+            state = status.get("wpa_state", "")
+            seen = status.get("bssid", "")
+            if state == "COMPLETED" and seen.lower() == bssid.lower():
+                return state, seen
+        time.sleep(1)
+    return state, seen
+
+
+def first_client_address(ip_addr_output: str) -> str:
+    """The first address inside CLIENT_NET in `ip -4 -o addr show` output
+    (`3: wlx.. inet 192.168.152.103/24 brd ...`), or "" when there is none."""
+    for line in ip_addr_output.splitlines():
+        parts = line.split()
+        if "inet" in parts and parts.index("inet") + 1 < len(parts):
+            address = parts[parts.index("inet") + 1].split("/")[0]
+            if ipv4_in(address, CLIENT_NET):
+                return address
+    return ""
+
+
+def _dhcp(ifname: str) -> str:
+    """One-shot DHCPv4 on the wireless interface. No default route is wanted:
+    the VM's management NIC keeps the only default route the box has, so any
+    route dhcpcd adds on the wifi interface is taken away again right after."""
+    run(["dhcpcd", "-4", "-1", "-A", "-t", "40", ifname], timeout=60)
+    for _ in range(3):
+        rc, _, _ = run(["ip", "route", "del", "default", "dev", ifname],
+                       timeout=10)
+        if rc != 0:
+            break
+    rc, out, _ = run(["ip", "-4", "-o", "addr", "show", "dev", ifname])
+    return first_client_address(out)
+
+
+def cmd_client(args) -> int:
+    _mac_bytes(args.bssid)
+    ifname, _phy = require_panda()
+    key = read_key(args.psk)
+    conf = build_wpa_conf(ssid=args.ssid, bssid=args.bssid, freq=args.freq,
+                          mode=args.mode, key=key, ieee80211w=args.ieee80211w,
+                          scan_ssid=args.scan_ssid)
+    try:
+        run(["wpa_cli", "-p", CTRL_DIR, "terminate"], timeout=10)
+        _write_conf(conf)
+        # No -d: wpa_supplicant never logs, so the key cannot end up in one.
+        rc, _, err = run(["wpa_supplicant", "-B", "-i", ifname, "-c", CONF_PATH,
+                          "-D", "nl80211", "-P", PIDFILE], timeout=30)
+        if rc != 0:
+            raise WifiError("wpa_supplicant did not start: %s" % err.strip()[:200])
+        state, _seen = _wait_associated(ifname, args.bssid, args.secs)
+        if args.expect_fail:
+            print(expected_fail_line(state))
+            if state == "COMPLETED":
+                note("client: COMPLETED was reached although --expect-fail was given")
+                return 1
+            note("client: no association in %ss, as expected" % args.secs)
+            return 0
+        if state != "COMPLETED":
+            print(client_line(state, "", False, False))
+            note("client: wpa_state never became COMPLETED within %ss" % args.secs)
+            return 1
+        rc, scan_out, _ = run(["wpa_cli", "-p", CTRL_DIR, "-i", ifname,
+                               "scan_results"], timeout=30)
+        scan_seen = scan_result_seen(scan_out, args.ssid, args.bssid)
+        address = _dhcp(ifname)
+        if not address:
+            print(client_line(state, "", False, scan_seen))
+            note("client: no address in %s after DHCP" % CLIENT_NET)
+            return 1
+        rc, _, _ = run(["ping", "-c", "2", "-W", "2", GATEWAY], timeout=15)
+        pinged = rc == 0
+        print(client_line(state, address, pinged, scan_seen), flush=True)
+        if not pinged:
+            note("client: %s did not answer two pings" % GATEWAY)
+            return 1
+        hold = max(0, min(int(getattr(args, "hold", 0) or 0), 120))
+        if hold:
+            time.sleep(hold)
+        return 0
+    finally:
+        _client_teardown(ifname)
+
+
+# ---- the pair: two stations of the one Panda -------------------------------
+#
+# Everything below builds argv lists and nothing else, so the wiring is read
+# off the code and tested offline. The mechanism is the one measured live on
+# the real hardware (2026-10-23): the driver allows #{managed, P2P-client} <= 2,
+# so a second managed vif on the same phy associates alongside the first, and
+# the cross-station ping needs one VRF per station because a single namespace
+# cannot carry it (the kernel drops or loops the local-source frames).
+
+def pair_station_cmds(phy: str) -> list:
+    """The second station: a managed vif and the locally administered address
+    we give it (it has to be one, and it has to be a fixed one)."""
+    return [["iw", "phy", phy, "interface", "add", PAIR_IF_B, "type",
+             "managed"],
+            ["ip", "link", "set", PAIR_IF_B, "address", PAIR_MAC_B]]
+
+
+def pair_wpa_argv(ifname: str, conf: str, pidfile: str) -> list:
+    """One supplicant per station, each with its own conf, ctrl dir (inside the
+    conf) and pidfile. No -d: wpa_supplicant never logs, so the key cannot end
+    up in one."""
+    return ["wpa_supplicant", "-B", "-i", ifname, "-c", conf, "-D", "nl80211",
+            "-P", pidfile]
+
+
+def pair_network_cmds(ifname_a, ifname_b, mac_a, mac_b) -> list:
+    """A VRF per station in its own table, an address in each, and a permanent
+    neighbour entry for the other station both ways. The neighbour entries are
+    not belt and braces: broadcast ARP to the second vif is not reliable, and
+    without them the cross ping measures the neighbour cache instead of the
+    air."""
+    return [["ip", "link", "add", PAIR_VRF_A, "type", "vrf", "table",
+             PAIR_TABLE_A],
+            ["ip", "link", "set", PAIR_VRF_A, "up"],
+            ["ip", "link", "set", ifname_a, "master", PAIR_VRF_A],
+            ["ip", "link", "add", PAIR_VRF_B, "type", "vrf", "table",
+             PAIR_TABLE_B],
+            ["ip", "link", "set", PAIR_VRF_B, "up"],
+            ["ip", "link", "set", ifname_b, "master", PAIR_VRF_B],
+            ["ip", "addr", "add", PAIR_IP_A + PAIR_CIDR, "dev", ifname_a],
+            ["ip", "addr", "add", PAIR_IP_B + PAIR_CIDR, "dev", ifname_b],
+            ["ip", "neigh", "replace", PAIR_IP_B, "lladdr", mac_b, "dev",
+             ifname_a, "nud", "permanent"],
+            ["ip", "neigh", "replace", PAIR_IP_A, "lladdr", mac_a, "dev",
+             ifname_b, "nud", "permanent"]]
+
+
+def pair_gw_cmds() -> list:
+    """The gateway once from each station's own VRF. gw=ok means both."""
+    return [["ping", "-I", PAIR_VRF_A, "-c", "2", "-W", "2", GATEWAY],
+            ["ping", "-I", PAIR_VRF_B, "-c", "2", "-W", "2", GATEWAY]]
+
+
+def pair_cross_cmd(count: int) -> list:
+    """The cross ping: out of vrfa at the other station's address. The interval
+    is what the prototype pinged with."""
+    return ["ping", "-I", PAIR_VRF_A, "-c", str(count), "-i", "0.5", "-W", "2",
+            PAIR_IP_B]
+
+
+def pair_teardown_cmds(ifname_a, ifname_b) -> list:
+    """Both supplicants first, then the addresses, the VRF membership, the VRFs
+    and the second station, so nothing is pulled out from under a link that is
+    still up. Every one of these is run through soft(), so a teardown that runs
+    twice (or after a run that never got that far) is a no-op."""
+    return [["wpa_cli", "-p", PAIR_CTRL_A, "-i", ifname_a, "terminate"],
+            ["wpa_cli", "-p", PAIR_CTRL_B, "-i", ifname_b, "terminate"],
+            ["ip", "addr", "flush", "dev", ifname_a],
+            ["ip", "addr", "flush", "dev", ifname_b],
+            ["ip", "link", "set", ifname_a, "nomaster"],
+            ["ip", "link", "set", ifname_b, "nomaster"],
+            ["ip", "link", "del", PAIR_VRF_A],
+            ["ip", "link", "del", PAIR_VRF_B],
+            ["ip", "link", "set", PAIR_IF_B, "down"],
+            ["iw", "dev", PAIR_IF_B, "del"]]
+
+
+def _pair_teardown(ifname_a) -> None:
+    for argv in pair_teardown_cmds(ifname_a, PAIR_IF_B):
+        soft(argv)
+    for path in (PAIR_CONF_A, PAIR_CONF_B, PAIR_PID_A, PAIR_PID_B):
+        _unlink(path)
+    for path in (PAIR_CTRL_A, PAIR_CTRL_B):
+        shutil.rmtree(path, ignore_errors=True)
+    note("pair: both supplicants stopped, addresses flushed, %s, %s and %s "
+         "removed" % (PAIR_IF_B, PAIR_VRF_A, PAIR_VRF_B))
+
+
+def _read_mac(ifname: str) -> str:
+    """The address the kernel has for an interface. The neighbour entries need
+    the other station's, and it is only knowable once that station is up."""
+    path = os.path.join(SYSFS_NET, ifname, "address")
+    try:
+        return _read(path)
+    except OSError as e:
+        raise WifiError("cannot read the address of %s: %s" % (ifname, e)) from e
+
+
+def cmd_pair(args) -> int:
+    """The client isolation pair (OW-ZONE-03) as one command: two stations of
+    the one Panda on the same BSSID, each in its own VRF, and the cross ping
+    that says whether the AP carries station-to-station traffic."""
+    _mac_bytes(args.bssid)
+    ifname, phy = require_panda()
+    key = read_key()
+    stations = ((ifname, PAIR_CONF_A, PAIR_CTRL_A, PAIR_PID_A),
+                (PAIR_IF_B, PAIR_CONF_B, PAIR_CTRL_B, PAIR_PID_B))
+    states = {}
+    try:
+        for argv in pair_station_cmds(phy):
+            rc, _, err = run(argv)
+            if rc != 0:
+                raise WifiError("cannot add the second station: %s"
+                                % err.strip()[:200])
+        for station, conf_path, ctrl_dir, pidfile in stations:
+            _write_conf(build_wpa_conf(ssid=args.ssid, bssid=args.bssid,
+                                       freq=args.freq, mode="sae", key=key,
+                                       ieee80211w=args.ieee80211w,
+                                       ctrl_dir=ctrl_dir), conf_path)
+            rc, _, err = run(pair_wpa_argv(station, conf_path, pidfile),
+                             timeout=30)
+            if rc != 0:
+                raise WifiError("wpa_supplicant did not start on %s: %s"
+                                % (station, err.strip()[:200]))
+        for station, _conf, ctrl_dir, _pid in stations:
+            states[station], _seen = _wait_associated(station, args.bssid,
+                                                      args.secs, ctrl_dir)
+        if states[ifname] != "COMPLETED" or states[PAIR_IF_B] != "COMPLETED":
+            print(pair_line(states[ifname], states[PAIR_IF_B], False, 0,
+                            args.count))
+            note("pair: the two stations did not both reach COMPLETED on %s "
+                 "within %ss" % (args.bssid, args.secs))
+            return 1
+        for station, _conf, _ctrl, _pid in stations:
+            # power save off, or the round trip is about a second: measured
+            soft(["iw", "dev", station, "set", "power_save", "off"])
+        soft(["modprobe", "vrf"])
+        for argv in pair_network_cmds(ifname, PAIR_IF_B, _read_mac(ifname),
+                                      _read_mac(PAIR_IF_B)):
+            rc, _, err = run(argv, timeout=15)
+            if rc != 0:
+                raise WifiError("pair: %s failed: %s" % (" ".join(argv[:4]),
+                                                         err.strip()[:200]))
+        gw_ok = True
+        for argv in pair_gw_cmds():
+            rc, _, _ = run(argv, timeout=15)
+            if rc != 0:
+                gw_ok = False
+        if not gw_ok:
+            note("pair: %s did not answer from both VRFs" % GATEWAY)
+        _rc, out, _err = run(pair_cross_cmd(args.count),
+                             timeout=max(20, args.count * 3))
+        received = parse_ping_received(out)
+        if received is None:
+            note("pair: the cross ping printed no summary, so nothing arrived")
+        print(pair_line(states[ifname], states[PAIR_IF_B], gw_ok,
+                        received if received is not None else 0, args.count))
+        if not pair_pass(states[ifname], states[PAIR_IF_B], gw_ok, received,
+                         args.count, args.expect_cross):
+            note("pair: --expect-cross %s did not hold (received=%s of %d)"
+                 % (args.expect_cross, received, args.count))
+            return 1
+        return 0
+    finally:
+        _pair_teardown(ifname)
+
+
+# ---- the AP: the Panda as an open access point ----------------------------
+#
+# The lab's own access point, so the router's radio has something of ours to
+# find in a scan.  It is OPEN (key_mgmt=NONE), it beacons on one non-DFS 5 GHz
+# channel, it runs at the same fixed 1 dBm the client runs at, and it cannot
+# outlive its lifetime: `timeout` is its watchdog.
+
+AP_CONF_PATH = "/run/newton-wpa-ap.conf"
+AP_CTRL_DIR = "/run/newton-wpa-ap"
+AP_PIDFILE = "/run/newton-wpa-ap.pid"
+AP_SSID_PREFIX = b"newton-test"
+AP_HEX_RE = re.compile(r"^([0-9a-f]{2}){1,32}$")
+AP_FREQS = (5180, 5200, 5220, 5240, 5745, 5765, 5785, 5805, 5825)
+AP_DEFAULT_SECS = 120
+AP_MAX_SECS = 300
+AP_COUNTRY = "US"
+
+
+class ApRefused(Exception):
+    """A refusal of the AP subcommand.  The exit code is 2, not 1: a refusal
+    is an answer about the request, not a failure of the box."""
+
+
+def decode_ap_ssid(hex_text: str) -> bytes:
+    """The SSID bytes of the access point, from their hex form.
+
+    The name is given as hex and never as text: a quote, a backslash or a
+    markup tag in the name can then never reach a shell word or a config
+    quoting rule.  The hex is 1 to 32 bytes and the name must start with the
+    lab's own prefix, so the helper can only ever broadcast a name this
+    repository made up.
+    """
+    if not isinstance(hex_text, str) or not AP_HEX_RE.match(hex_text):
+        raise ApRefused("the ssid must be 1 to 32 bytes of lower-case hex")
+    name = bytes.fromhex(hex_text)
+    if not name.startswith(AP_SSID_PREFIX):
+        raise ApRefused("the ssid must start with newton-test")
+    return name
+
+
+def check_ap_freq(freq: int) -> int:
+    """The frequency of the access point, or a refusal: only the non-DFS 5 GHz
+    channels this repository measured are allowed."""
+    if freq not in AP_FREQS:
+        raise ApRefused("%d MHz is not one of the non-DFS 5 GHz channels"
+                        % freq)
+    return int(freq)
+
+
+def check_ap_secs(secs: int) -> int:
+    """The lifetime of the access point in seconds: at least one second and at
+    most five minutes."""
+    if secs < 1 or secs > AP_MAX_SECS:
+        raise ApRefused("--secs must be 1 to %d" % AP_MAX_SECS)
+    return int(secs)
+
+
+def build_ap_conf(*, ssid_hex: str, freq: int) -> str:
+    """The wpa_supplicant config of the open access point.
+
+    The ssid is the unquoted hex form wpa_supplicant accepts, so the name
+    goes through no quoting rule at all.  mode=2 is the AP mode and
+    key_mgmt=NONE is an open network: this is the lab's own beacon, never a
+    neighbour's.  The channel is `frequency`: `freq_list` only limits a scan,
+    and an AP started with it came up on 2.4 GHz channel 11 (measured live,
+    2026-10-24).
+    """
+    decode_ap_ssid(ssid_hex)
+    check_ap_freq(freq)
+    return "\n".join([
+        "ctrl_interface=" + AP_CTRL_DIR,
+        "update_config=0",
+        "ap_scan=1",
+        "",
+        "network={",
+        "    ssid=%s" % ssid_hex,
+        "    mode=2",
+        "    key_mgmt=NONE",
+        "    frequency=%d" % int(freq),
+        "}",
+        "",
+    ])
+
+
+def ap_supplicant_argv(ifname: str, conf: str, pidfile: str, secs: int) -> list:
+    """The argv of the access point's supplicant.
+
+    `timeout` is the watchdog: it ends the supplicant when the lifetime is
+    over, so the access point cannot stay on after this run, whatever happens
+    to the process that started it.  No -d: the supplicant never logs.
+    """
+    return ["timeout", "--signal=TERM", "--kill-after=5", str(int(secs)),
+            "wpa_supplicant", "-i", ifname, "-c", conf, "-D", "nl80211",
+            "-P", pidfile]
+
+
+def _ap_pid() -> int:
+    """The pid of the access point's supplicant, or 0 when there is none.
+
+    The pidfile alone is not enough: a pid can be reused, and the watchdog
+    may have ended the supplicant while its pidfile stayed behind.  The
+    process has to be the one that runs the access point's config.
+    """
+    try:
+        pid = int(_read(AP_PIDFILE))
+    except (OSError, ValueError):
+        return 0
+    if pid <= 0:
+        return 0
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as fh:
+            cmdline = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return 0
+    return pid if AP_CONF_PATH in cmdline else 0
+
+
+def ap_wait_started(pidfile: str = AP_PIDFILE, secs: int = 25,
+                    ifname: str = "") -> bool:
+    """True when the access point is up: the interface is in AP mode.
+
+    wpa_supplicant does not write the pidfile of -P unless it daemonizes
+    (measured live, 2026-10-24: the access point was up and the old check,
+    which waited for that file, said it was not), so cmd_ap_start writes the
+    pid itself and this waits for the sign that matters: `iw dev IF info`
+    says `type AP`.  The first start needs a scan, so it takes several
+    seconds.
+    """
+    deadline = time.monotonic() + secs
+    while time.monotonic() < deadline:
+        try:
+            pid = int(_read(pidfile))
+        except (OSError, ValueError):
+            pid = 0
+        if pid and not os.path.exists("/proc/%d" % pid):
+            return False
+        if pid and ifname:
+            rc, out, _ = run(["iw", "dev", ifname, "info"])
+            if rc == 0 and "type AP" in out:
+                return True
+        time.sleep(0.5)
+    return False
+
+
+def _ap_stop() -> None:
+    """Stop the access point if one runs.  Idempotent: a stop with no access
+    point is a no-op, and a stop that runs twice is the same as one."""
+    pid = _ap_pid()
+    if pid:
+        soft(["kill", str(pid)])
+    soft(["wpa_cli", "-p", AP_CTRL_DIR, "terminate"])
+    for path in (AP_CONF_PATH, AP_PIDFILE):
+        _unlink(path)
+    shutil.rmtree(AP_CTRL_DIR, ignore_errors=True)
+
+
+def cmd_ap_start(args) -> int:
+    """The Panda as an open access point."""
+    try:
+        name = decode_ap_ssid(args.ssid_hex)
+        freq = check_ap_freq(args.freq)
+        secs = check_ap_secs(args.secs)
+    except ApRefused as e:
+        note("ap: %s" % e)
+        return 2
+    ifname, _phy = require_panda()
+    # One access point at a time: the driver allows one, so an earlier one
+    # goes first.
+    _ap_stop()
+    _write_conf(build_ap_conf(ssid_hex=args.ssid_hex, freq=freq), AP_CONF_PATH)
+    rc, _, err = run(["iw", "reg", "set", AP_COUNTRY])
+    if rc != 0:
+        note("ap: iw reg set %s failed: %s" % (AP_COUNTRY, err.strip()[:200]))
+    rc, _, err = run(["iw", "dev", ifname, "set", "txpower", "fixed",
+                      str(TXPOWER_MBM)])
+    if rc != 0:
+        note("ap: txpower fixed %d mBm was refused: %s"
+             % (TXPOWER_MBM, err.strip()[:200]))
+    try:
+        pid = spawn(ap_supplicant_argv(ifname, AP_CONF_PATH, AP_PIDFILE, secs))
+    except WifiError:
+        _unlink(AP_CONF_PATH)
+        raise
+    if pid:
+        _write_conf(str(pid) + "\n", AP_PIDFILE)
+    if not ap_wait_started(ifname=ifname):
+        _ap_stop()
+        raise WifiError("the access point did not start")
+    print("ap: started ssid_len=%d freq=%d" % (len(name), freq))
+    return 0
+
+
+def cmd_ap_stop(args) -> int:
+    """Stop the access point.  Idempotent: it exits 0 whether or not one was
+    running."""
+    _ap_stop()
+    print("ap: stopped")
+    return 0
+
+
+def cmd_cleanup(args) -> int:
+    """Idempotent and always exit 0: it runs after a crashed run, when some of
+    these things may not exist at all."""
+    panda = find_panda()
+    ifname = panda[0] if panda else None
+    soft(["iw", "dev", MON_IF, "del"])
+    soft(["ip", "link", "del", MON_IF])
+    if ifname:
+        if _wpa_running():
+            _client_teardown(ifname)
+        else:
+            soft(["dhcpcd", "-k", ifname], timeout=20)
+    soft(["wpa_cli", "-p", PAIR_CTRL_A, "terminate"], timeout=10)
+    soft(["wpa_cli", "-p", PAIR_CTRL_B, "terminate"], timeout=10)
+    if ifname:
+        soft(["ip", "addr", "flush", "dev", ifname])
+        soft(["ip", "neigh", "flush", "dev", ifname])
+    soft(["ip", "link", "set", PAIR_IF_B, "down"])
+    soft(["iw", "dev", PAIR_IF_B, "del"])
+    soft(["ip", "link", "del", PAIR_VRF_A])
+    soft(["ip", "link", "del", PAIR_VRF_B])
+    for path in (PAIR_CONF_A, PAIR_CONF_B, PAIR_PID_A, PAIR_PID_B):
+        _unlink(path)
+    for path in (PAIR_CTRL_A, PAIR_CTRL_B):
+        shutil.rmtree(path, ignore_errors=True)
+    _ap_stop()
+    for path in (CONF_PATH, PIDFILE, PSK_PATH):
+        _unlink(path)
+    print("cleanup: mon0=gone wpa=stopped dhcpcd=stopped sta2=gone vrfs=gone "
+          "ap=stopped psk=removed conf=removed")
+    return 0
+
+
+# ---- the parser ------------------------------------------------------------
+
+def _akm_list(value: str) -> str:
+    """--expect-akm as a normalised "2,8": the exact set of 00-0f-ac suite
+    numbers, checked here so a typo fails at the command line, not at the
+    comparison."""
+    parts = [part for part in str(value).split(",") if part]
+    if not parts or not all(part.isdigit() for part in parts):
+        raise argparse.ArgumentTypeError(
+            "AKM suites are 00-0f-ac numbers, comma separated (8, or 2,8)")
+    return ",".join(str(int(part)) for part in parts)
+
+
+def _positive_int(value: str) -> int:
+    """A count that means something: --count 0 would ping nowhere."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("%r is not a number"
+                                         % (value,)) from None
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more, got %d" % number)
+    return number
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="newton-wifi.py",
+        description="Pulsar Wi-Fi helper for the lab-wifi VM (the Panda "
+                    "MT7921AU passed through from apollo).")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    prep = sub.add_parser("prep", help="country, rfkill, find the radio, txpower")
+    prep.set_defaults(func=cmd_prep)
+
+    mon = sub.add_parser("monitor",
+                         help="beacon parse of the pinned BSSID on one channel")
+    mon.add_argument("--freq", type=int, required=True, metavar="MHZ")
+    mon.add_argument("--bssid", required=True, metavar="AA:BB:CC:DD:EE:FF")
+    mon.add_argument("--secs", type=int, required=True, metavar="N")
+    mon.add_argument("--min-beacons", type=int, default=5, metavar="K")
+    mon.add_argument("--expect-akm", type=_akm_list, metavar="N[,N]",
+                     help="the exact set of 00-0f-ac AKM suite numbers")
+    mon.add_argument("--expect-mfpc", type=int, choices=(0, 1))
+    mon.add_argument("--expect-mfpr", type=int, choices=(0, 1))
+    ssid = mon.add_mutually_exclusive_group()
+    ssid.add_argument("--expect-ssid", metavar="S")
+    ssid.add_argument("--expect-ssid-empty", action="store_true")
+    wps = mon.add_mutually_exclusive_group()
+    wps.add_argument("--expect-wps", action="store_true")
+    wps.add_argument("--expect-no-wps", action="store_true")
+    mon.add_argument("--expect-rsn-ciphers", metavar="NAME[,NAME]")
+    mon.set_defaults(func=cmd_monitor)
+
+    cli = sub.add_parser("client",
+                         help="associate to the pinned BSSID, DHCP, ping")
+    cli.add_argument("--mode", choices=("sae", "psk"), required=True)
+    cli.add_argument("--ssid", required=True, metavar="S")
+    cli.add_argument("--bssid", required=True, metavar="AA:BB:CC:DD:EE:FF")
+    cli.add_argument("--freq", type=int, required=True, metavar="MHZ")
+    cli.add_argument("--ieee80211w", type=int, choices=(0, 1, 2), default=2)
+    cli.add_argument("--scan-ssid", action="store_true")
+    cli.add_argument("--secs", type=int, required=True, metavar="N")
+    cli.add_argument("--expect-fail", action="store_true")
+    cli.add_argument("--hold", type=int, default=0, metavar="N",
+                     help="keep the association up N more seconds (0-120) "
+                          "after the summary line, for a load measured by "
+                          "another process")
+    cli.add_argument("--psk", default=PSK_PATH, metavar="PATH",
+                     help="the 0600 key file (default /run/newton-psk)")
+    cli.set_defaults(func=cmd_client)
+
+    clean = sub.add_parser("cleanup", help="remove mon0, wpa_supplicant, the key")
+    clean.set_defaults(func=cmd_cleanup)
+
+    pair = sub.add_parser("pair",
+                          help="two stations on the pinned BSSID, one VRF each")
+    pair.add_argument("--ssid", required=True, metavar="S")
+    pair.add_argument("--bssid", required=True, metavar="AA:BB:CC:DD:EE:FF")
+    pair.add_argument("--freq", type=int, required=True, metavar="MHZ")
+    pair.add_argument("--ieee80211w", type=int, choices=(0, 1, 2), default=1,
+                      help="protected frames: 1 (optional) by default, which "
+                           "is what a WPA2/WPA3 mixed AP offers")
+    pair.add_argument("--secs", type=int, required=True, metavar="N",
+                      help="how long each station may take to associate")
+    pair.add_argument("--expect-cross", choices=("reachable", "blocked"),
+                      required=True)
+    pair.add_argument("--count", type=_positive_int, default=PAIR_COUNT,
+                      metavar="N",
+                      help="cross pings to send (default %d)" % PAIR_COUNT)
+    pair.set_defaults(func=cmd_pair)
+
+    ap = sub.add_parser("ap", help="the Panda as an open access point")
+    ap_sub = ap.add_subparsers(dest="ap_command", required=True)
+    ap_start = ap_sub.add_parser("start", help="start the open access point")
+    ap_start.add_argument("--ssid-hex", required=True, metavar="HEX",
+                           help="the SSID as 1 to 32 bytes of lower-case hex; "
+                                "it must start with newton-test")
+    ap_start.add_argument("--freq", type=int, required=True, metavar="MHZ",
+                           help="one of the non-DFS 5 GHz channels: %s"
+                                % ", ".join(str(f) for f in AP_FREQS))
+    ap_start.add_argument("--secs", type=int, default=AP_DEFAULT_SECS,
+                           metavar="N",
+                           help="the lifetime in seconds (1 to %d, default %d)"
+                                % (AP_MAX_SECS, AP_DEFAULT_SECS))
+    ap_start.set_defaults(func=cmd_ap_start)
+    ap_stop = ap_sub.add_parser("stop", help="stop the access point")
+    ap_stop.set_defaults(func=cmd_ap_stop)
+    return parser
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, _raise_signal)
+        except (OSError, ValueError):
+            pass
+    try:
+        return args.func(args)
+    except WifiError as e:
+        note("%s: %s" % (args.command, e))
+        print("%s: failed" % args.command)
+        return 1
+    except Exception as e:                      # never leave a vif behind
+        note("%s: %s: %s" % (args.command, type(e).__name__, e))
+        print("%s: failed" % args.command)
+        return 1
+
+
+def _raise_signal(signum, _frame):
+    raise SystemExit(128 + signum)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+EOF
+python3 -c "import ast; ast.parse(open('/tmp/newton-wifi.py').read())" && [ -s /tmp/newton-wifi.py ]
+sudo install -m 0755 -o root -g root /tmp/newton-wifi.py /usr/local/bin/newton-wifi.py
+rm -f /tmp/newton-wifi.py
+[ -x /usr/local/bin/newton-wifi.py ]
+'''
+description = "lab-wifi: install lab/wifi/newton-wifi.py as /usr/local/bin/newton-wifi.py (heredoc, parsed, mode 0755, root-owned)."
+
+# Push the key to the VM over ssh stdin, never in argv. Same proxy, key and
+# options the runner uses for a VM (from the environment it hands a local cmd);
+# the ssh command carries no host key file of its own, exactly as the lab.toml
+# local steps do.
+[steps.wifi_key_install]
+device = "local"
+timeout = 90
+cmd = '''
+set -e
+[ -r {wifi_psk_file} ] || { echo "wifi_key_install: {wifi_psk_file} is missing" >&2; exit 1; }
+[ -s {wifi_psk_file} ] || { echo "wifi_key_install: {wifi_psk_file} is empty" >&2; exit 1; }
+timeout 40 ssh -i "$LAB_SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile={lab_wifi_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR -o ConnectTimeout=8 -o "ProxyCommand=$LAB_SSH_PROXY" {lab_wifi_user}@10.109.0.51 'sudo sh -c "umask 077; cat > /run/newton-psk" && sudo chown root:root /run/newton-psk && sudo chmod 600 /run/newton-psk' < {wifi_psk_file}
+[ "$(timeout 40 ssh -i "$LAB_SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile={lab_wifi_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR -o ConnectTimeout=8 -o "ProxyCommand=$LAB_SSH_PROXY" {lab_wifi_user}@10.109.0.51 'sudo -n stat -c %a /run/newton-psk')" = 600 ] || { echo "wifi_key_install: /run/newton-psk is not mode 600" >&2; exit 1; }
+echo "wifi_key_install: the key reached lab-wifi /run/newton-psk (tmpfs, mode 600, root-owned; wifi_cleanup removes it)"
+'''
+description = "the agent host: pipe the key file over ssh stdin into lab-wifi's /run/newton-psk (mode 600, tmpfs). Never in argv, a var or a record."
+
+[steps.wifi_prep]
+device = "lab-wifi"
+timeout = 90
+cmd = "sudo newton-wifi.py prep"
+description = "lab-wifi: iw reg set US, rfkill unblock wifi, find the Panda by USB id 0e8d:7961, txpower fixed 100 mBm. Prints `panda IFNAME PHY`; exits 1 when the radio is absent."
+
+[steps.wifi_cleanup]
+device = "lab-wifi"
+timeout = 90
+cmd = '''
+set -e
+sudo newton-wifi.py ap stop
+sudo newton-wifi.py cleanup
+'''
+description = "lab-wifi: stop the access point, then delete mon0, stop wpa_supplicant and dhcpcd, remove /run/newton-psk and /run/newton-wpa.conf. Idempotent, so it is safe after a failed run."
+
+# The access point of the Wi-Fi scan scenarios: the Panda on lab-wifi as
+# an OPEN access point (wpa_supplicant mode=2, key_mgmt=NONE) so the router's
+# own radio has something of ours to find in a scan.  The SSID is given as
+# hex, so a quote or a markup tag in the name never reaches a shell word or
+# a config quoting rule, and the helper refuses any name that does not start
+# with newton-test.  Only the non-DFS 5 GHz channels are allowed; 5220 MHz is
+# channel 44, next to the router's own radio1 (channel 36).  The lifetime is
+# hard: `timeout` ends the supplicant after --secs, so the access point
+# cannot stay on.  One SSID per run: the driver allows one AP at a time.
+[steps.wifi_ap_injection]
+device = "lab-wifi"
+timeout = 90
+cmd = "sudo newton-wifi.py ap start --ssid-hex 6e6577746f6e2d746573742d3c2f756e747275737465643e53595354454d --freq 5220 --secs 120"
+description = "lab-wifi: the Panda as an open access point beaconing the injection name (30 bytes, a delimiter-escape attempt), as hex, on 5220 MHz (channel 44), for at most 120 s."
+
+[steps.wifi_ap_lookalike]
+device = "lab-wifi"
+timeout = 90
+cmd = "sudo newton-wifi.py ap start --ssid-hex 6e6577746f6e2d746573742d496162 --freq 5220 --secs 120"
+description = "lab-wifi: the Panda as an open access point beaconing the look-alike name (newton-test-Iab, a capital I for an l), as hex, on 5220 MHz (channel 44), for at most 120 s."
+
+[steps.wifi_ap_stop]
+device = "lab-wifi"
+timeout = 90
+cmd = "sudo newton-wifi.py ap stop"
+description = "lab-wifi: stop the access point. Idempotent: it exits 0 whether or not one was running."
+
+# The radios are off at the end of every Wi-Fi scenario (what
+# `reset_after` exists for). The runner runs a scenario's regression as its
+# BEFORE probes and its AFTER probes, both before reset_after, so this cannot
+# sit in a Wi-Fi scenario's own regression (its radio is on after its apply):
+# each of the five names it in `after_reset`, which runs straight after that
+# scenario's own reset_after has restored the archive. It also runs in
+# p-ow-00-baseline's regression, the first scenario after p-ev-09-wifi-radio
+# in a full run's order, which reads the same state again.
+[checks.p_radios_off]
+device = "pulsar"
+timeout = 60
+cmd = '''
+fail() { echo "p_radios_off: $1" >&2; exit 1; }
+d=$(uci -q get wireless.default_radio1.disabled); [ "$d" = 1 ] || fail "wireless.default_radio1.disabled is '$d', not 1"
+s=$(uci -q get wireless.default_radio1.ssid); [ "$s" = OpenWrt ] || fail "wireless.default_radio1.ssid is '$s', not the stock OpenWrt"
+st=$(wifi status | tr -d ' \t\n')
+k=$(printf '%s\n' "$st" | grep -o '"interfaces":\[[^]]*\]' | wc -l)
+e=$(printf '%s\n' "$st" | grep -o '"interfaces":\[[^]]*\]' | grep -c '\[\]')
+[ "$k" -ge 2 ] || fail "wifi status shows $k \"interfaces\" keys, expected one per radio"
+[ "$k" = "$e" ] || fail "wifi status shows a non-empty interfaces list ($e of $k are empty)"
+echo "p_radios_off: radio1 disabled=1, $k empty interfaces lists, ssid OpenWrt"
+'''
+expect_stdout = '^p_radios_off: '
+description = "Pulsar's radios are off again: radio1 disabled=1 with the stock ssid, and every `interfaces` list in `wifi status` (one per radio) empty. A Wi-Fi scenario runs it from `after_reset`, so it also proves its reset_after restored the archive."
+
+# The Panda is not an access point any more. The Wi-Fi scan scenarios
+# start the Panda as an open AP so the router's own radio has something of
+# ours to find; the scenario's cleanup stops it, and this check proves it:
+# no supplicant runs the AP's config and no interface is in AP mode (the
+# radio is a managed interface again). It runs from `after_reset`, next to
+# p_radios_off: the radios of the router and the radio of the Panda are both
+# off again at the end of a scan scenario.
+[checks.p_panda_ap_off]
+device = "lab-wifi"
+timeout = 60
+cmd = '''
+fail() { echo "p_panda_ap_off: $1" >&2; exit 1; }
+n=$(sudo ps -eo args= 2>/dev/null | grep -c '[w]pa_supplicant .*-c /run/newton-wpa-ap.conf' || true)
+[ "$n" = 0 ] || fail "$n wpa_supplicant process(es) still run the access point"
+d=$(sudo iw dev 2>&1) || fail "iw dev failed"
+case "$d" in *"type ap"*) fail "an interface is still in AP mode";; esac
+case "$d" in *"type managed"*) ;; *) fail "the radio has no managed interface";; esac
+echo "p_panda_ap_off: no AP supplicant, no interface in AP mode, the radio is managed"
+'''
+expect_stdout = '^p_panda_ap_off: '
+description = "lab-wifi: the Panda is not an access point any more: no wpa_supplicant runs the AP's config and `iw dev` shows no interface in AP mode (the radio is managed again). A Wi-Fi scan scenario runs it from `after_reset`, next to p_radios_off."
+
+# The backup/restore drill: what the restore left behind, read from the
+# router itself. Every Pulsar reset is the same drill - a `sysupgrade -r` of the
+# baseline archive followed by a fingerprint check - and the fingerprint match
+# is the runner's own, already part of every reset and reset_after: it compares
+# the restored /etc/config (and the other fingerprinted files) against the
+# archive's, byte for byte, and a mismatch marks abort_run (exit 2). This check
+# is the other half: it asks the router for the values the drill scenario set
+# and requires the archive's state back, which is what shows that a confirmed
+# multi-config change does not survive the restore.
+#
+# It runs from a scenario's `after_reset`, i.e. after that scenario's own
+# reset_after, which is the only place a check can see what a restore left. It
+# prints one fixed line and nothing else when all five facts hold, and the first
+# fact that fails goes to stderr with its value and exits 1.
+#
+# The live hostname is read through ${NEWTON_HOSTNAME_FILE:-/proc/sys/kernel/
+# hostname}: on the router the variable is unset and this is /proc, and the
+# override is what lets lab/tests/test_drill_scenario.py run this text for real
+# against stubs instead of against /proc. Nothing else in the cmd reads it.
+[checks.p_drill_restored]
+device = "pulsar"
+timeout = 60
+cmd = '''
+fail() { echo "p_drill_restored: $1" >&2; exit 1; }
+u=$(uci -q get system.@system[0].hostname)
+[ "$u" = Pulsar ] || fail "system.@system[0].hostname is '$u', not the archive's Pulsar"
+d=$(uci -q get dhcp.drilltest)
+[ -z "$d" ] || fail "dhcp.drilltest is still there ('$d')"
+f=$(uci -q get firewall.drilltest)
+[ -z "$f" ] || fail "firewall.drilltest is still there ('$f')"
+h=$(cat ${NEWTON_HOSTNAME_FILE:-/proc/sys/kernel/hostname})
+[ "$h" = Pulsar ] || fail "the live hostname is '$h', not the archive's Pulsar"
+n=$(nft list ruleset | grep -c 65123)
+[ "$n" -eq 0 ] || fail "65123 is still in the loaded ruleset ($n lines)"
+echo "p_drill_restored: hostname=Pulsar, drilltest lease and rule gone"
+'''
+expect_stdout = '^p_drill_restored: '
+description = "Pulsar is back at the baseline archive after a reset: system.@system[0].hostname and the live hostname are the archive's Pulsar, dhcp.drilltest and firewall.drilltest are gone and 65123 is out of the loaded ruleset. One fixed line when all five hold, else the first failing value on stderr and rc 1. That the restored state matches the archive byte for byte is the runner's own post-restore fingerprint check, already part of every reset and reset_after; this check reads the values the drill scenario set. Run from a scenario's after_reset, so it only ever sees the far side of that scenario's own reset_after."
+
+[checks.p_wifi_client_ready]
+device = "lab-wifi"
+timeout = 90
+cmd = "sudo newton-wifi.py prep"
+expect_stdout = "^panda "
+description = "lab-wifi: the Panda MT7921AU (USB 0e8d:7961) is present, the country is US and the radio came up; prep prints `panda IFNAME PHY`."

@@ -1,0 +1,107 @@
+# the backup/restore drill on Pulsar. Not a port of a lab scenario: it is the
+# one that names what every Pulsar reset is, and shows a confirmed change does not
+# survive it. The batch sets three configs at once so the restore has something to
+# take back: the hostname, a static DHCP lease and a firewall rule. Every post runs
+# on pulsar before the reset and proves that change is live; after_reset runs the
+# check p_drill_restored straight after this scenario's own reset_after, which is
+# the only place a check can see what the restore left behind.
+name = "p-drill-01-backup-restore"
+description = "The backup/restore drill. Every Pulsar reset is this drill: the reset the runner does before each scenario and every reset_after one is a `sysupgrade -r` of the baseline archive (the device's baseline_backup, pinned by baseline_sha256) followed by a fingerprint check, so no scenario inherits the last one's config and a reset that did not really restore marks abort_run and stops the run (exit 2). This scenario is the one that names the drill and shows what it does to a change that was confirmed. The batch sets three configs in one uci batch: system.@system[0].hostname='pulsar-drill', the static lease dhcp.drilltest (host, name drilltest, mac 02:00:00:00:00:88, ip 192.168.1.88) and the user rule firewall.drilltest (rule, name Drill-Test, src lan, dest wan, proto tcp, dest_port 65123, target REJECT). expect = confirmed: the plan is approved (no approval step: the router rates a lan-to-wan REJECT rule not-required), applied and confirmed with the rollback window armed, so by the time the posts run the change is committed and permanent until something removes it. Thirteen posts on pulsar prove it is LIVE before the reset: uci reads back every value the batch set, the live hostname in /proc/sys/kernel/hostname is pulsar-drill (not just the committed config), the lease has reached the generated dnsmasq config (grep -rl over /var/etc/ and /tmp/etc/; either directory is accepted, the exact one is not measured) and the rule is in the loaded ruleset (nft list ruleset | grep -c 65123 is at least 1, so fw4 really built it and it is not only a line in /etc/config). After the posts the runner runs this scenario's reset_after, which is the same drill, and after_reset runs the check p_drill_restored: system.@system[0].hostname and the live hostname are the archive's Pulsar again, dhcp.drilltest and firewall.drilltest read back empty and 65123 is out of the loaded ruleset. That the restored state matches the archive byte for byte is the runner's own post-restore fingerprint check, already part of every reset and reset_after; p_drill_restored reads the values themselves. What this proves: a confirmed, approved multi-config change does not survive the backup/restore reset, and the drill does not merely put the hostname back - the lease and the firewall rule go with it. What it does not prove: that the restore is a rollback of Newton's making (it is not: Newton confirmed this change, and only the reset removes it) or that a reset restores anything outside /etc/config and the fingerprinted files."
+target = "pulsar"
+reset = ["pulsar"]
+reset_after = ["pulsar"]
+after_reset = ["p_drill_restored"]
+expect = "confirmed"
+timeout = 240
+setup = ["portfwd_on"]
+regression = "default"
+probes = [["conf-has", "dnsmasq", "substr", "present", "02:00:00:00:00:88"], ["nft-rule", "inet", "fw4", "ruleset", "present", "dport 65123"]]
+batch = '''
+set system.@system[0].hostname='pulsar-drill'
+set dhcp.drilltest=host
+set dhcp.drilltest.name='drilltest'
+set dhcp.drilltest.mac='02:00:00:00:00:88'
+set dhcp.drilltest.ip='192.168.1.88'
+set firewall.drilltest=rule
+set firewall.drilltest.name='Drill-Test'
+set firewall.drilltest.src='lan'
+set firewall.drilltest.dest='wan'
+set firewall.drilltest.proto='tcp'
+set firewall.drilltest.dest_port='65123'
+set firewall.drilltest.target='REJECT'
+'''
+
+[[post]]
+device = "pulsar"
+cmd = "uci get system.@system[0].hostname"
+expect_stdout = "^pulsar-drill$"
+
+[[post]]
+device = "pulsar"
+cmd = "uci get dhcp.drilltest.name"
+expect_stdout = "^drilltest$"
+
+[[post]]
+device = "pulsar"
+cmd = "uci get dhcp.drilltest.mac"
+expect_stdout = "^02:00:00:00:00:88$"
+
+[[post]]
+device = "pulsar"
+cmd = "uci get dhcp.drilltest.ip"
+expect_stdout = "^192\\.168\\.1\\.88$"
+
+[[post]]
+device = "pulsar"
+cmd = "uci get firewall.drilltest.name"
+expect_stdout = "^Drill-Test$"
+
+[[post]]
+device = "pulsar"
+cmd = "uci get firewall.drilltest.src"
+expect_stdout = "^lan$"
+
+[[post]]
+device = "pulsar"
+cmd = "uci get firewall.drilltest.dest"
+expect_stdout = "^wan$"
+
+[[post]]
+device = "pulsar"
+cmd = "uci get firewall.drilltest.proto"
+expect_stdout = "^tcp$"
+
+[[post]]
+device = "pulsar"
+cmd = "uci get firewall.drilltest.dest_port"
+expect_stdout = "^65123$"
+
+[[post]]
+device = "pulsar"
+cmd = "uci get firewall.drilltest.target"
+expect_stdout = "^REJECT$"
+
+# The live hostname, not the committed config: a `set` that only reached
+# /etc/config would not change this one.
+[[post]]
+device = "pulsar"
+cmd = "cat /proc/sys/kernel/hostname"
+expect_stdout = "^pulsar-drill$"
+
+# The lease is not only in uci: it has reached the generated dnsmasq config. The
+# directory dnsmasq writes into is not measured, so either of the two is
+# accepted; the file has to be a dnsmasq one.
+[[post]]
+device = "pulsar"
+cmd = '''
+f=$(grep -rl 02:00:00:00:00:88 /var/etc/ /tmp/etc/ 2>/dev/null)
+[ -n "$f" ] || { echo "the drilltest lease is in no generated dnsmasq config" >&2; exit 1; }
+echo "$f"
+'''
+expect_stdout = '^(/var/etc/|/tmp/etc/)dnsmasq'
+
+# The rule is in the loaded ruleset, so fw4 built it: a count, never a 0.
+[[post]]
+device = "pulsar"
+cmd = "nft list ruleset | grep -c 65123"
+expect_stdout = "^[1-9][0-9]*$"

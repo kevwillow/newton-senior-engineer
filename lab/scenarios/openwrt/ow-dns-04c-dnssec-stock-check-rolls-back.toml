@@ -1,0 +1,54 @@
+name = "ow-dns-04c-dnssec-stock-check-rolls-back"
+description = "OW-DNS-04 on the STOCK image with a per-control check: the same batch as ow-dns-04a (dnssec='1' on a dnsmasq built without DNSSEC), but the apply carries a read-only check that the running dnsmasq's conf has the dnssec line. The failed reload leaves the old conf and the old process in place, so the check fails in every verify round, Newton does not confirm, and the change is rolled back (expect = rolled_back; ow-dns-04a shows that the default verify confirms the same change). A sampler on lab-r1 (steps verify_observer_*) records the three clauses of the verify (ping 1.1.1.1, nslookup via 127.0.0.1, the dnssec line in the conf) while the option is applied: the last post requires at least 10 samples in which ping and nslookup were fine and the dnssec line was missing, so the rollback is tied to the check and not to a network fault. Afterwards the default regression (client_dns, client_dhcp and the rest) must pass, the option is gone from the config, dnsmasq runs with DNS on 53 and DHCP on 67, and a restart of dnsmasq brings it back up and resolving. Effect: the running dnsmasq's conf has a dnssec line; it fails before and has to still fail after the rollback. It was shown to pass in the dnsmasq-full state of ow-dns-04b."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "rolled_back"
+setup = ["portfwd_on", "verify_observer_start"]
+cleanup = ["verify_observer_stop"]
+regression = "default"
+probes = [["conf-has", "dnsmasq", "line", "present", "dnssec"]]
+batch = '''
+set dhcp.@dnsmasq[0].dnssec='1'
+'''
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+n=$(cat /var/etc/dnsmasq.conf.* | grep -c '^dnssec$')
+echo "running dnsmasq conf: dnssec lines=$n"; [ "$n" = 1 ]
+'''
+expect_stdout = '^running dnsmasq conf: dnssec lines=1$'
+
+[[post]]
+device = "lab-r1"
+cmd = "echo \"dnssec option: [$(uci -q get dhcp.@dnsmasq[0].dnssec)]\""
+expect_stdout = '^dnssec option: \[\]$'
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+p=$(ps w | grep -c '[d]nsmasq -C'); d=$(netstat -lun | grep -c '127.0.0.1:53 '); h=$(netstat -lun | grep -c ':67 ')
+echo "dnsmasq processes=$p dns listener=$d dhcp listener=$h"; [ "$p" -ge 1 ] && [ "$d" = 1 ] && [ "$h" -ge 1 ]
+'''
+expect_stdout = '^dnsmasq processes=[1-9]\d* dns listener=1 dhcp listener=[1-9]\d*$'
+
+[[post]]
+device = "lab-r1"
+timeout = 60
+cmd = '''
+/etc/init.d/dnsmasq restart >/dev/null 2>&1
+i=0
+while [ $i -lt 20 ]; do
+  if ps w | grep -q '[d]nsmasq -C' && nslookup openwrt.org 127.0.0.1 2>&1 | grep -q '^Name:'; then echo "dnsmasq restarts with the persisted config and resolves"; exit 0; fi
+  sleep 1; i=$((i+1))
+done
+echo "dnsmasq did not come back after a restart"; exit 1
+'''
+expect_stdout = '^dnsmasq restarts with the persisted config and resolves$'
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+awk -F'|' '$2 == "cfg=1" {t++} $2 == "cfg=1" && $3 == "ping=ok" && $4 == "dns=ok" && $5 == "dnssec_in_conf=no" {n++} END {print "while the option was applied: samples=" t + 0 ", with ping ok, dns ok and no dnssec line in the conf=" n + 0; exit !(n >= 10)}' /tmp/verify-observer.log
+'''
+expect_stdout = '^while the option was applied: samples=\d+, with ping ok, dns ok and no dnssec line in the conf=\d+$'

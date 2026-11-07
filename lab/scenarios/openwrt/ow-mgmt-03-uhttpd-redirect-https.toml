@@ -1,0 +1,30 @@
+name = "ow-mgmt-03-uhttpd-redirect-https"
+description = "OW-MGMT-03: uhttpd.main.redirect_https='1'. Effects: a plain http request from lab-client to 192.168.150.1 gets a 30x redirect whose Location is the https URL of the same host (200 before; uhttpd on 25.12.5 answers 307, the catalogue said 301), and the live uhttpd command line has -q. The check and the cmdline effect read /proc/<first pid of pidof uhttpd>/cmdline: a forked copy has the same argv, so any pid works (ubus call service is not usable in a check: owrt-change.sh's read-only filter rejects the word 'service'). mgmt_luci (regression) still gets 200 over https."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+approval = true
+probes = [["proc-args", "uhttpd", "-q"]]
+batch = '''
+set uhttpd.main.redirect_https='1'
+'''
+
+[[effect]]
+device = "lab-client"
+cmd = '''
+curl -s -o /dev/null -D - --max-time 8 http://192.168.150.1/ | tr -d '\r' | awk 'NR==1{s=$2} tolower($1)=="location:"{l=$2} END{print s, l}'
+'''
+expect_stdout = '^30[1-8] https://192\.168\.150\.1/$'
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+tr '\0' '\n' < /proc/$(pidof uhttpd | cut -d' ' -f1)/cmdline | grep -x -- -q
+'''
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get uhttpd.main.redirect_https"
+expect_stdout = '^1$'

@@ -1,0 +1,1583 @@
+#!/usr/bin/env bash
+# Install Newton's MCP server behind a dedicated, credential-owning system user.
+# NEWTON_INSTALL_ROOT is a rootless TEST seam: with it set, git runs as the
+# current user, no ownership checks are made, the work dir is under
+# ${TMPDIR:-/tmp}, and the script never performs an install (check mode only).
+# Code root is replaced as a unit: the old tree at <code root>
+# is moved aside, the new one is built in place at the same absolute
+# path (a venv cannot be moved or renamed after build), and on any
+# failure the old tree is restored. A leftover <code root>.old from a
+# crashed run makes the installer refuse until it is dealt with.
+#
+# The plain mode (no argument) is for the FIRST
+# install only; later installs and updates go through
+# `newton-bootstrap install <repo> <commit id>`, which runs this script
+# from a verified snapshot with --from-snapshot. In that mode the
+# snapshot proofs are done by the bootstrap; this script only checks
+# that <dir> is a root-owned chain with no symlinks and that every
+# required entry is present, then installs from it.
+#
+# The plain mode asks ONE optional question, about Claude
+# Code's managed settings (`allowManagedHooksOnly`). The default is no:
+# only the exact word "lock" sets the guard, because setting it stops
+# the owner's own Claude Code hooks from running on the machine. The
+# --from-snapshot mode never asks the question and never writes that
+# file.
+set -euo pipefail
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+export LC_ALL=C
+umask 022
+
+usage() {
+	# The plain mode (no argument) is for the FIRST install
+	# only; later installs and updates use `newton-bootstrap install
+	# <repo> <commit id>`, which runs this script from a verified
+	# snapshot as `newton-install --from-snapshot <dir>`.
+	printf 'usage: %s [--check | --from-snapshot <dir>]\n' "${0##*/}" >&2
+	exit 2
+}
+
+# the one sanitizer for repo- or git-derived text printed to the terminal.
+# Byte semantics (LC_ALL=C): backslash as \\, every byte outside 0x20-0x7e as
+# \xNN (lowercase hex), input cut to max_bytes BEFORE escaping with
+# ...[truncated] appended when cut. Pure bash; untrusted data is never a
+# format string.
+sanitize_text() {
+	local text=$1 max_bytes=${2:-200} escaped='' marker='' c i ord
+	if (( ${#text} > max_bytes )); then
+		text=${text:0:max_bytes}
+		marker='...[truncated]'
+	fi
+	for (( i = 0; i < ${#text}; i++ )); do
+		c=${text:i:1}
+		if [[ $c == \\ ]]; then
+			escaped+='\\'
+		elif [[ $c == [![:print:]] ]]; then
+			ord=$(printf '%d' "'$c")
+			if (( ord < 0 )); then
+				ord=$(( ord + 256 ))
+			fi
+			escaped+=$(printf '\\x%02x' "$ord")
+		else
+			escaped+=$c
+		fi
+	done
+	printf '%s%s\n' "$escaped" "$marker"
+}
+
+git_as_invoking_user() {
+	# In production every Git operation on the user-owned source tree is
+	# performed as its owner.
+	if [[ -n $INSTALL_ROOT ]]; then
+		git -C "$REPO" "$@"
+	else
+		/usr/sbin/runuser -u "$invoking_user" -- git -C "$REPO" "$@"
+	fi
+}
+
+# snapshot state. WORK/SNAP/COMMIT_ID/TREE_ID/COMMIT_FILE/
+# SNAP_FILE_COUNT are set by make_snapshot on success.
+WORK=
+SNAP=
+COMMIT_ID=
+TREE_ID=
+COMMIT_FILE=
+SNAP_FILE_COUNT=
+SOURCE_BRANCHES=
+TRACKED_CHANGE_COUNT=
+UNTRACKED_FILE_COUNT=
+launcher_tmp=
+approve_launcher_tmp=
+setup_launcher_tmp=
+vantage_setup_launcher_tmp=
+enrol_launcher_tmp=
+sudoers_tmp=
+doctor_tmp=
+# The two temporaries of the plain mode's bootstrap install and
+# the one of the managed-settings guard. They are globals, not locals
+# of their functions, so the cleanup trap can remove them when the
+# install is interrupted or fails.
+managed_settings_tmp=
+bootstrap_tmp=
+bootstrap_source_tmp=
+ROOT_GIT_ALTERNATES=
+ROOT_GIT_WORK_TREE=
+
+# the code-root replacement state. CODE_ROOT_BACKUP is the
+# path of the old tree moved aside while a new one is being built at
+# CODE_ROOT; CODE_ROOT_PENDING=1 while a replacement is in progress and
+# the EXIT trap must roll back on any failure.
+CODE_ROOT_BACKUP=
+CODE_ROOT_PENDING=0
+
+# every external program the installer runs as root. Names
+# are resolved once from the fixed PATH; the three absolute entries are
+# used by path. python3 is always /usr/bin/python3, never one from PATH.
+ROOT_PROGRAMS=(
+	awk cat chmod chown date dirname env find getent git groupadd head id
+	install mkdir mktemp mv readlink rm sha1sum stat tar useradd wc
+	/usr/sbin/runuser /usr/sbin/visudo /usr/bin/python3
+)
+declare -A ROOT_PROGRAM_PATH=()
+
+# top-level plain assignments (NOT env lookups) so a
+# sourcing test can re-aim them. VISUDO is the absolute visudo
+# check_root_programs already proved root-owned; tests set their stub
+# by reassigning after sourcing this file.
+VISUDO=/usr/sbin/visudo
+
+# Where install_bootstrap places the root-owned bootstrap
+# binary and its one-line provenance file (commit <COMMIT_ID>). Plain
+# top-level assignments, re-aimable by a sourcing test.
+BOOTSTRAP_DEST=/usr/local/sbin/newton-bootstrap
+BOOTSTRAP_SOURCE=/usr/local/sbin/newton-bootstrap.source
+
+# The Claude Code managed-settings guard.
+#
+# Claude Code reads /etc/claude-code/managed-settings.json with the
+# highest priority: a user cannot override it, and a hook that runs
+# there runs before anything the agent writes.  Newton needs
+# allowManagedHooksOnly there, so an agent cannot add an Elicitation
+# hook that answers the approval dialog for the owner.
+#
+# The file belongs to the owner, not to Newton: it may hold settings the
+# owner cares about, so an existing file is NEVER overwritten.  The
+# installer only reports on it and tells the owner which line to add.
+#
+# The guard is an OPTION, not a part of the install.  Setting it
+# stops the owner's own Claude Code hooks from running on the machine,
+# so the plain install asks one question about it and the default is
+# no.  Only the exact word "lock" sets it, and the --from-snapshot mode
+# (the upgrade path) never asks and never writes the file.
+MANAGED_SETTINGS_CONTENT='{"allowManagedHooksOnly": true}'
+
+# The answer to the question.  0 is the default, and the only
+# value the installer ever uses on its own.
+MANAGED_SETTINGS_LOCK=0
+
+# The one plain paragraph the owner reads before the
+# install and in the check output.  It describes the CHOICE, because
+# both answers change what runs on the machine: setting the guard stops
+# the owner's own Claude Code hooks, skipping it leaves them alone.
+MANAGED_SETTINGS_NOTE="Newton asks you whether to set Claude Code's managed settings, so that only hooks from the system settings run (\`allowManagedHooksOnly\`). Setting it stops another tool from answering Newton's approval dialog for you, and your own user and project Claude Code hooks stop running on this machine. The default is no: your own hooks keep working, and every approval still needs your passphrase or authenticator code."
+
+cleanup() {
+	local path
+	if (( CODE_ROOT_PENDING )); then
+		rm -rf -- "$CODE_ROOT" || true
+		if [[ -n ${CODE_ROOT_BACKUP:-} ]]; then
+			mv -T -- "$CODE_ROOT_BACKUP" "$CODE_ROOT" || true
+			printf 'WARNING: previous installation was restored after a failed upgrade\n' >&2
+		else
+			printf 'WARNING: this install failed before completion; nothing was installed\n' >&2
+		fi
+		CODE_ROOT_PENDING=0
+		CODE_ROOT_BACKUP=
+	fi
+	if [[ -n ${WORK:-} ]]; then
+		rm -rf -- "$WORK"
+	fi
+	for path in "$launcher_tmp" "$approve_launcher_tmp" "$setup_launcher_tmp" "$vantage_setup_launcher_tmp" "$enrol_launcher_tmp" "$sudoers_tmp" "$doctor_tmp" "$managed_settings_tmp" "$bootstrap_tmp" "$bootstrap_source_tmp"; do
+		[[ -n $path ]] || continue
+		rm -f -- "$path"
+	done
+}
+
+# Arm the cleanup trap. EVERY mode that writes must arm it: the
+# plain mode (in make_snapshot) and the --from-snapshot mode (the
+# upgrade path) both write, and the EXIT trap is what removes the
+# temporaries and the work dir and what rolls the code root back when
+# a step fails. The signals exit with the usual status codes so the
+# EXIT trap runs as well.
+arm_cleanup_traps() {
+	trap cleanup EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+}
+
+snapshot_fail() {
+	printf 'ERROR: %s; nothing installed\n' "$1" >&2
+}
+
+# The single wrapper for every root-side git call: a clean
+# environment, no system or global config, no lazy fetch, no replace
+# objects, and an explicit GIT_DIR. Root never runs git inside the
+# repository being installed, so its config, attributes, refs and hooks
+# are never honoured as root. Only src.git gets the repository's object
+# directory as an alternate (ROOT_GIT_ALTERNATES); verify.git never does.
+root_git() {
+	local gitdir=$1
+	shift
+	local -a cmd=(
+		env -i
+		PATH=/usr/sbin:/usr/bin:/sbin:/bin
+		HOME="$WORK/home"
+		LC_ALL=C
+		GIT_CONFIG_NOSYSTEM=1
+		GIT_CONFIG_GLOBAL=/dev/null
+		GIT_NO_LAZY_FETCH=1
+		GIT_NO_REPLACE_OBJECTS=1
+		GIT_TERMINAL_PROMPT=0
+		GIT_DIR="$gitdir"
+	)
+	if [[ -n $ROOT_GIT_ALTERNATES ]]; then
+		cmd+=("GIT_ALTERNATE_OBJECT_DIRECTORIES=$ROOT_GIT_ALTERNATES")
+	fi
+	if [[ -n $ROOT_GIT_WORK_TREE ]]; then
+		cmd+=("GIT_WORK_TREE=$ROOT_GIT_WORK_TREE")
+	fi
+	cmd+=(git --no-pager "$@")
+	"${cmd[@]}"
+}
+
+# The archive size cap. NEWTON_INSTALL_MAX_ARCHIVE_BYTES is a test seam
+# and is honoured only when the rootless NEWTON_INSTALL_ROOT seam is set.
+archive_size_cap() {
+	local cap=104857600
+	if [[ -n $INSTALL_ROOT && ${NEWTON_INSTALL_MAX_ARCHIVE_BYTES:-} =~ ^[0-9]+$ ]]; then
+		cap=$NEWTON_INSTALL_MAX_ARCHIVE_BYTES
+	fi
+	printf '%s\n' "$cap"
+}
+
+# The base directory for the private work directory. Production ignores
+# TMPDIR (root's TMPDIR is untrusted) and always uses /var/tmp; only the
+# rootless NEWTON_INSTALL_ROOT seam honours ${TMPDIR:-/tmp}.
+snapshot_base_dir() {
+	if [[ -z ${INSTALL_ROOT:-} ]]; then
+		printf '/var/tmp\n'
+	else
+		printf '%s\n' "${TMPDIR:-/tmp}"
+	fi
+}
+
+# take a snapshot of exactly one commit and prove it, before
+# the human prompt. Uses REPO, INSTALL_ROOT and invoking_user; on success
+# sets WORK, SNAP, COMMIT_ID, TREE_ID, COMMIT_FILE and SNAP_FILE_COUNT and
+# returns 0. Any failure prints "ERROR: ...; nothing installed" and
+# returns non-zero. After success nothing reads $REPO or the agent's git.
+make_snapshot() {
+	local head_id object_dir changes all_status err_first key filter_name
+	local mode length actual first entry_name component tree_verify extra count size cap
+	local -a parts filter_neutral=()
+	# Step 1: informational input from the repository, read as the
+	# invoking user only; nothing here is trusted. Agent-configured
+	# filters are neutralised on the command line so that even the
+	# invoking-user calls never run the repository's filter drivers.
+	while IFS=' ' read -r key _; do
+		[[ $key =~ ^filter\.[^.]+\. ]] || continue
+		filter_name=${key%.*}.
+		filter_neutral+=("-c" "${filter_name}process=" "-c" "${filter_name}clean=" "-c" "${filter_name}smudge=" "-c" "${filter_name}required=false")
+	done < <(git_as_invoking_user config --get-regexp '^filter\.' || true)
+	if ! head_id=$(git_as_invoking_user rev-parse --verify HEAD); then
+		snapshot_fail 'could not resolve HEAD as the invoking user'
+		return 1
+	fi
+	if [[ ! $head_id =~ ^[0-9a-f]{40}$ ]]; then
+		snapshot_fail "HEAD is not a full sha1 id ($(sanitize_text "$head_id")); sha256 repositories are not supported"
+		return 1
+	fi
+	if ! object_dir=$(git_as_invoking_user rev-parse --path-format=absolute --git-path objects); then
+		snapshot_fail 'could not locate the object directory as the invoking user'
+		return 1
+	fi
+	if [[ $object_dir == *:* || $object_dir != "${object_dir//[[:cntrl:]]/}" ]]; then
+		snapshot_fail "unsafe object directory path ($(sanitize_text "$object_dir"))"
+		return 1
+	fi
+	if ! SOURCE_BRANCHES=$(GIT_NO_LAZY_FETCH=1 git_as_invoking_user branch -r --contains "$head_id"); then
+		snapshot_fail 'could not list the remote branches containing HEAD as the invoking user'
+		return 1
+	fi
+	if ! changes=$(git_as_invoking_user "${filter_neutral[@]}" status --short --untracked-files=no); then
+		snapshot_fail 'could not inspect the working tree as the invoking user'
+		return 1
+	fi
+	if ! all_status=$(git_as_invoking_user "${filter_neutral[@]}" status --short --untracked-files=all); then
+		snapshot_fail 'could not inspect the working tree as the invoking user'
+		return 1
+	fi
+	TRACKED_CHANGE_COUNT=$(printf '%s\n' "$changes" | awk 'NF{n++} END{print n+0}')
+	UNTRACKED_FILE_COUNT=$(printf '%s\n' "$all_status" | awk '/^\?\? /{n++} END{print n+0}')
+	export SOURCE_BRANCHES TRACKED_CHANGE_COUNT UNTRACKED_FILE_COUNT
+
+	# Step 2: a private work directory.
+	if ! WORK=$(mktemp -d "$(snapshot_base_dir)/newton-install.XXXXXXXX"); then
+		snapshot_fail 'could not create a private work directory'
+		return 1
+	fi
+	if [[ $(stat -c %u "$WORK" 2>/dev/null) != "$EUID" ]]; then
+		snapshot_fail "work directory is not owned by uid $EUID"
+		return 1
+	fi
+	mode=$(stat -c %a "$WORK")
+	if (( (8#$mode & 8#077) != 0 )); then
+		snapshot_fail 'work directory has group or other permissions set'
+		return 1
+	fi
+	arm_cleanup_traps
+
+	# Step 3: two fresh repositories; only src.git sees the objects.
+	if ! mkdir -m 0700 "$WORK/home"; then
+		snapshot_fail 'could not prepare the work directory'
+		return 1
+	fi
+	if ! root_git "$WORK/src.git" init -q --bare --template=; then
+		snapshot_fail 'could not create the source object repository'
+		return 1
+	fi
+	if ! root_git "$WORK/verify.git" init -q --bare --template=; then
+		snapshot_fail 'could not create the verification repository'
+		return 1
+	fi
+	ROOT_GIT_ALTERNATES=$object_dir
+
+	# Step 4: prove the commit object authentic.
+	COMMIT_FILE=$WORK/commit.txt
+	if ! root_git "$WORK/src.git" cat-file commit "$head_id" >"$COMMIT_FILE" 2>"$WORK/cat-file.err"; then
+		err_first=$(head -n 1 "$WORK/cat-file.err")
+		snapshot_fail "could not read commit object $head_id ($(sanitize_text "$err_first"))"
+		return 1
+	fi
+	length=$(wc -c <"$COMMIT_FILE")
+	length=${length//[[:space:]]/}
+	actual=$({ printf 'commit %s\0' "$length"; cat "$COMMIT_FILE"; } | sha1sum)
+	actual=${actual%% *}
+	if [[ $actual != "$head_id" ]]; then
+		snapshot_fail 'commit object does not match its id'
+		return 1
+	fi
+	IFS= read -r first <"$COMMIT_FILE"
+	if [[ ! $first =~ ^tree\ ([0-9a-f]{40})$ ]]; then
+		snapshot_fail 'commit object does not start with a tree header'
+		return 1
+	fi
+	COMMIT_ID=$head_id
+	TREE_ID=${BASH_REMATCH[1]}
+
+	# Step 5: archive, scan the listing, then extract. The write itself
+	# is bounded: ulimit -f (whose unit in bash is 1024-byte blocks) is
+	# set just above the cap inside a subshell, so an oversized archive
+	# can never reach the disk in full; a failed archive whose file
+	# nevertheless reached the cap is reported as a size-cap hit.
+	local archive=$WORK/snapshot.tar
+	cap=$(archive_size_cap)
+	if ! (
+		ulimit -f $(( (cap + 1023) / 1024 + 1 ))
+		root_git "$WORK/src.git" -c core.attributesFile=/dev/null archive --format=tar "$COMMIT_ID"
+	) >"$archive" 2>"$WORK/archive.err"; then
+		size=$(wc -c <"$archive")
+		size=${size//[[:space:]]/}
+		if (( size >= cap )); then
+			snapshot_fail "snapshot archive exceeds the size cap of $cap bytes"
+			return 1
+		fi
+		err_first=$(head -n 1 "$WORK/archive.err")
+		snapshot_fail "git archive failed ($(sanitize_text "$err_first"))"
+		return 1
+	fi
+	ROOT_GIT_ALTERNATES=
+	size=$(wc -c <"$archive")
+	size=${size//[[:space:]]/}
+	if (( size > cap )); then
+		snapshot_fail "snapshot archive exceeds the size cap of $cap bytes"
+		return 1
+	fi
+	if ! tar --quoting-style=escape -tvf "$archive" >"$WORK/tar.types" 2>"$WORK/tar.err"; then
+		err_first=$(head -n 1 "$WORK/tar.err")
+		snapshot_fail "could not list the snapshot archive ($(sanitize_text "$err_first"))"
+		return 1
+	fi
+	while IFS= read -r first; do
+		[[ -n $first ]] || continue
+		if [[ $first != [-d]* ]]; then
+			snapshot_fail "snapshot archive entry is not a regular file or directory: $(sanitize_text "$first")"
+			return 1
+		fi
+	done <"$WORK/tar.types"
+	if ! tar --quoting-style=escape -tf "$archive" >"$WORK/tar.names" 2>"$WORK/tar.err"; then
+		err_first=$(head -n 1 "$WORK/tar.err")
+		snapshot_fail "could not list the snapshot archive ($(sanitize_text "$err_first"))"
+		return 1
+	fi
+	while IFS= read -r entry_name; do
+		[[ -n $entry_name ]] || continue
+		entry_name=${entry_name%/}
+		if [[ $entry_name == /* ]]; then
+			snapshot_fail "snapshot archive contains an absolute path: $(sanitize_text "$entry_name")"
+			return 1
+		fi
+		IFS='/' read -r -a parts <<<"$entry_name"
+		for component in "${parts[@]}"; do
+			case $component in
+				..)
+					snapshot_fail "snapshot archive path escapes the extraction directory: $(sanitize_text "$entry_name")"
+					return 1
+					;;
+				.git)
+					snapshot_fail "snapshot archive contains a .git path: $(sanitize_text "$entry_name")"
+					return 1
+					;;
+				.gitattributes)
+					snapshot_fail "snapshot archive contains a .gitattributes file: $(sanitize_text "$entry_name")"
+					return 1
+					;;
+			esac
+		done
+	done <"$WORK/tar.names"
+	SNAP=$WORK/snap
+	if ! install -d -m 0700 "$SNAP"; then
+		snapshot_fail 'could not create the snapshot directory'
+		return 1
+	fi
+	if ! tar -xf "$archive" -C "$SNAP" --no-same-owner 2>"$WORK/tar.err"; then
+		err_first=$(head -n 1 "$WORK/tar.err")
+		snapshot_fail "could not extract the snapshot archive ($(sanitize_text "$err_first"))"
+		return 1
+	fi
+	extra=$(find "$SNAP" ! -type f ! -type d -print -quit)
+	if [[ -n $extra ]]; then
+		snapshot_fail "snapshot contains an entry that is not a regular file or directory: $(sanitize_text "$extra")"
+		return 1
+	fi
+
+	# Step 6: prove the extracted files are exactly that tree. verify.git
+	# has no alternates: only the extracted files can satisfy it.
+	ROOT_GIT_WORK_TREE=$SNAP
+	if ! root_git "$WORK/verify.git" -c core.bare=false -c core.autocrlf=false \
+		-c core.safecrlf=false -c core.attributesFile=/dev/null add --force --all; then
+		snapshot_fail 'could not index the extracted snapshot files'
+		return 1
+	fi
+	if ! tree_verify=$(root_git "$WORK/verify.git" -c core.bare=false -c core.autocrlf=false \
+		-c core.safecrlf=false -c core.attributesFile=/dev/null write-tree); then
+		snapshot_fail 'could not compute the tree id of the extracted snapshot'
+		return 1
+	fi
+	ROOT_GIT_WORK_TREE=
+	if [[ $tree_verify != "$TREE_ID" ]]; then
+		snapshot_fail "snapshot files do not match tree $TREE_ID"
+		return 1
+	fi
+
+	# Step 7: completeness of the source tree. The same list is checked
+	# again by the --from-snapshot mode (after the bootstrap's own
+	# proofs), so the entries live in a single helper. scripts/newton-
+	# bootstrap is required ONLY because the plain mode installs it
+	# via install_bootstrap; --from-snapshot never installs it.
+	while IFS=" " read -r kind path; do
+		[[ -n $kind ]] || continue
+		if [[ $kind == d ]]; then
+			if [[ ! -d $SNAP/$path ]]; then
+				snapshot_fail "snapshot is not a complete Newton source tree (missing $path/)"
+				return 1
+			fi
+		elif [[ ! -f $SNAP/$path ]]; then
+			snapshot_fail "snapshot is not a complete Newton source tree (missing $path)"
+			return 1
+		fi
+	done < <(required_snapshot_paths)
+	count=$(find "$SNAP" -type f | wc -l)
+	SNAP_FILE_COUNT=${count//[[:space:]]/}
+
+	# Step 8: from here on nothing reads $REPO, the working tree or the
+	# agent's git again; the install copies only from $SNAP.
+	return 0
+}
+
+print_snapshot_summary() {
+	printf 'Commit:  %s\n' "$COMMIT_ID"
+	printf 'Tree:    %s\n' "$TREE_ID"
+}
+
+# the identity block shown after the snapshot and before the
+# prompt. Every fact comes from the authenticated commit file
+# (COMMIT_FILE) and the counts make_snapshot recorded; the repository
+# is never asked again. All repo-derived text passes sanitize_text.
+print_identity_block() {
+	local line author_raw author_name='' author_email='' author_ts='' author_tz=''
+	local subject='' seen_author=0 in_body=0 date_text branch branch_count=0
+	local author_re='^(.*) <([^>]*)> ([0-9]{1,15}) ([+-][0-9]{4})$'
+	while IFS= read -r line || [[ -n $line ]]; do
+		if [[ $in_body -eq 1 ]]; then
+			subject=$line
+			break
+		fi
+		if [[ -z $line ]]; then
+			in_body=1
+			continue
+		fi
+		if [[ $seen_author -eq 0 && $line == author\ * ]]; then
+			author_raw=${line#author }
+			if [[ $author_raw =~ $author_re ]]; then
+				author_name=${BASH_REMATCH[1]}
+				author_email=${BASH_REMATCH[2]}
+				author_ts=${BASH_REMATCH[3]}
+				author_tz=${BASH_REMATCH[4]}
+				seen_author=1
+			fi
+		fi
+	done <"$COMMIT_FILE"
+	if [[ $seen_author -eq 0 ]]; then
+		printf 'ERROR: authenticated commit object has no readable author header; nothing installed\n' >&2
+		exit 1
+	fi
+	if ! date_text=$(date -u -d "@$author_ts"); then
+		printf 'ERROR: could not format the author date; nothing installed\n' >&2
+		exit 1
+	fi
+	printf 'Source repository: %s\n' "$(sanitize_text "$REPO")"
+	print_snapshot_summary
+	printf 'Author:  %s <%s>\n' \
+		"$(sanitize_text "$author_name")" "$(sanitize_text "$author_email")"
+	printf 'Date:    %s (author timezone %s)\n' \
+		"$(sanitize_text "$date_text")" "$author_tz"
+	printf 'Subject: %s\n' "$(sanitize_text "$subject")"
+	printf 'Remote branches containing this commit (as reported by the repo; check it matches GitHub):\n'
+	if [[ -n $SOURCE_BRANCHES ]]; then
+		while IFS= read -r branch; do
+			[[ -n $branch ]] || continue
+			branch_count=$((branch_count + 1))
+			if [[ $branch_count -le 20 ]]; then
+				printf '  %s\n' "$(sanitize_text "$branch")"
+			fi
+		done <<<"$SOURCE_BRANCHES"
+		if [[ $branch_count -gt 20 ]]; then
+			printf '  ... and %d more not shown\n' "$((branch_count - 20))"
+		fi
+	else
+		printf '  (none)\n'
+	fi
+	if [[ $TRACKED_CHANGE_COUNT -eq 0 && $UNTRACKED_FILE_COUNT -eq 0 ]]; then
+		printf 'Working tree (informational, from the repo): clean\n'
+	else
+		printf 'Working tree (informational, from the repo): %s tracked change(s), %s untracked file(s); none of them are installed (only commit %s is)\n' \
+			"$TRACKED_CHANGE_COUNT" "$UNTRACKED_FILE_COUNT" "${COMMIT_ID:0:12}"
+	fi
+	printf 'Snapshot: %s files verified against tree %s\n' "$SNAP_FILE_COUNT" "$TREE_ID"
+}
+
+# the human prompt requires the FULL
+# 40-hex commit id. The prompt deliberately does NOT print the expected
+# string; the operator must copy it from the commit page on GitHub and the
+# script does the byte-for-byte comparison. A commit can be engineered to
+# share a 12-hex prefix with a genuine commit (about 2^48 SHA-1 tries);
+# requiring the full id and not printing it forces the GitHub check.
+confirm_install() {
+	local confirmation='' expected="install $COMMIT_ID"
+	printf 'Compare the commit id above with GitHub, then type "install " followed by the full 40-hex commit id as shown on GitHub, to continue: ' >&2
+	IFS= read -r confirmation || confirmation=
+	[[ $confirmation == "$expected" ]] || {
+		printf 'ERROR: confirmation did not match; installation aborted\n' >&2
+		exit 1
+	}
+}
+
+# The one optional question, asked in the plain (first install)
+# mode right after the install confirmation.  The trade-off is printed
+# first, in plain words, because both answers change what runs on the
+# machine.  Only the exact word "lock" sets the guard; anything else,
+# or the end of the input, skips it and says how to set it later.
+ask_managed_settings() {
+	local answer='' file=${MANAGED_SETTINGS:-/etc/claude-code/managed-settings.json}
+	printf '%s\n' 'Optional: lock Claude Code on this machine to system hooks only (allowManagedHooksOnly).'
+	printf '%s\n' "Yes: no tool can add a hook that answers Newton's approval dialog. Your own Claude Code hooks stop running."
+	printf '%s\n' "No: your hooks keep working. Each approval still needs your passphrase or authenticator code."
+	printf 'Type "lock" to set it, or press Enter to skip: ' >&2
+	IFS= read -r answer || answer=
+	if [[ $answer == lock ]]; then
+		MANAGED_SETTINGS_LOCK=1
+		printf "Setting Claude Code's managed settings: %s (allowManagedHooksOnly)\n" "$file"
+		return 0
+	fi
+	MANAGED_SETTINGS_LOCK=0
+	printf 'The Claude Code managed settings guard was not set. newton-doctor will report managed-settings-guard as INCONCLUSIVE; to set it later, as root, add the line "allowManagedHooksOnly": true to %s.\n' \
+		"$file"
+	return 0
+}
+
+# The manual credential steps.
+#
+# The steps are printed on every install: whether there is a legacy
+# credential set to move cannot be told from here.  A development
+# install may have kept its inventory anywhere (NEWTON_INVENTORY), so
+# the absence of ~/.config/newton/devices.toml proves nothing, and a
+# fresh machine would lose the steps it does need.
+#
+# The wording says what the steps are for, so that on a machine where
+# there is nothing to move the block reads as an offer and not as a
+# failure.
+print_manual_steps() {
+	cat <<EOF
+
+If you ran Newton from your own account before, move its router credentials to the newton account:
+  1. Move devices.toml and each password file into $NEWTON_HOME.
+  2. Run: chown newton:newton $NEWTON_HOME/devices.toml $NEWTON_HOME/<password-file>
+  3. Run: chmod 600 $NEWTON_HOME/devices.toml $NEWTON_HOME/<password-file>
+On a new machine there is nothing to move.
+
+MCP client command (all harnesses):
+  $CLIENT_COMMAND
+EOF
+}
+
+copy_tree() {
+	local source=$1 destination=$2 file_mode=$3 path relative
+	find "$destination" -mindepth 1 -delete
+	while IFS= read -r -d '' path; do
+		relative=${path#"$source"/}
+		install -d -o root -g root -m 0755 "$destination/$relative"
+	done < <(find "$source" -mindepth 1 \
+		\( -name __pycache__ -o -name .pytest_cache -o -name .venv \) -prune -o \
+		-type d -print0)
+	while IFS= read -r -d '' path; do
+		relative=${path#"$source"/}
+		install -o root -g root -m "$file_mode" "$path" "$destination/$relative"
+	done < <(find "$source" \
+		\( -name __pycache__ -o -name .pytest_cache -o -name .venv \) -prune -o \
+		-type f ! -name '*.pyc' -print0)
+}
+
+# refuse a path unless the file and every ancestor of both
+# the given and the resolved path, up to /, are owned by root with no
+# group-write or other-write bit. stat -L takes owner and mode from
+# what a component follows to (a symlink's own mode is always 777, and
+# /usr/bin/awk, /usr/bin/python3 and /bin are symlinks on this host).
+# The walk is leaf-first, so the message names the deepest, i.e. first,
+# offending path.
+require_root_owned_chain_walk() {
+	local path=$1 label=$2 line uid mode
+	case $path in
+		/*) ;;
+		*) path=$PWD/$path ;;
+	esac
+	while [[ $path == */ && $path != / ]]; do
+		path=${path%/}
+	done
+	[[ -n $path ]] || path=/
+	while :; do
+		if ! line=$(stat -L -c '%u %a' -- "$path" 2>/dev/null); then
+			printf 'ERROR: %s at %s is missing; refusing to run it as root\n' "$label" "$path" >&2
+			return 1
+		fi
+		read -r uid mode <<<"$line"
+		if (( (8#$mode & 8#022) != 0 )); then
+			printf 'ERROR: %s at %s is writable by group or other; refusing to run it as root\n' "$label" "$path" >&2
+			return 1
+		fi
+		if (( uid != 0 )); then
+			printf 'ERROR: %s at %s is not owned by root; refusing to run it as root\n' "$label" "$path" >&2
+			return 1
+		fi
+		if [[ $path == / ]]; then
+			break
+		fi
+		path=$(dirname -- "$path")
+	done
+	return 0
+}
+
+require_root_owned_chain() {
+	local given=$1 label=${2:-$1} resolved
+	if ! resolved=$(readlink -f -- "$given" 2>/dev/null) || [[ -z $resolved ]]; then
+		printf 'ERROR: %s at %s is missing; refusing to run it as root\n' "$label" "$given" >&2
+		return 1
+	fi
+	require_root_owned_chain_walk "$given" "$label" || return 1
+	require_root_owned_chain_walk "$resolved" "$label" || return 1
+	return 0
+}
+
+# resolve every root-run program once from the fixed PATH,
+# prove its chain is root-owned, and keep the resolved path. An
+# unresolvable or unsafe program stops the install. Skipped only under
+# NEWTON_INSTALL_ROOT (a rootless uid map breaks ownership); tests call
+# the chain check directly.
+check_root_programs() {
+	local program resolved program_type
+	for program in "${ROOT_PROGRAMS[@]}"; do
+		program_type=$(type -t -- "$program" 2>/dev/null || true)
+		if [[ $program_type != file ]]; then
+			printf 'ERROR: %s resolves as %s, not an external file; refusing to run it as root\n' \
+				"$program" "${program_type:-nothing}" >&2
+			return 1
+		fi
+		case $program in
+			/*)
+				resolved=$program
+				;;
+			*)
+				if ! resolved=$(command -v "$program"); then
+					printf 'ERROR: %s was not found on PATH; refusing to run it as root\n' "$program" >&2
+					return 1
+				fi
+				;;
+		esac
+		require_root_owned_chain "$resolved" "$program" || return 1
+		ROOT_PROGRAM_PATH[$program]=$resolved
+	done
+	for program in "${!ROOT_PROGRAM_PATH[@]}"; do
+		if [[ ! -x ${ROOT_PROGRAM_PATH[$program]} ]]; then
+			printf 'ERROR: %s at %s is not executable; refusing to run it as root\n' \
+				"$program" "${ROOT_PROGRAM_PATH[$program]}" >&2
+			return 1
+		fi
+	done
+	return 0
+}
+
+# the cwd, HOME and PYTHON* variables the installer is
+# invoked with are attacker-controlled. Build the venv from an empty
+# root-owned directory with a cleared environment and python -I, so
+# nothing in the caller's directory or user site can run as root during
+# the venv step.
+create_venv() {
+	local venv_cwd=$WORK/venv-cwd
+	install -d -o root -g root -m 0700 "$WORK/tmp" "$venv_cwd" || return 1
+	(
+		cd "$venv_cwd" || exit 1
+		env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TMPDIR="$WORK/tmp" \
+			/usr/bin/python3 -I -m venv "$CODE_ROOT/venv"
+	)
+}
+
+# build the venv from the verified snapshot only, with the
+# absolute system python, and run pip in a cleared environment from an
+# empty root-owned working directory under WORK, never from the repo.
+build_venv() {
+	local pip_cwd
+	rm -rf -- "$CODE_ROOT/venv"
+	if ! create_venv; then
+		printf 'ERROR: could not create the virtual environment\n' >&2
+		return 1
+	fi
+	install -d -o root -g root -m 0700 "$WORK/tmp"
+	for pip_cwd in "$WORK/pip-cwd.1" "$WORK/pip-cwd.2"; do
+		install -d -o root -g root -m 0700 "$pip_cwd"
+	done
+	if ! (
+		cd "$WORK/pip-cwd.1" || exit 1
+		env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TMPDIR="$WORK/tmp" \
+			"$CODE_ROOT/venv/bin/python" -m pip install \
+			--isolated --no-input --no-cache-dir --require-hashes \
+			--only-binary=:all: --no-deps \
+			-r "$SNAP/mcp/requirements.lock"
+	); then
+		printf 'ERROR: could not install the locked dependencies into the venv\n' >&2
+		return 1
+	fi
+	if ! (
+		cd "$WORK/pip-cwd.2" || exit 1
+		env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TMPDIR="$WORK/tmp" \
+			"$CODE_ROOT/venv/bin/python" -m pip install \
+			--isolated --no-input --no-cache-dir --no-deps \
+			--no-build-isolation \
+			"$SNAP/mcp"
+	); then
+		printf 'ERROR: could not install the newton package into the venv\n' >&2
+		return 1
+	fi
+	chown -R root:root "$CODE_ROOT/venv"
+	chmod -R go-w "$CODE_ROOT/venv"
+}
+
+# build the doctor copy installed at /usr/local/bin/newton-doctor.
+# Read <src> line by line; the first line is rewritten to `#!/bin/bash -p`
+# (bash privileged mode), the single line starting `NEWTON_DOCTOR_SEAMS=1`
+# is rewritten to the installed marker, every other line passes through
+# unchanged. A source whose last line has no trailing newline stays that
+# way. Pure bash and `rm` only; any failure prints ERROR: ... to stderr,
+# removes <dst>, returns 1.
+render_installed_doctor() {
+	local src="$1" dst="$2" line=''
+	local terminator='' first_seen='' replaced=0
+	rm -f -- "$dst"
+
+	if [[ ! -r $src ]]; then
+		printf 'ERROR: render_installed_doctor: source %s is not readable\n' "$src" >&2
+		return 1
+	fi
+	if [[ ! -s $src ]]; then
+		printf 'ERROR: render_installed_doctor: source %s is empty\n' "$src" >&2
+		return 1
+	fi
+
+	while :; do
+		if IFS= read -r line; then
+			terminator=$'\n'
+		elif [[ -n $line ]]; then
+			terminator=''
+		else
+			break
+		fi
+
+		if [[ -z $first_seen ]]; then
+			[[ $line == \#!* ]] || {
+				printf 'ERROR: render_installed_doctor: first line of %s does not start with #!\n' "$src" >&2
+				rm -f -- "$dst"
+				return 1
+			}
+			first_seen=1
+			line='#!/bin/bash -p'
+		elif [[ $line == NEWTON_DOCTOR_SEAMS=1* ]]; then
+			line='NEWTON_DOCTOR_SEAMS=0  # installed copy: test seams disabled'
+			(( replaced++ )) || true
+		fi
+
+		printf '%s%s' "$line" "$terminator"
+	done <"$src" >"$dst"
+
+	(( replaced == 1 )) || {
+		printf 'ERROR: render_installed_doctor: expected exactly one NEWTON_DOCTOR_SEAMS=1 marker in %s (found %d); nothing installed\n' "$src" "$replaced" >&2
+		rm -f -- "$dst"
+		return 1
+	}
+}
+
+# The router sources the setup tool installs on a device (design 7.2 row
+# INST): the controller keeps copies of the router code files and the
+# profile manifest under the code root, files only (no tests directories,
+# no __pycache__), SRC_RELATIVE|CODE_ROOT_RELATIVE|MODE rows. The two
+# executables keep mode 0755; they are read (and hashed) from here, never
+# run on the controller.
+DEVICE_SOURCE_FILES=(
+	"device/openwrt/newton-router/newton-router|device/openwrt/newton-router/newton-router|0755"
+	"device/openwrt/newton-router/router-tools.txt|device/openwrt/newton-router/router-tools.txt|0644"
+	"device/openwrt/newton-router/grammar.tsv|device/openwrt/newton-router/grammar.tsv|0644"
+	"device/openwrt/newton-guard/newton-guard|device/openwrt/newton-guard/newton-guard|0755"
+	"device/openwrt/newton-guard/newton-guard.init|device/openwrt/newton-guard/newton-guard.init|0644"
+	"profiles/openwrt/manifest.toml|profiles/openwrt/manifest.toml|0644"
+	"profiles/openwrt/standard.uci|profiles/openwrt/standard.uci|0644"
+	"profiles/openwrt/hardened.uci|profiles/openwrt/hardened.uci|0644"
+	"profiles/openwrt/lockdown.uci|profiles/openwrt/lockdown.uci|0644"
+	"profiles/openwrt/intents.toml|profiles/openwrt/intents.toml|0644"
+)
+
+# install the router sources from the verified snapshot into
+# the code root, root:root, directories 0755, per-file modes from
+# DEVICE_SOURCE_FILES. Called from install_code_root so the copies take
+# part in the same atomic code-root replacement as scripts/ and mcp/.
+install_device_sources() {
+	local row src dst mode
+	for row in "${DEVICE_SOURCE_FILES[@]}"; do
+		IFS='|' read -r src dst mode <<<"$row"
+		install -d -o root -g root -m 0755 "$CODE_ROOT/$(dirname -- "$dst")"
+		install -o root -g root -m "$mode" "$SNAP/$src" "$CODE_ROOT/$dst"
+	done
+}
+
+# replace the code root as one unit. venv console scripts
+# and pyvenv.cfg store the absolute build path, so the venv cannot be
+# built elsewhere and renamed; the old tree at CODE_ROOT is moved
+# aside to CODE_ROOT.old, the new tree is built at the same path, and
+# on success the old tree is removed. On any failure cleanup rolls
+# the old tree back (a leftover CODE_ROOT.old from a crashed run
+# makes the installer refuse until it is dealt with).
+install_code_root() {
+	local old
+	old=$CODE_ROOT.old
+	if [[ -e $old || -L $old ]]; then
+		printf 'ERROR: %s exists: an earlier install did not finish. Inspect it, then move it back to %s or remove it, and run the installer again\n' "$old" "$CODE_ROOT" >&2
+		return 1
+	fi
+	if [[ -e $CODE_ROOT || -L $CODE_ROOT ]]; then
+		mv -T -- "$CODE_ROOT" "$old"
+		CODE_ROOT_BACKUP=$old
+	fi
+	CODE_ROOT_PENDING=1
+	install -d -o root -g root -m 0755 "$CODE_ROOT" "$CODE_ROOT/scripts" "$CODE_ROOT/mcp"
+	copy_tree "$SNAP/scripts" "$CODE_ROOT/scripts" 0755
+	copy_tree "$SNAP/mcp" "$CODE_ROOT/mcp" 0644
+	install -o root -g root -m 0644 "$SNAP/SKILL.md" "$CODE_ROOT/SKILL.md"
+	install_device_sources
+	build_venv
+	CODE_ROOT_PENDING=0
+	if [[ -n $CODE_ROOT_BACKUP ]]; then
+		rm -rf -- "$CODE_ROOT_BACKUP"
+		CODE_ROOT_BACKUP=
+	fi
+}
+
+# The completeness check run by both make_snapshot (step 7)
+# and the --from-snapshot mode. Each line is "kind path"; kind d is a
+# directory, f is a regular file. The list is the snapshot contract:
+# scripts/newton-bootstrap is in the list ONLY because the plain mode
+# installs it via install_bootstrap; --from-snapshot never installs it
+# (the bootstrap replaces itself only through its own self-update).
+required_snapshot_paths() {
+	printf 'd %s\n' scripts mcp
+	printf 'f %s\n' scripts/newton-install scripts/newton-bootstrap scripts/newton-doctor \
+		mcp/pyproject.toml mcp/requirements.lock SKILL.md \
+		device/openwrt/newton-router/newton-router device/openwrt/newton-router/router-tools.txt \
+		device/openwrt/newton-router/grammar.tsv device/openwrt/newton-guard/newton-guard \
+		device/openwrt/newton-guard/newton-guard.init profiles/openwrt/manifest.toml \
+		profiles/openwrt/standard.uci profiles/openwrt/hardened.uci profiles/openwrt/lockdown.uci \
+		profiles/openwrt/intents.toml
+}
+
+# Refuse a dirty environment. The bootstrap re-execs this
+# script under `env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root
+# LANG=C.UTF-8 SUDO_USER=<...> bash -p`; anything else (LD_PRELOAD, an
+# injected PATH edit, IFS, BASH_ENV, ...) must be refused. The script
+# itself adds LC_ALL (above) and overwrites PATH (same name, still
+# allowed); bash always adds PWD OLDPWD SHLVL _; SUDO_USER is required
+# by main()'s prior check.
+verify_scrubbed_env() {
+	local var
+	for var in $(compgen -e); do
+		case $var in
+			PATH|HOME|LANG|SUDO_USER|PWD|OLDPWD|SHLVL|_|LC_ALL)
+				;;
+			*)
+				printf 'ERROR: environment contains unexpected variable %s; refusing to run as root\n' \
+					"$var" >&2
+				return 1
+				;;
+		esac
+	done
+	return 0
+}
+
+# The entire post-snapshot/prompt tail of the
+# plain install, factored out so both plain and --from-snapshot modes
+# can call it and install exactly the same set of things. Uses the
+# globals SNAP (set by make_snapshot or by run_from_snapshot_mode),
+# COMMIT_ID (set by make_snapshot), CODE_ROOT / SYSTEM_USER /
+# SYSTEM_GROUP / NEWTON_HOME / the launcher + sudoers / DOCTOR_LAUNCHER
+# + their template strings, INVOKING / SUDOERS_*_LINE templates (set by
+# main), the launchers' temp slots (launcher_tmp etc.), the cleanup
+# trap (cleanup), VISUDO, BOOTSTRAP_DEST, BOOTSTRAP_SOURCE. Returns
+# nothing; exits non-zero on failure. The bootstrap does NOT call
+# perform_install from --from-snapshot mode without first ensuring
+# these globals are set.
+perform_install() {
+	if ! getent group "$SYSTEM_GROUP" >/dev/null; then
+		groupadd --system "$SYSTEM_GROUP"
+	fi
+
+	if getent passwd "$SYSTEM_USER" >/dev/null; then
+		IFS=: read -r _ _ _ _ _ existing_home existing_shell < <(getent passwd "$SYSTEM_USER")
+		[[ $existing_home == "$NEWTON_HOME" && $existing_shell == /usr/sbin/nologin ]] || {
+			printf 'ERROR: existing newton user has unexpected home or shell; refusing to modify it\n' >&2
+			exit 1
+		}
+		[[ $(id -gn "$SYSTEM_USER") == "$SYSTEM_GROUP" ]] || {
+			printf 'ERROR: existing newton user does not have newton as its primary group\n' >&2
+			exit 1
+		}
+	else
+		useradd --system --gid "$SYSTEM_GROUP" --home-dir "$NEWTON_HOME" \
+			--shell /usr/sbin/nologin --no-create-home "$SYSTEM_USER"
+	fi
+
+	install -d -o "$SYSTEM_USER" -g "$SYSTEM_GROUP" -m 0700 "$NEWTON_HOME" "$NEWTON_HOME/state"
+
+	install_code_root
+
+	launcher_tmp=$(mktemp "${LAUNCHER}.new.XXXXXX")
+	approve_launcher_tmp=$(mktemp "${APPROVE_LAUNCHER}.new.XXXXXX")
+	setup_launcher_tmp=$(mktemp "${SETUP_LAUNCHER}.new.XXXXXX")
+	vantage_setup_launcher_tmp=$(mktemp "${VANTAGE_SETUP_LAUNCHER}.new.XXXXXX")
+	enrol_launcher_tmp=$(mktemp "${ENROL_LAUNCHER}.new.XXXXXX")
+	sudoers_tmp=$(mktemp "${SUDOERS}.new.XXXXXX")
+
+	cat >"$launcher_tmp" <<'EOF'
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 0 ]; then
+	echo "newton-mcp: arguments are not allowed" >&2
+	exit 2
+fi
+expected_uid=$(/usr/bin/id -u newton) || exit 1
+if [ "$(/usr/bin/id -u)" != "$expected_uid" ]; then
+	echo "newton-mcp: must run as user newton" >&2
+	exit 1
+fi
+
+cd /
+exec /usr/bin/env -i \
+	NEWTON_HOME=/opt/newton \
+	NEWTON_STATE_DIR=/var/lib/newton/state \
+	NEWTON_INVENTORY=/var/lib/newton/devices.toml \
+	OWRT_BACKUP_DIR=/var/lib/newton/state/backups \
+	OWRT_AUDIT_LOG=/var/lib/newton/state/audit.log \
+	HOME=/var/lib/newton \
+	PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+	/opt/newton/venv/bin/newton-mcp
+EOF
+	install -o root -g root -m 0755 "$launcher_tmp" "$LAUNCHER"
+
+	cat >"$approve_launcher_tmp" <<'EOF'
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 1 ] || [ "${#1}" -ne 32 ]; then
+	echo "newton-approve: exactly one 32-hex plan id is required" >&2
+	exit 2
+fi
+case $1 in
+	*[!0-9a-f]*)
+		echo "newton-approve: exactly one 32-hex plan id is required" >&2
+		exit 2
+		;;
+esac
+expected_uid=$(/usr/bin/id -u newton) || exit 1
+if [ "$(/usr/bin/id -u)" != "$expected_uid" ]; then
+	echo "newton-approve: must run as user newton" >&2
+	exit 1
+fi
+sudo_user=${SUDO_USER:-}
+case $sudo_user in
+	''|root|[!A-Za-z_]*|*[!A-Za-z0-9_.-]*)
+		echo "newton-approve: sudo must provide a valid non-root SUDO_USER" >&2
+		exit 1
+		;;
+esac
+
+cd /
+exec /usr/bin/env -i \
+	NEWTON_HOME=/opt/newton \
+	NEWTON_STATE_DIR=/var/lib/newton/state \
+	NEWTON_INVENTORY=/var/lib/newton/devices.toml \
+	HOME=/var/lib/newton \
+	PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+	SUDO_USER="$sudo_user" \
+	/opt/newton/venv/bin/newton-approve "$1"
+EOF
+	install -o root -g root -m 0755 "$approve_launcher_tmp" "$APPROVE_LAUNCHER"
+
+	cat >"$setup_launcher_tmp" <<'EOF'
+#!/bin/sh
+set -eu
+
+expected_uid=$(/usr/bin/id -u newton) || exit 1
+if [ "$(/usr/bin/id -u)" != "$expected_uid" ]; then
+	echo "newton-router-setup: must run as user newton" >&2
+	exit 1
+fi
+sudo_user=${SUDO_USER:-}
+case $sudo_user in
+	''|root|[!A-Za-z_]*|*[!A-Za-z0-9_.-]*)
+		echo "newton-router-setup: sudo must provide a valid non-root SUDO_USER" >&2
+		exit 1
+		;;
+esac
+
+cd /
+exec /usr/bin/env -i \
+	NEWTON_HOME=/opt/newton \
+	NEWTON_STATE_DIR=/var/lib/newton/state \
+	NEWTON_INVENTORY=/var/lib/newton/devices.toml \
+	NEWTON_KEYS_DIR=/var/lib/newton/keys \
+	HOME=/var/lib/newton \
+	PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+	SUDO_USER="$sudo_user" \
+	/opt/newton/scripts/newton-router-setup "$@"
+EOF
+	install -o root -g root -m 0755 "$setup_launcher_tmp" "$SETUP_LAUNCHER"
+
+	cat >"$vantage_setup_launcher_tmp" <<'EOF'
+#!/bin/sh
+set -eu
+
+expected_uid=$(/usr/bin/id -u newton) || exit 1
+if [ "$(/usr/bin/id -u)" != "$expected_uid" ]; then
+	echo "newton-vantage-setup: must run as user newton" >&2
+	exit 1
+fi
+sudo_user=${SUDO_USER:-}
+case $sudo_user in
+	''|root|[!A-Za-z_]*|*[!A-Za-z0-9_.-]*)
+		echo "newton-vantage-setup: sudo must provide a valid non-root SUDO_USER" >&2
+		exit 1
+		;;
+esac
+
+cd /
+exec /usr/bin/env -i \
+	NEWTON_HOME=/opt/newton \
+	NEWTON_INVENTORY=/var/lib/newton/devices.toml \
+	NEWTON_KEYS_DIR=/var/lib/newton/keys \
+	HOME=/var/lib/newton \
+	PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+	SUDO_USER="$sudo_user" \
+	/opt/newton/scripts/newton-vantage-setup "$@"
+EOF
+	install -o root -g root -m 0755 "$vantage_setup_launcher_tmp" "$VANTAGE_SETUP_LAUNCHER"
+
+	cat >"$enrol_launcher_tmp" <<'EOF'
+#!/bin/sh
+set -eu
+
+expected_uid=$(/usr/bin/id -u newton) || exit 1
+if [ "$(/usr/bin/id -u)" != "$expected_uid" ]; then
+	echo "newton-enrol: must run as user newton" >&2
+	exit 1
+fi
+sudo_user=${SUDO_USER:-}
+case $sudo_user in
+	''|root|[!A-Za-z_]*|*[!A-Za-z0-9_.-]*)
+		echo "newton-enrol: sudo must provide a valid non-root SUDO_USER" >&2
+		exit 1
+		;;
+esac
+
+cd /
+exec /usr/bin/env -i \
+	NEWTON_HOME=/opt/newton \
+	NEWTON_STATE_DIR=/var/lib/newton/state \
+	NEWTON_INVENTORY=/var/lib/newton/devices.toml \
+	NEWTON_KEYS_DIR=/var/lib/newton/keys \
+	HOME=/var/lib/newton \
+	PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+	SUDO_USER="$sudo_user" \
+	/opt/newton/venv/bin/newton-enrol "$@"
+EOF
+	install -o root -g root -m 0755 "$enrol_launcher_tmp" "$ENROL_LAUNCHER"
+
+	doctor_tmp=$(mktemp "${DOCTOR_LAUNCHER}.new.XXXXXX")
+	render_installed_doctor "$SNAP/scripts/newton-doctor" "$doctor_tmp"
+	install -o root -g root -m 0755 "$doctor_tmp" "$DOCTOR_LAUNCHER"
+
+	printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$SUDOERS_MCP_LINE" "$SUDOERS_APPROVE_LINE" "$SUDOERS_APPROVE_DEFAULTS_LINE" "$SUDOERS_SETUP_LINE" "$SUDOERS_SETUP_DEFAULTS_LINE" "$SUDOERS_VANTAGE_SETUP_LINE" "$SUDOERS_VANTAGE_SETUP_DEFAULTS_LINE" "$SUDOERS_ENROL_LINE" "$SUDOERS_ENROL_DEFAULTS_LINE" >"$sudoers_tmp"
+	chown root:root "$sudoers_tmp"
+	chmod 0440 "$sudoers_tmp"
+	"$VISUDO" -cf "$sudoers_tmp" >/dev/null
+	mv -f -- "$sudoers_tmp" "$SUDOERS"
+	chown root:root "$SUDOERS"
+	chmod 0440 "$SUDOERS"
+
+	# The guard is written only when the owner answered "lock" to
+	# the question.  The --from-snapshot mode never asks it, so an
+	# upgrade never writes the file and never disturbs one that is
+	# already there.
+	if (( MANAGED_SETTINGS_LOCK )); then
+		install_managed_settings
+	fi
+
+	printf 'Newton installed successfully.\n'
+	printf 'Run the isolation check yourself, in your own terminal as the agent user: %s --router root@<router-ip>\n' "$DOCTOR_LAUNCHER"
+	access_modes_closing
+	print_manual_steps
+}
+
+# The two access modes of an OpenWrt
+# router, in the installer's closing text.  The same ten sentences stand
+# in the setup tool's closing lines, in README.md, in SETUP.md and in
+# SKILL.md; the test tests/protocol/test_router_setup_modes.py keeps the
+# copies equal, so no place promises more than another.
+access_modes_closing() {
+	cat <<'EOF'
+The two access modes for an OpenWrt router:
+no-install: Newton puts nothing on the router except one web-interface user.
+no-install: Every change uses OpenWrt's own undo timer.
+no-install: Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays.
+no-install: Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval.
+no-install: Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run.
+installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 210 KB), no packages and no compiled code.
+installed: Newton's key can run that program and nothing else, so the agent never gets a root shell.
+installed: If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck.
+installed: More checks can run, and fewer changes need a script.
+installed: uninstall removes Newton's program and key; it keeps the guard's saved settings and the rest of /etc/newton (its lock and log), the program directory, the WAN-health settings in /etc/config/newton_wanhealth, the keys from before swap-key and the sysupgrade file: the saved settings and the copy of your keys are what you restore by hand.
+EOF
+}
+
+# The state of a managed-settings file.  true means the
+# guard is set, absent means valid JSON without the key and invalid
+# means the file is not JSON at all.  The file is parsed with python3
+# -I (isolated: no user site, no PYTHON* from the environment) and is
+# never executed.
+managed_settings_state() {
+	local file=$1 state=''
+	state=$(/usr/bin/python3 -I -c '
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "rb") as handle:
+        data = json.load(handle)
+except Exception:
+    print("invalid")
+    sys.exit(0)
+if isinstance(data, dict) and data.get("allowManagedHooksOnly") is True:
+    print("true")
+else:
+    print("absent")
+' "$file" 2>/dev/null) || state=invalid
+	case $state in
+		true|absent|invalid) printf '%s\n' "$state" ;;
+		*) printf 'invalid\n' ;;
+	esac
+}
+
+# Write the Claude Code managed-settings guard.
+#
+# The file is written only when it is not there yet: an existing file
+# belongs to the owner and is never overwritten, so the installer only
+# reports on it and prints the line to add.  Nothing here fails the
+# install: a missing guard is reported by the doctor, and the owner can
+# always fix the file himself.
+install_managed_settings() {
+	local file=$MANAGED_SETTINGS dir state dir_owner dir_mode file_owner file_mode
+	dir=${file%/*}
+	if [[ $dir == "$file" ]]; then
+		dir=.
+	fi
+	if [[ -L $dir ]]; then
+		printf 'WARNING: %s is a symlink; refusing to write the Claude Code managed settings through it\n' "$dir" >&2
+		return 0
+	fi
+	if [[ ! -d $dir ]]; then
+		if ! install -d -o root -g root -m 0755 "$dir"; then
+			printf 'WARNING: could not create %s; the Claude Code managed settings guard was not set\n' "$dir" >&2
+			return 0
+		fi
+	fi
+	# A directory somebody else owns or can write to would let that
+	# somebody replace the guard after it is written.  (The installer runs
+	# as root, so EUID is 0 on a real install.)
+	dir_owner=$(stat -c %u -- "$dir" 2>/dev/null || true)
+	dir_mode=$(stat -c %a -- "$dir" 2>/dev/null || true)
+	if [[ ! $dir_mode =~ ^[0-7]+$ ]] || { [[ $dir_owner != 0 && $dir_owner != "$EUID" ]]; } || (( (8#$dir_mode & 8#022) != 0 )); then
+		printf 'WARNING: %s is not owned by root or is writable by group or other; the Claude Code managed settings guard was not set\n' "$dir" >&2
+		printf 'Fix the directory, then add "allowManagedHooksOnly": true to %s yourself.\n' "$file" >&2
+		return 0
+	fi
+	if [[ -e $file || -L $file ]]; then
+		if [[ -L $file ]]; then
+			printf 'WARNING: %s is a symlink; refusing to write the Claude Code managed settings through it\n' "$file" >&2
+			printf 'Add "allowManagedHooksOnly": true to the file it points at yourself.\n' >&2
+			return 0
+		fi
+		# A guard somebody else can edit is no guard, and one the owner's
+		# Claude Code cannot read is ignored by it.
+		file_owner=$(stat -c %u -- "$file" 2>/dev/null || true)
+		file_mode=$(stat -c %a -- "$file" 2>/dev/null || true)
+		if [[ ! $file_mode =~ ^[0-7]+$ ]] || { [[ $file_owner != 0 && $file_owner != "$EUID" ]]; } || (( (8#$file_mode & 8#022) != 0 )); then
+			printf 'WARNING: %s is not owned by root or is writable by group or other; it was left untouched (Newton never overwrites it).\n' "$file" >&2
+			printf 'Make it root-owned and mode 0644, with "allowManagedHooksOnly": true in it.\n' >&2
+			return 0
+		fi
+		if (( (8#$file_mode & 8#004) == 0 )); then
+			printf 'WARNING: %s is not readable by everyone, so Claude Code running as you ignores it; it was left untouched.\n' "$file" >&2
+			printf 'Make it mode 0644, with "allowManagedHooksOnly": true in it.\n' >&2
+			return 0
+		fi
+		state=$(managed_settings_state "$file")
+		if [[ $state == true ]]; then
+			printf 'Claude Code managed settings already allow only managed hooks; %s was left untouched.\n' "$file"
+			return 0
+		fi
+		if [[ $state == invalid ]]; then
+			printf 'WARNING: %s is not valid JSON; it was left untouched (Newton never overwrites it).\n' "$file" >&2
+		else
+			printf 'WARNING: %s does not set "allowManagedHooksOnly": true; it was left untouched (Newton never overwrites it).\n' "$file" >&2
+		fi
+		printf 'Add this line to %s yourself:\n' "$file" >&2
+		printf '  "allowManagedHooksOnly": true\n' >&2
+		printf "Until you do, an agent can add a Claude Code hook that answers Newton's approval dialog for you.\n" >&2
+		return 0
+	fi
+	managed_settings_tmp=$(mktemp "$dir/.managed-settings.json.new.XXXXXX") || {
+		printf 'WARNING: could not create a temporary file in %s; the Claude Code managed settings guard was not set\n' "$dir" >&2
+		return 0
+	}
+	if ! printf '%s\n' "$MANAGED_SETTINGS_CONTENT" >"$managed_settings_tmp"; then
+		rm -f -- "$managed_settings_tmp"
+		printf 'WARNING: could not write the Claude Code managed settings; the guard was not set\n' >&2
+		return 0
+	fi
+	chown root:root "$managed_settings_tmp"
+	chmod 0644 "$managed_settings_tmp"
+	# ln fails when the file appeared since the check above: an owner's file
+	# is never replaced, not even by a race.
+	if ! ln -- "$managed_settings_tmp" "$file" 2>/dev/null; then
+		rm -f -- "$managed_settings_tmp"
+		printf 'WARNING: %s appeared while the installer ran; it was left untouched. Add "allowManagedHooksOnly": true yourself.\n' "$file" >&2
+		return 0
+	fi
+	rm -f -- "$managed_settings_tmp"
+	printf 'Claude Code managed settings written: %s (allowManagedHooksOnly)\n' "$file"
+	return 0
+}
+
+# The plain mode installs the root-owned
+# bootstrap so later installs/updates go through it. Called only in
+# the plain mode, only after main() has refused any pre-existing
+# BOOTSTRAP_DEST (so the first install can't accidentally overwrite a
+# running bootstrap; once installed, the bootstrap's own self-update
+# path is the only way to change it). --from-snapshot never calls
+# install_bootstrap (the bootstrap replaces itself only through its
+# own self-update). Writes BOOTSTRAP_DEST root:root 0755 through a
+# temp file in the same directory then `mv -f` (atomic), and
+# BOOTSTRAP_SOURCE root:root 0644 with the single line `commit
+# <COMMIT_ID>`. Uses only globals.
+install_bootstrap() {
+	local bootstrap_sha
+	bootstrap_tmp=$(mktemp "$(dirname -- "$BOOTSTRAP_DEST")/newton-bootstrap.new.XXXXXX")
+	install -o root -g root -m 0755 "$SNAP/scripts/newton-bootstrap" "$bootstrap_tmp"
+	mv -f -- "$bootstrap_tmp" "$BOOTSTRAP_DEST"
+
+	bootstrap_sha=$(sha256sum -- "$SNAP/scripts/newton-bootstrap" | awk '{print $1}')
+	bootstrap_source_tmp=$(mktemp "$(dirname -- "$BOOTSTRAP_SOURCE")/$(basename -- "$BOOTSTRAP_SOURCE").new.XXXXXX")
+	printf 'commit %s\n' "$COMMIT_ID" >"$bootstrap_source_tmp"
+	printf 'sha256 %s\n' "$bootstrap_sha" >>"$bootstrap_source_tmp"
+	chown root:root "$bootstrap_source_tmp"
+	chmod 0644 "$bootstrap_source_tmp"
+	mv -f -- "$bootstrap_source_tmp" "$BOOTSTRAP_SOURCE"
+}
+
+# Handle `--from-snapshot <dir>`. Skips
+# make_snapshot, the identity block, the prompt and the tty check
+# (the bootstrap did all of that); only checks that <dir> is a
+# root-owned chain with no symlinks and every required entry present,
+# then sets SNAP and calls perform_install. SUDO_USER was already
+# validated by main(); we re-check the env here because the whole
+# point is that we are running under a scrubbed env.
+run_from_snapshot_mode() {
+	local dir=$1 resolved bad kind path self_path
+	(( EUID == 0 )) || {
+		printf 'ERROR: --from-snapshot must run as root\n' >&2
+		exit 1
+	}
+	verify_scrubbed_env || exit 1
+	[[ $dir == /* ]] || {
+		printf 'ERROR: --from-snapshot directory %s must be an absolute path\n' "$dir" >&2
+		exit 2
+	}
+	if ! resolved=$(readlink -f -- "$dir" 2>/dev/null) || [[ -z $resolved ]]; then
+		printf 'ERROR: could not resolve --from-snapshot directory %s\n' "$dir" >&2
+		exit 1
+	fi
+	[[ -d $resolved ]] || {
+		printf 'ERROR: --from-snapshot path %s is not a directory\n' "$dir" >&2
+		exit 1
+	}
+	check_root_programs || exit $?
+	require_root_owned_chain "$dir" snapshot-dir || exit 1
+	bad=$(find "$resolved" -mindepth 1 ! \( -type d -o -type f \) -print -quit)
+	if [[ -n $bad ]]; then
+		printf 'ERROR: --from-snapshot directory contains a symlink or non-regular entry: %s\n' \
+			"$(sanitize_text "$bad")" >&2
+		exit 1
+	fi
+	bad=$(find "$resolved" \( ! -uid 0 -o ! -gid 0 -o -perm -0002 \) -print -quit)
+	if [[ -n $bad ]]; then
+		printf 'ERROR: --from-snapshot directory has an entry not owned by root or writable by others: %s\n' \
+			"$(sanitize_text "$bad")" >&2
+		exit 1
+	fi
+	while IFS=" " read -r kind path; do
+		[[ -n $kind ]] || continue
+		if [[ $kind == d ]]; then
+			[[ -d $resolved/$path ]] || {
+				printf 'ERROR: --from-snapshot directory is missing required dir %s\n' "$path" >&2
+				exit 1
+			}
+		else
+			[[ -f $resolved/$path ]] || {
+				printf 'ERROR: --from-snapshot directory is missing required file %s\n' "$path" >&2
+				exit 1
+			}
+		fi
+	done < <(required_snapshot_paths)
+	self_path=$(readlink -f -- "$0")
+	if [[ $self_path != "$resolved/scripts/newton-install" ]]; then
+		printf 'ERROR: this installer must be inside --from-snapshot directory at %s/scripts/newton-install (got %s)\n' \
+			"$resolved" "$self_path" >&2
+		exit 1
+	fi
+
+	SNAP=$resolved
+	# Arm the cleanup trap BEFORE anything is allocated, so the
+	# temporaries and the scratch dir below are removed and a failure
+	# after the code root was swapped rolls the old tree back. The
+	# plain mode arms the same trap in make_snapshot.
+	arm_cleanup_traps
+	# install_code_root needs a scratch dir for the venv build; the
+	# snapshot dir itself cannot be used (the bootstrap will remove
+	# it at exit, and the build writes into the code root through
+	# $WORK/{tmp,pip-cwd.*,venv-cwd}). Allocate one and let the
+	# cleanup trap handle it.
+	WORK=$(mktemp -d /var/tmp/newton-install.from-snap.XXXXXXXX) || {
+		printf 'ERROR: could not create the install scratch directory\n' >&2
+		exit 1
+	}
+	printf 'Installing from verified snapshot %s (verified by newton-bootstrap)\n' "$dir"
+	perform_install
+}
+
+main() {
+	local script_path=${BASH_SOURCE[0]} from_snapshot_dir=
+	CHECK=0
+	case ${1:-} in
+		'') ;;
+		--check)
+			CHECK=1
+			shift
+			;;
+		--from-snapshot)
+			(( $# == 2 )) || usage
+			from_snapshot_dir=$2
+			shift 2
+			;;
+		*) usage ;;
+	esac
+	(( $# == 0 )) || usage
+
+	INSTALL_ROOT=${NEWTON_INSTALL_ROOT:-}
+	if [[ -n $INSTALL_ROOT ]]; then
+		[[ $INSTALL_ROOT == /* && $INSTALL_ROOT != / ]] || {
+			printf 'ERROR: NEWTON_INSTALL_ROOT must be an absolute path other than /\n' >&2
+			exit 2
+		}
+		INSTALL_ROOT=${INSTALL_ROOT%/}
+	fi
+
+	if [[ -n $from_snapshot_dir ]]; then
+		(( CHECK == 0 )) || {
+			printf 'ERROR: --from-snapshot cannot be combined with --check\n' >&2
+			exit 2
+		}
+		[[ -z $INSTALL_ROOT ]] || {
+			printf 'ERROR: --from-snapshot cannot be used with NEWTON_INSTALL_ROOT (test seam)\n' >&2
+			exit 2
+		}
+	fi
+
+	HERE=$(cd -- "$(dirname -- "$script_path")" && pwd -P)
+	REPO=$(cd -- "$HERE/.." && pwd -P)
+	[[ -d $REPO/scripts && -d $REPO/mcp && -f $REPO/SKILL.md ]] || {
+		printf 'ERROR: run this script from a complete Newton source tree\n' >&2
+		exit 1
+	}
+
+	SYSTEM_USER=newton
+	SYSTEM_GROUP=newton
+	NEWTON_HOME=/var/lib/newton
+	CODE_ROOT=/opt/newton
+	LAUNCHER=/usr/local/bin/newton-mcp
+	APPROVE_LAUNCHER=/usr/local/bin/newton-approve
+	SETUP_LAUNCHER=/usr/local/bin/newton-router-setup
+	VANTAGE_SETUP_LAUNCHER=/usr/local/bin/newton-vantage-setup
+	ENROL_LAUNCHER=/usr/local/bin/newton-enrol
+	DOCTOR_LAUNCHER=/usr/local/bin/newton-doctor
+	SUDOERS=/etc/sudoers.d/newton-mcp
+	MANAGED_SETTINGS=/etc/claude-code/managed-settings.json
+	CLIENT_COMMAND='sudo -n -u newton /usr/local/bin/newton-mcp'
+
+	invoking_user=${SUDO_USER:-}
+	if [[ -z $invoking_user && -n $INSTALL_ROOT ]]; then
+		invoking_user=$(id -un)
+	fi
+	if [[ -z $invoking_user || $invoking_user == root || ! $invoking_user =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ || $invoking_user =~ ^[A-Z0-9_]+$ ]]; then
+		printf 'ERROR: SUDO_USER must name the non-root user who invoked this installer\n' >&2
+		exit 1
+	fi
+	SUDOERS_MCP_LINE="$invoking_user ALL=($SYSTEM_USER) NOPASSWD: $LAUNCHER \"\""
+	SUDOERS_APPROVE_LINE="$invoking_user ALL=($SYSTEM_USER) $APPROVE_LAUNCHER"
+	SUDOERS_APPROVE_DEFAULTS_LINE="Defaults!$APPROVE_LAUNCHER timestamp_timeout=0"
+	SUDOERS_SETUP_LINE="$invoking_user ALL=($SYSTEM_USER) $SETUP_LAUNCHER"
+	SUDOERS_SETUP_DEFAULTS_LINE="Defaults!$SETUP_LAUNCHER timestamp_timeout=0"
+	SUDOERS_VANTAGE_SETUP_LINE="$invoking_user ALL=($SYSTEM_USER) $VANTAGE_SETUP_LAUNCHER"
+	SUDOERS_VANTAGE_SETUP_DEFAULTS_LINE="Defaults!$VANTAGE_SETUP_LAUNCHER timestamp_timeout=0"
+	SUDOERS_ENROL_LINE="$invoking_user ALL=($SYSTEM_USER) $ENROL_LAUNCHER"
+	SUDOERS_ENROL_DEFAULTS_LINE="Defaults!$ENROL_LAUNCHER timestamp_timeout=0"
+
+	# --from-snapshot skips our own snapshot, identity block
+	# and prompt (the bootstrap did all of that); it only checks the
+	# snapshot chain and required entries, then installs from it.
+	if [[ -n $from_snapshot_dir ]]; then
+		run_from_snapshot_mode "$from_snapshot_dir"
+		exit $?
+	fi
+
+	if (( CHECK )); then
+		# From here on nothing runs in the caller's directory.
+		if (( EUID == 0 )) && [[ -z $INSTALL_ROOT ]]; then
+			check_root_programs || exit $?
+		fi
+		make_snapshot || exit $?
+		cd -- "$WORK" || exit 1
+		print_identity_block
+		cat <<EOF
+CHECK ONLY: no changes will be made.
+Would install a verified snapshot of commit $COMMIT_ID (tree $TREE_ID)
+Would ensure system group: $SYSTEM_GROUP
+Would ensure system user: $SYSTEM_USER (home $NEWTON_HOME, mode 0700; shell /usr/sbin/nologin; no password)
+Would install root-owned code: $CODE_ROOT/{scripts,mcp,device,profiles,SKILL.md}
+Would create/update virtual environment: $CODE_ROOT/venv
+Would install launcher: $LAUNCHER (root:root 0755; clean environment; newton user only; no arguments)
+Would install launcher: $APPROVE_LAUNCHER (root:root 0755; clean environment; newton user only; one 32-hex argument)
+Would install launcher: $SETUP_LAUNCHER (root:root 0755; clean environment; newton user only; arguments passed through to newton-router-setup)
+Would install launcher: $VANTAGE_SETUP_LAUNCHER (root:root 0755; clean environment; newton user only; arguments passed through to newton-vantage-setup)
+Would install launcher: $ENROL_LAUNCHER (root:root 0755; clean environment; newton user only; arguments passed through to newton-enrol)
+Would install: $DOCTOR_LAUNCHER (root:root 0755; test seams disabled)
+Would validate and install sudoers rules: $SUDOERS (root:root 0440)
+$SUDOERS_MCP_LINE
+$SUDOERS_APPROVE_LINE
+$SUDOERS_APPROVE_DEFAULTS_LINE
+$SUDOERS_SETUP_LINE
+$SUDOERS_SETUP_DEFAULTS_LINE
+$SUDOERS_VANTAGE_SETUP_LINE
+$SUDOERS_VANTAGE_SETUP_DEFAULTS_LINE
+$SUDOERS_ENROL_LINE
+$SUDOERS_ENROL_DEFAULTS_LINE
+Would ask whether to set Claude Code's managed settings: $MANAGED_SETTINGS (root:root 0644; allowManagedHooksOnly; default: no; a file that is already there is never overwritten)
+$MANAGED_SETTINGS_NOTE
+Would create credential state directory: $NEWTON_HOME/state (newton:newton 0700)
+Would install: $BOOTSTRAP_DEST (root:root 0755) and $(basename -- "$BOOTSTRAP_SOURCE") (root:root 0644)
+EOF
+		print_manual_steps
+		exit 0
+	fi
+
+	# Plain (real install) mode: the first install only. Everything
+	# else goes through `newton-bootstrap install <repo> <commit id>`.
+	(( EUID == 0 )) || {
+		printf 'ERROR: newton-install must run as root (normally through sudo)\n' >&2
+		exit 1
+	}
+	[[ -t 0 ]] || {
+		printf 'ERROR: refusing non-interactive install; run this command from your own terminal\n' >&2
+		exit 1
+	}
+	if [[ -z $INSTALL_ROOT ]]; then
+		check_root_programs || exit $?
+	fi
+	make_snapshot || exit $?
+	cd -- "$WORK" || exit 1
+	print_identity_block
+	# The owner decides with this paragraph in front of
+	# the prompt, because the guard changes what runs on the machine.
+	printf '%s\n' "$MANAGED_SETTINGS_NOTE"
+	confirm_install
+	# The one optional question, asked after the confirmation and
+	# before anything is written.  The default is no.
+	ask_managed_settings
+
+	[[ -z $INSTALL_ROOT ]] || {
+		printf 'ERROR: NEWTON_INSTALL_ROOT is a check-mode test seam and requires --check\n' >&2
+		exit 2
+	}
+	# Plain mode installs the bootstrap itself, so it refuses up
+	# front if the bootstrap is already on disk. The check runs
+	# BEFORE perform_install so a refused bootstrap install does NOT
+	# leave a half-built Newton on the system. Once installed, the
+	# bootstrap manages itself only through its own self-update path
+	# (which --from-snapshot never touches).
+	if [[ -e $BOOTSTRAP_DEST || -L $BOOTSTRAP_DEST ]]; then
+		printf 'ERROR: newton-bootstrap is already installed; use: newton-bootstrap install <repo> <commit id> (to reinstall the bootstrap itself, remove the file first)\n' >&2
+		exit 1
+	fi
+	perform_install
+	install_bootstrap
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+	main "$@"
+fi

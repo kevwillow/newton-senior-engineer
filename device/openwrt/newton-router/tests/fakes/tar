@@ -1,0 +1,3 @@
+#!/usr/bin/busybox sh
+# tar is real: the backup must be a genuine archive
+exec /usr/bin/busybox tar "$@"

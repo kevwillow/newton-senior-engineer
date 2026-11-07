@@ -1,0 +1,93 @@
+name = "ev-08-diagnostics-read"
+description = "EV-08 (audit, no batch): read-only audit of newton-router's `read` subcommand over the restricted key lane. The router-side binary /usr/libexec/newton/newton-router accepts a fixed table of `read VERB ARGS` forms (uci, ubus, ip, ifstatus, fw4, nft, cat, iwinfo, netstat, df, free, uptime, uname, wifi, logread, apk, ping, traceroute, nslookup); each verb accepts a closed argument shape (e.g. `ping -c 1..5 HOST`, `traceroute HOST`, `ifstatus IFACE`, `iwinfo [IFACE [info|...]]`). Six posts drive the same key lane as mgmt_ssh_newton to call ping (1 packet to lab-isp at 10.100.0.1, must see 0% loss), traceroute (10.100.0.1, must see the traceroute header), nslookup (lab-r1.lan via 127.0.0.1, the router's own dnsmasq must answer 192.168.150.1), ifstatus wan (must be up with an ipv4 address), logread -l 5 (at most 5 lines), and iwinfo (lab-r1 has no radio and no iwinfo binary: the post requires rc=127 with the combined output exactly `error tool-missing iwinfo`, the string `/usr/libexec/newton/newton-router` absent, and still fails if a wireless device is claimed). The seventh post calls a verb outside the table (`read ls`) and asserts the router refuses it (rc 2, the `error bad-arg` line on stderr). Regression is the explicit list (no portfwd): mgmt_ssh_newton proves the key lane works, the rest prove the baseline."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "none"
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "client_internet", "client_dns", "client_dhcp"]
+
+[[post]]
+device = "local"
+cmd = '''
+o=$(timeout 40 ssh -i ~/.ssh/newton-lab-runner -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" root@10.109.0.11 '/usr/libexec/newton/newton-router read ping -c 1 10.100.0.1' 2>&1)
+rc=$?
+if [ "$rc" = "0" ] && printf '%s' "$o" | grep -q '1 packets transmitted, 1 packets received, 0% packet loss'; then
+  echo "ping 10.100.0.1: 0% loss"; exit 0
+fi
+echo "ping 10.100.0.1: rc=$rc no loss"; exit 1
+'''
+expect_stdout = '^ping 10\.100\.0\.1: 0% loss$'
+
+[[post]]
+device = "local"
+timeout = 60
+cmd = '''
+o=$(timeout 40 ssh -i ~/.ssh/newton-lab-runner -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" root@10.109.0.11 '/usr/libexec/newton/newton-router read traceroute 10.100.0.1' 2>&1)
+rc=$?
+if [ "$rc" = "0" ] && printf '%s' "$o" | head -1 | grep -q '^traceroute to 10\.100\.0\.1'; then
+  echo "traceroute 10.100.0.1: header ok"; exit 0
+fi
+echo "traceroute 10.100.0.1: rc=$rc no header"; exit 1
+'''
+expect_stdout = '^traceroute 10\.100\.0\.1: header ok$'
+
+[[post]]
+device = "local"
+cmd = '''
+o=$(timeout 40 ssh -i ~/.ssh/newton-lab-runner -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" root@10.109.0.11 '/usr/libexec/newton/newton-router read nslookup lab-r1.lan 127.0.0.1' 2>&1)
+rc=$?
+if [ "$rc" = "0" ] && printf '%s' "$o" | grep -q 'lab-r1\.lan' && printf '%s' "$o" | grep -q '192\.168\.150\.1'; then
+  echo "nslookup lab-r1.lan 127.0.0.1: own address 192.168.150.1"; exit 0
+fi
+echo "nslookup: rc=$rc missing answer"; exit 1
+'''
+expect_stdout = '^nslookup lab-r1\.lan 127\.0\.0\.1: own address 192\.168\.150\.1$'
+
+[[post]]
+device = "local"
+cmd = '''
+o=$(timeout 40 ssh -i ~/.ssh/newton-lab-runner -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" root@10.109.0.11 '/usr/libexec/newton/newton-router read ifstatus wan' 2>&1)
+rc=$?
+if [ "$rc" = "0" ] && printf '%s' "$o" | grep -q '"up":\s*true' && printf '%s' "$o" | grep -q '"address":'; then
+  echo "ifstatus wan: up with ipv4 address"; exit 0
+fi
+echo "ifstatus wan: rc=$rc not up"; exit 1
+'''
+expect_stdout = '^ifstatus wan: up with ipv4 address$'
+
+[[post]]
+device = "local"
+cmd = '''
+o=$(timeout 40 ssh -i ~/.ssh/newton-lab-runner -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" root@10.109.0.11 '/usr/libexec/newton/newton-router read logread -l 5' 2>&1)
+rc=$?
+if [ -z "$o" ]; then lines=0; else lines=$(printf '%s' "$o" | wc -l); fi
+if [ "$rc" = "0" ] && [ "$lines" -le 5 ]; then
+  echo "logread -l 5: $lines lines"; exit 0
+fi
+echo "logread: rc=$rc lines=$lines"; exit 1
+'''
+expect_stdout = '^logread -l 5: [0-5] lines$'
+
+[[post]]
+device = "local"
+cmd = '''
+o=$(timeout 40 ssh -i ~/.ssh/newton-lab-runner -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" root@10.109.0.11 '/usr/libexec/newton/newton-router read iwinfo' 2>&1)
+rc=$?
+if printf '%s' "$o" | grep -qE 'wlan[0-9]|phy[0-9]|Mode:|Channel:|ESSID:|Access Point:'; then
+  echo "iwinfo: claims a wireless device (rc=$rc)"; exit 1
+fi
+if [ "$rc" != "127" ] || [ "$o" != "error tool-missing iwinfo" ] || printf '%s' "$o" | grep -q '/usr/libexec/newton/newton-router'; then
+  echo "iwinfo: not the clean answer (rc=$rc: $(printf '%s' "$o" | head -1 | cut -c1-80))"; exit 1
+fi
+echo "iwinfo: tool-missing, clean answer (rc=127)"; exit 0
+'''
+expect_stdout = '^iwinfo: tool-missing, clean answer \(rc=127\)$'
+
+[[post]]
+device = "local"
+cmd = '''
+out=$(timeout 40 ssh -i ~/.ssh/newton-lab-runner -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" root@10.109.0.11 '/usr/libexec/newton/newton-router read ls' 2>&1); rc=$?
+echo "$out" | head -1
+exit $rc
+'''
+expect_rc = 2
+expect_stdout = '^error bad-arg 1$'

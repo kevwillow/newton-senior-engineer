@@ -1,0 +1,16 @@
+#!/usr/bin/busybox sh
+# generic fake: log the call, replay canned out/err/rc (arch.md test conventions)
+name=${0##*/}
+root=${NEWTON_ROUTER_ROOT:-}
+echo "$name $*" >> "$root/control/calls.log"
+if [ -f "$root/control/$name.sleep" ]; then
+	read -r s < "$root/control/$name.sleep"
+	/usr/bin/sleep "$s"
+fi
+[ -f "$root/control/$name.out" ] && cat "$root/control/$name.out"
+[ -f "$root/control/$name.err" ] && cat "$root/control/$name.err" >&2
+if [ -f "$root/control/$name.rc" ]; then
+	read -r rc < "$root/control/$name.rc"
+	exit "$rc"
+fi
+exit 0

@@ -1,0 +1,22 @@
+name = "ow-ref-02-staging-verb-revert"
+description = "Negative scenario for design 5.1: a staging verb other than set/add/add_list/del_list/delete/rename/reorder is refused outright. The batch uses the verb revert (it would replace config with an unrelated file), which the helper rejects with 'only set/add/add_list/del_list/delete/rename/reorder are allowed, got: revert' (scripts/owrt-safe-apply.sh around the bad-verb check); owrt-change.sh's plan branch wraps that as 'staging rejected: ... '. Nothing reaches the staging session: uci changes stays empty and the live network config is unchanged. The reject_match regex pins both the wrapper and the helper's own message so a future change to either fails the test."
+target = "lab-r1"
+reset = ["lab-r1"]
+timeout = 60
+setup = ["portfwd_on"]
+regression = "default"
+expect = "rejected"
+reject_match = "staging rejected:.* only set/add/add_list/del_list/delete/rename/reorder are allowed, got: revert"
+batch = '''
+revert /etc/config/network
+'''
+
+[[post]]
+device = "lab-r1"
+cmd = "uci changes | wc -l"
+expect_stdout = "^0$"
+
+[[post]]
+device = "lab-r1"
+cmd = "ifstatus wan | jsonfilter -e '@[\"ipv4-address\"][0].address'"
+expect_stdout = "^10\\.100\\.0\\.\\d+$"

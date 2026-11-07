@@ -1,0 +1,75 @@
+# PORT of ow-fw-07. Changed: lab-r1 -> pulsar, r1_wan_ip -> p_wan_ip, regression -> pulsar's list; single WAN (wan2 probe dropped); local post uses isp()/r() helpers (lab-isp through the proxy, pulsar direct with the admin key).
+name = "p-ow-fw-07-wan-bogon-drop"
+description = "OW-FW-07: a rule Drop-Bogon-WAN (src wan, proto all, target DROP) with src_ip 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 and 169.254.0.0/16, and not 100.64.0.0/10 (carrier-grade NAT space, the satellite WAN). It only filters traffic addressed to the router (input_wan). pulsar's WAN is 10.100.0.0/24, inside 10/8, and lab-isp (10.100.0.1) is the only upstream, so every new inbound connection from lab-isp now matches. The router-side check makes Newton confirm only when the rule is live after both Allow-DHCP-Renew and Allow-Ping in input_wan (a bogon rule above them would break WAN DHCP renewal and ping). Effects: a closed tcp port on each of the router's two WAN addresses (wan and wan2, lab-isp's sources 10.100.0.1 and 10.101.0.1 are both inside 10/8), refused at once before, now gets no answer, while ping from lab-isp still works on both (Allow-Ping precedes the rule); the live input_wan chain has the rule with the four prefixes and without 100.64, after Allow-DHCP-Renew. Posts: (1) the stock allow rules still win over the bogon rule, measured with the rule counters: one ping and one udp packet to port 68 from lab-isp (busybox traceroute sends its first probe to base port + 1, so -p 67; source 10.100.0.1, which the bogon rule matches) raise Allow-Ping and Allow-DHCP-Renew and leave Drop-Bogon-WAN alone; with the rule moved to the top of the chain the same packets raise only Drop-Bogon-WAN (results file). (2) The WAN DHCP lease is re-acquired from scratch (ifdown, ifup). That second post cannot see rule order: udhcpc receives the OFFER on a raw packet socket, below the firewall, and the lease was also re-acquired with the rule first (results file); the first post is the ordering proof. The port forward from lab-isp (source 10.100.0.1, also inside 10/8) is in the default regression: DNAT traffic is forwarded, not delivered to the router, so it must survive. wan_closed_refused is the intended breakage."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+breaks = ["wan_closed_refused"]
+probes = [["nft-rule-order", "inet", "fw4", "input_wan", "Allow-DHCP-Renew", "Drop-Bogon-WAN"], ["nft-rule-order", "inet", "fw4", "input_wan", "Allow-Ping", "Drop-Bogon-WAN"]]
+batch = '''
+set firewall.bogon_wan=rule
+set firewall.bogon_wan.name='Drop-Bogon-WAN'
+set firewall.bogon_wan.src='wan'
+set firewall.bogon_wan.proto='all'
+set firewall.bogon_wan.target='DROP'
+add_list firewall.bogon_wan.src_ip='10.0.0.0/8'
+add_list firewall.bogon_wan.src_ip='172.16.0.0/12'
+add_list firewall.bogon_wan.src_ip='192.168.0.0/16'
+add_list firewall.bogon_wan.src_ip='169.254.0.0/16'
+'''
+
+[[effect]]
+device = "lab-isp"
+timeout = 40
+cmd = '''
+probe() {
+  ping -c 1 -W 2 $1 >/dev/null 2>&1 && p=ok || p=none
+  t=$(mktemp); nc $1 9 </dev/null >/dev/null 2>$t & n=$!
+  i=0; while [ ! -s $t ] && [ $i -lt 4 ]; do sleep 1; i=$((i+1)); done
+  r=$(cat $t); kill $n 2>/dev/null; rm -f $t
+  case "$r" in *refused*) c=refused;; "") c="no answer in 4 s";; *) c="$r";; esac
+  echo "$1: ping=$p closed-port-9=$c"
+  [ "$p" = ok ] && [ "$c" = "no answer in 4 s" ]
+}
+probe {p_wan_ip}
+'''
+expect_stdout = '^10\.100\.0\.\d+: ping=ok closed-port-9=no answer in 4 s$'
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+c=$(nft list chain inet fw4 input_wan); l=$(echo "$c" | grep 'Drop-Bogon-WAN')
+a=$(echo "$c" | grep -n 'Allow-DHCP-Renew' | cut -d: -f1); b=$(echo "$c" | grep -n 'Drop-Bogon-WAN' | cut -d: -f1)
+[ -n "$l" ] && [ -n "$a" ] && [ "$a" -lt "$b" ] && echo "$l" | grep -q '10.0.0.0/8' && echo "$l" | grep -q '172.16.0.0/12' && echo "$l" | grep -q '192.168.0.0/16' && echo "$l" | grep -q '169.254.0.0/16' && ! echo "$l" | grep -q '100.64' && echo "input_wan: Drop-Bogon-WAN after Allow-DHCP-Renew, lists 10/8 172.16/12 192.168/16 169.254/16, not 100.64/10"
+'''
+expect_stdout = '^input_wan: Drop-Bogon-WAN after Allow-DHCP-Renew, lists 10/8 172\.16/12 192\.168/16 169\.254/16, not 100\.64/10$'
+
+[[post]]
+device = "local"
+timeout = 90
+cmd = '''
+isp() { timeout 40 ssh -i "$LAB_SSH_KEY" -o BatchMode=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" root@10.109.0.10 "$@"; }
+r() { timeout 40 ssh -i {pulsar_admin_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 "$@"; }
+cnt() { r "nft list chain inet fw4 input_wan | grep '$1' | sed 's/.*counter packets \([0-9]*\) .*/\1/'"; }
+b0=$(cnt Drop-Bogon-WAN); d0=$(cnt Allow-DHCP-Renew); p0=$(cnt Allow-Ping)
+isp 'ping -c 1 -W 2 {p_wan_ip} >/dev/null 2>&1; traceroute -n -m 1 -q 1 -w 1 -p 67 {p_wan_ip} >/dev/null 2>&1; true'
+sleep 1
+b1=$(cnt Drop-Bogon-WAN); d1=$(cnt Allow-DHCP-Renew); p1=$(cnt Allow-Ping)
+{ [ -n "$b0" ] && [ -n "$b1" ]; } || { echo "Drop-Bogon-WAN rule not found in input_wan"; exit 1; }
+echo "one ping and one udp/68 packet from lab-isp: Allow-Ping +$((p1-p0)) Allow-DHCP-Renew +$((d1-d0)) Drop-Bogon-WAN +$((b1-b0))"
+[ $((p1-p0)) -ge 1 ] && [ $((d1-d0)) -ge 1 ] && [ $((b1-b0)) -eq 0 ]
+'''
+expect_stdout = '^one ping and one udp/68 packet from lab-isp: Allow-Ping \+[1-9]\d* Allow-DHCP-Renew \+[1-9]\d* Drop-Bogon-WAN \+0$'
+
+[[post]]
+device = "pulsar"
+timeout = 90
+cmd = '''
+ifdown wan; sleep 2; ifup wan
+i=0; a=""
+while [ $i -lt 40 ] && [ -z "$a" ]; do a=$(ifstatus wan | jsonfilter -e '@["ipv4-address"][0].address'); [ -n "$a" ] || { sleep 1; i=$((i+1)); }; done
+echo "wan lease after ifdown/ifup: ${a:-none} (waited $i s)"; [ -n "$a" ]
+'''
+expect_stdout = '^wan lease after ifdown/ifup: 10\.100\.0\.\d+ '

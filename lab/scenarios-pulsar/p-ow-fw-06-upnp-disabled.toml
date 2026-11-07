@@ -1,0 +1,49 @@
+# PORT of ow-fw-06-upnp-disabled. Changed: lab-r1 -> pulsar; 10.109.0.11 -> 192.168.1.1; 10.109.0.50 -> {agent_ip}; the SSDP probe from lab-client is sent from the real LAN client (the agent host, `local`) bound to {agent_ip} instead of lab-client bound to 10.109.0.50, and the target is 192.168.1.1:1900 instead of 10.109.0.11:1900. The "outside Newton's rollback" wording now says pulsar removes it.
+name = "p-ow-fw-06-upnp-disabled"
+description = "OW-FW-06 with the package installed: UPnP/NAT-PMP stays off. The setup step installs miniupnpd-nftables (the fw4 build, shipped enabled=0) with apk, outside Newton's rollback; the next reset of pulsar removes it (the runner's package restore: apk del of every world entry added since the record). The batch sets upnpd.config.enabled='0', which is already the value, so the plan stages nothing and the expected outcome is noop. Without the package the same batch is also a noop (section missing), so the posts first prove the package is installed. Posts: nothing listens on udp 1900 or 5351 or tcp 5000 and no miniupnpd process runs, and the agent host (the LAN client) gets no SSDP reply from pulsar's mgmt address (p-ow-fw-06b-upnp-enabled shows the same probe getting a reply)."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "noop"
+setup = ["portfwd_on", "miniupnpd_install"]
+regression = "default"
+batch = '''
+set upnpd.config.enabled='0'
+'''
+
+[[post]]
+device = "pulsar"
+cmd = "echo \"package=$(apk list -I miniupnpd-nftables 2>/dev/null | cut -d' ' -f1 | head -1) enabled=$(uci -q get upnpd.config.enabled)\""
+expect_stdout = '^package=miniupnpd-nftables-\S+ enabled=0$'
+
+[[post]]
+device = "pulsar"
+cmd = '''
+l=$(netstat -lun | grep -c -E ':(1900|5351) '); t=$(netstat -ltn | grep -c ':5000 '); p=$(ps w | grep -c '[m]iniupnpd')
+echo "udp 1900/5351 listeners=$l tcp 5000 listeners=$t miniupnpd processes=$p"; [ "$l$t$p" = 000 ]
+'''
+expect_stdout = '^udp 1900/5351 listeners=0 tcp 5000 listeners=0 miniupnpd processes=0$'
+
+[[post]]
+device = "local"
+timeout = 30
+cmd = '''
+python3 - <<'PYEOF'
+import socket, sys
+msg = 'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: "ssdp:discover"\r\nMX: 1\r\nST: upnp:rootdevice\r\n\r\n'.encode()
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(1.5)
+s.bind(("{agent_ip}", 0))
+for i in range(3):
+    s.sendto(msg, ('192.168.1.1', 1900))
+    try:
+        data, addr = s.recvfrom(2048)
+    except (socket.timeout, ConnectionRefusedError):
+        continue
+    print('ssdp reply from %s' % addr[0])
+    sys.exit(0)
+print('no ssdp reply from 192.168.1.1:1900')
+sys.exit(1)
+PYEOF
+'''
+expect_rc = 1
+expect_stdout = '^no ssdp reply from 192\.168\.1\.1:1900$'

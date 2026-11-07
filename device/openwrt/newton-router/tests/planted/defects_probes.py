@@ -1,0 +1,31 @@
+"""Planted defects for the probe tests. Used by tests/planted/runner.py with test_probes.py and test_probes_match.py."""
+B = "device/openwrt/newton-router/tests"
+P = [f"{B}/test_probes.py", f"{B}/test_probes_match.py", f"{B}/test_probes_exit.py", f"{B}/test_read_more.py"]
+MUTANTS = [
+    ("M14", "backslash accepted in a probe field", "\t\t*\\\\*)\n\t\t\tPB_REASON=syntax\n\t\t\treturn 1\n\t\t\t;;\n", "", P),
+    ("M15", "probe TEXT matched as a regex", "p = index(s, t)", "p = match(s, t)", P),
+    ("M16", "a probe prints router output", "printf 'probe %s fail %s\\n' \"$PB_NAME\" \"$PB_REASON\"", "printf 'probe %s fail %s\\n' \"$PB_NAME\" \"$PB_REASON\"; cat \"$OUT\"", P),
+    ("M17", "watchdog never kills", "\t\tkill -TERM \"$pid\" 2>/dev/null\n\t\t\"$SLEEP\" 1\n\t\tkill -0 \"$PROG_PID\" 2>/dev/null || exit 0\n\t\tkill -KILL \"$pid\" 2>/dev/null\n\t) </dev/null >/dev/null 2>&1 &\n\tw=$!\n\twait \"$pid\" 2>/dev/null\n\trc=$?\n\tkill \"$w\" 2>/dev/null\n\treturn \"$rc\"\n}\n\n# run_bounded_in",
+     "\t\t:\n\t\t\"$SLEEP\" 1\n\t\tkill -0 \"$PROG_PID\" 2>/dev/null || exit 0\n\t\t:\n\t) </dev/null >/dev/null 2>&1 &\n\tw=$!\n\twait \"$pid\" 2>/dev/null\n\trc=$?\n\tkill \"$w\" 2>/dev/null\n\treturn \"$rc\"\n}\n\n# run_bounded_in", P),
+    ("M49", "nft-rule: a failing nft counts as an empty listing", "\tnft_list \"$PB_1\" \"$PB_2\" \"$PB_3\"\n\trc=$?\n\tif [ \"$rc\" -ne 0 ]; then\n\t\tif probe_killed \"$rc\"; then PB_REASON=timeout; else PB_REASON=error; fi\n\t\treturn 1\n\tfi\n\tprobe_capture || return 1\n\tmatch_count \"$((PB_NARGS - 4))\"",
+     "\tnft_list \"$PB_1\" \"$PB_2\" \"$PB_3\"\n\trc=$?\n\tif [ \"$rc\" -ne 0 ] && false; then\n\t\tif probe_killed \"$rc\"; then PB_REASON=timeout; else PB_REASON=error; fi\n\t\treturn 1\n\tfi\n\tprobe_capture || return 1\n\tmatch_count \"$((PB_NARGS - 4))\"", P),
+    ("PM1", "ping -W 1", "run_bounded 10 \"$PING\" -c \"$c\" -W 3 \"$PB_1\"", "run_bounded 10 \"$PING\" -c \"$c\" -W 1 \"$PB_1\"", P),
+    ("PM2", "resolve default server", "s=127.0.0.1", "s=8.8.8.8", P),
+    ("PM3", "service-running accepts false", "grep -q '^true$' \"$OUT\"", "grep -q '^\\(true\\|false\\)$' \"$OUT\"", P),
+    ("PM4", "sysctl KEY depth 6 allowed", "[ \"$n\" -ge 2 ] && [ \"$n\" -le 6 ]", "[ \"$n\" -ge 2 ] && [ \"$n\" -le 7 ]", P),
+    ("PM5", "root-password-class: ! is not locked", "substr($2, 1, 1) == \"*\" || substr($2, 1, 1) == \"!\"", "substr($2, 1, 1) == \"*\"", P),
+    ("PM6", "conf-has accepts any -C path", "\t\t\t\t\t\t/var/etc/dnsmasq.conf.*|/tmp/etc/dnsmasq.conf.*)", "\t\t\t\t\t\t/*)", P),
+    ("PM7", "listen: port compared as a prefix", "if (pn != port) next", "if (index(pn, port) != 1) next", P),
+    ("PM8", "listen wildcard includes any address", "if (a == \"0.0.0.0\" || a == \"::\") cnt = cnt + 1", "cnt = cnt + 1", P),
+    ("PM9", "nft-set-has only ignores the count", "if [ \"$found\" -eq 1 ] && [ \"$ncnt\" -eq 1 ]; then return 0; fi", "if [ \"$found\" -eq 1 ]; then return 0; fi", P),
+    ("PM10", "probe line limit 513", "fail bad-probe 2 '1 too-long'", "fail bad-probe 2 '1 syntax'", P),
+    ("PM11", "root-password-class open to read role", "if [ \"$PB_NAME\" = root-password-class ] && [ \"$ROLE\" != change ]; then", "if false; then", P),
+    ("PM12", "ra-absent: no fallback to device", "run_bounded 5 \"$JSONFILTER\" -i \"$scratch\" -e '@.device'", "run_bounded 5 \"$JSONFILTER\" -i \"$scratch\" -e '@.l3_device'", P),
+    ("PM13", "negative TEXT ignored", "if (index(line, substr(t, 2)) > 0) return 0", "if (0) return 0", P),
+    ("PM14", "ordered TEXT not enforced", "s = substr(s, p + length(t))", "s = s", P),
+    ("PM15", "nft-rule-near window off by one", "win = near\n", "win = near - 1\n", P),
+    ("PM16", "empty field accepted", "\"$PB_TAB\"*|*\"$PB_TAB\"|*\"$PB_TAB$PB_TAB\"*)", "\"$PB_TAB\"*|*\"$PB_TAB\")", P),
+    ("PM17", "field limit 129", "if [ \"${#f}\" -gt 128 ]; then", "if [ \"${#f}\" -gt 129 ]; then", P),
+    ("PM18", "probe argument count: one more allowed for ping", "ping) PB_MIN=1; PB_MAX=2;", "ping) PB_MIN=1; PB_MAX=3;", P),
+    ("PM19", "uci-equals compares a prefix", "[ \"$v\" = \"$PB_2\" ] && return 0\n\tPB_REASON=mismatch\n\treturn 1\n}\n\n# probe_uci_unset", "case \"$v\" in \"$PB_2\"*) return 0 ;; esac\n\tPB_REASON=mismatch\n\treturn 1\n}\n\n# probe_uci_unset", P),
+]

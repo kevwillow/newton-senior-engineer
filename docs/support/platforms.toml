@@ -1,0 +1,225 @@
+# Platforms the support table covers. Edit this by hand; runs.toml is appended by `scripts/support-table.py record`.
+# undo is one of: on-router guard, commit-confirm, reboot, timer. A shape with scenarios = [] has no scenario written yet.
+
+[platforms.openwrt]
+label = "OpenWrt"
+untested = ["Hardware other than the Asus RT-AX57M", "Dual WAN on the GL.iNet Beryl and a satellite-WAN uplink (planned for the first 1.x release with the hardware)", "Firmware upgrade (planned for 1.4)", "Other OpenWrt releases than the one in each row", "The no-install mode: b and c are refused when the change is planned, not rolled back (a change that cuts off Newton's own access to the router could never be confirmed), so nothing is applied"]
+
+# The two access modes of an OpenWrt router (ADR-021 point 1).  A run
+# names the mode it was made in.
+#
+# The release and the undo type belong to the MODE, not to the platform:
+# the no-install mode is release 1.1 and its undo is OpenWrt's own
+# timer, which lives in the router's RAM, not the installed guard.  A
+# platform with access modes must not carry a second copy of them.
+[[platforms.openwrt.access_mode]]
+id = "installed"
+name = "Newton's program and guard on the router"
+release = "1.0"
+undo = "on-router guard"
+
+[[platforms.openwrt.access_mode]]
+id = "no-install"
+name = "nothing on the router but one web-interface user"
+release = "1.1"
+undo = "timer"
+undo_note = "OpenWrt's own undo timer, RAM only"
+
+[[platforms.openwrt.shape]]
+id = "a"
+name = "happy path (a confirmed change)"
+scenarios = ["01-static-lease", "p-01-static-lease", "n-01-static-lease"]
+
+[[platforms.openwrt.shape]]
+id = "b"
+name = "management IP lockout rolls back"
+scenarios = ["02-mgmt-ip-lockout", "p-02-mgmt-ip-lockout", "n-02-mgmt-ip-lockout"]
+
+[[platforms.openwrt.shape]]
+id = "c"
+name = "management firewall drop rolls back"
+scenarios = ["03-mgmt-firewall-drop", "p-03-mgmt-firewall-drop", "n-03-mgmt-firewall-drop"]
+
+[[platforms.openwrt.shape]]
+id = "d"
+name = "injection in a change is rejected"
+scenarios = ["04-commit-smuggling", "p-04-commit-smuggling", "n-04-commit-smuggling"]
+
+[[platforms.openwrt.shape]]
+id = "e"
+name = "bad syntax is rejected"
+scenarios = ["05-bad-syntax", "p-05-bad-syntax", "n-05-bad-syntax"]
+
+[[platforms.openwrt.shape]]
+id = "f"
+name = "a service is reachable after the change"
+scenarios = ["06-port-forward-from-isp", "p-06-port-forward-from-isp", "n-06-port-forward-from-isp"]
+
+[[platforms.openwrt.shape]]
+id = "g"
+name = "uplinks down rolls back"
+scenarios = ["07-wan-down-isolation", "p-07-wan-down-isolation", "n-07-wan-down-isolation"]
+
+[platforms.vyos]
+label = "VyOS"
+release = "1.0"
+undo = "commit-confirm"
+untested = ["Tested on a virtual image only, no hardware", "Reload mode is required; a VyOS without it is read-only", "Only the seven shapes above are recorded; the unapproved-change refusal is a separate lab shape"]
+
+[[platforms.vyos.shape]]
+id = "a"
+name = "happy path (a confirmed change)"
+scenarios = ["01-harmless"]
+
+[[platforms.vyos.shape]]
+id = "b"
+name = "management IP lockout rolls back"
+scenarios = ["02-mgmt-ip"]
+
+[[platforms.vyos.shape]]
+id = "c"
+name = "management firewall drop rolls back"
+scenarios = ["03-input-drop"]
+
+[[platforms.vyos.shape]]
+id = "d"
+name = "injection in a change is rejected"
+scenarios = ["04-injection"]
+
+[[platforms.vyos.shape]]
+id = "e"
+name = "bad syntax is rejected"
+scenarios = ["05-bad-syntax"]
+
+[[platforms.vyos.shape]]
+id = "f"
+name = "a service is reachable after the change"
+scenarios = ["06-service-reachable"]
+
+[[platforms.vyos.shape]]
+id = "g"
+name = "uplinks down rolls back"
+scenarios = ["07-uplink-down"]
+
+[platforms.routeros]
+label = "MikroTik RouterOS"
+release = "1.0"
+undo = "reboot"
+untested = ["Tested on a virtual image (CHR) only, no hardware", "Undo is a reboot into the backup (tier T2), so a rollback interrupts traffic"]
+
+[[platforms.routeros.shape]]
+id = "a"
+name = "happy path (a confirmed change)"
+scenarios = ["01-harmless"]
+
+[[platforms.routeros.shape]]
+id = "b"
+name = "management IP lockout rolls back"
+scenarios = ["02-mgmt-ip"]
+
+[[platforms.routeros.shape]]
+id = "c"
+name = "management firewall drop rolls back"
+scenarios = ["03-input-drop"]
+
+[[platforms.routeros.shape]]
+id = "d"
+name = "injection in a change is rejected"
+scenarios = ["04-injection"]
+
+[[platforms.routeros.shape]]
+id = "e"
+name = "bad syntax is rejected"
+scenarios = ["05-bad-syntax"]
+
+[[platforms.routeros.shape]]
+id = "f"
+name = "a service is reachable after the change"
+scenarios = ["06-service-reachable"]
+
+[[platforms.routeros.shape]]
+id = "g"
+name = "uplinks down rolls back"
+scenarios = ["07-uplink-down"]
+
+[platforms.junos]
+label = "Juniper Junos"
+release = "1.0"
+undo = "commit-confirm"
+untested = ["Tested on a virtual image only, no hardware"]
+
+[[platforms.junos.shape]]
+id = "a"
+name = "happy path (a confirmed change)"
+scenarios = ["01-harmless"]
+
+[[platforms.junos.shape]]
+id = "b"
+name = "management IP lockout rolls back"
+scenarios = ["02-mgmt-ip"]
+
+[[platforms.junos.shape]]
+id = "c"
+name = "management firewall drop rolls back"
+scenarios = ["03-input-drop"]
+
+[[platforms.junos.shape]]
+id = "d"
+name = "injection in a change is rejected"
+scenarios = ["04-injection"]
+
+[[platforms.junos.shape]]
+id = "e"
+name = "bad syntax is rejected"
+scenarios = ["05-bad-syntax"]
+
+[[platforms.junos.shape]]
+id = "f"
+name = "a service is reachable after the change"
+scenarios = ["06-service-reachable"]
+
+[[platforms.junos.shape]]
+id = "g"
+name = "uplinks down rolls back"
+scenarios = ["07-uplink-down"]
+
+[platforms.linux]
+label = "Linux hosts"
+release = "1.3"
+undo = "timer"
+untested = ["Every shape: planned for 1.3, tested per network stack"]
+
+[[platforms.linux.shape]]
+id = "a"
+name = "happy path (a confirmed change)"
+scenarios = []
+
+[[platforms.linux.shape]]
+id = "b"
+name = "management IP lockout rolls back"
+scenarios = []
+
+[[platforms.linux.shape]]
+id = "c"
+name = "management firewall drop rolls back"
+scenarios = []
+
+[[platforms.linux.shape]]
+id = "d"
+name = "injection in a change is rejected"
+scenarios = []
+
+[[platforms.linux.shape]]
+id = "e"
+name = "bad syntax is rejected"
+scenarios = []
+
+[[platforms.linux.shape]]
+id = "f"
+name = "a service is reachable after the change"
+scenarios = []
+
+[[platforms.linux.shape]]
+id = "g"
+name = "uplinks down rolls back"
+scenarios = []

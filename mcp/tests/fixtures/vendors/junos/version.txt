@@ -1,0 +1,7 @@
+# synthetic
+Host: lab-jx-r1
+Model: vjunos-router
+Junos: 23.4R1.9
+Build: 2026-09-12 09:14:00 UTC
+MGD: lab-jx-r1
+Build date: 2026-09-12

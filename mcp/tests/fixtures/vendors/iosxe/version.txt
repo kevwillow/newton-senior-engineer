@@ -1,0 +1,6 @@
+# synthetic
+Cisco IOS XE Software, Version 17.12.04
+ROM: IOS-XE ROMMON
+System image file is "bootflash:packages.conf"
+cisco lab-ios-r1 processor with 1234567K bytes of memory
+Configuration register is 0x2102

@@ -1,0 +1,59 @@
+# PORT of dw-04-no-flap. Changed: lab-r1 -> pulsar (Pulsar's wan is device `wan` from lab-isp's ISP-A 10.100.0.1 and wan2 is `wan.101` from ISP-B 10.101.0.1; lab-isp's eth2/eth3 and the nft counters are unchanged); the effect reads pulsar's logread over the pinned admin-key path (r() to 192.168.1.1, no proxy) instead of ssh through the proxy; regression = the same checks plus p_client_on_pulsar.
+name = "p-dw-04-no-flap"
+description = "DW-04: a transient upstream fault shorter than the tool's detection window must NOT trigger a failover. Settings: interval 3, timeout 1, down_after 3, so the detection threshold is about down_after*(interval+K*timeout) = 12 s with K=1 for demoting wan. The effect [[effect]] (timeout 150) confirms the baseline (via ISP-A), makes the `inet nwcut` nft cut, sleeps 5 s, lifts the cut, sleeps another 15 s, then asserts (a) a fresh connection still leaves via ISP-A only (eth2 counter rose by exactly 1 per probe, eth3 by zero) and (b) `logread -e newton-wan-health` on pulsar contains the startup line `started` but no line matching ` down ` (the tool saw the fault, never crossed the threshold, did not demote). BEFORE the change the service is not running, so logread shows no `started` line and the effect fails -- that is what makes this scenario a real test of the change. OBSERVATION: lab-isp nft counters (no eth3 rise = no failover) and pulsar's logread."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+timeout = 180
+setup = ["dw_wanhealth_install", "dw_isp_target_on", "dw_isp_count_on"]
+cleanup = ["dw_isp_count_off", "dw_isp_target_off", "dw_cut_clear"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_client_on_pulsar", "client_internet", "client_dns", "client_dhcp"]
+probes = [["uci-equals", "newton_wanhealth.main.enabled", "1"]]
+batch = '''
+set newton_wanhealth.main=settings
+set newton_wanhealth.main.enabled='1'
+set newton_wanhealth.main.interval='3'
+set newton_wanhealth.main.timeout='1'
+set newton_wanhealth.main.down_after='3'
+set newton_wanhealth.main.up_after='2'
+add_list newton_wanhealth.main.target='198.51.100.9'
+add_list newton_wanhealth.main.iface='wan'
+add_list newton_wanhealth.main.iface='wan2'
+'''
+
+[[effect]]
+device = "local"
+timeout = 150
+cmd = '''
+. lab/dualwan-lib.sh
+nwcut_off 2>/dev/null; nwdown_off 2>/dev/null
+fail() { echo "dw-04-no-flap: $1" >&2; nwcut_off; exit 1; }
+trap 'nwcut_off' EXIT
+wait_via A 20 || fail "baseline: not via ISP-A"
+read -r a0 b0 < <(counts)
+nwcut_on
+sleep 5
+nwcut_off
+sleep 15
+read -r a1 b1 < <(counts)
+nwsend
+sleep 1
+read -r a2 b2 < <(counts)
+# eth2 rose by 1 (the post-cut probe) and eth3 stayed put
+if [ "$a2" -ne "$((a0 + 1))" ]; then fail "eth2 counter expected $((a0 + 1)), got $a2"; fi
+if [ "$b2" -ne "$b0" ]; then fail "eth3 counter moved ($b0 -> $b2): failover happened"; fi
+r() { timeout 40 ssh -i {pulsar_admin_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 "$@"; }
+LOGS=$(r 'logread -e newton-wan-health' </dev/null) || fail "cannot read pulsar logread"
+case "$LOGS" in *"started"*) :;; *) fail "logread has no 'started' line for newton-wan-health"; esac
+case "$LOGS" in *" down "*) fail "logread has a ' down ' line: the tool demoted wan";; esac
+echo "no_flap_after_5s_cut=1"
+'''
+expect_stdout = '^no_flap_after_5s_cut=1$'
+
+[[post]]
+device = "pulsar"
+cmd = '''
+e=$(uci -q get newton_wanhealth.main.enabled); d=$(uci -q get newton_wanhealth.main.down_after); i=$(uci -q get newton_wanhealth.main.interval); t=$(uci -q get newton_wanhealth.main.timeout)
+echo "enabled=$e down_after=$d interval=$i timeout=$t"
+'''
+expect_stdout = '^enabled=1 down_after=3 interval=3 timeout=1$'

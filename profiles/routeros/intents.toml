@@ -1,0 +1,137 @@
+# RouterOS intent -> revert-wrapped snippet mapping.
+#
+# Audit ids name the enabled getters of this platform
+# (``mcp/newton_mcp/adapters/routeros/getters.toml``); ids like
+# ``admins`` and ``running_config`` ship DISABLED on this platform,
+# so they never appear in ``audit`` lists. Every snippet is
+# UNVERIFIED until a lab run confirms it on lab-chr.
+#
+# Keys of an [[intent]] entry, in this order:
+#   id            vendor-neutral intent id, e.g. INT-MGMT-NO-TELNET
+#   explanation   Newton-written short description (a single sentence).
+#   doc           source-of-truth doc file the intent was paraphrased from.
+#   ledger        ledger id for the explanation, or "" everywhere today.
+#   audit         ENABLED getter ids the intent runs against the live device.
+#   check         Newton-written one-sentence description of what to verify.
+#   good          Newton-written one-sentence description of what good looks
+#                 like after the snippet is applied and confirmed.
+#   snippet       multi-line TOML literal; revert-wrapped per design 8.3.
+#                 Optional, but always paired with ``confirm``.
+#   confirm       Newton-written one-sentence description of the human step
+#                 that confirms the change before the wrapper's timer fires.
+#                 Optional, but always paired with ``snippet``.
+#
+# Reserved keys refused by the loader: control_id, tier, form_of, and any
+# other key not in the list above. The four service-off intents
+# (INT-MGMT-NO-TELNET, INT-MGMT-NO-WEB, INT-MGMT-NO-API, INT-SNMP-OFF)
+# are the only intents that may carry a ``snippet`` / ``confirm`` pair.
+#
+# Intents not listed here are returned by ``recommend()`` with
+# guidance "none" and explanation "no guidance for <platform> yet".
+[[intent]]
+id = 'INT-MGMT-SRC'
+explanation = 'Decide which source prefixes may reach the admin plane; store the chosen prefix list per device.'
+doc = 'profiles/routeros/notes.md'
+ledger = ''
+audit = []
+check = 'Check the running configuration on the device console for the chosen source restriction; no enabled getter shows it yet.'
+good = 'Admin reachability on every enabled protocol is constrained to the recorded source set; nothing else responds.'
+
+[[intent]]
+id = 'INT-MGMT-NO-TELNET'
+explanation = 'Keep telnet off the RouterOS service list; admin authentication must stay key-based.'
+doc = 'profiles/routeros/notes.md'
+ledger = ''
+audit = ['mgmt_services']
+check = 'Audit mgmt_services for a telnet line; expect ``disabled=yes`` after the snippet runs.'
+good = 'telnet is absent from ``/ip service print``; only the ssh line is enabled.'
+snippet = """\
+# press Ctrl-X to enter Safe Mode before pasting
+/ip service set telnet disabled=yes"""
+confirm = 'Press Ctrl-X again to leave Safe Mode and keep the change; if the session drops, RouterOS reverts the disabled=yes flag.'
+
+[[intent]]
+id = 'INT-MGMT-NO-WEB'
+explanation = 'Disable both the HTTP and HTTPS RouterOS web services so admin traffic stays on the CLI; admin UI should not be reachable.'
+doc = 'profiles/routeros/notes.md'
+ledger = ''
+audit = ['mgmt_services']
+check = 'Audit mgmt_services for the ``www`` and ``www-ssl`` lines; expect both ``disabled=yes`` after the snippet runs.'
+good = '``www`` and ``www-ssl`` are both disabled in ``/ip service print``; the only listener is on ssh.'
+snippet = """\
+# press Ctrl-X to enter Safe Mode before pasting
+/ip service set www disabled=yes
+/ip service set www-ssl disabled=yes"""
+confirm = 'Press Ctrl-X again to leave Safe Mode and keep the change; if the session drops, RouterOS reverts the disabled=yes flags.'
+
+[[intent]]
+id = 'INT-MGMT-NO-API'
+explanation = 'Disable both the plain and TLS RouterOS API services so admin automation must use ssh; the JSON-RPC API stays off.'
+doc = 'profiles/routeros/notes.md'
+ledger = ''
+audit = ['mgmt_services']
+check = 'Audit mgmt_services for the ``api`` and ``api-ssl`` lines; expect both ``disabled=yes`` after the snippet runs.'
+good = '``api`` and ``api-ssl`` are both disabled in ``/ip service print``; the only listener is on ssh.'
+snippet = """\
+# press Ctrl-X to enter Safe Mode before pasting
+/ip service set api disabled=yes
+/ip service set api-ssl disabled=yes"""
+confirm = 'Press Ctrl-X again to leave Safe Mode and keep the change; if the session drops, RouterOS reverts the disabled=yes flags.'
+
+[[intent]]
+id = 'INT-SNMP-V3-ONLY'
+explanation = 'When SNMP is needed, run it on v3 with auth + priv; never advertise a community string.'
+doc = 'profiles/routeros/notes.md'
+ledger = ''
+audit = []
+check = 'If SNMP is required, audit the running snmp configuration for v3-only mode with auth and priv; community lines must be absent.'
+good = 'SNMP, when present, responds to v3 requests with auth+priv only; no v1/v2 community line remains.'
+
+[[intent]]
+id = 'INT-SNMP-OFF'
+explanation = 'Turn RouterOS SNMP off entirely; no v3 listener, no community, no traps.'
+doc = 'profiles/routeros/notes.md'
+ledger = ''
+audit = []
+check = 'Run ``/snmp print`` on the device console and confirm the output shows ``enabled: no`` (unconfirmed until a lab capture confirms it); /ip service print does not show SNMP, so the audit list is empty.'
+good = '``/snmp print`` reports ``enabled: no`` on the device console; the device does not respond on UDP/161 from any subnet.'
+snippet = """\
+# press Ctrl-X to enter Safe Mode before pasting
+/snmp set enabled=no"""
+confirm = 'Press Ctrl-X again to leave Safe Mode and keep the change; if the session drops, RouterOS reverts enabled=no.'
+
+[[intent]]
+id = 'INT-SSH-KEYS-ONLY'
+explanation = 'Disable SSH password login after a key login is proven on the RouterOS account.'
+doc = 'profiles/routeros/notes.md'
+ledger = ''
+audit = []
+check = 'Audit every admin account for a public key imported and confirm ssh refuses password login (field names unconfirmed until a lab capture confirms it).'
+good = 'Each enabled account authenticates with a key; password logins on ssh are refused.'
+
+[[intent]]
+id = 'INT-INBOUND-NONE'
+explanation = 'No inbound services; the firewall and NAT rules should not advertise anything from outside the WAN.'
+doc = 'profiles/routeros/notes.md'
+ledger = ''
+audit = ['firewall_policy', 'nat']
+check = 'Audit firewall_policy and nat for any dst-nat or accept-in wan rule; expect no such rule after the change.'
+good = 'firewall filter and NAT rules hold no inbound accept; UPnP is off; nothing from outside reaches a LAN port.'
+
+[[intent]]
+id = 'INT-LOG-REMOTE'
+explanation = 'Forward RouterOS logs to a syslog server; the device keeps an on-box copy too.'
+doc = 'profiles/routeros/notes.md'
+ledger = ''
+audit = ['logging']
+check = 'Audit logging for a remote action whose prefix is not on-box; expect a remote target line after the change.'
+good = 'logs reach the configured syslog endpoint; the on-box buffer reflects the same events.'
+
+[[intent]]
+id = 'INT-NTP-SERVERS'
+explanation = 'List the NTP servers RouterOS syncs against; the device clock must be right for every auth check.'
+doc = 'profiles/routeros/notes.md'
+ledger = ''
+audit = ['ntp']
+check = 'Audit ntp for the configured servers; expect at least one reachable server after the change.'
+good = 'At least one configured NTP server is reachable and the device reports its clock as synchronised.'

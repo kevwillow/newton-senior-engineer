@@ -1,0 +1,6 @@
+# recorded lab:chr:7.24.5:2026-10-18
+Flags: D - DYNAMIC; A - ACTIVE; c - CONNECT
+Columns: DST-ADDRESS, GATEWAY, ROUTING-TABLE, DISTANCE
+    DST-ADDRESS    GATEWAY  ROUTING-TABLE  DISTANCE
+DAc 192.0.2.0/24  ether1   main                  0
+

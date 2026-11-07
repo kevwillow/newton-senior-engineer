@@ -1,0 +1,34 @@
+name = "ow-fw-03-drop-invalid"
+description = "OW-FW-03: firewall.@defaults[0].drop_invalid='1'. Effects: the live ruleset gets 'invalid : drop' in the ct state vmap of the input, forward and output chains (3 rules, 0 before), and a behavioural one: lab-client sends the router raw TCP segments with an invalid flag combination (SYN+FIN, and no flags at all) to a closed port on its client LAN address. conntrack marks them invalid, so before the change the input chain lets them reach the TCP stack, which answers with a reset, and after it they are dropped and nothing comes back, while an ordinary SYN to the same port is still answered (a router that stopped answering altogether would look the same). Forward and output are covered by the ruleset text only. The default regression includes the port forward, DNS and DHCP, which must still work."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on", "tcpraw_on"]
+cleanup = ["tcpraw_off"]
+regression = "default"
+probes = [["nft-rule", "inet", "fw4", "ruleset", "eq:3", "invalid : drop"]]
+batch = '''
+set firewall.@defaults[0].drop_invalid='1'
+'''
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+n=$(nft list ruleset | grep -c 'invalid : drop'); echo "invalid : drop vmap rules=$n"; [ "$n" = 3 ]
+'''
+expect_stdout = '^invalid : drop vmap rules=3$'
+
+[[effect]]
+device = "lab-client"
+timeout = 40
+cmd = '''
+sudo python3 /tmp/newton-tcpraw.py 192.168.150.1 9 1 0x02 --min 1 || exit 1
+sudo python3 /tmp/newton-tcpraw.py 192.168.150.1 9 1 0x03 --max 0 || exit 1
+sudo python3 /tmp/newton-tcpraw.py 192.168.150.1 9 1 0x00 --max 0
+'''
+expect_stdout = '^sent=1 answered=0 flags=0x00 to 192\.168\.150\.1:9 \(allowed 0\.\.0\) OK$'
+
+[[post]]
+device = "lab-r1"
+cmd = "echo \"drop_invalid=$(uci -q get firewall.@defaults[0].drop_invalid)\""
+expect_stdout = '^drop_invalid=1$'

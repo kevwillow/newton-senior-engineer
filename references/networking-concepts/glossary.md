@@ -1,0 +1,71 @@
+---
+source: Peterson & Davie, Computer Networks: A Systems Approach (6th ed); https://github.com/SystemsApproach/book (commit 5deec5e)
+license: CC BY 4.0, (c) Larry Peterson and Bruce Davie. Condensed by an AI agent from the chapter summaries; not the original text.
+---
+
+# Glossary
+
+- **ACK / NAK**: acknowledgement / negative acknowledgement; receiver feedback in reliable delivery.
+- **AIMD**: additive increase, multiplicative decrease; TCP congestion window rule (+1 MSS per RTT, halve on loss).
+- **AEAD**: authenticated encryption with associated data; confidentiality plus integrity in one primitive (e.g. AES-GCM, ChaCha20-Poly1305).
+- **ARP**: maps IPv4 address to link-layer address by broadcast request, cached with timeout. IPv6 uses neighbor discovery.
+- **AS (autonomous system)**: routing domain under one administration; BGP connects ASes.
+- **Bandwidth**: bits per second a link can carry. **Throughput**: what is actually achieved.
+- **BGP**: path-vector inter-domain routing; policy-driven; iBGP inside an AS, eBGP between.
+- **Bridge / learning switch**: L2 forwarder that learns source MAC to port; floods unknown destinations.
+- **Broadcast domain**: set of nodes reached by an L2 broadcast; split with VLANs or routers.
+- **CIDR**: classless addressing, prefix/length, enables aggregation and longest-prefix match.
+- **Congestion control vs flow control**: protecting the network vs protecting the receiver.
+- **Connection tracking (conntrack)**: stateful firewall's table of flows; needed for NAT and return traffic.
+- **CRC**: cyclic redundancy check; strong link-layer error detection by polynomial division.
+- **CSMA/CD, CSMA/CA**: carrier sense multiple access with collision detection (Ethernet, historic) / avoidance (Wi-Fi).
+- **DHCP**: dynamic host configuration; leases address, gateway, DNS from a server via broadcast discovery or relay.
+- **DiffServ / DSCP / EF / AF**: per-hop behaviour classes marked in the IP header; edge marks, core forwards.
+- **Distance-vector / link-state**: routing algorithm families (RIP / OSPF, IS-IS).
+- **DMZ**: network segment for exposed services, reachable from outside and inside, not allowed to initiate to inside.
+- **DNS**: hierarchical name service; records A, AAAA, CNAME, MX, NS, PTR, TXT; caching with TTL.
+- **DNSSEC**: signatures over DNS data for origin authentication.
+- **ECN**: explicit congestion notification; routers mark instead of drop.
+- **End-to-end argument**: put functions at the endpoints unless the network can do them completely and cheaply.
+- **Fair queuing (FQ)**: per-flow queues served round-robin by bits; isolates flows.
+- **Firewall**: filter at a boundary; stateless (packet) or stateful (flow); default deny.
+- **Fragmentation**: splitting a datagram larger than a link MTU; reassembled only at the destination; avoid with PMTUD.
+- **Framing**: marking where a frame starts and ends on a link.
+- **Hop-by-hop vs end-to-end**: scope of a mechanism.
+- **ICMP**: control and error messages for IP (echo, unreachable, time exceeded, fragmentation needed).
+- **IGP / EGP**: interior (OSPF, RIP, IS-IS) / exterior (BGP) gateway protocols.
+- **IPsec**: IP-layer security (AH, ESP, IKE); tunnel and transport modes.
+- **IPv6**: 128-bit addresses, no router fragmentation, SLAAC/DHCPv6, prefix delegation, neighbor discovery.
+- **Jitter**: variation in packet delay; absorbed by playback buffer.
+- **Latency / RTT**: one-way delay / round trip time = propagation + transmission + queuing.
+- **MAC address**: 48-bit link-layer address.
+- **MAC (message authentication code)**: keyed hash for integrity/authenticity (HMAC).
+- **MPLS**: label switching; used for traffic engineering and VPNs.
+- **MSS**: maximum TCP segment size (payload), negotiated in SYN; clamp it to fit path MTU.
+- **MTU**: largest frame payload a link carries (Ethernet 1500).
+- **Multicast**: one-to-many delivery; IGMP (hosts) and PIM (routers).
+- **NAT**: rewriting addresses/ports at a boundary; breaks end-to-end addressing; needs ALGs/helpers for some protocols.
+- **Narrow waist**: IP as the common minimal layer.
+- **OSPF**: link-state IGP with areas.
+- **PKI / certificate**: binding of identity to public key signed by a CA; trust chain.
+- **PMTUD**: path MTU discovery using DF bit and ICMP "fragmentation needed".
+- **QoS**: service differentiation (bandwidth, delay, loss, jitter).
+- **QUIC**: UDP-based multiplexed transport with built-in TLS 1.3.
+- **RED**: random early detection; probabilistic early drop based on average queue.
+- **Reliable delivery**: ACKs, timeouts, retransmission, sequence numbers.
+- **RPC**: request/reply abstraction over a network.
+- **RTP/RTCP**: real-time media transport and its control channel.
+- **Session key**: short-lived symmetric key derived per connection.
+- **Sliding window**: sender may have up to window-size unacknowledged frames/segments; window >= delay x bandwidth to fill the pipe.
+- **Slow start**: exponential cwnd growth from 1 MSS until threshold or loss.
+- **Spanning tree (STP)**: loop-free subset of bridged topology; one root, blocked redundant ports.
+- **Statistical multiplexing**: sharing capacity on demand among bursty flows.
+- **Subnet**: contiguous address block on one L2 network, defined by mask.
+- **TCP**: reliable ordered byte stream with flow and congestion control.
+- **TLS**: transport security over TCP (handshake, certificates, AEAD records).
+- **TTL / hop limit**: decremented per hop; drop at 0 to stop loops.
+- **Tunnel**: encapsulating one protocol in another (GRE, IPsec, WireGuard).
+- **UDP**: unreliable datagrams with ports and optional checksum.
+- **VLAN (802.1Q)**: 12-bit tag partitioning an L2 switch into separate broadcast domains; trunk (tagged) vs access (untagged) ports.
+- **VPN**: private network over a shared one, via tunnel and encryption.
+- **Window scaling / timestamps (PAWS)**: TCP options for fast long paths.

@@ -1,0 +1,35 @@
+# PORT of ow-mgmt-01c. Changed: lab-r1 -> pulsar; the lockout setting is Interface='wan' (ssh bound to the WAN addresses only, so the LAN path Newton verifies over
+# is refused) instead of Interface='lab'; the observer awk looks for the WAN address instead of the client LAN address; regression names -> pulsar's;
+# the lab-client effect (negative after rollback anyway) is dropped.
+name = "p-ow-mgmt-01c-dropbear-lockout"
+description = "OW-MGMT-01 lockout variant on pulsar: Interface='wan' refuses Newton's LAN path, verify cannot log in, the apply must roll back."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "rolled_back"
+setup = ["portfwd_on", "ssh_observer_start"]
+cleanup = ["ssh_observer_stop"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen", "portfwd"]
+approval = true
+batch = '''
+set dropbear.@dropbear[0].Interface='wan'
+'''
+
+[[post]]
+device = "pulsar"
+cmd = '''
+awk -F'|' '$2 ~ /-p 10\.100\.0\.[0-9]+:22/ && $3 ~ /10\.100\.0\.[0-9]+:22/ && $3 !~ /192\.168\.1\.1:22/ && $3 !~ /0\.0\.0\.0:22/ && $3 !~ /:::22/ {n++} END{print "samples with ssh bound to the wan address only: " n+0; exit !(n>=5)}' /tmp/ssh-observer.log
+'''
+expect_stdout = '^samples with ssh bound to the wan address only: [0-9]+$'
+
+[[post]]
+device = "pulsar"
+cmd = '''
+[ -z "$(uci -q get dropbear.@dropbear[0].Interface)" ] && echo interface-unset
+'''
+expect_stdout = '^interface-unset$'
+
+[[post]]
+device = "pulsar"
+cmd = '''
+netstat -tln | awk '$4=="0.0.0.0:22"{a=1} $4==":::22"{b=1} END{print "wildcard-v4=" a+0 " wildcard-v6=" b+0; exit !(a&&b)}'
+'''

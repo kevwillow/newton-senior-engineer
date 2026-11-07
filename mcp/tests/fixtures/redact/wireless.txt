@@ -1,0 +1,12 @@
+wireless.@wifi-iface[0]=wifi-iface
+wireless.@wifi-iface[0].device='radio0'
+wireless.@wifi-iface[0].ssid='LabNet'
+wireless.@wifi-iface[0].encryption='psk2+ccmp'
+wireless.@wifi-iface[0].key='fake-wpa2-shared-secret-passphrase'
+wireless.@wifi-iface[0].wpa_psk='fake-wpa3-shared-secret-passphrase'
+wireless.@wifi-iface[0].auth_secret='fake-radius-shared-secret'
+wireless.@wifi-iface[0].sae_password='fake-sae-shared-secret'
+wireless.@wifi-iface[0].acct_secret='fake-radius-acct-secret'
+wireless.@wifi-iface[0].network='lan'
+wireless.@wifi-iface[0].mode='ap'
+wireless.@wifi-iface[0].disabled='0'

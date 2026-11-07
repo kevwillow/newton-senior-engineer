@@ -1,0 +1,41 @@
+name = "ow-mgmt-01c-dropbear-lockout"
+description = "OW-MGMT-01 lockout variant: Interface='lab' binds ssh to the client LAN side only, so Newton's mgmt path (10.109.0.11:22) is refused. The verify rounds cannot log in, the change is never confirmed, and the apply must roll back (expect rolled_back). A sampler on lab-r1 (steps ssh_observer_*) records dropbear's command line and :22 listeners every second, and the first post requires at least 5 samples with ssh bound to 192.168.150.1 only, so the rollback is tied to the lockout config having been live. After the rollback the baseline holds, including password-only ssh, which is what owrt-change.sh uses. The effect (mgmt port refused while the client LAN address accepts ssh) fails before and after; it was shown to pass by planting the config by hand (results file). Uses an explicit regression list: the default plus mgmt_ssh_pw."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "rolled_back"
+setup = ["portfwd_on", "ssh_observer_start"]
+cleanup = ["ssh_observer_stop"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_luci", "client_internet", "client_dns", "client_dhcp", "portfwd"]
+approval = true
+batch = '''
+set dropbear.@dropbear[0].Interface='lab'
+'''
+
+[[effect]]
+device = "lab-client"
+cmd = '''
+tcp() { LC_ALL=C timeout 6 bash -c "exec 3<>/dev/tcp/$1/$2" 2>&1; }
+tcp 192.168.150.1 22 >/dev/null || { echo "192.168.150.1:22 not open"; exit 1; }
+tcp 10.109.0.11 22 | grep -q 'Connection refused' && echo "10.109.0.11:22 refused, 192.168.150.1:22 open"
+'''
+expect_stdout = '^10\.109\.0\.11:22 refused'
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+awk -F'|' '$2 ~ /-p 192\.168\.150\.1:22/ && $3 ~ /192\.168\.150\.1:22/ && $3 !~ /10\.109\.0\.11:22/ && $3 !~ /0\.0\.0\.0:22/ && $3 !~ /:::22/ {n++} END{print "samples with ssh bound to the client LAN address only: " n+0; exit !(n>=5)}' /tmp/ssh-observer.log
+'''
+expect_stdout = '^samples with ssh bound to the client LAN address only: [0-9]+$'
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+[ -z "$(uci -q get dropbear.@dropbear[0].Interface)" ] && echo interface-unset
+'''
+expect_stdout = '^interface-unset$'
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+netstat -tln | awk '$4=="0.0.0.0:22"{a=1} $4==":::22"{b=1} END{print "wildcard-v4=" a+0 " wildcard-v6=" b+0; exit !(a&&b)}'
+'''

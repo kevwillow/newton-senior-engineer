@@ -1,0 +1,65 @@
+# OW-WIFI-02, WPA2/WPA3 mixed, on Pulsar's radio1 (5 GHz ch36 HE20, country US, txpower 3 dBm).
+# Same self-contained batch as p-ow-wifi-01 with encryption sae-mixed and ieee80211w 1 (optional protected frames):
+# MFPC must be offered, MFPR must not be required, or the WPA2-only client below could never associate. Both ends
+# of the proof are real clients on lab-wifi (VM 9107, the Panda MT7921AU passed through from apollo).
+name = "p-ow-wifi-02-sae-mixed"
+description = "OW-WIFI-02: WPA2/WPA3 mixed (measured live: with ieee80211w 1 hostapd advertises AKMs PSK, PSK-SHA256 and SAE, so the beacon set is exactly 2,6,8). Interface wlan on radio1 (5 GHz, ch36, HE20, country US, txpower 3 dBm), dhcp section wlan, zone wlz (input/output/forward ACCEPT) with forwarding wlz to wan, and wireless.default_radio1 edited to disabled 0, ssid newton-test, network wlan, encryption sae-mixed, ieee80211w 1, with the key from the secret var. Effects from the Panda on lab-wifi, --bssid pinned to radio1's MAC and the channel pinned to 5180 MHz: the monitor parses that BSSID's beacons and the AKM suite set is exactly {PSK 00-0f-ac:2, SAE 00-0f-ac:8} with MFPC=1 and MFPR=0 (protected frames offered, not required - that is what lets a WPA2-only client in); then BOTH a SAE client (ieee80211w 1) and a WPA2-PSK client (ieee80211w 0) reach wpa_state COMPLETED, take a 192.168.152.0/24 lease by DHCP and ping 192.168.152.1. Two clients, one key, one radio: the point of the mixed mode is that the old generation still works. The router side is iface-field wlan up true plus the disabled=0 uci probe; the regression is Pulsar's baseline list. approval = true because the batch touches firewall."
+target = "pulsar"
+reset = ["pulsar"]
+reset_after = ["pulsar"]
+after_reset = ["p_radios_off"]
+approval = true
+expect = "confirmed"
+timeout = 240
+setup = ["wifi_script_install", "wifi_key_install", "wifi_prep"]
+cleanup = ["wifi_cleanup"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen", "p_client_on_pulsar"]
+probes = [["iface-field", "wlan", "up", "true"], ["uci-equals", "wireless.default_radio1.disabled", "0"]]
+batch = '''
+set network.wlan=interface
+set network.wlan.proto='static'
+set network.wlan.ipaddr='192.168.152.1'
+set network.wlan.netmask='255.255.255.0'
+set dhcp.wlan=dhcp
+set dhcp.wlan.interface='wlan'
+set dhcp.wlan.start='100'
+set dhcp.wlan.limit='50'
+set dhcp.wlan.leasetime='1h'
+set firewall.wlz=zone
+set firewall.wlz.name='wlz'
+set firewall.wlz.network='wlan'
+set firewall.wlz.input='ACCEPT'
+set firewall.wlz.output='ACCEPT'
+set firewall.wlz.forward='ACCEPT'
+set firewall.wlz_wan=forwarding
+set firewall.wlz_wan.src='wlz'
+set firewall.wlz_wan.dest='wan'
+set wireless.radio1.country='US'
+set wireless.radio1.channel='36'
+set wireless.radio1.htmode='HE20'
+set wireless.radio1.txpower='3'
+set wireless.default_radio1.disabled='0'
+set wireless.default_radio1.network='wlan'
+set wireless.default_radio1.ssid='newton-test'
+set wireless.default_radio1.encryption='sae-mixed'
+set wireless.default_radio1.ieee80211w='1'
+set wireless.default_radio1.key='{wifi_psk}'
+'''
+
+[[effect]]
+device = "lab-wifi"
+timeout = 60
+cmd = "sudo /usr/local/bin/newton-wifi.py monitor --freq 5180 --bssid {p_wifi_bssid} --secs 20 --min-beacons 5 --expect-akm 2,6,8 --expect-mfpc 1 --expect-mfpr 0"
+expect_stdout = '^monitor: beacons=[1-9][0-9]* ssid=newton-test akm=2,6,8 mfpc=1 mfpr=0 wps=0 ciphers=ccmp '
+
+[[effect]]
+device = "lab-wifi"
+timeout = 120
+cmd = "sudo /usr/local/bin/newton-wifi.py client --mode sae --ssid newton-test --bssid {p_wifi_bssid} --freq 5180 --ieee80211w 1 --secs 40"
+expect_stdout = '^client: state=COMPLETED ip=192\.168\.152\.[0-9]{1,3} ping=ok scan_ssid_seen=1$'
+
+[[effect]]
+device = "lab-wifi"
+timeout = 120
+cmd = "sudo /usr/local/bin/newton-wifi.py client --mode psk --ssid newton-test --bssid {p_wifi_bssid} --freq 5180 --ieee80211w 0 --secs 40"
+expect_stdout = '^client: state=COMPLETED ip=192\.168\.152\.[0-9]{1,3} ping=ok scan_ssid_seen=1$'

@@ -1,0 +1,350 @@
+# the vendor write shapes.
+#
+# One table per shape ([shapes.<id>]) and one lines table per vendor
+# ([<vendor>.<id>]).  A new vendor adds a lines table and nothing else:
+# the shape says what must happen, the vendor table says the exact lines.
+#
+# lab/newton-vendor-lab.py runs every shape against the lab VM of that
+# vendor: it rolls the VM back to its Proxmox snapshot, plans the change
+# through the real NewtonService, writes the approval record the way
+# newton-approve writes it, applies the change, reads the status back and
+# compares the outcome with the shape's expect.
+#
+# expect is one of:
+#   confirmed        the change is on the device and was confirmed
+#   rolled_back      the change was reverted and the base configuration is back
+#   refused_at_plan  the plan refused the change; nothing was applied
+#   refused_at_apply the apply refused the change; nothing was applied
+#
+# sessions is the number of ssh sessions the change itself may open: the
+# plan and the apply together, and the posts that run after them.  The
+# reset reads the configuration before the shape starts and is not
+# counted.  The injection shape must open none: its text is refused by
+# the vendor's own lint before any session is made.
+#
+# The claims are the ones the vendor can check: config_has (the running
+# configuration holds this line) and ping (the device answers this host).
+# The CHR carries the ping claim only: its export normalises the lines it
+# writes, so a configuration line cannot be compared with it reliably.
+
+[vars]
+# The peer on the lab's second bridge (vmbr102), the eth0 side of the VM.
+uplink_peer = "192.168.150.1"
+# A peer in the subnet the management address moves to in shape 02.
+moved_subnet_peer = "10.109.9.1"
+# A lab peer in the management subnet.
+mgmt_peer = "10.109.0.10"
+
+[baseline.vyos]
+# The hash of the baseline running configuration of the VyOS VM, as the
+# driver reads it: the sha256 of the output of
+#   /opt/vyatta/bin/vyatta-op-cmd-wrapper show configuration commands
+# The driver prints the hash it read when the check fails, and stops the
+# run with exit code 2; put that value here before the first live run.
+config_hash = "05bb0d71fee4c62841c4a0e999bb60050c721f4710fe75f9811e0051fc04d7d4"
+
+[baseline.routeros]
+# The hash of the baseline running configuration of the CHR, as the CHR
+# operations hash it: the sha256 of the export without its comment lines
+# and without the trailing space of every line (the export normalises its
+# own lines, so the sha256 of the raw text is not this hash).
+# PLACEHOLDER: a live run fills this value from the first live run.
+config_hash = "6a41de5e577d65090ef3f87bf23df3852990fa6a088ac5dd79b96e353d80cb64"
+
+[baseline.junos]
+# The hash of the baseline running configuration of the Junos, as the
+# Junos operations hash it: the sha256 of the display-set text without
+# its comment lines and without its blank lines (the CLI prints its
+# notices that way, so the sha256 of the raw text is not this hash).
+# PLACEHOLDER: a live run fills this value from the first live run.
+config_hash = "eb1caa40ff89426a2a86bacb1f25a4622b0a1311e1fbba7d8aa44c1719d3b908"
+
+# 1: the harmless path.  A value that changes nothing but a description.
+[shapes.01-harmless]
+id = "01-harmless"
+description = "The loopback description changes and nothing else does."
+expect = "confirmed"
+timeout_s = 90
+explanation = { intent = "Set the description of the loopback of the lab device to a harmless value.", steps = ["Set the loopback description."], risk = "The description of the loopback changes; nothing else does." }
+
+[vyos.01-harmless]
+lines = ["set interfaces loopback lo description 'newton-lab-shape-01'"]
+claims = [{ kind = "config_has", line = "set interfaces loopback lo description 'newton-lab-shape-01'" }]
+posts = [{ cmd = "/opt/vyatta/bin/vyatta-op-cmd-wrapper show configuration commands", expect_stdout = "newton-lab-shape-01" }]
+
+# 2: the management address moves to another subnet.  The device loses its
+# management path, so the apply cannot reach it and the device-side
+# commit-confirm timer is what brings it back; the driver checks the
+# configuration hash itself and reports rolled_back when the device is
+# back at the baseline.
+[shapes.02-mgmt-ip]
+id = "02-mgmt-ip"
+description = "The management address of eth1 moves to another subnet."
+expect = "rolled_back"
+timeout_s = 60
+explanation = { intent = "Move the management address of eth1 to another subnet.", steps = ["Delete the current address.", "Set the address in the other subnet."], risk = "The management path of the lab device moves away; the change must be rolled back." }
+
+[vyos.02-mgmt-ip]
+lines = ["delete interfaces ethernet eth1 address '10.109.0.31/24'", "set interfaces ethernet eth1 address '10.109.9.99/24'"]
+claims = [{ kind = "ping", host = "{moved_subnet_peer}" }]
+
+# 3: the input of the management interface is dropped.  VyOS only: the
+# other vendors have no equivalent of a named firewall set.
+[shapes.03-input-drop]
+id = "03-input-drop"
+description = "A firewall rule that drops the input of eth1."
+expect = "rolled_back"
+timeout_s = 60
+explanation = { intent = "Drop the input of the management interface of the lab device.", steps = ["Drop the input traffic.", "Only on the management interface eth1."], risk = "The management path of the lab device goes away; the change must be rolled back." }
+
+[vyos.03-input-drop]
+lines = ["set firewall ipv4 input filter rule 10 action drop", "set firewall ipv4 input filter rule 10 inbound-interface name eth1"]
+claims = [{ kind = "ping", host = "{mgmt_peer}" }]
+
+# 4: the injection shape.  The change text carries a semicolon, a second
+# statement, a verb the vendor refuses and the reserved marker text.  The
+# vendor's lint refuses the text before any session is opened, so the
+# shape must open no session at all.
+[shapes.04-injection]
+id = "04-injection"
+description = "A change text that carries shell and CLI text."
+expect = "refused_at_plan"
+sessions = 0
+explanation = { intent = "Try to smuggle shell text into the change of the lab device.", steps = ["A semicolon inside a value.", "A second statement in the text.", "A verb the vendor refuses.", "The reserved marker text."], risk = "Nothing is applied: the vendor's lint refuses the text before any session is opened." }
+
+[vyos.04-injection]
+lines = ["set system description 'newton-lab; rm -rf /'", "set system description 'newton-lab'", "commit", "set system description 'NEWTON-fake'"]
+claims = [{ kind = "config_has", line = "set system description 'newton-lab'" }]
+
+# 5: the bad syntax shape.  The text passes the lint, the device refuses
+# the candidate configuration, so the plan is refused.
+[shapes.05-bad-syntax]
+id = "05-bad-syntax"
+description = "A change the device itself rejects."
+expect = "refused_at_plan"
+explanation = { intent = "Try a change on the lab device that the device refuses.", steps = ["Set an option the device does not have."], risk = "Nothing is applied: the device rejects the candidate configuration." }
+
+[vyos.05-bad-syntax]
+lines = ["set interfaces ethernet eth0 nosuchoption 'x'"]
+claims = [{ kind = "config_has", line = "set interfaces ethernet eth0 nosuchoption 'x'" }]
+
+# 6: the service shape.  The service answers from the lab client, over
+# the lab's own ssh to lab-client.
+#
+# KNOWN GAP: the vendor lint refuses every service change (see
+# REFUSED_SERVICE_PREFIXES in mcp/newton_mcp/adapters/vendor_write.py), and
+# the design says a service that widens access needs an explicit allow.
+# That allow is not in this release, so this shape is refused at the plan
+# until it is: the driver will report it, not hide it.
+[shapes.06-service-reachable]
+id = "06-service-reachable"
+description = "A change that would open a new service is refused by default (the lint widening rule)."
+expect = "refused_at_plan"
+sessions = 0
+explanation = { intent = "Enable the https service on the lab device so the lab client can reach it.", steps = ["Enable the https service."], risk = "The device would answer on a new port; the vendor's lint refuses a widening service before any session is opened." }
+
+[vyos.06-service-reachable]
+lines = ["set service https port '443'"]
+claims = [{ kind = "ping", host = "{mgmt_peer}" }]
+
+# 7: the uplink goes down.  The device stops answering the peer on its
+# second interface, the change is rolled back, and the management path on
+# the first interface never goes away.
+[shapes.07-uplink-down]
+id = "07-uplink-down"
+description = "The second interface goes down and the peer stops answering."
+expect = "rolled_back"
+timeout_s = 60
+explanation = { intent = "Disable the interface of the lab device that carries the uplink peer.", steps = ["Disable eth0."], risk = "The peer stops answering; the change must be rolled back." }
+
+[vyos.07-uplink-down]
+lines = ["set interfaces ethernet eth0 disable"]
+claims = [{ kind = "ping", host = "{uplink_peer}" }]
+posts = [{ cmd = "/opt/vyatta/bin/vyatta-op-cmd-wrapper show configuration commands", expect_not_stdout = "set interfaces ethernet eth0 'disable'" }]
+
+# 8: the no-approval shape.  Nothing approves the plan, so the apply
+# stops before it opens a session.
+[shapes.08-no-approval]
+id = "08-no-approval"
+description = "A change nobody approved."
+expect = "refused_at_apply"
+approval = false
+explanation = { intent = "Try to apply a change on the lab device that nobody approved.", steps = ["Set the loopback description."], risk = "Nothing is applied: the apply stops before it opens a session." }
+
+[vyos.08-no-approval]
+lines = ["set interfaces loopback lo description 'newton-lab-shape-08'"]
+claims = [{ kind = "config_has", line = "set interfaces loopback lo description 'newton-lab-shape-08'" }]
+
+# ---- the CHR: the RouterOS lines of every shape --------------------------------
+#
+# A CHR statement is a menu path, a verb and key=value parameters, and the
+# lint refuses the characters RouterOS refuses.  The undo of a CHR is a
+# reboot into the backup, so a change that takes the management path away
+# comes back by itself: the driver reads the configuration hash and reports
+# rolled_back.
+#
+# A vendor table may override the facts that are vendor-specific: the
+# outcome of the shape (expect), the number of sessions it may open
+# (sessions), the window of the plan (timeout_s) and the text of the
+# explanation (intent, risk, steps).  A shape that behaves the same on
+# every vendor does not repeat them.
+
+[routeros.01-harmless]
+lines = ["/system/identity set name=lab-chr-shape-01"]
+intent = "Set the identity of the lab CHR to a harmless value."
+risk = "The identity of the lab device changes; nothing else does."
+steps = ["Set the identity name."]
+claims = [{ kind = "ping", host = "{mgmt_peer}" }]
+
+[routeros.02-mgmt-ip]
+lines = ["/ip/address set numbers=0 address=10.109.9.21/24"]
+intent = "Move the management address of the lab CHR to another subnet."
+risk = "The management path of the lab device moves away; the change must be rolled back."
+steps = ["Move the management address to the other subnet."]
+claims = [{ kind = "ping", host = "{moved_subnet_peer}" }]
+
+[routeros.03-input-drop]
+lines = ["/ip/firewall/filter add chain=input in-interface=ether1 action=drop"]
+intent = "Drop the input of the management interface of the lab CHR."
+risk = "The management path of the lab device goes away; the change must be rolled back."
+steps = ["Drop the input traffic of the management interface."]
+claims = [{ kind = "ping", host = "{mgmt_peer}" }]
+
+[routeros.04-injection]
+lines = [
+  "/system/identity set name=lab-chr;rm -rf /",
+  "/ip/address set address=[not-a-value",
+  "/system reboot",
+  "/system/identity set name=newton-shape",
+]
+intent = "Try to smuggle shell text into the change of the lab CHR."
+risk = "Nothing is applied: the vendor's lint refuses the text before any session is opened."
+steps = [
+  "A semicolon inside a value.",
+  "A bracket inside a value.",
+  "A menu the vendor refuses.",
+  "A name the vendor reserves for itself.",
+]
+claims = [{ kind = "ping", host = "{mgmt_peer}" }]
+
+[routeros.05-bad-syntax]
+lines = ["/ip/address add address=999.1.1.1/24 interface=ether2"]
+expect = "rolled_back"
+intent = "Try a change on the lab CHR that the device refuses when it runs it."
+risk = "The CHR cannot check the syntax before the run: the change is applied and then rolled back."
+steps = ["Add an address the device will refuse."]
+claims = [{ kind = "ping", host = "{mgmt_peer}" }]
+
+[routeros.06-service-reachable]
+lines = ["/ip/service set numbers=0 disabled=no"]
+intent = "Enable a service on the lab CHR so the lab client can reach it."
+risk = "The device would answer on a new port; the vendor's lint refuses a widening service before any session is opened."
+steps = ["Enable the service again."]
+claims = [{ kind = "ping", host = "{mgmt_peer}" }]
+
+[routeros.07-uplink-down]
+lines = ["/interface/ethernet disable numbers=1"]
+intent = "Disable the interface of the lab CHR that carries the uplink peer."
+risk = "The peer stops answering; the change must be rolled back."
+steps = ["Disable the interface of the uplink."]
+claims = [{ kind = "ping", host = "{uplink_peer}" }]
+
+[routeros.08-no-approval]
+lines = ["/system/identity set name=lab-chr-shape-08"]
+intent = "Try to apply a change on the lab CHR that nobody approved."
+risk = "Nothing is applied: the apply stops before it opens a session."
+steps = ["Set the identity name."]
+claims = [{ kind = "ping", host = "{mgmt_peer}" }]
+
+# ---- the Junos: the Junos lines of every shape --------------------------------
+#
+# A Junos statement is a hierarchy, a verb and its values, and the lint
+# refuses what Junos refuses: a character of the shell, a verb of the
+# device ("request", "commit") and the name Newton reserves for itself.
+# The revert of a Junos is native: the apply commits with "commit
+# confirmed N", so the device holds the revert before the change is on
+# it, and the change that takes the management path away comes back by
+# itself.
+#
+# A Junos carries the two vendor claims: config_has (the display-set
+# output holds this line) and ping (the device answers this host).
+
+[junos.01-harmless]
+lines = ["set interfaces lo0 description lab-shape-01"]
+intent = "Set the description of the loopback of the lab Junos to a harmless value."
+risk = "The description of the loopback changes; nothing else does."
+steps = ["Set the loopback description."]
+claims = [{ kind = "config_has", line = "set interfaces lo0 description lab-shape-01" }]
+
+[junos.02-mgmt-ip]
+lines = [
+  "delete interfaces fxp0 unit 0 family inet address 10.109.0.41/24",
+  "set interfaces fxp0 unit 0 family inet address 10.109.9.41/24",
+]
+intent = "Move the management address of the lab Junos to another subnet."
+risk = "The management path of the lab device moves away; the change must be rolled back."
+steps = [
+  "Delete the current management address.",
+  "Set the address in the other subnet.",
+]
+claims = [{ kind = "ping", host = "{moved_subnet_peer}" }]
+
+[junos.03-input-drop]
+lines = [
+  "set firewall family inet filter LABDROP term t1 then discard",
+  "set interfaces fxp0 unit 0 family inet filter input LABDROP",
+]
+intent = "Drop the input of the management interface of the lab Junos."
+risk = "The management path of the lab device goes away; the change must be rolled back."
+steps = [
+  "Add a filter that discards everything.",
+  "Put the filter on the input of the management interface.",
+]
+claims = [{ kind = "config_has", line = "set interfaces fxp0 unit 0 family inet filter input LABDROP" }]
+
+[junos.04-injection]
+lines = [
+  "set interfaces lo0 description 'lab-shape-04; rm -rf /'",
+  "set system host-name lab-junos | match root",
+  "request system reboot",
+  "commit",
+  "set system host-name NEWTON-fake",
+]
+intent = "Try to smuggle shell text into the change of the lab Junos."
+risk = "Nothing is applied: the vendor's lint refuses the text before any session is opened."
+steps = [
+  "A semicolon inside a value.",
+  "A pipe inside a value.",
+  "A verb the vendor refuses.",
+  "The verb of the device itself.",
+  "A name the vendor reserves for itself.",
+]
+claims = [{ kind = "ping", host = "{mgmt_peer}" }]
+
+[junos.05-bad-syntax]
+lines = ["set interfaces ge-0/0/0 unit 0 family inet nosuchoption 1"]
+intent = "Try a change on the lab Junos that the device refuses when it runs it."
+risk = "The Junos cannot check the syntax before the run: the change is applied and then rolled back."
+steps = ["Set an option the device does not have."]
+claims = [{ kind = "config_has", line = "set interfaces ge-0/0/0 unit 0 family inet nosuchoption 1" }]
+
+[junos.06-service-reachable]
+lines = ["set system services web-management http"]
+intent = "Enable the web management of the lab Junos so the lab client can reach it."
+risk = "The device would answer on a new port; the vendor's lint refuses the hierarchy before any session is opened."
+steps = ["Enable the web management."]
+claims = [{ kind = "ping", host = "{mgmt_peer}" }]
+
+[junos.07-uplink-down]
+lines = ["set interfaces ge-0/0/0 disable"]
+intent = "Disable the interface of the lab Junos that carries the uplink peer."
+risk = "The peer stops answering; the change must be rolled back."
+steps = ["Disable the interface of the uplink."]
+claims = [{ kind = "ping", host = "{uplink_peer}" }]
+
+[junos.08-no-approval]
+lines = ["set interfaces lo0 description lab-shape-08"]
+intent = "Try to apply a change on the lab Junos that nobody approved."
+risk = "Nothing is applied: the apply stops before it opens a session."
+steps = ["Set the loopback description."]
+claims = [{ kind = "config_has", line = "set interfaces lo0 description lab-shape-08" }]

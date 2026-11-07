@@ -1,0 +1,18 @@
+name = "ow-svc-02-unneeded-services-audit"
+description = "OW-SVC-02 (not UCI, audit only): none of the services that a home router does not need is installed or running: samba4-server, openssh-sftp-server, snmpd (snmpd-nossl and any other snmpd*) and miniupnpd-* (the nftables and iptables builds). The post checks four things and passes only when all are empty: the packages (`apk list -I` names starting with those prefixes), the init scripts the packages ship (hand run, installed on lab-r1 and removed again: samba4-server gives /etc/init.d/samba4, which `apk add` enables and starts at once with smbd on tcp 139 and 445 and nmbd on udp 137 and 138, plus avahi-daemon and dbus init scripts from its dependencies; snmpd-nossl gives /etc/init.d/snmpd, enabled and started, udp 161 on every address; openssh-sftp-server ships only /usr/libexec/sftp-server, a helper binary with no init script and no listener, so `service stop/disable` does not apply to it and only `apk del` removes it; miniupnpd-nftables gives /etc/init.d/miniupnpd, disabled by its shipped config, see ow-fw-06), the processes (smbd, nmbd, snmpd, miniupnpd) and the listeners on tcp 139 and 445 and udp 137, 138, 161, 1900 and 5351. No batch, so expect none; the default regression runs before and after as in ow-00-baseline. The listener set as a whole is ow-svc-01's audit. Hand run (results file): installing snmpd-nossl, samba4-server and openssh-sftp-server makes the post fail on all four counts, removing them makes it pass again."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "none"
+setup = ["portfwd_on"]
+regression = "default"
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+pk=$(apk list -I 2>/dev/null | grep -E '^(samba4-server|openssh-sftp-server|snmpd|miniupnpd-)' | cut -d' ' -f1 | tr '\n' ' ')
+ini=$(for s in samba4 snmpd miniupnpd; do [ -e /etc/init.d/$s ] && printf '%s ' $s; done)
+pr=$(pidof smbd nmbd snmpd miniupnpd | wc -w)
+ls=$(netstat -tulpn 2>/dev/null | grep -cE ':(137|138|139|445|161|1900|5351) ')
+echo "unneeded packages installed: [$pk]; their init scripts present: [$ini]; processes: $pr; listeners on 137/138/139/445/161/1900/5351: $ls"
+[ -z "$pk" ] && [ -z "$ini" ] && [ "$pr" = 0 ] && [ "$ls" = 0 ]'''
+expect_stdout = '^unneeded packages installed: \[\]; their init scripts present: \[\]; processes: 0; listeners on 137/138/139/445/161/1900/5351: 0$'

@@ -1,0 +1,33 @@
+name = "ow-mgmt-05b-dropbear-idle-timeout"
+description = "OW-MGMT-05 variant, behavioural: IdleTimeout='20'. Effect: an ssh session that runs 'sleep 40' with no keepalives and no traffic is closed by the router after about 20 s (before the change it runs the full 40 s and prints 'done'). The probe fails unless the session really started, did not finish, ended with ssh's connection-lost status 255 (not the local timeout's 124), and ended between 12 and 32 s, so a refused connection or a client-side timeout cannot pass it. The second effect is the command-line proof (-I 20)."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+approval = true
+probes = [["proc-args", "dropbear", "-I 20"]]
+batch = '''
+set dropbear.@dropbear[0].IdleTimeout='20'
+'''
+
+[[effect]]
+device = "local"
+timeout = 90
+cmd = '''
+t0=$(date +%s)
+out=$(timeout 60 ssh -i "$LAB_SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o ServerAliveInterval=0 -o TCPKeepAlive=no -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o "ProxyCommand=$LAB_SSH_PROXY" root@10.109.0.11 'echo started; sleep 40; echo done' 2>&1); rc=$?
+t1=$(date +%s); s=$((t1 - t0))
+case "$out" in *started*) ;; *) echo "session never started after $s seconds: $out"; exit 1;; esac
+case "$out" in *done*) echo "idle session survived the full $s seconds"; exit 1;; esac
+[ "$rc" -eq 255 ] || { echo "session ended after $s seconds with ssh exit $rc, not 255 (connection lost): $out"; exit 1; }
+[ "$s" -ge 12 ] && [ "$s" -le 32 ] || { echo "session closed after $s seconds, outside 12..32"; exit 1; }
+echo "idle session closed by the router after $s seconds"
+'''
+expect_stdout = '^idle session closed by the router after [0-9]+ seconds$'
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+tr '\0' ' ' < /proc/$(cat /var/run/dropbear.main.pid)/cmdline | grep -- ' -I 20 '
+'''

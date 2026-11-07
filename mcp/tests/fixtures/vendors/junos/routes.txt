@@ -1,0 +1,21 @@
+# synthetic
+inet.0: 8 destinations, 8 routes (7 active, 0 holddown, 1 hidden)
++ = Active Route, - = Last Active, * = Both
+
+0.0.0.0/0          *[Static/5] 1w2d 20:14:33
+                    > to 198.51.100.254 via ge-0/0/0.0
+
+192.0.2.0/24       *[Direct/0] 4d 00:12:01
+                    > via ge-0/0/0.0
+
+198.51.100.0/24    *[Direct/0] 4d 00:12:01
+                    > via fxp0.0
+
+198.51.100.1/32    *[Local/0] 4d 00:12:01
+                      Local via fxp0.0
+
+203.0.113.0/24     *[Direct/0] 12d 02:55:14
+                    > via lo0.0
+
+224.0.0.5/32       *[OSPF/10] 12d 03:11:02, metric 1
+                      MultiRecv

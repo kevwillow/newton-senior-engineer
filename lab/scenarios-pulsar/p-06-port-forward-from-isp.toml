@@ -1,0 +1,24 @@
+# PORT of 06 (r2: setup agent_masq_on added after the first live run: the agent host's default route is not via pulsar, the DNATed flow came back asymmetrically). Changed: lab-r1 -> pulsar; forward target is the agent host (the only LAN client, {agent_ip}=192.168.1.242) in zone lan instead of lab-client in zone lab; WAN address var r1_wan_ip -> p_wan_ip.
+name = "p-06-port-forward-from-isp"
+description = "(port of 06) Forward WAN:2222 to the agent host SSH; expect confirmed; verify SSH banner reachable from lab-isp."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["agent_masq_on"]
+timeout = 90
+approval = true
+probes = [["nft-rule", "inet", "fw4", "ruleset", "present", "dport 2222"]]
+batch = """set firewall.fwd_ssh_client=redirect
+set firewall.fwd_ssh_client.name='ssh to client'
+set firewall.fwd_ssh_client.src='wan'
+set firewall.fwd_ssh_client.src_dport='2222'
+set firewall.fwd_ssh_client.dest='lan'
+set firewall.fwd_ssh_client.dest_ip='{agent_ip}'
+set firewall.fwd_ssh_client.dest_port='22'
+set firewall.fwd_ssh_client.proto='tcp'
+set firewall.fwd_ssh_client.target='DNAT'"""
+
+[[post]]
+device = "lab-isp"
+cmd = "(nc {p_wan_ip} 2222 </dev/null > /tmp/b 2>/dev/null &) ; sleep 3; head -c 7 /tmp/b; rm -f /tmp/b"
+expect_stdout = "^SSH-2\\.0"

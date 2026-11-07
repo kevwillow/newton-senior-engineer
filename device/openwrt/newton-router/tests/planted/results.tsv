@@ -1,0 +1,259 @@
+# Planted defects (design 9.3 and the dispatcher's lists) run by tests/planted/runner.py against the program at the commit that carries this file.
+# columns: id, result, first failing test (empty if none), description. SURVIVED rows carry the reason in the last column after ' -- '.
+# Regenerate: python3 device/openwrt/newton-router/tests/planted/runner.py <repo root> --out results.tsv (slow: minutes per defect).
+M1	KILLED	device/openwrt/newton-router/tests/test_grammar.py::test_sample_passes_grammar[hello]	request class widened: ; | & $ allowed
+M1b	KILLED	device/openwrt/newton-router/tests/test_grammar.py::test_sample_passes_grammar[hello]	request class widened: backtick and parentheses allowed
+M2	KILLED	device/openwrt/newton-router/tests/test_request.py::test_glob_characters_stay_literal[fwrestart	set -f removed
+M3	KILLED	device/openwrt/newton-router/tests/test_request.py::test_request_double_space	spacing check removed
+M4	KILLED	device/openwrt/newton-router/tests/test_request.py::test_request_17_tokens	17 tokens accepted (forced)
+M4b	KILLED	device/openwrt/newton-router/tests/test_request.py::test_direct_17_tokens	17 tokens accepted (direct)
+M5	KILLED	device/openwrt/newton-router/tests/test_request.py::test_request_unset	an empty request becomes a default command
+M7a	KILLED	device/openwrt/newton-router/tests/test_grammar.py::test_adversarial_token_rejected_identically[seal-1-aaa..x33]	SID: more than 32 hex accepted
+M7b	KILLED	device/openwrt/newton-router/tests/test_grammar.py::test_sid_boundaries[sid-upper]	SID: uppercase hex accepted
+M7c	KILLED	device/openwrt/newton-router/tests/test_grammar.py::test_adversarial_token_rejected_identically[seal-1-aaa..x31]	SID: a prefix of 31 hex accepted
+M8	KILLED	device/openwrt/newton-router/tests/test_grammar.py::test_adversarial_token_rejected_identically[seal-2-060]	leading-zero T accepted
+M8b	KILLED	device/openwrt/newton-router/tests/test_grammar.py::test_t_boundaries[601]	T upper bound 601
+M8c	KILLED	device/openwrt/newton-router/tests/test_grammar.py::test_t_boundaries[59]	T lower bound 59
+M9	KILLED	device/openwrt/newton-router/tests/test_grammar.py::test_one_argument_more_fails_arg_count[hello]	an extra argument accepted
+M9b	KILLED	device/openwrt/newton-router/tests/test_grammar.py::test_one_argument_less_fails_arg_count[hello]	one argument too few accepted
+M10	KILLED	device/openwrt/newton-router/tests/test_grammar.py::test_read_credential_refused_for_change_rows[stage]	read role allowed to stage
+M10b	KILLED	device/openwrt/newton-router/tests/test_grammar.py::test_read_credential_refused_for_change_rows[backup]	role check skipped
+D1	KILLED	device/openwrt/newton-router/tests/test_grammar.py::test_adversarial_token_rejected_identically[apply-3-aaa..x33]	TOKEN accepts 32 hex (the defect found in review)
+M-order	KILLED	device/openwrt/newton-router/tests/test_grammar.py::test_sample_passes_grammar[seal]	classes of seal swapped
+M-owner	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_other_caller_is_not_owner	owner check skipped for non-root
+M-direct-only	KILLED	device/openwrt/newton-router/tests/test_grammar.py::test_sample_passes_grammar[approval-selftest]	approval-selftest allowed in forced mode
+M-rpcd	KILLED	device/openwrt/newton-router/tests/test_request.py::test_rpcd_door_not_built	--rpcd falls through to direct mode
+M-keyline	KILLED	device/openwrt/newton-router/tests/test_request.py::test_bad_key_line[caller-only]	bad key line accepted as direct
+M-len1024	KILLED	device/openwrt/newton-router/tests/test_request.py::test_request_1025_bytes	request length limit 1025
+M-shift2	KILLED	device/openwrt/newton-router/tests/test_request.py::test_request_install_path_twice	the install path token shifted twice
+M19	KILLED	device/openwrt/newton-router/tests/test_lint.py::test_prod_mode_at_install_path_ignores_seams	seams honoured at the install path
+M20-unset	KILLED	device/openwrt/newton-router/tests/test_lint.py::test_unset_list_covers_every_newton_name	NEWTON_LOCK dropped from the production unset list
+M40	KILLED	device/openwrt/newton-router/tests/test_simple.py::test_fw_loaded_one	fw-loaded echoes nft output
+M42	KILLED	device/openwrt/newton-router/tests/test_logging.py::test_rejected_bad_character	refused request text written to syslog
+M44	KILLED	device/openwrt/newton-router/tests/test_simple.py::test_backup_archive_holds_only_etc_config	backup archive holds more than etc/config
+H1	KILLED	device/openwrt/newton-router/tests/test_hello.py::test_missing_code_file[prog]	hello exits 0 with a missing code file
+H2	KILLED	device/openwrt/newton-router/tests/test_hello.py::test_hello_file_keeps_last_64_lines	hello log keeps 65 lines
+H2b	KILLED	device/openwrt/newton-router/tests/test_hello.py::test_hello_file_keeps_last_64_lines	hello log never trimmed
+H3	KILLED	device/openwrt/newton-router/tests/test_hello.py::test_direct_hello_writes_nothing	direct mode writes the hello log
+H4	KILLED	device/openwrt/newton-router/tests/test_hello.py::test_approval_key_field[key-63hex]	approval key present for 63 hex
+H5	KILLED	device/openwrt/newton-router/tests/test_hello.py::test_profile_field[profile-junk]	junk profile means lab
+H6	KILLED	device/openwrt/newton-router/tests/test_hello.py::test_from_field	from= accepts junk
+H7	KILLED	device/openwrt/newton-router/tests/test_logging.py::test_no_such_txn_shows_only_first_8_hex	log shows the full SID
+H8	KILLED	device/openwrt/newton-router/tests/test_hello.py::test_all_fields_in_order_with_exact_values	mode field always prod
+H9	KILLED	device/openwrt/newton-router/tests/test_hello.py::test_agent_field	agent always 0
+H10	KILLED	device/openwrt/newton-router/tests/test_hello.py::test_tty_one_with_pty_stdin	tty always 0
+H11	KILLED	device/openwrt/newton-router/tests/test_simple.py::test_hostname_failure_passes_through	hostname ignores uci failure
+H12	KILLED	device/openwrt/newton-router/tests/test_simple.py::test_logd_pid_never_found	logd-pid waits only twice
+H13	KILLED	device/openwrt/newton-router/tests/test_hello.py::test_all_fields_in_order_with_exact_values	hello device read from profile file
+H14	KILLED	device/openwrt/newton-router/tests/test_logging.py::test_success_line_shape	syslog line missing rc
+H15	KILLED	device/openwrt/newton-router/tests/test_hello.py::test_all_fields_in_order_with_exact_values	hello nonce echo wrong
+H16	KILLED	device/openwrt/newton-router/tests/test_lint.py::test_program_has_no_forbidden_constructs	forbidden construct: backtick comment
+H17	KILLED	device/openwrt/newton-router/tests/test_lint.py::test_program_has_no_forbidden_constructs	forbidden call timeout in code
+M14	KILLED	device/openwrt/newton-router/tests/test_probes.py::test_grammar[syntax-backslash]	backslash accepted in a probe field
+M15	KILLED	device/openwrt/newton-router/tests/test_probes_match.py::test_log_has_counts_matching_lines	probe TEXT matched as a regex
+M16	KILLED	device/openwrt/newton-router/tests/test_probes.py::test_grammar[valid-fail]	a probe prints router output
+M17	KILLED	device/openwrt/newton-router/tests/test_probes.py::test_stdin_timeout_probe_bounds_and_lock	watchdog never kills
+M49	KILLED	device/openwrt/newton-router/tests/test_probes_match.py::test_a_failing_data_command_is_never_a_pass[nft-present]	nft-rule: a failing nft counts as an empty listing
+PM1	KILLED	device/openwrt/newton-router/tests/test_probes.py::test_ping_ok_default_count_one	ping -W 1
+PM2	KILLED	device/openwrt/newton-router/tests/test_probes.py::test_resolve_default_server_is_localhost	resolve default server
+PM3	KILLED	device/openwrt/newton-router/tests/test_probes_match.py::test_service_running_no_true_line_is_absent	service-running accepts false
+PM4	KILLED	device/openwrt/newton-router/tests/test_probes.py::test_grammar[key-depth7]	sysctl KEY depth 6 allowed
+PM5	KILLED	device/openwrt/newton-router/tests/test_probes.py::test_root_password_class_matches[LOCKED]	root-password-class: ! is not locked
+PM6	KILLED	device/openwrt/newton-router/tests/test_read_more.py::test_conf_has_ignores_a_c_path_outside_var_etc_and_tmp_etc[root]	conf-has accepts any -C path
+PM7	KILLED	device/openwrt/newton-router/tests/test_probes_match.py::test_listen_port_address_and_program_are_compared_whole	listen: port compared as a prefix
+PM8	KILLED	device/openwrt/newton-router/tests/test_probes_match.py::test_listen_wildcard_matches_v4_and_v6	listen wildcard includes any address
+PM9	KILLED	device/openwrt/newton-router/tests/test_probes_match.py::test_nft_set_has_states_and_multiline_elements	nft-set-has only ignores the count
+PM10	KILLED	device/openwrt/newton-router/tests/test_probes.py::test_grammar[too-long-line-513]	probe line limit 513
+PM11	KILLED	device/openwrt/newton-router/tests/test_probes.py::test_read_role_may_run_any_probe_but_root_password_class[root-password-class]	root-password-class open to read role
+PM12	KILLED	device/openwrt/newton-router/tests/test_probes.py::test_ra_absent_fallback_to_device	ra-absent: no fallback to device
+PM13	KILLED	device/openwrt/newton-router/tests/test_probes_match.py::test_nft_rule_negative_text_removes_lines	negative TEXT ignored
+PM14	KILLED	device/openwrt/newton-router/tests/test_probes_match.py::test_nft_rule_ordered_texts_out_of_order_do_not_match	ordered TEXT not enforced
+PM15	KILLED	device/openwrt/newton-router/tests/test_probes_match.py::test_nft_rule_near_boundary	nft-rule-near window off by one
+PM16	KILLED	device/openwrt/newton-router/tests/test_probes.py::test_grammar[syntax-empty-field]	empty field accepted
+PM17	KILLED	device/openwrt/newton-router/tests/test_probes.py::test_grammar[too-long-field-129]	field limit 129
+PM18	KILLED	device/openwrt/newton-router/tests/test_probes.py::test_grammar[arg-count-ping-more]	probe argument count: one more allowed for ping
+PM19	KILLED	device/openwrt/newton-router/tests/test_probes.py::test_uci_equals_compares_the_whole_value	uci-equals compares a prefix
+R1	KILLED	device/openwrt/newton-router/tests/test_read.py::test_refused_form[nft--j-list-ruleset]	read nft: the word list is not checked (the review finding)
+R2	KILLED	device/openwrt/newton-router/tests/test_read_more.py::test_refused_form[uci-export-network.lan]	uci export takes a path
+R3	KILLED	device/openwrt/newton-router/tests/test_read.py::test_refused_form[uci-show--q]	uci dash argument not refused
+R4	KILLED	device/openwrt/newton-router/tests/test_read.py::test_child_exit_255_becomes_125	child exit 255 passed through
+R5	KILLED	device/openwrt/newton-router/tests/test_read.py::test_hung_child_times_out_and_leaves_the_lock_free	watchdog kill not mapped to 124
+R6	KILLED	device/openwrt/newton-router/tests/test_read.py::test_hung_child_times_out_and_leaves_the_lock_free	read timeout 25 s becomes 250 s
+R7	KILLED	device/openwrt/newton-router/tests/test_read.py::test_child_stdout_and_stderr_pass_through_unmixed	stderr not passed through
+R8	KILLED	device/openwrt/newton-router/tests/test_read.py::test_refused_form[ping--c-6-1.1.1.1]	ping count limit 6
+R9	KILLED	device/openwrt/newton-router/tests/test_read.py::test_accepted_form[ping--c-3-8.8.8.8]	ping without the -W 2 bound
+R10	KILLED	device/openwrt/newton-router/tests/test_read.py::test_accepted_form[traceroute-1.1.1.1]	traceroute without bounds
+R11	KILLED	device/openwrt/newton-router/tests/test_read.py::test_refused_form[cat-/etc/config/evil]	cat of a symlinked config allowed
+R12	KILLED	device/openwrt/newton-router/tests/test_read.py::test_refused_form[cat-/etc/shadow]	cat of any /etc file allowed
+R13	KILLED	device/openwrt/newton-router/tests/test_read.py::test_ip_refused[ip--4--6-addr]	ip -4 and -6 together allowed
+R14	KILLED	device/openwrt/newton-router/tests/test_read.py::test_ip_refused[ip-rule-list-dev-eth0]	ip dev allowed for rule
+R15	KILLED	device/openwrt/newton-router/tests/test_read.py::test_ip_refused[ip-a]	ip abbreviation accepted (a)
+R16	KILLED	device/openwrt/newton-router/tests/test_read.py::test_refused_form[iwinfo-wlan0-scan]	iwinfo scan allowed
+R17	SURVIVED		logread -f allowed via any flag -- equivalent: logread -f is already an arg-count error before the case the defect edits
+R18	KILLED	device/openwrt/newton-router/tests/test_read.py::test_refused_form[apk-add-x]	apk add allowed
+R19	KILLED	device/openwrt/newton-router/tests/test_read_more.py::test_refused_form[ubus-call-foo-bar]	ubus call any object
+R20	SURVIVED		stdin of the child not /dev/null -- equivalent: the dispatcher already gives the program /dev/null as stdin
+R21	KILLED	device/openwrt/newton-router/tests/test_read_more.py::test_fast_verify_watchdogs_do_not_keep_program_lock	watchdog keeps the program lock (M17/M46)
+R22	KILLED	device/openwrt/newton-router/tests/test_read.py::test_hung_child_times_out_and_leaves_the_lock_free	Terminated line not hidden (wait without 2>/dev/null)
+R23	SURVIVED		netstat flag shape widened (digits) -- equivalent: a second check on the token shape refuses first
+R24	SURVIVED		host class lets a leading dash through for nslookup -- equivalent: is_host already refuses a leading dash
+R25	KILLED	device/openwrt/newton-router/tests/test_read_more.py::test_refused_form[free--s]	free flag list widened
+M13a	KILLED	device/openwrt/newton-router/tests/test_stage.py::test_stage_total_byte_limit[30721-refused]	stage size limit off by one
+M13b	KILLED	device/openwrt/newton-router/tests/test_stage.py::test_stage_rejects_bad_bytes_before_calls[nul]	stage bad byte check removed
+M13c	KILLED	device/openwrt/newton-router/tests/test_stage.py::test_stage_line_count_limit[1001-terminated]	stage line count 1001
+M13d	KILLED	device/openwrt/newton-router/tests/test_stage.py::test_stage_single_line_length_limit[1025]	stage line length 1025
+S1	KILLED	device/openwrt/newton-router/tests/test_stage.py::test_stage_busy_redacts_sid_by_caller[other-short]	busy shows the full SID to everyone
+S2	KILLED	device/openwrt/newton-router/tests/test_stage.py::test_stage_busy_redacts_sid_by_caller[owner-full]	busy hides the SID from root and the owner
+S3	KILLED	device/openwrt/newton-router/tests/test_stage.py::test_stage_guard_gate_never_calls_helper[pending]	guard pending does not block stage
+S4	KILLED	device/openwrt/newton-router/tests/test_stage.py::test_stage_rejects_helper_output_with_extra_line[line-after-sid]	stage accepts a two line helper answer
+S5	KILLED	device/openwrt/newton-router/tests/test_stage.py::test_stage_happy_path_records_transaction_and_exact_stdin	stage-up records zero
+S6	KILLED	device/openwrt/newton-router/tests/test_seal.py::test_seal_already_sealed	seal allowed twice
+S7	KILLED	device/openwrt/newton-router/tests/test_seal.py::test_seal_already_applied[applying]	seal after apply started allowed
+S8	KILLED	device/openwrt/newton-router/tests/test_seal.py::test_seal_probe_limits[33-lines]	33 probe lines allowed
+S9	SURVIVED		513 byte probe line allowed -- equivalent: probe_check repeats the 512-byte test with the same reason
+M34a	KILLED	device/openwrt/newton-router/tests/test_seal.py::test_seal_happy_path_output_digest_and_files[without-probes]	digest leaves out T
+M34b	KILLED	device/openwrt/newton-router/tests/test_seal.py::test_seal_happy_path_output_digest_and_files[without-probes]	digest leaves out the device
+M34c	KILLED	device/openwrt/newton-router/tests/test_seal.py::test_seal_happy_path_output_digest_and_files[without-probes]	digest leaves out the SID
+M34d	KILLED	device/openwrt/newton-router/tests/test_seal.py::test_seal_happy_path_output_digest_and_files[without-probes]	digest leaves out the base
+M34e	KILLED	device/openwrt/newton-router/tests/test_seal.py::test_seal_happy_path_output_digest_and_files[without-probes]	digest leaves out the probes
+M32	KILLED	device/openwrt/newton-router/tests/test_seal.py::test_seal_profile_rule[missing]	a missing profile file means lab
+S10	KILLED	device/openwrt/newton-router/tests/test_seal.py::test_seal_session_gone	session gone not refused
+S11	KILLED	device/openwrt/newton-router/tests/test_stage.py::test_stage_happy_path_records_transaction_and_exact_stdin	seal ignores the leash file for required
+S12	KILLED	device/openwrt/newton-router/tests/test_seal.py::test_seal_happy_path_output_digest_and_files[without-probes]	sealed written before base
+L01	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[lan	mgmt-zone never fires
+L02	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[wan	wan-zone never fires
+L03	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[new	zone-exposure never fires
+L04	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[forwarding	forwarding-mgmt never fires
+L05	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[forwarding	wan-forwarding never fires
+L06	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[redirect	wan-redirect with a src never fires
+L07	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[redirect	wan-redirect without any src never fires (output rule treated as safe)
+L08	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[rule	wan-rule never fires
+L09	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[defaults	defaults-accept never fires
+L10	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[include	exec-include never fires (include section classified harmless)
+L11	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[firewall	firewall-type never fires (nat/ipset unknown types pass)
+L13	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[dropbear	mgmt-config never fires (dropbear/rpcd/uhttpd harmless)
+L14	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[lan	mgmt-interface never fires
+L15	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[bridge	bridge-member never fires
+L16	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[route	mgmt-route never fires
+L17	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[ucitrack-index]	exec-config never fires
+L18	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[ucitrack-index]	unknown-package never fires
+L19	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[ntp	ntp-server-open never fires
+L20	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[dhcpscript-index]	exec-option dhcpscript never fires
+L21	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[log_file-index]	exec-option log_file never fires
+L22	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[pppd_options-index]	exec-option pppd_options never fires
+L23	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[upnp	upnp-on never fires
+L24	KILLED	device/openwrt/newton-router/tests/test_leash_extra.py::test_extra_codes[index-fw	path-option on committed values never fires
+L25	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[include	path-option on staged values never fires
+L26	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[unparsed	unparsed-change never fires (fail open)
+L27	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[prod	profile-prod never fires
+L28	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[nameless	firewall section-unidentified fails open (no type, nameless zone)
+L29	KILLED	device/openwrt/newton-router/tests/test_leash_format.py::test_fail_safe_section_unidentified_empty_views	network section-unidentified fails open
+L30	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[rule	wan-rule: reorder/disable of a wan rule not counted
+L31	SURVIVED		wan-rule: a deleted rule not counted -- equivalent: the target-unset branch of the same rule fires for a deleted rule
+L32	SURVIVED		rename: S lines under the old token not skipped -- redundant half of the rename repair: the awk OFS fix alone keeps the corpus green; the pre-fix program (both halves reverted) fails 3 scenarios
+L33	SURVIVED		rename: awk OFS back to a space (field assignment rebuilds the line) -- redundant half of the rename repair: skipping the old token alone keeps the corpus green; the pre-fix program fails 3 scenarios
+L34	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[dropbear	approval required ignores the leash codes
+A01	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_stale_base	M22: apply skips the base recompute compare
+A02	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_plan_changed_diff	M23a: apply skips the diff compare
+A03	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_plan_changed_probes	M23b: apply skips the probes compare
+A04	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_stale_stage_age_t90[uptime-2651-refused]	M35a: stage age check skipped
+A05	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_stale_stage_boot_id	M35b: boot id check skipped
+A06	KILLED	device/openwrt/newton-router/tests/test_apply_more.py::test_apply_with_only_the_applied_marker_is_already_applied_exit_1	M38a: retried apply (applied present) refused with exit 3
+A07	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_already_applied_exit_1[applying]	M38b: retried apply (applying present) refused with exit 3
+A08	SURVIVED		M25: guard arm refusal ignored -- equivalent: the format check of the armed line refuses every refusal line anyway
+A09	KILLED	device/openwrt/newton-router/tests/test_approval.py::test_apply_prod_last_hex_digit_flipped	M33: token compared on an 8 character prefix
+A10	KILLED	device/openwrt/newton-router/tests/test_approval.py::test_apply_prod_none_needs_approval	approval skipped when required
+A11	KILLED	device/openwrt/newton-router/tests/test_approval.py::test_apply_lab_leash_change_requires_token	required ignores the sealed leash codes
+A12	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_stale_stage_age_t90[uptime-2650-passes]	M47: the guard arm line reaches stdout
+A13	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_uci_apply_failed	apply-failed: the guard restore is skipped
+A14	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_crash_points_then_abort_restores	no crash point after the applying write
+A15	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_happy_path_t90	post is not written
+A16	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_happy_path_t90	helper-format .applied holds the wrong time (no T)
+A17	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_happy_path_t90	applied rpcd deadline off by 30
+A18	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_session_gone	session-gone not refused
+A19	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_no_health_snapshot	no-health-snapshot not refused
+A20	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_guard_pending_refuses	guard state not checked before arming
+A21	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_plan_changed_t	T equality with the sealed T not checked
+A22	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_not_sealed	not-sealed not refused
+A23	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_stale_stage_age_t90[uptime-2651-refused]	stage age limit off by one (59)
+A24	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_already_applied_exit_1[applying]	M41: guard window T+1 (arm argument and the check)
+A25	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_happy_path_t90	an exit 0 of uci apply is not needed: apply failure ignored
+A26	KILLED	device/openwrt/newton-router/tests/test_apply_more.py::test_apply_refuses_a_stage_up_file_that_is_not_digits[empty]	stale-stage digits check removed
+A27	KILLED	device/openwrt/newton-router/tests/test_apply.py::test_apply_happy_path_t90	the applied txn file records the boot id wrongly
+A28	KILLED	device/openwrt/newton-router/tests/test_approval.py::test_apply_missing_profile_treated_as_prod	profile-prod code dropped when the profile changed to prod
+C01	KILLED	device/openwrt/newton-router/tests/test_confirm.py::test_confirm_happy_path	M26-like: the rpcd confirm is skipped (guard confirm only)
+C02	KILLED	device/openwrt/newton-router/tests/test_confirm.py::test_confirm_guard_refuses_its_confirm	M27: the guard confirm refusal is ignored (reports confirmed)
+C03	KILLED	device/openwrt/newton-router/tests/test_confirm.py::test_confirm_lost_timer_5_config_changed	M28: the lost path is taken although the config is not post
+C04	KILLED	device/openwrt/newton-router/tests/test_confirm.py::test_confirm_lost_timer_shipped_program_rpcd_5	RPCD_LOST shipped non-empty
+C05	KILLED	device/openwrt/newton-router/tests/test_confirm.py::test_confirm_too_late_guard_window[guard-4]	too-late: guard left boundary 4 instead of 5
+C06	KILLED	device/openwrt/newton-router/tests/test_confirm.py::test_confirm_too_late_rpcd_deadline[rpcd-4]	too-late: rpcd deadline boundary 4 instead of 5
+C07	KILLED	device/openwrt/newton-router/tests/test_confirm.py::test_confirm_not_applied[boot-id-mismatch]	not-applied: the boot id check is skipped
+C08	KILLED	device/openwrt/newton-router/tests/test_confirm.py::test_confirm_happy_path	the program lock directory is not removed after confirm
+C09	KILLED	device/openwrt/newton-router/tests/test_confirm.py::test_confirm_happy_path	last is not written by confirm
+C10	KILLED	device/openwrt/newton-router/tests/test_confirm.py::test_confirm_happy_path	the rpcd save dir is not removed by confirm
+C11	KILLED	device/openwrt/newton-router/tests/test_confirm.py::test_confirm_happy_path	the guard confirm line leaks to stdout
+C12	KILLED	device/openwrt/newton-router/tests/test_confirm.py::test_confirm_guard_refuses_its_confirm	confirm-incomplete: the guard restore is skipped
+C13	KILLED	device/openwrt/newton-router/tests/test_confirm.py::test_confirm_rpcd_confirm_failed	rpcd confirm failure: not refused
+C14	KILLED	device/openwrt/newton-router/tests/test_confirm.py::test_confirm_kill_after_rpcd_confirm	no crash point after the rpcd-confirmed write (ok)
+C15	KILLED	device/openwrt/newton-router/tests/test_confirm.py::test_confirm_sighup_is_ignored	confirm does not ignore HUP and PIPE (connection dropped during confirm)
+B01	KILLED	device/openwrt/newton-router/tests/test_abort.py::test_abort_rolled_back_happy	M30: abort skips the guard restore in row 3
+B02	KILLED	device/openwrt/newton-router/tests/test_abort_more.py::test_abort_keeps_health_snapshot_and_sid[discarded]	M31: abort deletes the health snapshot
+B03	KILLED	device/openwrt/newton-router/tests/test_abort.py::test_abort_non_owner_applied_pending_refused	M51: a non-owner may abort an applied txn while the guard is pending for it
+B04	KILLED	device/openwrt/newton-router/tests/test_abort.py::test_abort_non_owner_stale_old_stage_up_allowed	stale age limit 2701
+B05	KILLED	device/openwrt/newton-router/tests/test_abort.py::test_abort_guard_failed_is_inconsistent[with-txn]	row 1: a failed guard is ignored
+B06	KILLED	device/openwrt/newton-router/tests/test_abort.py::test_abort_discarded_staged	abort leaves the txn directory
+B07	KILLED	device/openwrt/newton-router/tests/test_abort.py::test_abort_discarded_staged	abort does not write last
+B08	KILLED	device/openwrt/newton-router/tests/test_abort.py::test_abort_non_owner_live_staged_is_refused	a non-owner is never refused
+B09	KILLED	device/openwrt/newton-router/tests/test_abort_more.py::test_abort_restore_refuses_wrong_line[wrong-sid]	abort_restore accepts any guard answer
+B10	KILLED	device/openwrt/newton-router/tests/test_abort.py::test_abort_rpcd_already_reverted	row 4: already-rolled-back test reversed
+B11	KILLED	device/openwrt/newton-router/tests/test_abort.py::test_abort_already_confirmed_by_guard	row 6 already-confirmed never fires
+B12	KILLED	device/openwrt/newton-router/tests/test_abort_more.py::test_abort_non_owner_ticks_guard_first	abort does not tick the guard for a non-owner
+B13	KILLED	device/openwrt/newton-router/tests/test_abort_more.py::test_abort_cleans_rpcd_save_dir[discarded]	abort leaves the rpcd uci dir
+B14	KILLED	device/openwrt/newton-router/tests/test_abort.py::test_abort_rolled_back_happy	abort leaves the helper-format .applied file
+T01	KILLED	device/openwrt/newton-router/tests/test_status.py::test_status_ticks_guard_first_when_window_expired	M29: status does not tick the guard
+T02	KILLED	device/openwrt/newton-router/tests/test_status.py::test_status_rule_5_applied_pending_config_base_rolled_back	rule 5 (config = base with the guard pending) missing
+T03	KILLED	device/openwrt/newton-router/tests/test_status.py::test_status_rule_8_applied_other_guard_confirmed	rule 8 (confirmed) never fires
+T04	KILLED	device/openwrt/newton-router/tests/test_status.py::test_status_after_reboot_guard_boot_restores	boot always same
+T05	KILLED	device/openwrt/newton-router/tests/test_status.py::test_status_rule_5_applied_pending_config_base_rolled_back	rule 4 ignores the session
+T06	KILLED	device/openwrt/newton-router/tests/test_status.py::test_status_rule_7_applied_guard_restored_rolled_back	rule 7 (guard restored this SID) missing
+T07	KILLED	device/openwrt/newton-router/tests/test_status.py::test_status_rule_10_no_txn_last_confirmed	rule 10 (last = confirmed) missing
+T08	KILLED	device/openwrt/newton-router/tests/test_status.py::test_status_rule_3_applied_pending_with_rpcd_file[lost]	rule 3: rpcd=lost reported as confirmed
+T09	KILLED	device/openwrt/newton-router/tests/test_status.py::test_status_rule_13_no_txn_pending_inconsistent	rule 13 (no txn, guard pending for the SID) reports gone
+T10	KILLED	device/openwrt/newton-router/tests/test_status.py::test_status_rule_1_guard_failed_is_inconsistent	status guard=failed reason dropped
+V01	KILLED	device/openwrt/newton-router/tests/test_verify.py::test_verify_ping_fail	the ping step is skipped
+V02	KILLED	device/openwrt/newton-router/tests/test_verify.py::test_verify_all_pass_three_sealed_probes	the nslookup step is skipped
+V03	KILLED	device/openwrt/newton-router/tests/test_verify.py::test_verify_health_fail_passes_through	the health check failure is ignored
+V04	KILLED	device/openwrt/newton-router/tests/test_verify.py::test_verify_hung_ping_ends_at_bound_and_lock_is_free	the ping bound is 100 s instead of 10
+V05	KILLED	device/openwrt/newton-router/tests/test_verify.py::test_verify_25s_budget_first_probe_is_budget	the probe budget is 250 s
+V06	KILLED	device/openwrt/newton-router/tests/test_verify.py::test_verify_dhcp1_no_listener_fail	DHCP 1 does not need the listener
+V07	KILLED	device/openwrt/newton-router/tests/test_verify.py::test_verify_sealed_probe_fail_first_one	a failing probe is ignored
+V08	SURVIVED		verify does not need an applied txn -- equivalent: the boot id check refuses a txn without an applied marker anyway
+V09	KILLED	device/openwrt/newton-router/tests/test_verify.py::test_verify_dhcp2_pidof_down_fail	DHCP 2 not checked
+X1	KILLED	device/openwrt/newton-router/tests/test_leash.py::test_scenario_codes[rename	H2: mgmt-interface ignores the committed name (a rename of the mgmt interface passes)
+X2	KILLED	device/openwrt/newton-router/tests/test_label.py::test_invalid_caller_label_is_refused[bang]	H2: the caller label glob accepts anything after the second byte
+X3	KILLED	device/openwrt/newton-router/tests/test_probes_exit.py::test_uci_probe_exit_codes[unset-exit2]	H2: uci-unset passes on every non-zero exit
+X4	KILLED	device/openwrt/newton-router/tests/test_probes_exit.py::test_service_running_jsonfilter_exit_codes[absent-json-error]	H2: service-running ignores a failing jsonfilter
+X5	KILLED	device/openwrt/newton-router/tests/test_abort_exact.py::test_abort_post_hash_requires_exact_equality[extended]	H2: abort compares the post hash by prefix
+X6	KILLED	device/openwrt/newton-router/tests/test_probes_exit.py::test_uci_probe_exit_codes[equals-exit2]	H2: uci-equals takes every non-zero exit as unset
+# fix2 rows (defects_fix2.py, findings F-A to F-E of the second review): run against the program of the fix round. The F-A rows were run twice: the first run was started with nohup, which hands SIGHUP down as ignored, so the signal test [HUP] failed for every F-A row for that reason alone; the table holds the second run, started in the foreground. The signal test now resets the signals in the child and gives the same answer in both launches.
+# FE1 to FE3 were run again after the hello lock wait went from 3 s to 10 s; all three are still killed.
+FB1	KILLED	device/openwrt/newton-router/tests/test_seal_writes.py::test_seal_write_failure_is_refused[leash]	F-B: a failed write of the leash copy does not stop seal
+FB2	KILLED	device/openwrt/newton-router/tests/test_seal_writes.py::test_seal_sealed_marker_write_failure_is_refused	F-B: a failed write of the sealed marker does not stop seal
+FB3	KILLED	device/openwrt/newton-router/tests/test_seal_writes.py::test_seal_write_failure_is_refused[t]	F-B: seal_write_fail refuses nothing
+FB4	KILLED	device/openwrt/newton-router/tests/test_seal_writes.py::test_apply_missing_leash_copy_needs_approval	F-B: apply takes a missing leash copy as not required
+FB5	KILLED	device/openwrt/newton-router/tests/test_seal_writes.py::test_apply_missing_leash_copy_needs_approval	F-B: apply does not name the leash-unreadable code
+FB6	KILLED	device/openwrt/newton-router/tests/test_seal_writes.py::test_apply_missing_leash_copy_needs_approval	F-B: apply reads the leash copy even when it cannot be read (shell error on stderr)
+FC1	KILLED	device/openwrt/newton-router/tests/test_label.py::test_invalid_caller_label_is_refused[root]	F-C: the caller label root is accepted in a key line
+FE1	KILLED	device/openwrt/newton-router/tests/test_hello_lock.py::test_hello_waits_while_the_directory_lock_is_held	F-E: hello never takes the directory lock
+FE2	KILLED	device/openwrt/newton-router/tests/test_hello_lock.py::test_hello_stops_waiting_after_ten_seconds	F-E: hello trims even when it did not get the lock
+FE3	KILLED	device/openwrt/newton-router/tests/test_hello_lock.py::test_hello_waits_while_the_directory_lock_is_held	F-E: hello does not wait for the lock
+FA1	KILLED	device/openwrt/newton-router/tests/test_scratch_signals.py::test_signal_ends_the_call_and_removes_scratch[TERM]	F-A: SIGTERM is not trapped (the EXIT trap does not run)
+FA2	KILLED	device/openwrt/newton-router/tests/test_scratch_signals.py::test_signal_ends_the_call_and_removes_scratch[HUP]	F-A: a signal exit leaves RC at 0 (the syslog line says rc=0)
+FA3	KILLED	device/openwrt/newton-router/tests/test_scratch_signals.py::test_stale_scratch_of_dead_calls_is_swept	F-A: the sweep also removes the files of live calls
+FA4	KILLED	device/openwrt/newton-router/tests/test_scratch_signals.py::test_stale_scratch_of_dead_calls_is_swept	F-A: the sweep removes any pid-shaped name, not only the scratch prefixes
+FA5	KILLED	device/openwrt/newton-router/tests/test_scratch_signals.py::test_every_mktemp_template_carries_the_program_pid	F-A: the runner capture file has no pid in its name
+FA6	KILLED	device/openwrt/newton-router/tests/test_scratch_signals.py::test_stale_scratch_of_dead_calls_is_swept	F-A: the sweep is never called
+FD1	KILLED	device/openwrt/newton-router/tests/test_leash_index_shift.py::test_lone_delete_by_selector_does_not_fire	F-D: one selector line alone is enough to fire
+FD2	KILLED	device/openwrt/newton-router/tests/test_leash_index_shift.py::test_selector_sets_only_do_not_fire	F-D: a structural line is not needed to fire
+FD3	KILLED	device/openwrt/newton-router/tests/test_leash_index_shift.py::test_selector_set_plus_delete_by_name_of_same_type_is_section_unidentified	F-D: a structural line addressed by name is not counted
+FD4	KILLED	device/openwrt/newton-router/tests/test_leash_index_shift.py::test_selector_set_plus_add_of_same_type_is_section_unidentified	F-D: the add of a section is not a structural line

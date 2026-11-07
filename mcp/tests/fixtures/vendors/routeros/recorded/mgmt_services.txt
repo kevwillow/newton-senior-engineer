@@ -1,0 +1,19 @@
+# recorded lab:chr:7.24.5:2026-10-18
+Flags: D - DYNAMIC; X - DISABLED, I - INVALID; c - CONNECTION
+Columns: NAME, PORT, PROTO, CERTIFICATE, VRF, MAX-SESSIONS, LOCAL
+ #     NAME           PORT  PROTO  CERTIFICATE  VRF   MA  LOCAL      
+ 0     ftp              21  tcp                 main  20             
+ 1     ssh              22  tcp                 main  20             
+ 2 D c ssh              22  tcp                           192.0.2.21
+ 3     telnet           23  tcp                 main  20             
+ 4 D   dhcp             67  udp                                      
+ 5 D   dhcpclient       68  udp                                      
+ 6     www              80  tcp                 main  20             
+ 7  X  www-ssl         443  tcp    none         main  20             
+ 8     reverse-proxy   443  tcp    none         main  20             
+ 9 D   btest          2000  tcp                                      
+10 D   discover       5678  udp                                      
+11     winbox         8291  tcp                 main  20             
+12     api            8728  tcp                 main  20             
+13     api-ssl        8729  tcp    none         main  20             
+

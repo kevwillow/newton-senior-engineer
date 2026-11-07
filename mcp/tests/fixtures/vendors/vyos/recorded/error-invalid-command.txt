@@ -1,0 +1,4 @@
+# recorded lab:vyos:2026.10.01-0035-rolling:2026-10-18
+
+  Invalid command: show [bogus]
+

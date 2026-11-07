@@ -1,0 +1,22 @@
+# PORT of ow-upd-02-owut-check-audit. Changed: lab-r1 -> pulsar, regression -> pulsar's default list. owut is installed on pulsar. Failed live on 2026-10-18 because owut 2026.04.09 crashed (rc 254) against the ASU overview of that day; passes since 2026-10-23 (full P8 run).
+name = "p-ow-upd-02-owut-check-audit"
+description = "OW-UPD-02 (renamed by the verify report: the attended-sysupgrade client is owut, the package auc is not in the 25.12.5 feed; audit only): `owut check` is the report command of the auto-update path, and the only part of it that is safe to run here. The post runs it on pulsar (it queries the attended-sysupgrade server https://sysupgrade.openwrt.org and the upstream feeds through lab-isp, writes no config and left no file behind at the hand run) and requires exit 0, Version-from equal to the installed release (read from /etc/openwrt_release), and the report lines for the server and for the number of out-of-date packages. Version-to equals Version-from because owut targets the installed version unless told otherwise, so there is no release update to report. `owut download`, `verify`, `install` and `upgrade` are never run: they build and flash an image. No batch, so expect none; the default regression runs before and after as in ow-00-baseline. The audit depends on the real internet (the sysupgrade server): an outage makes it red, never green. Hand run: with the feed and the server unreachable (tcp 443 rejected in the output chain) `owut check` fails and the post fails (results file)."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "none"
+setup = ["portfwd_on"]
+regression = "default"
+
+[[post]]
+device = "pulsar"
+timeout = 120
+cmd = '''
+o=$(owut check 2>&1); rc=$?
+. /etc/openwrt_release
+vf=$(echo "$o" | sed -n 's/^Version-from[[:space:]]*\([0-9.]*\).*/\1/p')
+vt=$(echo "$o" | sed -n 's/^Version-to[[:space:]]*\([0-9.]*\).*/\1/p')
+srv=$(echo "$o" | sed -n 's/^ASU-Server[[:space:]]*//p')
+ood=$(echo "$o" | sed -n 's/^\([0-9][0-9]*\) packages are out-of-date.*/\1/p')
+echo "owut check rc=$rc; server=$srv; installed=$DISTRIB_RELEASE; Version-from=$vf Version-to=$vt; out-of-date packages=$ood"
+[ $rc = 0 ] && [ "$vf" = "$DISTRIB_RELEASE" ] && [ -n "$srv" ] && [ -n "$ood" ]'''
+expect_stdout = '^owut check rc=0; server=https://sysupgrade\.openwrt\.org; installed=([0-9.]+); Version-from=\1 Version-to=[0-9.]+; out-of-date packages=\d+$'

@@ -1,0 +1,2 @@
+# synthetic
+% Authorization denied for command 'show version'

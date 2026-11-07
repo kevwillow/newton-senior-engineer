@@ -1,0 +1,16 @@
+name = "11-tier-hardened"
+description = "Live proof of the hardened tier: roll lab-r1 back to its clean snapshot, apply every batch of profiles/openwrt/hardened.uci in order through the same splitter newton_plan_tier uses (cap 16 so the live proof runs several small ordered batches instead of one large one), then reboot the router and re-run every batch's sealed probes plus the rollback-hash check. Hardened needs the WAN firewall zone id AND the Allow-Ping rule id; values come from lab.toml [vars] fw_wan_zone and fw_allow_ping."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 180
+tier = "hardened"
+tier_reboot = true
+tier_batch_lines = 16
+tier_fail_probe = ["conf-has", "dnsmasq", "substr", "present", "newton-tier-rollback-marker-never-present"]
+tier_values = { fw_wan_zone = "{fw_wan_zone}", fw_allow_ping = "{fw_allow_ping}" }
+
+[[post]]
+device = "lab-r1"
+cmd = "uci changes | wc -l"
+expect_stdout = "^0$"

@@ -1,0 +1,263 @@
+#!/usr/bin/python3
+"""Fixture router program for scripts/newton-router-setup tests.
+
+Implements design 2.5 (mode selection), 2.6 (hello) and the pieces of 3.5
+the setup tests need: probe, approval-selftest, backup.  The builder may
+append FIXTURE-VERSION and FIXTURE-BROKEN comment marker lines to this very
+file; they are read at start.
+"""
+
+import hashlib
+import hmac
+import os
+import re
+import subprocess
+import sys
+import tarfile
+from io import BytesIO
+from pathlib import Path
+
+NONCE_RE = re.compile(r"^[0-9a-f]{32}$")
+TOKEN_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+LABEL_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+FROM_RE = re.compile(r"^[0-9a-fA-F.:]{2,45}$")
+ROLES = ("change", "read")
+
+# the four code files hello reports (design 2.6)
+SHA_FILES = (
+    ("prog", "usr/libexec/newton/newton-router"),
+    ("helper", "usr/libexec/newton/newton-safe-apply"),
+    ("guard", "usr/libexec/newton-guard"),
+    ("init", "etc/init.d/newton-guard"),
+)
+
+
+def die(code, detail="", status=2):
+    """One `error <code>` line on stderr, then exit."""
+    sys.stderr.write("error %s%s\n" % (code, (" " + detail) if detail else ""))
+    sys.exit(status)
+
+
+def fixture_markers():
+    """(# FIXTURE-VERSION value, broken?) read from this very file."""
+    version, broken = "1.0.0", False
+    try:
+        with open(os.path.realpath(__file__), encoding="utf-8") as fh:
+            for line in fh:
+                text = line.strip()
+                if text.startswith("# FIXTURE-VERSION "):
+                    version = text.split(None, 2)[2].strip()
+                elif text == "# FIXTURE-BROKEN":
+                    broken = True
+    except OSError:
+        pass
+    return version, broken
+
+
+def read_file(fs, rel):
+    """Text of fs/rel without the trailing newline, or None when absent."""
+    try:
+        return (fs / rel).read_text().rstrip("\n")
+    except OSError:
+        return None
+
+
+def sha_of(fs, rel):
+    """sha256 hex of fs/rel, or None when the file is absent."""
+    try:
+        return hashlib.sha256((fs / rel).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def fixture_lies(fs):
+    """The test-only name=value overrides from etc/newton/fixture-lie."""
+    lies = {}
+    try:
+        for line in (fs / "etc/newton/fixture-lie").read_text().splitlines():
+            name, sep, value = line.partition("=")
+            if sep and name:
+                lies[name] = value
+    except OSError:
+        pass
+    return lies
+
+
+def guard_state(fs):
+    """First word of the guard's `status`; the state file or `idle` as
+    fallback when the guard script cannot run."""
+    guard = fs / "usr/libexec/newton-guard"
+    if guard.exists():
+        try:
+            proc = subprocess.run([str(guard), "status"], capture_output=True,
+                                  timeout=10)
+            words = proc.stdout.decode("utf-8", "replace").split()
+            if words:
+                return words[0]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    state = read_file(fs, "etc/newton/guard-state")
+    return state.split()[0] if state and state.split() else "idle"
+
+
+def hello_line(fs, nonce, caller, role, forced, version):
+    """The single design 2.6 line as a list of words."""
+    parts = ["hello", nonce, "api=1", "version=%s" % version,
+             "mode=%s" % ("test" if os.environ.get("NEWTON_ROUTER_ROOT")
+                          else "prod")]
+    missing = False
+    for name, rel in SHA_FILES:
+        digest = sha_of(fs, rel)
+        if digest is None:
+            missing = True
+            parts.append("%s=missing" % name)
+        else:
+            parts.append("%s=%s" % (name, digest))
+    device = read_file(fs, "etc/newton/device-id") or "-"
+    profile = read_file(fs, "etc/newton/profile")
+    key = read_file(fs, "etc/newton/approve.key") or ""
+    parts.extend([
+        "device=%s" % device,
+        "profile=%s" % (profile if profile in ("lab", "prod") else "prod"),
+        "approval-key=%s" % ("present" if HEX64_RE.match(key) else "missing"),
+        "guard-state=%s" % guard_state(fs),
+        "busy=-",
+        "caller=%s" % caller,
+        "role=%s" % role,
+        "door=%s" % ("ssh" if forced else "root"),
+        "tty=%s" % ("1" if os.environ.get("FAKE_TTY") else "0"),
+        "agent=%s" % ("1" if os.environ.get("SSH_AUTH_SOCK") else "0"),
+    ])
+    client = os.environ.get("SSH_CLIENT", "").split()
+    parts.append("from=%s" % (client[0] if client and FROM_RE.match(client[0])
+                              else "-"))
+    for name, value in fixture_lies(fs).items():
+        for index, word in enumerate(parts):
+            if word.startswith(name + "="):
+                parts[index] = "%s=%s" % (name, value)
+                break
+    return parts, missing
+
+
+def remember_hello(fs, nonce, caller):
+    """Forced mode only: append `<nonce> <caller> <uptime>` and keep 64
+    lines (the dead-man switch greps this file)."""
+    try:
+        uptime = int(float((fs.parent / "clock").read_text().strip()))
+    except (OSError, ValueError):
+        uptime = 0
+    log = fs / "tmp/newton/hello"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "a") as fh:
+        fh.write("%s %s %d\n" % (nonce, caller, uptime))
+    lines = log.read_text().splitlines()
+    if len(lines) > 64:
+        log.write_text("\n".join(lines[-64:]) + "\n")
+
+
+def do_hello(fs, nonce, caller, role, forced, version):
+    """Print the hello line; exit 1 when a code file is missing."""
+    parts, missing = hello_line(fs, nonce, caller, role, forced, version)
+    print(" ".join(parts))
+    if forced:
+        remember_hello(fs, nonce, caller)
+    if missing:
+        sys.exit(1)
+
+
+def do_backup(fs, role):
+    """tar.gz bytes of etc/config (directory entry included) on stdout."""
+    if role != "change":
+        die("role", status=3)
+    buf = BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        tar.add(str(fs / "etc/config"), arcname="etc/config")
+    sys.stdout.buffer.write(buf.getvalue())
+    sys.stdout.buffer.flush()
+
+
+def parse_mode(argv):
+    """Design 2.5: (caller, role) when forced, else None; dies on a
+    half-mode key line."""
+    if not argv:
+        return None
+    if not argv[0].startswith("--caller=") and not argv[0].startswith("--role="):
+        return None
+    forced = None
+    if len(argv) == 2:
+        caller = argv[0][len("--caller="):]
+        role = argv[1][len("--role="):]
+        if (argv[0].startswith("--caller=") and argv[1].startswith("--role=")
+                and LABEL_RE.match(caller) and role in ROLES):
+            forced = (caller, role)
+    if forced is None:
+        die("bad-key-line")
+    return forced
+
+
+def main():
+    """argv -> mode -> request -> subcommand."""
+    version, broken = fixture_markers()
+    if broken:
+        sys.exit(3)
+    fs_env = os.environ.get("FAKE_ROUTER_FS")
+    if not fs_env:
+        die("bad-root")
+    fs = Path(fs_env)
+    argv = sys.argv[1:]
+    forced = parse_mode(argv)
+    if forced:
+        tokens = os.environ.get("SSH_ORIGINAL_COMMAND", "").split()
+        # design 3.2 step 6: shift once only when $1 is exactly the program path
+        if tokens and tokens[0] == "/usr/libexec/newton/newton-router":
+            tokens = tokens[1:]
+    else:
+        tokens = argv
+    if not tokens:
+        die("empty-request")
+    for token in tokens:
+        if not TOKEN_RE.match(token):
+            die("bad-character")
+    sub, args = tokens[0], tokens[1:]
+    caller, role = forced if forced else ("root", "change")
+    if sub == "hello":
+        if len(args) != 1:
+            die("arg-count")
+        if not NONCE_RE.match(args[0]):
+            die("bad-arg 1")
+        do_hello(fs, args[0], caller, role, forced is not None, version)
+    elif sub == "probe":
+        if args:
+            die("arg-count")
+        if sys.stdin.readline().rstrip("\n") == "fail":
+            print("probe fail fail planted")
+            sys.exit(1)
+        die("bad-probe 1 unknown-probe")
+    elif sub == "approval-selftest":
+        if len(args) != 1:
+            die("arg-count")
+        if not NONCE_RE.match(args[0]):
+            die("bad-arg 1")
+        if forced:
+            die("direct-only", status=3)
+        key = read_file(fs, "etc/newton/approve.key") or ""
+        if not HEX64_RE.match(key):
+            die("approval-key-missing", status=3)
+        mac = hmac.new(bytes.fromhex(key),
+                       b"newton-selftest-v1\n" + args[0].encode() + b"\n",
+                       hashlib.sha256).hexdigest()
+        lie = fixture_lies(fs).get("selftest")
+        if lie and HEX64_RE.match(lie):
+            mac = lie
+        print("approval-selftest %s %s" % (args[0], mac))
+    elif sub == "backup":
+        if args:
+            die("arg-count")
+        do_backup(fs, role)
+    else:
+        die("unknown-subcommand")
+
+
+if __name__ == "__main__":
+    main()

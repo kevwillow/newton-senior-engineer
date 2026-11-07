@@ -1,0 +1,28 @@
+# PORT of ow-mgmt-02. Changed: lab-r1 -> pulsar; 10.109.0.11 -> 192.168.1.1; the lab-client "refused on client address" effect is dropped (one LAN);
+# the final post is a plain curl from the agent host (device local) instead of lab-client.
+name = "p-ow-mgmt-02-uhttpd-listen-lan"
+description = "OW-MGMT-02 on pulsar: uhttpd listens on 192.168.1.1:80/443 only."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+approval = true
+probes = [["listen", "tcp", "192.168.1.1", "443", "uhttpd", "present"]]
+batch = '''
+delete uhttpd.main.listen_http
+add_list uhttpd.main.listen_http='192.168.1.1:80'
+delete uhttpd.main.listen_https
+add_list uhttpd.main.listen_https='192.168.1.1:443'
+'''
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+netstat -tlnp | awk '$4=="192.168.1.1:80" && $7 ~ /uhttpd/ {a=1} $4=="192.168.1.1:443" && $7 ~ /uhttpd/ {b=1} $4=="0.0.0.0:80"||$4==":::80"||$4=="0.0.0.0:443"||$4==":::443"{w=1} END{print "mgmt-80=" a+0 " mgmt-443=" b+0 " wildcard=" w+0; exit !(a&&b&&!w)}'
+'''
+
+[[post]]
+device = "local"
+cmd = "curl -s -o /dev/null -D - --max-time 8 http://192.168.1.1/"
+expect_stdout = '^HTTP/\S+ 200'

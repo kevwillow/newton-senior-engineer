@@ -1,0 +1,12 @@
+# synthetic
+Interface          IP Address         Status     Protocol
+Ethernet1          198.51.100.10/24   up         up
+Ethernet2          198.51.100.11/24   up         up
+Ethernet3          unassigned         down       down
+Ethernet4          unassigned         administratively down   down
+Loopback0          192.0.2.10/32      up         up
+Loopback1          203.0.113.10/32    up         up
+Management1        198.51.100.20/24   up         up
+Port-Channel1      unassigned         down       down
+Vlan100            198.51.100.100/24  up         up
+Vlan200            unassigned         down       down

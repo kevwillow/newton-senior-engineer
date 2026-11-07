@@ -1,0 +1,73 @@
+# PORT of ow-dns-04b-dnssec-full. Changed: lab-r1 -> pulsar; 192.168.150.1 -> 192.168.1.1; the AD-flag python effect runs on `local` (the agent host, the real LAN client) against 192.168.1.1 instead of lab-client against 192.168.150.1; the dnssec-failed.org post runs on `local` against 192.168.1.1; r1_clock_ok -> p_clock_ok (new local step, reads pulsar's clock over the pinned admin path and requires it within 60 s of the runner host's); regression -> pulsar's default list. The "outside Newton's rollback" wording now says pulsar removes it (the runner's package restore: apk del of every world entry added since the record).
+name = "p-ow-dns-04b-dnssec-full"
+description = "OW-DNS-04 with the package it needs: dhcp.@dnsmasq[0].dnssec='1' on dnsmasq-full. The setup step dnsmasq_full_install swaps the package with apk, outside Newton's rollback; the next reset of pulsar removes it (the runner's package restore: apk del of every world entry added since the record), and fails loudly unless dnsmasq-full is installed and running with DNSSEC compiled in, DNS and DHCP are bound and DNS answers, and ntpd has reported valid time; p_clock_ok compares pulsar's clock with the runner host's. The default regression then proves DHCP and DNS work on the new build before the apply. The plan's idea of an effect with dnssec-failed.org (resolves before, SERVFAIL after) does not hold in this lab: the chain behind pulsar (lab-isp, Quasar, a validating public resolver) already answers SERVFAIL for it before, so a post keeps it as a safety net and the effects use the AD flag instead: a client that sets AD and DO gets AD=1 for the signed names cloudflare.com and iana.org only when dnsmasq validates itself (the stock path strips AD, dnsmasq-full without dnssec gives AD=0), and the unsigned openwrt.org still resolves (rcode 0, AD 0). The first effect checks the running dnsmasq's conf and startup log (dnssec, the root trust anchors, 'DNSSEC validation enabled'). The check gating Newton's confirm requires the same three facts."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on", "dnsmasq_full_install", "p_clock_ok"]
+regression = "default"
+probes = [["conf-has", "dnsmasq", "line", "present", "dnssec"], ["conf-has", "dnsmasq", "line", "present", "conf-file=/usr/share/dnsmasq/trust-anchors.conf"], ["log-has", "present", "dnsmasq[", "DNSSEC validation enabled"]]
+batch = '''
+set dhcp.@dnsmasq[0].dnssec='1'
+'''
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+f=$(cat /var/etc/dnsmasq.conf.*)
+a=$(echo "$f" | grep -c '^dnssec$'); b=$(echo "$f" | grep -c '^conf-file=/usr/share/dnsmasq/trust-anchors.conf$')
+c=$(logread | grep 'dnsmasq\[' | grep -c 'DNSSEC validation enabled')
+echo "running dnsmasq conf: dnssec=$a trust-anchors=$b; startup log lines 'DNSSEC validation enabled'=$c"; [ "$a" = 1 ] && [ "$b" = 1 ] && [ "$c" -ge 1 ]
+'''
+expect_stdout = '^running dnsmasq conf: dnssec=1 trust-anchors=1; startup log lines .DNSSEC validation enabled.=[1-9]\d*$'
+
+[[effect]]
+device = "local"
+timeout = 100
+cmd = '''
+python3 - <<'PYEOF'
+import random, socket, struct, sys
+
+def ask(name):
+    # header flags RD + AD, one question (A), one EDNS0 OPT record with the DO bit
+    flags = 0x0120
+    q = b''.join(bytes([len(p)]) + p.encode() for p in name.split('.')) + b'\0' + struct.pack('!HH', 1, 1)
+    msg = struct.pack('!HHHHHH', random.getrandbits(16), flags, 1, 0, 0, 1) + q + b'\0' + struct.pack('!HHIH', 41, 1232, 0x8000, 0)
+    for attempt in range(2):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(12)
+        s.sendto(msg, ('192.168.1.1', 53))
+        try:
+            d, a = s.recvfrom(4096)
+        except socket.timeout:
+            continue
+        f = struct.unpack('!H', d[2:4])[0]
+        return f & 0xf, (f >> 5) & 1, struct.unpack('!H', d[6:8])[0]
+    return None
+
+ok = True
+for name, want_ad in (('cloudflare.com', 1), ('iana.org', 1), ('openwrt.org', 0)):
+    r = ask(name)
+    if r is None:
+        print('%s: no answer' % name)
+        ok = False
+        continue
+    rcode, ad, an = r
+    print('%s: rcode=%d ad=%d answers=%d' % (name, rcode, ad, an))
+    if rcode != 0 or ad != want_ad or an < 1:
+        ok = False
+sys.exit(0 if ok else 1)
+PYEOF
+'''
+expect_stdout = '^cloudflare\.com: rcode=0 ad=1 answers=\d+\niana\.org: rcode=0 ad=1 answers=\d+\nopenwrt\.org: rcode=0 ad=0 answers=\d+$'
+
+[[post]]
+device = "local"
+timeout = 45
+cmd = "host -W 8 dnssec-failed.org 192.168.1.1 | tail -1"
+expect_stdout = '^Host dnssec-failed\.org not found: 2\(SERVFAIL\)$'
+
+[[post]]
+device = "pulsar"
+cmd = "echo \"dnssec=$(uci -q get dhcp.@dnsmasq[0].dnssec) package=$(apk list -I | grep '^dnsmasq-full-' | cut -d' ' -f1) stock-package=$(apk list -I | grep -c '^dnsmasq-[0-9]')\""
+expect_stdout = '^dnssec=1 package=dnsmasq-full-\S+ stock-package=0$'

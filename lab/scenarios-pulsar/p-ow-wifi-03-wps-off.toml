@@ -1,0 +1,67 @@
+# OW-WIFI-03, the WPS vendor IE, on Pulsar's radio1 (5 GHz ch36 HE20, country US, txpower 3 dBm).
+# Pulsar ships wpad-basic-mbedtls 2025.08.26 (hostapd 2.12-devel), whose binary carries SAE, SAE_PK and OWE but no
+# WPS code at all: strings on it return no wps_state and no wps_pin. So the beacon cannot carry a WPS IE whatever
+# the config says, and this scenario records what it can prove and what it cannot. The batch sets no wps_* option
+# and there is deliberately no `del wireless.default_radio1.wps_pushbutton` line: uci batch writes "Entry not
+# found" to stderr for a delete of an option that is not there, and scripts/owrt-safe-apply.sh rejects the whole
+# batch when uci batch wrote anything to stderr, so a "harmless" del would throw the whole change away. The post
+# below proves the option is unset instead.
+name = "p-ow-wifi-03-wps-off"
+description = "OW-WIFI-03: the WPS vendor IE, as far as this build can show it. Interface wlan on radio1 (5 GHz, ch36, HE20, country US, txpower 3 dBm), dhcp section wlan, zone wlz (input/output/forward ACCEPT) with forwarding wlz to wan, and wireless.default_radio1 edited to disabled 0, ssid newton-test, network wlan, encryption sae-mixed, ieee80211w 1, with the key from the secret var; no wps_* option is set and none is deleted (a uci batch that deletes an absent option writes to stderr, which the runner's staging wrapper treats as a rejected batch). Effect, from the Panda on lab-wifi with --bssid pinned to radio1's MAC and the channel pinned to 5180 MHz: the monitor parses that BSSID's beacons for 20 s (AKM set exactly {2,8}, MFPC=1, MFPR=0, at least five beacons) and finds no vendor IE with OUI 00:50:f2 type 4. Post on the router: wps_pushbutton is unset in the config. What this proves: Pulsar's beacons carry no WPS IE, because wpad-basic-mbedtls has no WPS code at all (no wps_state, no wps_pin in the binary), and that is not that a config option turned WPS off - nothing in /etc/config/wireless could. The config-level control, where wps_pushbutton='1' must make the IE appear, needs the full wpad-mbedtls, and installing it replaces wpad-basic-mbedtls, which breaks the runner's package record (the world entry wpad-basic-mbedtls goes missing on the next reset). Recorded as a follow-up, not solved here. The regression is Pulsar's baseline list; approval = true because the batch touches firewall."
+target = "pulsar"
+reset = ["pulsar"]
+reset_after = ["pulsar"]
+after_reset = ["p_radios_off"]
+approval = true
+expect = "confirmed"
+timeout = 240
+setup = ["wifi_script_install", "wifi_key_install", "wifi_prep"]
+cleanup = ["wifi_cleanup"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen", "p_client_on_pulsar"]
+probes = [["iface-field", "wlan", "up", "true"], ["uci-unset", "wireless.default_radio1.wps_pushbutton"]]
+batch = '''
+set network.wlan=interface
+set network.wlan.proto='static'
+set network.wlan.ipaddr='192.168.152.1'
+set network.wlan.netmask='255.255.255.0'
+set dhcp.wlan=dhcp
+set dhcp.wlan.interface='wlan'
+set dhcp.wlan.start='100'
+set dhcp.wlan.limit='50'
+set dhcp.wlan.leasetime='1h'
+set firewall.wlz=zone
+set firewall.wlz.name='wlz'
+set firewall.wlz.network='wlan'
+set firewall.wlz.input='ACCEPT'
+set firewall.wlz.output='ACCEPT'
+set firewall.wlz.forward='ACCEPT'
+set firewall.wlz_wan=forwarding
+set firewall.wlz_wan.src='wlz'
+set firewall.wlz_wan.dest='wan'
+set wireless.radio1.country='US'
+set wireless.radio1.channel='36'
+set wireless.radio1.htmode='HE20'
+set wireless.radio1.txpower='3'
+set wireless.default_radio1.disabled='0'
+set wireless.default_radio1.network='wlan'
+set wireless.default_radio1.ssid='newton-test'
+set wireless.default_radio1.encryption='sae-mixed'
+set wireless.default_radio1.ieee80211w='1'
+set wireless.default_radio1.key='{wifi_psk}'
+'''
+
+[[effect]]
+device = "lab-wifi"
+timeout = 60
+cmd = "sudo /usr/local/bin/newton-wifi.py monitor --freq 5180 --bssid {p_wifi_bssid} --secs 20 --min-beacons 5 --expect-akm 2,6,8 --expect-mfpc 1 --expect-mfpr 0 --expect-no-wps"
+expect_stdout = '^monitor: beacons=[1-9][0-9]* ssid=newton-test akm=2,6,8 mfpc=1 mfpr=0 wps=0 ciphers=ccmp '
+
+[[post]]
+device = "pulsar"
+timeout = 30
+cmd = '''
+v=$(uci -q get wireless.default_radio1.wps_pushbutton)
+[ -z "$v" ] || { echo "wps_pushbutton is set to '$v'" >&2; exit 1; }
+echo "wps_pushbutton is unset in the config"
+'''
+expect_stdout = '^wps_pushbutton is unset in the config$'

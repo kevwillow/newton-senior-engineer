@@ -1,0 +1,16 @@
+name = "01-static-lease"
+description = "Add a static DHCP lease on lab-r1 and verify UCI shows it."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 60
+probes = [["conf-has", "dnsmasq", "substr", "present", "02:00:00:00:00:77"]]
+batch = """set dhcp.labtest=host
+set dhcp.labtest.name='labtest'
+set dhcp.labtest.mac='02:00:00:00:00:77'
+set dhcp.labtest.ip='192.168.150.77'"""
+
+[[post]]
+device = "lab-r1"
+cmd = "uci get dhcp.labtest.ip"
+expect_stdout = "^192\\.168\\.150\\.77$"

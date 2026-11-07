@@ -1,0 +1,15 @@
+# PORT of 04-commit-smuggling. Changed: device -> pulsar; reset = [] -> ["pulsar"] (a physical device carries state between scenarios).
+name = "p-04-commit-smuggling"
+description = "Try to smuggle a commit verb; plan must reject. (port of 04-commit-smuggling)"
+target = "pulsar"
+reset = ["pulsar"]
+expect = "rejected"
+reject_match = 'only set/add/add_list/del_list/delete/rename/reorder are allowed, got: commit system'
+timeout = 60
+batch = """set system.@system[0].description='x'
+commit system"""
+
+[[post]]
+device = "pulsar"
+cmd = "uci -q get system.@system[0].description; echo rc=$?"
+expect_stdout = "rc=1"

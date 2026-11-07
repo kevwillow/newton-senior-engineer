@@ -1,0 +1,295 @@
+#!/bin/bash -p
+# Newton bootstrap: refuses dirty env / non-root / tampered repo, then runs the snapshot's installer.
+set -euo pipefail
+
+BOOT_DIR=/usr/local/sbin
+SELF=$BOOT_DIR/newton-bootstrap
+SOURCE_FILE=$BOOT_DIR/newton-bootstrap.source
+ALLOWED_PATH_DIR='^(/usr/local/sbin|/usr/local/bin|/usr/sbin|/usr/bin|/sbin|/bin|/snap/bin)$'
+
+die_run()  { printf 'ERROR: %s; refusing to run\n' "$(sanitize_text "$1" 400)" >&2; exit 1; }
+die_inst() { printf 'ERROR: %s; nothing installed\n' "$(sanitize_text "$1" 400)" >&2; exit 1; }
+
+sanitize_text() {
+	local text=$1 max_bytes=${2:-200} escaped='' marker='' c i ord LC_ALL=C
+	if (( ${#text} > max_bytes )); then text=${text:0:max_bytes}; marker='...[truncated]'; fi
+	for (( i = 0; i < ${#text}; i++ )); do
+		c=${text:i:1}
+		if [[ $c == \\ ]]; then escaped+='\\'
+		elif [[ $c == [$' '-~] ]]; then escaped+=$c
+		else
+			ord=$(printf '%d' "'$c"); (( ord < 0 )) && ord=$(( ord + 256 ))
+			escaped+=$(printf '\\x%02x' "$ord")
+		fi
+	done
+	printf '%s%s\n' "$escaped" "$marker"
+}
+
+objdir_from_repo() {
+	local repo=$1
+	if [[ -d $repo/.git ]]; then
+		if [[ -L $repo/.git || -L $repo/.git/objects ]]; then return 1; fi
+		printf '%s/.git/objects\n' "$repo"; return 0
+	fi
+	if [[ -f $repo/.git ]]; then return 1; fi
+	if [[ -f $repo/HEAD && -d $repo/objects ]]; then printf '%s/objects\n' "$repo"; return 0; fi
+	return 1
+}
+
+git_x() {
+	local gitdir=$1; shift
+	local -a envs=(
+		PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME="$WORK/home" LC_ALL=C
+		GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+		GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1 GIT_TERMINAL_PROMPT=0
+		GIT_DIR="$gitdir"
+	)
+	if [[ ${1-} == --alt=* ]]; then envs+=( "GIT_ALTERNATE_OBJECT_DIRECTORIES=${1#--alt=}" ); shift; fi
+	if [[ ${1-} == --work-tree=* ]]; then envs+=( "GIT_WORK_TREE=${1#--work-tree=}" ); shift; fi
+	env -i "${envs[@]}" git --no-pager "$@"
+}
+
+check_no() {
+	while IFS= read -r _n; do
+		[[ -n $_n ]] || continue
+		if [[ $_n =~ ^($1)$ ]]; then die_run "$2 ($_n)"; fi
+	done < <(compgen -e)
+}
+check_yes() { while IFS= read -r _n; do [[ -n $_n ]] || continue; if [[ ! $_n =~ ^($1)$ ]]; then die_run "$2 ($_n)"; fi; done < <(compgen -e); }
+
+sudo_arg=()
+if [[ -v SUDO_USER ]]; then
+	[[ ${SUDO_USER-} =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ && ${SUDO_USER-} != root && ! ${SUDO_USER-} =~ ^[A-Z0-9_]+$ ]] || die_run "SUDO_USER is unset, malformed, or equals root"
+	sudo_arg=( "SUDO_USER=$SUDO_USER" )
+fi
+if [[ -v PATH ]]; then
+	IFS=':' read -r -a _pdp <<<"$PATH"
+	for _d in "${_pdp[@]}"; do
+		[[ -n $_d && $_d =~ $ALLOWED_PATH_DIR ]] || die_run "PATH contains ${_d:-<empty>}"
+	done
+else die_run "PATH is not set"; fi
+check_no 'LD_.*|BASH_ENV|ENV|IFS|SHELLOPTS|BASHOPTS|PS4|PROMPT_COMMAND|CDPATH|GLOBIGNORE|BASH_FUNC_.*|PYTHON.*|GIT_.*' 'environment variable not allowed'
+
+# Re-exec once under env -i (only on the first call); below only runs in the re-exec'd copy.
+[[ -v _NEWTON_BOOTSTRAP_CLEAN ]] || exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+	HOME=/root LANG=C.UTF-8 ${sudo_arg[@]+"${sudo_arg[@]}"} _NEWTON_BOOTSTRAP_CLEAN=1 /bin/bash -p -- "$0" "$@"
+
+[[ ${PATH-} == /usr/sbin:/usr/bin:/sbin:/bin ]] || die_run "environment after re-exec has an unexpected PATH"
+[[ ${HOME-} == /root ]] || die_run "environment after re-exec has an unexpected HOME"
+check_yes 'PATH|HOME|LANG|SUDO_USER|_NEWTON_BOOTSTRAP_CLEAN|PWD|OLDPWD|SHLVL|_|BASH_SOURCE|BASH_LINENO|BASH_VERSINFO' \
+	'environment after re-exec still has'
+(( EUID == 0 )) || die_run "must run as root (euid $EUID)"
+
+# own path and every parent root-owned, not g/o-writable; stat -L follows symlinks.
+_chain_walk() {
+	local path=$1 line uid mode
+	case $path in /*) ;; *) path=$PWD/$path ;; esac
+	while [[ $path == */ && $path != / ]]; do path=${path%/}; done
+[[ -n $path ]] || path=/
+		while :; do
+			if ! line=$(stat -L -c '%u %a' -- "$path" 2>/dev/null); then die_run "${path##*/} at $path is missing"; fi
+			IFS=' ' read -r uid mode <<<"$line"
+			(( (8#$mode & 8#022) == 0 )) || die_run "${path##*/} at $path is group/other-writable"
+			(( uid == 0 )) || die_run "${path##*/} at $path is not owned by root"
+			if [[ $path == / ]]; then break; fi
+			path=$(dirname -- "$path")
+		done
+}
+_chain_walk "$0"
+_chain_walk "$(readlink -f -- "$0" 2>/dev/null || printf '%s' "$0")"
+
+WORK=
+_cleanup() {
+	[[ -n $WORK && -d $WORK ]] && chmod -R u+w "$WORK" 2>/dev/null || true
+	if [[ -n $WORK && -d $WORK ]]; then rm -rf -- "$WORK"; fi
+}
+_usage() {
+	printf 'usage: %s install <repo-path> <40-hex-id> | self-update <repo-path> <40-hex-id> | version\n' "${0##*/}" >&2
+	exit 2
+}
+
+# snapshot one commit; sets COMMIT_ID/TREE_ID/WORK/SNAP. Never runs git inside the repo.
+make_snapshot() {
+	local repo=$1 commit_id=$2 object_dir src_git verify_git first
+	local length actual size cap=104857600 archive tree_verify extra last entry_name component
+	local -a parts
+
+	object_dir=$(objdir_from_repo "$repo") || die_inst "$repo is not a valid git repository"
+	[[ $object_dir != *:* && $object_dir == "${object_dir//[[:cntrl:]]/}" ]] || die_inst "unsafe object directory path"
+	WORK=$(mktemp -d /root/.newton-bootstrap.XXXXXXXX) || die_inst "could not create a private work directory"
+	[[ $(stat -c %u "$WORK") == "$EUID" ]] && (( (8#$(stat -c %a "$WORK") & 8#077) == 0 )) || die_inst "work directory is not root-owned 0700"
+	trap _cleanup EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	mkdir -m 0700 "$WORK/home" || die_inst "could not prepare the work directory"
+	src_git=$WORK/src.git; verify_git=$WORK/verify.git
+	git_x "$src_git"   init -q --bare --template= || die_inst "could not create source object repository"
+	git_x "$verify_git" init -q --bare --template= || die_inst "could not create verification repository"
+	COMMIT_FILE=$WORK/commit.txt
+	git_x "$src_git" --alt="$object_dir" cat-file commit "$commit_id" >"$COMMIT_FILE" 2>"$WORK/cat-file.err" \
+		|| die_inst "commit $commit_id not found in $repo"
+	length=$(wc -c <"$COMMIT_FILE"); length=${length//[[:space:]]/}
+	actual=$({ printf 'commit %s\0' "$length"; cat "$COMMIT_FILE"; } | sha1sum); actual=${actual%% *}
+	[[ $actual == "$commit_id" ]] || die_inst "commit object does not match its id"
+	IFS= read -r first <"$COMMIT_FILE" || die_inst "could not read the commit object"
+	[[ $first =~ ^tree\ ([0-9a-f]{40})$ ]] || die_inst "commit object has no tree header"
+	TREE_ID=${BASH_REMATCH[1]}
+	archive=$WORK/snapshot.tar
+	if ! (
+		ulimit -f $(( (cap + 1023) / 1024 + 1 ))
+		git_x "$src_git" --alt="$object_dir" -c core.attributesFile=/dev/null archive --format=tar "$commit_id"
+	) >"$archive" 2>"$WORK/archive.err"; then die_inst "git archive failed"; fi
+	size=$(wc -c <"$archive"); size=${size//[[:space:]]/}
+	(( size <= cap )) || die_inst "snapshot archive exceeds the size cap"
+	tar --quoting-style=escape -tvf "$archive" >"$WORK/tar.types" 2>"$WORK/tar.err" || die_inst "could not list the snapshot archive"
+	while IFS= read -r first; do
+		[[ -n $first ]] || continue
+		[[ $first == [-d]* ]] || die_inst "archive has a non-regular/dir entry"
+	done <"$WORK/tar.types"
+	tar -tf "$archive" | LC_ALL=C sort >"$WORK/tar.names" || die_inst "could not list the snapshot archive"
+	last=
+	while IFS= read -r entry_name; do
+		[[ -n $entry_name ]] || continue
+		entry_name=${entry_name%/}
+		[[ $entry_name != /* ]] || die_inst "archive contains absolute path ($entry_name)"
+		IFS='/' read -r -a parts <<<"$entry_name"
+		for component in "${parts[@]}"; do
+			case $component in
+				..) die_inst "archive path escapes ($entry_name)" ;;
+				.git) die_inst "archive contains a .git path ($entry_name)" ;;
+				.gitattributes) die_inst "archive contains a .gitattributes file" ;;
+			esac
+		done
+		[[ $entry_name != "$last" ]] || die_inst "archive contains a duplicate entry ($entry_name)"
+		last=$entry_name
+	done <"$WORK/tar.names"
+	SNAP=$WORK/snap
+	install -d -m 0700 "$SNAP" || die_inst "could not create the snapshot directory"
+	tar -xf "$archive" -C "$SNAP" --no-same-owner 2>"$WORK/tar.err" || die_inst "could not extract the snapshot archive"
+	extra=$(find "$SNAP" ! -type f ! -type d -print -quit)
+	[[ -z $extra ]] || die_inst "snapshot contains a non-regular/dir entry ($extra)"
+	if ! git_x "$verify_git" --work-tree="$SNAP" -c core.bare=false -c core.autocrlf=false \
+		-c core.safecrlf=false -c core.attributesFile=/dev/null add --force --all 2>"$WORK/add.err"; then die_inst "could not index the extracted snapshot"; fi
+	if ! tree_verify=$(git_x "$verify_git" --work-tree="$SNAP" -c core.bare=false -c core.autocrlf=false \
+		-c core.safecrlf=false -c core.attributesFile=/dev/null write-tree 2>"$WORK/wt.err"); then die_inst "could not compute the tree id of the snapshot"; fi
+	[[ $tree_verify == "$TREE_ID" ]] || die_inst "snapshot files do not match tree $TREE_ID"
+	[[ -f $SNAP/scripts/newton-install ]] || die_inst "snapshot is missing scripts/newton-install"
+}
+
+print_identity() {
+	local line author_raw author_name='' author_email='' author_ts='' author_tz='' subject=''
+	local blank=0 seen=0 re='^(.*) <([^>]*)> ([0-9]{1,15}) ([+-][0-9]{4})$'
+	while IFS= read -r line || [[ -n $line ]]; do
+		if (( blank )); then subject=$line; break; fi
+		if [[ -z $line ]]; then blank=1; continue; fi
+		if (( !seen )) && [[ $line == author\ * ]]; then
+			author_raw=${line#author }
+			[[ $author_raw =~ $re ]] || die_inst "authenticated commit has no readable author header"
+			author_name=${BASH_REMATCH[1]} author_email=${BASH_REMATCH[2]}
+			author_ts=${BASH_REMATCH[3]} author_tz=${BASH_REMATCH[4]}; seen=1
+		fi
+	done <"$WORK/commit.txt"
+	(( seen )) || die_inst "authenticated commit has no readable author header"
+	local date_text
+	date_text=$(date -u -d "@$author_ts") || die_inst "could not format the author date"
+	printf 'Commit:  %s\nTree:    %s\nAuthor:  %s <%s>\nDate:    %s (author timezone %s)\nSubject: %s\n' \
+		"$COMMIT_ID" "$TREE_ID" \
+		"$(sanitize_text "$author_name")" "$(sanitize_text "$author_email")" \
+		"$(sanitize_text "$date_text")" "$author_tz" \
+		"$(sanitize_text "$subject")"
+	local inst_sha
+	inst_sha=$(sha256sum -- "$SNAP/scripts/newton-install" | awk '{print $1}')
+	printf 'sha256 of %s/scripts/newton-install: %s\n' "${SNAP##*/}" "$inst_sha"
+}
+
+sub=${1-}; [[ $# -gt 0 ]] && shift || sub=
+case $sub in
+	install)
+		(( $# == 2 )) || _usage
+		repo=$1; id=$2
+		[[ $id =~ ^[0-9a-f]{40}$ ]] || { printf 'ERROR: commit id must be 40 lowercase hex characters; refusing\n' >&2; exit 2; }
+		[[ -v SUDO_USER && -n ${SUDO_USER-} ]] || die_run "SUDO_USER is not set: start the root shell with sudo -i so the installer knows which user to authorise; refusing to run"
+		[[ -t 0 ]] || die_run "stdin must be a tty"
+		COMMIT_ID=$id
+		make_snapshot "$repo" "$id"
+		print_identity
+		printf 'Compare the commit id with what you saw on GitHub, then type "install " followed by the first 12 hex characters of the commit id to continue: ' >&2
+		conf=; IFS= read -r conf || conf=
+		[[ $conf == "install ${id:0:12}" ]] || { printf 'ERROR: confirmation did not match; nothing installed\n' >&2; exit 1; }
+		workdir=$WORK/empty
+		install -d -m 0700 "$workdir" || die_inst "could not create the empty work directory"
+		( cd -- "$workdir" && env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root LANG=C.UTF-8 \
+			${sudo_arg[@]+"${sudo_arg[@]}"} \
+			/bin/bash -p -- "$WORK/snap/scripts/newton-install" --from-snapshot "$WORK/snap" )
+		;;
+	self-update)
+		(( $# == 2 )) || _usage
+		repo=$1; id=$2
+		[[ $id =~ ^[0-9a-f]{40}$ ]] || { printf 'ERROR: commit id must be 40 lowercase hex characters; refusing\n' >&2; exit 2; }
+		[[ -v SUDO_USER && -n ${SUDO_USER-} ]] || die_run "SUDO_USER is not set: start the root shell with sudo -i so the installer knows which user to authorise; refusing to run"
+		[[ -t 0 ]] || die_run "stdin must be a tty"
+		COMMIT_ID=$id
+		make_snapshot "$repo" "$id"
+		print_identity
+		src=$SNAP/scripts/newton-bootstrap
+		[[ ! -L $src && -f $src ]] || die_inst "snapshot scripts/newton-bootstrap must be a regular file"
+		if cmp -s -- "$SELF" "$src"; then printf 'already up to date\n'; exit 0; fi
+		# Reject files with NUL or other non-printable/non-LF bytes so the user is never shown a diff they cannot read.
+		bad=$(LC_ALL=C tr -d '\011\012\040-\176' <"$src" | wc -c)
+		(( bad == 0 )) || die_inst "snapshot scripts/newton-bootstrap contains a byte outside TAB/LF/printable-ASCII"
+		long=$(LC_ALL=C awk 'length($0) > 200 {n++} END {print n+0}' "$src")
+		(( long == 0 )) || die_inst "snapshot scripts/newton-bootstrap contains a line longer than 200 bytes"
+		# diff -u exits 1 on differences; only >1 is an error. Write to a temp file so we can count lines and refuse an un-reviewable diff.
+		rc=0; diff -a -u -- "$SELF" "$src" >"$WORK/boot.diff" || rc=$?
+		(( rc <= 1 )) || die_inst "diff tool failed (rc=$rc)"
+		diff_lines=$(wc -l <"$WORK/boot.diff"); diff_lines=${diff_lines//[[:space:]]/}
+		(( diff_lines <= 800 )) || die_inst "diff too long to review ($diff_lines lines); split the change"
+		cat -v "$WORK/boot.diff"
+		printf '\n--- %s (installed)\n+++ %s (snapshot)\n' "$SELF" "$src"
+		printf 'sha256 installed: %s\nsha256 snapshot:  %s\n' \
+			"$(sha256sum -- "$SELF" | awk '{print $1}')" "$(sha256sum -- "$src" | awk '{print $1}')"
+		printf 'Type "update " followed by the first 12 hex characters of the commit id to continue: ' >&2
+		conf=; IFS= read -r conf || conf=
+		[[ $conf == "update ${id:0:12}" ]] || { printf 'ERROR: confirmation did not match; nothing changed\n' >&2; exit 1; }
+		rm -f -- "$SELF.new"
+		install -o root -g root -m 0755 -- "$src" "$SELF.new" || die_inst "could not write the staging copy"
+		if ! cmp -s -- "$src" "$SELF.new"; then rm -f -- "$SELF.new"; die_inst "staging copy does not match the snapshot"; fi
+		if ! bash -n "$SELF.new"; then rm -f -- "$SELF.new"; die_inst "staging copy fails bash -n"; fi
+		sync -- "$SELF.new"; sync -- "$BOOT_DIR"
+		install -o root -g root -m 0644 -- "$SELF" "$SELF.prev.tmp" || die_inst "could not stage the previous copy"
+		mv -f -- "$SELF.prev.tmp" "$SELF.prev"
+		sha256_self=$(sha256sum -- "$SELF.new" | awk '{print $1}')
+		src_new=$SOURCE_FILE.new
+		printf 'commit %s\n' "$id" >"$src_new" || die_inst "could not write the source tmp file"
+		printf 'sha256 %s\n' "$sha256_self" >>"$src_new" || die_inst "could not write the source tmp file"
+		chmod 0644 -- "$src_new"
+		chown root:root -- "$src_new"
+		mv -f -- "$SELF.new" "$SELF"
+		mv -f -- "$src_new" "$SOURCE_FILE" || { printf 'ERROR: the bootstrap was replaced but its provenance file could not be written; run version, it will warn\n' >&2; exit 1; }
+		sync -- "$BOOT_DIR"
+		printf 'updated to %s; previous copy kept as %s.prev\n' "$id" "$SELF"
+		;;
+	version)
+		(( $# == 0 )) || _usage
+		sha=$(sha256sum -- "$0" | awk '{print $1}')
+		printf 'sha256 %s\n' "$sha"
+		if [[ -f $SOURCE_FILE ]]; then
+			cat -- "$SOURCE_FILE"
+			recorded=$(awk '$1=="sha256"{print $2; exit}' "$SOURCE_FILE")
+			if [[ -n $recorded && $recorded != "$sha" ]]; then
+				printf 'WARNING: provenance does not match this file (recorded %s, actual %s)\n' "${recorded:0:12}" "${sha:0:12}"
+			fi
+		else
+			printf 'commit unknown\n'
+			if [[ -f $SOURCE_FILE.new ]]; then
+				staged=$(awk '$1=="sha256"{print $2; exit}' "$SOURCE_FILE.new")
+				if [[ -n $staged && $staged == "$sha" ]]; then
+					printf 'WARNING: provenance does not match this file (recorded %s, actual %s)\n' "${staged:0:12}" "${sha:0:12}"
+				fi
+			fi
+		fi
+		;;
+	*) _usage ;;
+esac
+exit 0

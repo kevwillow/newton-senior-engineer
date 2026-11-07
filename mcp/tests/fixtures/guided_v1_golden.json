@@ -1,0 +1,599 @@
+{
+ "generated_from": "the v1 interview",
+ "note": "reports from guided.recommend() before the v2 interview; each value is json.dumps(report) exactly",
+ "cases": [
+  {
+   "answers": {
+    "strictness": "normal"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "wifi_wpa2": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-02\", \"current_state\": \"not audited\", \"desired_state\": \"standard\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: yes)\", \"evidence\": [], \"benefit\": \"WPA2/3 mixed\", \"breakage_or_preconditions\": \"Both WPA2 and WPA3 devices can join; very old devices without WPA2 cannot. Proven on real hardware (Pulsar, 2026-10-23).\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "wifi_wpa2": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-02\", \"current_state\": \"not audited\", \"desired_state\": \"hardened\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: yes)\", \"evidence\": [], \"benefit\": \"WPA2/3 mixed\", \"breakage_or_preconditions\": \"Both WPA2 and WPA3 devices can join; very old devices without WPA2 cannot. Proven on real hardware (Pulsar, 2026-10-23).\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "wifi_wpa2": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-02\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: yes)\", \"evidence\": [], \"benefit\": \"WPA2/3 mixed\", \"breakage_or_preconditions\": \"Both WPA2 and WPA3 devices can join; very old devices without WPA2 cannot. Proven on real hardware (Pulsar, 2026-10-23).\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "wifi_wpa2": "unsure"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"unsure\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-02\", \"current_state\": \"not audited\", \"desired_state\": \"standard\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: unsure)\", \"evidence\": [], \"benefit\": \"WPA2/3 mixed\", \"breakage_or_preconditions\": \"Both WPA2 and WPA3 devices can join; very old devices without WPA2 cannot. Proven on real hardware (Pulsar, 2026-10-23).\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "wifi_wpa2": "unsure"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"unsure\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-02\", \"current_state\": \"not audited\", \"desired_state\": \"hardened\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: unsure)\", \"evidence\": [], \"benefit\": \"WPA2/3 mixed\", \"breakage_or_preconditions\": \"Both WPA2 and WPA3 devices can join; very old devices without WPA2 cannot. Proven on real hardware (Pulsar, 2026-10-23).\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "wifi_wpa2": "unsure"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"unsure\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-02\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: unsure)\", \"evidence\": [], \"benefit\": \"WPA2/3 mixed\", \"breakage_or_preconditions\": \"Both WPA2 and WPA3 devices can join; very old devices without WPA2 cannot. Proven on real hardware (Pulsar, 2026-10-23).\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "wifi_wpa2": "all_wpa3"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"all_wpa3\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-01\", \"current_state\": \"not audited\", \"desired_state\": \"standard\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: all_wpa3)\", \"evidence\": [], \"benefit\": \"WPA3 (SAE)\", \"breakage_or_preconditions\": \"Devices without WPA3 (older phones, some IoT) cannot join; use the mixed form (OW-WIFI-02) if you have them. Proven on real hardware (Pulsar, 2026-10-23). Catalogue: WPA3-only at Hardened; Standard uses the mixed form (OW-WIFI-02). WPA3-only, with a fallback to mixed when the owner lists old clients.\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "wifi_wpa2": "all_wpa3"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"all_wpa3\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-01\", \"current_state\": \"not audited\", \"desired_state\": \"hardened\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: all_wpa3)\", \"evidence\": [], \"benefit\": \"WPA3 (SAE)\", \"breakage_or_preconditions\": \"Devices without WPA3 (older phones, some IoT) cannot join; use the mixed form (OW-WIFI-02) if you have them. Proven on real hardware (Pulsar, 2026-10-23). Catalogue: WPA3-only at Hardened; Standard uses the mixed form (OW-WIFI-02). WPA3-only, with a fallback to mixed when the owner lists old clients.\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "wifi_wpa2": "all_wpa3"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"all_wpa3\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-01\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: all_wpa3)\", \"evidence\": [], \"benefit\": \"WPA3 (SAE)\", \"breakage_or_preconditions\": \"Devices without WPA3 (older phones, some IoT) cannot join; use the mixed form (OW-WIFI-02) if you have them. Proven on real hardware (Pulsar, 2026-10-23). Catalogue: WPA3-only at Hardened; Standard uses the mixed form (OW-WIFI-02). WPA3-only, with a fallback to mixed when the owner lists old clients.\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "guest_network": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"guest_network\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-ZONE-01\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"Do you want a separate guest network that cannot reach your main devices? (answer: yes)\", \"evidence\": [], \"benefit\": \"Guest network isolated\", \"breakage_or_preconditions\": \"Offered at Standard. Adds a new network with its own subnet and DHCP. It is an extra, not a Standard control. batch uses {lan_device} in place of the lab's eth3. check runs in the lab's guest namespace and names lab addresses.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "guest_network": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"guest_network\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-ZONE-01\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you want a separate guest network that cannot reach your main devices? (answer: yes)\", \"evidence\": [], \"benefit\": \"Guest network isolated\", \"breakage_or_preconditions\": \"Offered at Standard. Adds a new network with its own subnet and DHCP. It is an extra, not a Standard control. batch uses {lan_device} in place of the lab's eth3. check runs in the lab's guest namespace and names lab addresses.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "guest_network": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"guest_network\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-ZONE-01\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you want a separate guest network that cannot reach your main devices? (answer: yes)\", \"evidence\": [], \"benefit\": \"Guest network isolated\", \"breakage_or_preconditions\": \"Offered at Standard. Adds a new network with its own subnet and DHCP. It is an extra, not a Standard control. batch uses {lan_device} in place of the lab's eth3. check runs in the lab's guest namespace and names lab addresses.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "guest_network": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"guest_network\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "guest_network": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"guest_network\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "guest_network": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"guest_network\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "upnp": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"upnp\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-FW-06\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in form (UPnP on)\", \"owner_reason\": \"Do games or consoles need UPnP/NAT-PMP to open ports automatically? (answer: yes)\", \"evidence\": [], \"benefit\": \"UPnP/NAT-PMP off (UPnP on)\", \"breakage_or_preconditions\": \"package miniupnpd-nftables\", \"confidence\": \"high\", \"status\": \"plan-ready\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "upnp": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"upnp\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-FW-06\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in form (UPnP on)\", \"owner_reason\": \"Do games or consoles need UPnP/NAT-PMP to open ports automatically? (answer: yes)\", \"evidence\": [], \"benefit\": \"UPnP/NAT-PMP off (UPnP on)\", \"breakage_or_preconditions\": \"package miniupnpd-nftables\", \"confidence\": \"high\", \"status\": \"plan-ready\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "upnp": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"upnp\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-FW-06\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in form (UPnP on)\", \"owner_reason\": \"Do games or consoles need UPnP/NAT-PMP to open ports automatically? (answer: yes)\", \"evidence\": [], \"benefit\": \"UPnP/NAT-PMP off (UPnP on)\", \"breakage_or_preconditions\": \"package miniupnpd-nftables\", \"confidence\": \"high\", \"status\": \"plan-ready\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "upnp": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"upnp\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-FW-06\", \"current_state\": \"not audited\", \"desired_state\": \"standard\", \"owner_reason\": \"Do games or consoles need UPnP/NAT-PMP to open ports automatically? (answer: no)\", \"evidence\": [], \"benefit\": \"UPnP/NAT-PMP off\", \"breakage_or_preconditions\": \"package miniupnpd-nftables\", \"confidence\": \"low\", \"status\": \"skipped\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "upnp": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"upnp\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-FW-06\", \"current_state\": \"not audited\", \"desired_state\": \"hardened\", \"owner_reason\": \"Do games or consoles need UPnP/NAT-PMP to open ports automatically? (answer: no)\", \"evidence\": [], \"benefit\": \"UPnP/NAT-PMP off\", \"breakage_or_preconditions\": \"package miniupnpd-nftables\", \"confidence\": \"low\", \"status\": \"skipped\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "upnp": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"upnp\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-FW-06\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown\", \"owner_reason\": \"Do games or consoles need UPnP/NAT-PMP to open ports automatically? (answer: no)\", \"evidence\": [], \"benefit\": \"UPnP/NAT-PMP off\", \"breakage_or_preconditions\": \"package miniupnpd-nftables\", \"confidence\": \"low\", \"status\": \"skipped\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "iot_network": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"iot_network\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-ZONE-02\", \"current_state\": \"not audited\", \"desired_state\": \"standard\", \"owner_reason\": \"Do you want an isolated IoT network, accepting that casting/discovery may need extra rules? (answer: yes)\", \"evidence\": [], \"benefit\": \"IoT zone isolated, no inbound from IoT to LAN, LAN->IoT allowed\", \"breakage_or_preconditions\": \"Same scenario as OW-FW-08 (ow-zone-02-iot). batch uses {lan_device} in place of the lab's eth3. check runs in the lab's iot namespace and names lab addresses; {client_lab_ip} is resolved at apply time.\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "iot_network": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"iot_network\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-ZONE-02\", \"current_state\": \"not audited\", \"desired_state\": \"hardened\", \"owner_reason\": \"Do you want an isolated IoT network, accepting that casting/discovery may need extra rules? (answer: yes)\", \"evidence\": [], \"benefit\": \"IoT zone isolated, no inbound from IoT to LAN, LAN->IoT allowed\", \"breakage_or_preconditions\": \"Same scenario as OW-FW-08 (ow-zone-02-iot). batch uses {lan_device} in place of the lab's eth3. check runs in the lab's iot namespace and names lab addresses; {client_lab_ip} is resolved at apply time.\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "iot_network": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"iot_network\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-ZONE-02\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown\", \"owner_reason\": \"Do you want an isolated IoT network, accepting that casting/discovery may need extra rules? (answer: yes)\", \"evidence\": [], \"benefit\": \"IoT zone isolated, no inbound from IoT to LAN, LAN->IoT allowed\", \"breakage_or_preconditions\": \"Same scenario as OW-FW-08 (ow-zone-02-iot). batch uses {lan_device} in place of the lab's eth3. check runs in the lab's iot namespace and names lab addresses; {client_lab_ip} is resolved at apply time.\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "iot_network": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"iot_network\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "iot_network": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"iot_network\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "iot_network": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"iot_network\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "ssh_password_off": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"ssh_password_off\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-MGMT-04\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"After a separate key login is proven, do you want password SSH disabled? (answer: yes)\", \"evidence\": [], \"benefit\": \"SSH password auth: keep (O, S, H), key-only is an option\", \"breakage_or_preconditions\": \"Offered at Lockdown. Expects rolled_back: Newton's verify runs password-only under the runner, so key-only cannot confirm; password mode rolls it back (the lockout protection works). Key-mode path comes later.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "ssh_password_off": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"ssh_password_off\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-MGMT-04\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"After a separate key login is proven, do you want password SSH disabled? (answer: yes)\", \"evidence\": [], \"benefit\": \"SSH password auth: keep (O, S, H), key-only is an option\", \"breakage_or_preconditions\": \"Offered at Lockdown. Expects rolled_back: Newton's verify runs password-only under the runner, so key-only cannot confirm; password mode rolls it back (the lockout protection works). Key-mode path comes later.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "ssh_password_off": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"ssh_password_off\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-MGMT-04\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"After a separate key login is proven, do you want password SSH disabled? (answer: yes)\", \"evidence\": [], \"benefit\": \"SSH password auth: keep (O, S, H), key-only is an option\", \"breakage_or_preconditions\": \"Offered at Lockdown. Expects rolled_back: Newton's verify runs password-only under the runner, so key-only cannot confirm; password mode rolls it back (the lockout protection works). Key-mode path comes later.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "ssh_password_off": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"ssh_password_off\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "ssh_password_off": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"ssh_password_off\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "ssh_password_off": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"ssh_password_off\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "dnssec": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"dnssec\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-DNS-04\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"Do you want DNSSEC validation, with a correct clock and dnsmasq-full installed? (answer: yes)\", \"evidence\": [], \"benefit\": \"DNSSEC validation\", \"breakage_or_preconditions\": \"package dnsmasq-full; router clock correct (NTP synced)\", \"confidence\": \"high\", \"status\": \"plan-ready\"}], \"unanswered\": [\"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "dnssec": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"dnssec\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-DNS-04\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you want DNSSEC validation, with a correct clock and dnsmasq-full installed? (answer: yes)\", \"evidence\": [], \"benefit\": \"DNSSEC validation\", \"breakage_or_preconditions\": \"package dnsmasq-full; router clock correct (NTP synced)\", \"confidence\": \"high\", \"status\": \"plan-ready\"}], \"unanswered\": [\"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "dnssec": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"dnssec\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-DNS-04\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you want DNSSEC validation, with a correct clock and dnsmasq-full installed? (answer: yes)\", \"evidence\": [], \"benefit\": \"DNSSEC validation\", \"breakage_or_preconditions\": \"package dnsmasq-full; router clock correct (NTP synced)\", \"confidence\": \"high\", \"status\": \"plan-ready\"}], \"unanswered\": [\"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "dnssec": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"dnssec\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "dnssec": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"dnssec\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "dnssec": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"dnssec\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "encrypted_dns": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"encrypted_dns\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-DNS-05\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"Do you want encrypted upstream DNS despite captive-portal/bootstrap risk? (answer: yes)\", \"evidence\": [], \"benefit\": \"Encrypted upstream (DoH)\", \"breakage_or_preconditions\": \"package https-dns-proxy\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "encrypted_dns": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"encrypted_dns\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-DNS-05\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you want encrypted upstream DNS despite captive-portal/bootstrap risk? (answer: yes)\", \"evidence\": [], \"benefit\": \"Encrypted upstream (DoH)\", \"breakage_or_preconditions\": \"package https-dns-proxy\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "encrypted_dns": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"encrypted_dns\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-DNS-05\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you want encrypted upstream DNS despite captive-portal/bootstrap risk? (answer: yes)\", \"evidence\": [], \"benefit\": \"Encrypted upstream (DoH)\", \"breakage_or_preconditions\": \"package https-dns-proxy\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "encrypted_dns": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"encrypted_dns\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "encrypted_dns": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"encrypted_dns\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "encrypted_dns": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"encrypted_dns\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "ipv6_off": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"ipv6_off\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-V6-03\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"Do you deliberately want IPv6 disabled everywhere? (answer: yes)\", \"evidence\": [], \"benefit\": \"IPv6 off entirely\", \"breakage_or_preconditions\": \"Offered at Lockdown. Opt-in, never applied by default. In the lab it was applied to the client LAN interface, with wan6 deleted. batch uses {lan_device} in place of the lab's eth3; check/expect name the lab device eth3.\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "ipv6_off": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"ipv6_off\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-V6-03\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you deliberately want IPv6 disabled everywhere? (answer: yes)\", \"evidence\": [], \"benefit\": \"IPv6 off entirely\", \"breakage_or_preconditions\": \"Offered at Lockdown. Opt-in, never applied by default. In the lab it was applied to the client LAN interface, with wan6 deleted. batch uses {lan_device} in place of the lab's eth3; check/expect name the lab device eth3.\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "ipv6_off": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"ipv6_off\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-V6-03\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you deliberately want IPv6 disabled everywhere? (answer: yes)\", \"evidence\": [], \"benefit\": \"IPv6 off entirely\", \"breakage_or_preconditions\": \"Offered at Lockdown. Opt-in, never applied by default. In the lab it was applied to the client LAN interface, with wan6 deleted. batch uses {lan_device} in place of the lab's eth3; check/expect name the lab device eth3.\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "ipv6_off": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"ipv6_off\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "ipv6_off": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"ipv6_off\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "ipv6_off": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"ipv6_off\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "ipv6_off": "unsure"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"ipv6_off\", \"answer\": \"unsure\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "ipv6_off": "unsure"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"ipv6_off\", \"answer\": \"unsure\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "ipv6_off": "unsure"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"ipv6_off\", \"answer\": \"unsure\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"fw_update_check\", \"guest_network\", \"iot_network\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "fw_update_check": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"fw_update_check\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-UPD-02\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"Do you want a read-only firmware-update availability check? (answer: yes)\", \"evidence\": [], \"benefit\": \"Auto-update\", \"breakage_or_preconditions\": \"package owut\", \"confidence\": \"medium\", \"status\": \"audit-only\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "fw_update_check": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"fw_update_check\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-UPD-02\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you want a read-only firmware-update availability check? (answer: yes)\", \"evidence\": [], \"benefit\": \"Auto-update\", \"breakage_or_preconditions\": \"package owut\", \"confidence\": \"medium\", \"status\": \"audit-only\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "fw_update_check": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"fw_update_check\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-UPD-02\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you want a read-only firmware-update availability check? (answer: yes)\", \"evidence\": [], \"benefit\": \"Auto-update\", \"breakage_or_preconditions\": \"package owut\", \"confidence\": \"medium\", \"status\": \"audit-only\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "fw_update_check": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"fw_update_check\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "fw_update_check": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"fw_update_check\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "fw_update_check": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"fw_update_check\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"guest_network\", \"iot_network\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "wifi_wpa2": "yes",
+    "guest_network": "yes",
+    "upnp": "yes",
+    "iot_network": "yes",
+    "ssh_password_off": "yes",
+    "dnssec": "yes",
+    "encrypted_dns": "yes",
+    "ipv6_off": "yes",
+    "fw_update_check": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"yes\"}, {\"id\": \"guest_network\", \"answer\": \"yes\"}, {\"id\": \"upnp\", \"answer\": \"yes\"}, {\"id\": \"iot_network\", \"answer\": \"yes\"}, {\"id\": \"ssh_password_off\", \"answer\": \"yes\"}, {\"id\": \"dnssec\", \"answer\": \"yes\"}, {\"id\": \"encrypted_dns\", \"answer\": \"yes\"}, {\"id\": \"ipv6_off\", \"answer\": \"yes\"}, {\"id\": \"fw_update_check\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-02\", \"current_state\": \"not audited\", \"desired_state\": \"standard\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: yes)\", \"evidence\": [], \"benefit\": \"WPA2/3 mixed\", \"breakage_or_preconditions\": \"Both WPA2 and WPA3 devices can join; very old devices without WPA2 cannot. Proven on real hardware (Pulsar, 2026-10-23).\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-ZONE-01\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"Do you want a separate guest network that cannot reach your main devices? (answer: yes)\", \"evidence\": [], \"benefit\": \"Guest network isolated\", \"breakage_or_preconditions\": \"Offered at Standard. Adds a new network with its own subnet and DHCP. It is an extra, not a Standard control. batch uses {lan_device} in place of the lab's eth3. check runs in the lab's guest namespace and names lab addresses.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-FW-06\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in form (UPnP on)\", \"owner_reason\": \"Do games or consoles need UPnP/NAT-PMP to open ports automatically? (answer: yes)\", \"evidence\": [], \"benefit\": \"UPnP/NAT-PMP off (UPnP on)\", \"breakage_or_preconditions\": \"package miniupnpd-nftables\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-ZONE-02\", \"current_state\": \"not audited\", \"desired_state\": \"standard\", \"owner_reason\": \"Do you want an isolated IoT network, accepting that casting/discovery may need extra rules? (answer: yes)\", \"evidence\": [], \"benefit\": \"IoT zone isolated, no inbound from IoT to LAN, LAN->IoT allowed\", \"breakage_or_preconditions\": \"Same scenario as OW-FW-08 (ow-zone-02-iot). batch uses {lan_device} in place of the lab's eth3. check runs in the lab's iot namespace and names lab addresses; {client_lab_ip} is resolved at apply time.\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-MGMT-04\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"After a separate key login is proven, do you want password SSH disabled? (answer: yes)\", \"evidence\": [], \"benefit\": \"SSH password auth: keep (O, S, H), key-only is an option\", \"breakage_or_preconditions\": \"Offered at Lockdown. Expects rolled_back: Newton's verify runs password-only under the runner, so key-only cannot confirm; password mode rolls it back (the lockout protection works). Key-mode path comes later.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-DNS-04\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"Do you want DNSSEC validation, with a correct clock and dnsmasq-full installed? (answer: yes)\", \"evidence\": [], \"benefit\": \"DNSSEC validation\", \"breakage_or_preconditions\": \"package dnsmasq-full; router clock correct (NTP synced)\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-DNS-05\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"Do you want encrypted upstream DNS despite captive-portal/bootstrap risk? (answer: yes)\", \"evidence\": [], \"benefit\": \"Encrypted upstream (DoH)\", \"breakage_or_preconditions\": \"package https-dns-proxy\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-V6-03\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"Do you deliberately want IPv6 disabled everywhere? (answer: yes)\", \"evidence\": [], \"benefit\": \"IPv6 off entirely\", \"breakage_or_preconditions\": \"Offered at Lockdown. Opt-in, never applied by default. In the lab it was applied to the client LAN interface, with wan6 deleted. batch uses {lan_device} in place of the lab's eth3; check/expect name the lab device eth3.\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-UPD-02\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"Do you want a read-only firmware-update availability check? (answer: yes)\", \"evidence\": [], \"benefit\": \"Auto-update\", \"breakage_or_preconditions\": \"package owut\", \"confidence\": \"medium\", \"status\": \"audit-only\"}], \"unanswered\": [], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "wifi_wpa2": "yes",
+    "guest_network": "yes",
+    "upnp": "yes",
+    "iot_network": "yes",
+    "ssh_password_off": "yes",
+    "dnssec": "yes",
+    "encrypted_dns": "yes",
+    "ipv6_off": "yes",
+    "fw_update_check": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"yes\"}, {\"id\": \"guest_network\", \"answer\": \"yes\"}, {\"id\": \"upnp\", \"answer\": \"yes\"}, {\"id\": \"iot_network\", \"answer\": \"yes\"}, {\"id\": \"ssh_password_off\", \"answer\": \"yes\"}, {\"id\": \"dnssec\", \"answer\": \"yes\"}, {\"id\": \"encrypted_dns\", \"answer\": \"yes\"}, {\"id\": \"ipv6_off\", \"answer\": \"yes\"}, {\"id\": \"fw_update_check\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-02\", \"current_state\": \"not audited\", \"desired_state\": \"hardened\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: yes)\", \"evidence\": [], \"benefit\": \"WPA2/3 mixed\", \"breakage_or_preconditions\": \"Both WPA2 and WPA3 devices can join; very old devices without WPA2 cannot. Proven on real hardware (Pulsar, 2026-10-23).\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-ZONE-01\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you want a separate guest network that cannot reach your main devices? (answer: yes)\", \"evidence\": [], \"benefit\": \"Guest network isolated\", \"breakage_or_preconditions\": \"Offered at Standard. Adds a new network with its own subnet and DHCP. It is an extra, not a Standard control. batch uses {lan_device} in place of the lab's eth3. check runs in the lab's guest namespace and names lab addresses.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-FW-06\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in form (UPnP on)\", \"owner_reason\": \"Do games or consoles need UPnP/NAT-PMP to open ports automatically? (answer: yes)\", \"evidence\": [], \"benefit\": \"UPnP/NAT-PMP off (UPnP on)\", \"breakage_or_preconditions\": \"package miniupnpd-nftables\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-ZONE-02\", \"current_state\": \"not audited\", \"desired_state\": \"hardened\", \"owner_reason\": \"Do you want an isolated IoT network, accepting that casting/discovery may need extra rules? (answer: yes)\", \"evidence\": [], \"benefit\": \"IoT zone isolated, no inbound from IoT to LAN, LAN->IoT allowed\", \"breakage_or_preconditions\": \"Same scenario as OW-FW-08 (ow-zone-02-iot). batch uses {lan_device} in place of the lab's eth3. check runs in the lab's iot namespace and names lab addresses; {client_lab_ip} is resolved at apply time.\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-MGMT-04\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"After a separate key login is proven, do you want password SSH disabled? (answer: yes)\", \"evidence\": [], \"benefit\": \"SSH password auth: keep (O, S, H), key-only is an option\", \"breakage_or_preconditions\": \"Offered at Lockdown. Expects rolled_back: Newton's verify runs password-only under the runner, so key-only cannot confirm; password mode rolls it back (the lockout protection works). Key-mode path comes later.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-DNS-04\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you want DNSSEC validation, with a correct clock and dnsmasq-full installed? (answer: yes)\", \"evidence\": [], \"benefit\": \"DNSSEC validation\", \"breakage_or_preconditions\": \"package dnsmasq-full; router clock correct (NTP synced)\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-DNS-05\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you want encrypted upstream DNS despite captive-portal/bootstrap risk? (answer: yes)\", \"evidence\": [], \"benefit\": \"Encrypted upstream (DoH)\", \"breakage_or_preconditions\": \"package https-dns-proxy\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-V6-03\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you deliberately want IPv6 disabled everywhere? (answer: yes)\", \"evidence\": [], \"benefit\": \"IPv6 off entirely\", \"breakage_or_preconditions\": \"Offered at Lockdown. Opt-in, never applied by default. In the lab it was applied to the client LAN interface, with wan6 deleted. batch uses {lan_device} in place of the lab's eth3; check/expect name the lab device eth3.\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-UPD-02\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you want a read-only firmware-update availability check? (answer: yes)\", \"evidence\": [], \"benefit\": \"Auto-update\", \"breakage_or_preconditions\": \"package owut\", \"confidence\": \"medium\", \"status\": \"audit-only\"}], \"unanswered\": [], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "wifi_wpa2": "yes",
+    "guest_network": "yes",
+    "upnp": "yes",
+    "iot_network": "yes",
+    "ssh_password_off": "yes",
+    "dnssec": "yes",
+    "encrypted_dns": "yes",
+    "ipv6_off": "yes",
+    "fw_update_check": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"yes\"}, {\"id\": \"guest_network\", \"answer\": \"yes\"}, {\"id\": \"upnp\", \"answer\": \"yes\"}, {\"id\": \"iot_network\", \"answer\": \"yes\"}, {\"id\": \"ssh_password_off\", \"answer\": \"yes\"}, {\"id\": \"dnssec\", \"answer\": \"yes\"}, {\"id\": \"encrypted_dns\", \"answer\": \"yes\"}, {\"id\": \"ipv6_off\", \"answer\": \"yes\"}, {\"id\": \"fw_update_check\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-02\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: yes)\", \"evidence\": [], \"benefit\": \"WPA2/3 mixed\", \"breakage_or_preconditions\": \"Both WPA2 and WPA3 devices can join; very old devices without WPA2 cannot. Proven on real hardware (Pulsar, 2026-10-23).\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-ZONE-01\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you want a separate guest network that cannot reach your main devices? (answer: yes)\", \"evidence\": [], \"benefit\": \"Guest network isolated\", \"breakage_or_preconditions\": \"Offered at Standard. Adds a new network with its own subnet and DHCP. It is an extra, not a Standard control. batch uses {lan_device} in place of the lab's eth3. check runs in the lab's guest namespace and names lab addresses.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-FW-06\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in form (UPnP on)\", \"owner_reason\": \"Do games or consoles need UPnP/NAT-PMP to open ports automatically? (answer: yes)\", \"evidence\": [], \"benefit\": \"UPnP/NAT-PMP off (UPnP on)\", \"breakage_or_preconditions\": \"package miniupnpd-nftables\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-ZONE-02\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown\", \"owner_reason\": \"Do you want an isolated IoT network, accepting that casting/discovery may need extra rules? (answer: yes)\", \"evidence\": [], \"benefit\": \"IoT zone isolated, no inbound from IoT to LAN, LAN->IoT allowed\", \"breakage_or_preconditions\": \"Same scenario as OW-FW-08 (ow-zone-02-iot). batch uses {lan_device} in place of the lab's eth3. check runs in the lab's iot namespace and names lab addresses; {client_lab_ip} is resolved at apply time.\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-MGMT-04\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"After a separate key login is proven, do you want password SSH disabled? (answer: yes)\", \"evidence\": [], \"benefit\": \"SSH password auth: keep (O, S, H), key-only is an option\", \"breakage_or_preconditions\": \"Offered at Lockdown. Expects rolled_back: Newton's verify runs password-only under the runner, so key-only cannot confirm; password mode rolls it back (the lockout protection works). Key-mode path comes later.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-DNS-04\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you want DNSSEC validation, with a correct clock and dnsmasq-full installed? (answer: yes)\", \"evidence\": [], \"benefit\": \"DNSSEC validation\", \"breakage_or_preconditions\": \"package dnsmasq-full; router clock correct (NTP synced)\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-DNS-05\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you want encrypted upstream DNS despite captive-portal/bootstrap risk? (answer: yes)\", \"evidence\": [], \"benefit\": \"Encrypted upstream (DoH)\", \"breakage_or_preconditions\": \"package https-dns-proxy\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-V6-03\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you deliberately want IPv6 disabled everywhere? (answer: yes)\", \"evidence\": [], \"benefit\": \"IPv6 off entirely\", \"breakage_or_preconditions\": \"Offered at Lockdown. Opt-in, never applied by default. In the lab it was applied to the client LAN interface, with wan6 deleted. batch uses {lan_device} in place of the lab's eth3; check/expect name the lab device eth3.\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-UPD-02\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you want a read-only firmware-update availability check? (answer: yes)\", \"evidence\": [], \"benefit\": \"Auto-update\", \"breakage_or_preconditions\": \"package owut\", \"confidence\": \"medium\", \"status\": \"audit-only\"}], \"unanswered\": [], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "wifi_wpa2": "all_wpa3",
+    "guest_network": "no",
+    "upnp": "no",
+    "iot_network": "no",
+    "ssh_password_off": "no",
+    "dnssec": "no",
+    "encrypted_dns": "no",
+    "ipv6_off": "unsure",
+    "fw_update_check": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"all_wpa3\"}, {\"id\": \"guest_network\", \"answer\": \"no\"}, {\"id\": \"upnp\", \"answer\": \"no\"}, {\"id\": \"iot_network\", \"answer\": \"no\"}, {\"id\": \"ssh_password_off\", \"answer\": \"no\"}, {\"id\": \"dnssec\", \"answer\": \"no\"}, {\"id\": \"encrypted_dns\", \"answer\": \"no\"}, {\"id\": \"ipv6_off\", \"answer\": \"unsure\"}, {\"id\": \"fw_update_check\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-01\", \"current_state\": \"not audited\", \"desired_state\": \"standard\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: all_wpa3)\", \"evidence\": [], \"benefit\": \"WPA3 (SAE)\", \"breakage_or_preconditions\": \"Devices without WPA3 (older phones, some IoT) cannot join; use the mixed form (OW-WIFI-02) if you have them. Proven on real hardware (Pulsar, 2026-10-23). Catalogue: WPA3-only at Hardened; Standard uses the mixed form (OW-WIFI-02). WPA3-only, with a fallback to mixed when the owner lists old clients.\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-FW-06\", \"current_state\": \"not audited\", \"desired_state\": \"standard\", \"owner_reason\": \"Do games or consoles need UPnP/NAT-PMP to open ports automatically? (answer: no)\", \"evidence\": [], \"benefit\": \"UPnP/NAT-PMP off\", \"breakage_or_preconditions\": \"package miniupnpd-nftables\", \"confidence\": \"low\", \"status\": \"skipped\"}], \"unanswered\": [], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "wifi_wpa2": "all_wpa3",
+    "guest_network": "no",
+    "upnp": "no",
+    "iot_network": "no",
+    "ssh_password_off": "no",
+    "dnssec": "no",
+    "encrypted_dns": "no",
+    "ipv6_off": "unsure",
+    "fw_update_check": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"all_wpa3\"}, {\"id\": \"guest_network\", \"answer\": \"no\"}, {\"id\": \"upnp\", \"answer\": \"no\"}, {\"id\": \"iot_network\", \"answer\": \"no\"}, {\"id\": \"ssh_password_off\", \"answer\": \"no\"}, {\"id\": \"dnssec\", \"answer\": \"no\"}, {\"id\": \"encrypted_dns\", \"answer\": \"no\"}, {\"id\": \"ipv6_off\", \"answer\": \"unsure\"}, {\"id\": \"fw_update_check\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-01\", \"current_state\": \"not audited\", \"desired_state\": \"hardened\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: all_wpa3)\", \"evidence\": [], \"benefit\": \"WPA3 (SAE)\", \"breakage_or_preconditions\": \"Devices without WPA3 (older phones, some IoT) cannot join; use the mixed form (OW-WIFI-02) if you have them. Proven on real hardware (Pulsar, 2026-10-23). Catalogue: WPA3-only at Hardened; Standard uses the mixed form (OW-WIFI-02). WPA3-only, with a fallback to mixed when the owner lists old clients.\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-FW-06\", \"current_state\": \"not audited\", \"desired_state\": \"hardened\", \"owner_reason\": \"Do games or consoles need UPnP/NAT-PMP to open ports automatically? (answer: no)\", \"evidence\": [], \"benefit\": \"UPnP/NAT-PMP off\", \"breakage_or_preconditions\": \"package miniupnpd-nftables\", \"confidence\": \"low\", \"status\": \"skipped\"}], \"unanswered\": [], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "wifi_wpa2": "all_wpa3",
+    "guest_network": "no",
+    "upnp": "no",
+    "iot_network": "no",
+    "ssh_password_off": "no",
+    "dnssec": "no",
+    "encrypted_dns": "no",
+    "ipv6_off": "unsure",
+    "fw_update_check": "no"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"all_wpa3\"}, {\"id\": \"guest_network\", \"answer\": \"no\"}, {\"id\": \"upnp\", \"answer\": \"no\"}, {\"id\": \"iot_network\", \"answer\": \"no\"}, {\"id\": \"ssh_password_off\", \"answer\": \"no\"}, {\"id\": \"dnssec\", \"answer\": \"no\"}, {\"id\": \"encrypted_dns\", \"answer\": \"no\"}, {\"id\": \"ipv6_off\", \"answer\": \"unsure\"}, {\"id\": \"fw_update_check\", \"answer\": \"no\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-01\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: all_wpa3)\", \"evidence\": [], \"benefit\": \"WPA3 (SAE)\", \"breakage_or_preconditions\": \"Devices without WPA3 (older phones, some IoT) cannot join; use the mixed form (OW-WIFI-02) if you have them. Proven on real hardware (Pulsar, 2026-10-23). Catalogue: WPA3-only at Hardened; Standard uses the mixed form (OW-WIFI-02). WPA3-only, with a fallback to mixed when the owner lists old clients.\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-FW-06\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown\", \"owner_reason\": \"Do games or consoles need UPnP/NAT-PMP to open ports automatically? (answer: no)\", \"evidence\": [], \"benefit\": \"UPnP/NAT-PMP off\", \"breakage_or_preconditions\": \"package miniupnpd-nftables\", \"confidence\": \"low\", \"status\": \"skipped\"}], \"unanswered\": [], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "normal",
+    "wifi_wpa2": "yes",
+    "guest_network": "yes",
+    "upnp": "yes",
+    "iot_network": "yes",
+    "ssh_password_off": "yes",
+    "dnssec": "yes",
+    "encrypted_dns": "yes",
+    "ipv6_off": "yes",
+    "fw_update_check": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"standard\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"normal\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"yes\"}, {\"id\": \"guest_network\", \"answer\": \"yes\"}, {\"id\": \"upnp\", \"answer\": \"yes\"}, {\"id\": \"iot_network\", \"answer\": \"yes\"}, {\"id\": \"ssh_password_off\", \"answer\": \"yes\"}, {\"id\": \"dnssec\", \"answer\": \"yes\"}, {\"id\": \"encrypted_dns\", \"answer\": \"yes\"}, {\"id\": \"ipv6_off\", \"answer\": \"yes\"}, {\"id\": \"fw_update_check\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-02\", \"current_state\": \"not audited\", \"desired_state\": \"standard\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: yes)\", \"evidence\": [], \"benefit\": \"WPA2/3 mixed\", \"breakage_or_preconditions\": \"Both WPA2 and WPA3 devices can join; very old devices without WPA2 cannot. Proven on real hardware (Pulsar, 2026-10-23).\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-ZONE-01\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"Do you want a separate guest network that cannot reach your main devices? (answer: yes)\", \"evidence\": [], \"benefit\": \"Guest network isolated\", \"breakage_or_preconditions\": \"Offered at Standard. Adds a new network with its own subnet and DHCP. It is an extra, not a Standard control. batch uses {lan_device} in place of the lab's eth3. check runs in the lab's guest namespace and names lab addresses.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-FW-06\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in form (UPnP on)\", \"owner_reason\": \"Do games or consoles need UPnP/NAT-PMP to open ports automatically? (answer: yes)\", \"evidence\": [], \"benefit\": \"UPnP/NAT-PMP off (UPnP on)\", \"breakage_or_preconditions\": \"package miniupnpd-nftables\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-ZONE-02\", \"current_state\": \"not audited\", \"desired_state\": \"standard\", \"owner_reason\": \"Do you want an isolated IoT network, accepting that casting/discovery may need extra rules? (answer: yes)\", \"evidence\": [], \"benefit\": \"IoT zone isolated, no inbound from IoT to LAN, LAN->IoT allowed\", \"breakage_or_preconditions\": \"Same scenario as OW-FW-08 (ow-zone-02-iot). batch uses {lan_device} in place of the lab's eth3. check runs in the lab's iot namespace and names lab addresses; {client_lab_ip} is resolved at apply time.\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-MGMT-04\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"After a separate key login is proven, do you want password SSH disabled? (answer: yes)\", \"evidence\": [], \"benefit\": \"SSH password auth: keep (O, S, H), key-only is an option\", \"breakage_or_preconditions\": \"Offered at Lockdown. Expects rolled_back: Newton's verify runs password-only under the runner, so key-only cannot confirm; password mode rolls it back (the lockout protection works). Key-mode path comes later.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-DNS-04\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"Do you want DNSSEC validation, with a correct clock and dnsmasq-full installed? (answer: yes)\", \"evidence\": [], \"benefit\": \"DNSSEC validation\", \"breakage_or_preconditions\": \"package dnsmasq-full; router clock correct (NTP synced)\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-DNS-05\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"Do you want encrypted upstream DNS despite captive-portal/bootstrap risk? (answer: yes)\", \"evidence\": [], \"benefit\": \"Encrypted upstream (DoH)\", \"breakage_or_preconditions\": \"package https-dns-proxy\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-V6-03\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"Do you deliberately want IPv6 disabled everywhere? (answer: yes)\", \"evidence\": [], \"benefit\": \"IPv6 off entirely\", \"breakage_or_preconditions\": \"Offered at Lockdown. Opt-in, never applied by default. In the lab it was applied to the client LAN interface, with wan6 deleted. batch uses {lan_device} in place of the lab's eth3; check/expect name the lab device eth3.\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-UPD-02\", \"current_state\": \"not audited\", \"desired_state\": \"standard opt-in\", \"owner_reason\": \"Do you want a read-only firmware-update availability check? (answer: yes)\", \"evidence\": [], \"benefit\": \"Auto-update\", \"breakage_or_preconditions\": \"package owut\", \"confidence\": \"medium\", \"status\": \"audit-only\"}], \"unanswered\": [], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "stricter",
+    "wifi_wpa2": "yes",
+    "guest_network": "yes",
+    "upnp": "yes",
+    "iot_network": "yes",
+    "ssh_password_off": "yes",
+    "dnssec": "yes",
+    "encrypted_dns": "yes",
+    "ipv6_off": "yes",
+    "fw_update_check": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"yes\"}, {\"id\": \"guest_network\", \"answer\": \"yes\"}, {\"id\": \"upnp\", \"answer\": \"yes\"}, {\"id\": \"iot_network\", \"answer\": \"yes\"}, {\"id\": \"ssh_password_off\", \"answer\": \"yes\"}, {\"id\": \"dnssec\", \"answer\": \"yes\"}, {\"id\": \"encrypted_dns\", \"answer\": \"yes\"}, {\"id\": \"ipv6_off\", \"answer\": \"yes\"}, {\"id\": \"fw_update_check\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-02\", \"current_state\": \"not audited\", \"desired_state\": \"hardened\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: yes)\", \"evidence\": [], \"benefit\": \"WPA2/3 mixed\", \"breakage_or_preconditions\": \"Both WPA2 and WPA3 devices can join; very old devices without WPA2 cannot. Proven on real hardware (Pulsar, 2026-10-23).\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-ZONE-01\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you want a separate guest network that cannot reach your main devices? (answer: yes)\", \"evidence\": [], \"benefit\": \"Guest network isolated\", \"breakage_or_preconditions\": \"Offered at Standard. Adds a new network with its own subnet and DHCP. It is an extra, not a Standard control. batch uses {lan_device} in place of the lab's eth3. check runs in the lab's guest namespace and names lab addresses.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-FW-06\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in form (UPnP on)\", \"owner_reason\": \"Do games or consoles need UPnP/NAT-PMP to open ports automatically? (answer: yes)\", \"evidence\": [], \"benefit\": \"UPnP/NAT-PMP off (UPnP on)\", \"breakage_or_preconditions\": \"package miniupnpd-nftables\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-ZONE-02\", \"current_state\": \"not audited\", \"desired_state\": \"hardened\", \"owner_reason\": \"Do you want an isolated IoT network, accepting that casting/discovery may need extra rules? (answer: yes)\", \"evidence\": [], \"benefit\": \"IoT zone isolated, no inbound from IoT to LAN, LAN->IoT allowed\", \"breakage_or_preconditions\": \"Same scenario as OW-FW-08 (ow-zone-02-iot). batch uses {lan_device} in place of the lab's eth3. check runs in the lab's iot namespace and names lab addresses; {client_lab_ip} is resolved at apply time.\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-MGMT-04\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"After a separate key login is proven, do you want password SSH disabled? (answer: yes)\", \"evidence\": [], \"benefit\": \"SSH password auth: keep (O, S, H), key-only is an option\", \"breakage_or_preconditions\": \"Offered at Lockdown. Expects rolled_back: Newton's verify runs password-only under the runner, so key-only cannot confirm; password mode rolls it back (the lockout protection works). Key-mode path comes later.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-DNS-04\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you want DNSSEC validation, with a correct clock and dnsmasq-full installed? (answer: yes)\", \"evidence\": [], \"benefit\": \"DNSSEC validation\", \"breakage_or_preconditions\": \"package dnsmasq-full; router clock correct (NTP synced)\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-DNS-05\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you want encrypted upstream DNS despite captive-portal/bootstrap risk? (answer: yes)\", \"evidence\": [], \"benefit\": \"Encrypted upstream (DoH)\", \"breakage_or_preconditions\": \"package https-dns-proxy\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-V6-03\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you deliberately want IPv6 disabled everywhere? (answer: yes)\", \"evidence\": [], \"benefit\": \"IPv6 off entirely\", \"breakage_or_preconditions\": \"Offered at Lockdown. Opt-in, never applied by default. In the lab it was applied to the client LAN interface, with wan6 deleted. batch uses {lan_device} in place of the lab's eth3; check/expect name the lab device eth3.\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-UPD-02\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you want a read-only firmware-update availability check? (answer: yes)\", \"evidence\": [], \"benefit\": \"Auto-update\", \"breakage_or_preconditions\": \"package owut\", \"confidence\": \"medium\", \"status\": \"audit-only\"}], \"unanswered\": [], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "strictness": "maximum",
+    "wifi_wpa2": "yes",
+    "guest_network": "yes",
+    "upnp": "yes",
+    "iot_network": "yes",
+    "ssh_password_off": "yes",
+    "dnssec": "yes",
+    "encrypted_dns": "yes",
+    "ipv6_off": "yes",
+    "fw_update_check": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"yes\"}, {\"id\": \"guest_network\", \"answer\": \"yes\"}, {\"id\": \"upnp\", \"answer\": \"yes\"}, {\"id\": \"iot_network\", \"answer\": \"yes\"}, {\"id\": \"ssh_password_off\", \"answer\": \"yes\"}, {\"id\": \"dnssec\", \"answer\": \"yes\"}, {\"id\": \"encrypted_dns\", \"answer\": \"yes\"}, {\"id\": \"ipv6_off\", \"answer\": \"yes\"}, {\"id\": \"fw_update_check\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-02\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: yes)\", \"evidence\": [], \"benefit\": \"WPA2/3 mixed\", \"breakage_or_preconditions\": \"Both WPA2 and WPA3 devices can join; very old devices without WPA2 cannot. Proven on real hardware (Pulsar, 2026-10-23).\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-ZONE-01\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you want a separate guest network that cannot reach your main devices? (answer: yes)\", \"evidence\": [], \"benefit\": \"Guest network isolated\", \"breakage_or_preconditions\": \"Offered at Standard. Adds a new network with its own subnet and DHCP. It is an extra, not a Standard control. batch uses {lan_device} in place of the lab's eth3. check runs in the lab's guest namespace and names lab addresses.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-FW-06\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in form (UPnP on)\", \"owner_reason\": \"Do games or consoles need UPnP/NAT-PMP to open ports automatically? (answer: yes)\", \"evidence\": [], \"benefit\": \"UPnP/NAT-PMP off (UPnP on)\", \"breakage_or_preconditions\": \"package miniupnpd-nftables\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-ZONE-02\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown\", \"owner_reason\": \"Do you want an isolated IoT network, accepting that casting/discovery may need extra rules? (answer: yes)\", \"evidence\": [], \"benefit\": \"IoT zone isolated, no inbound from IoT to LAN, LAN->IoT allowed\", \"breakage_or_preconditions\": \"Same scenario as OW-FW-08 (ow-zone-02-iot). batch uses {lan_device} in place of the lab's eth3. check runs in the lab's iot namespace and names lab addresses; {client_lab_ip} is resolved at apply time.\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-MGMT-04\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"After a separate key login is proven, do you want password SSH disabled? (answer: yes)\", \"evidence\": [], \"benefit\": \"SSH password auth: keep (O, S, H), key-only is an option\", \"breakage_or_preconditions\": \"Offered at Lockdown. Expects rolled_back: Newton's verify runs password-only under the runner, so key-only cannot confirm; password mode rolls it back (the lockout protection works). Key-mode path comes later.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-DNS-04\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you want DNSSEC validation, with a correct clock and dnsmasq-full installed? (answer: yes)\", \"evidence\": [], \"benefit\": \"DNSSEC validation\", \"breakage_or_preconditions\": \"package dnsmasq-full; router clock correct (NTP synced)\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-DNS-05\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you want encrypted upstream DNS despite captive-portal/bootstrap risk? (answer: yes)\", \"evidence\": [], \"benefit\": \"Encrypted upstream (DoH)\", \"breakage_or_preconditions\": \"package https-dns-proxy\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-V6-03\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you deliberately want IPv6 disabled everywhere? (answer: yes)\", \"evidence\": [], \"benefit\": \"IPv6 off entirely\", \"breakage_or_preconditions\": \"Offered at Lockdown. Opt-in, never applied by default. In the lab it was applied to the client LAN interface, with wan6 deleted. batch uses {lan_device} in place of the lab's eth3; check/expect name the lab device eth3.\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-UPD-02\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you want a read-only firmware-update availability check? (answer: yes)\", \"evidence\": [], \"benefit\": \"Auto-update\", \"breakage_or_preconditions\": \"package owut\", \"confidence\": \"medium\", \"status\": \"audit-only\"}], \"unanswered\": [], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "fw_update_check": "yes",
+    "iot_network": "yes",
+    "strictness": "stricter",
+    "guest_network": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"hardened\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"stricter\"}, {\"id\": \"guest_network\", \"answer\": \"yes\"}, {\"id\": \"iot_network\", \"answer\": \"yes\"}, {\"id\": \"fw_update_check\", \"answer\": \"yes\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-ZONE-01\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you want a separate guest network that cannot reach your main devices? (answer: yes)\", \"evidence\": [], \"benefit\": \"Guest network isolated\", \"breakage_or_preconditions\": \"Offered at Standard. Adds a new network with its own subnet and DHCP. It is an extra, not a Standard control. batch uses {lan_device} in place of the lab's eth3. check runs in the lab's guest namespace and names lab addresses.\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-ZONE-02\", \"current_state\": \"not audited\", \"desired_state\": \"hardened\", \"owner_reason\": \"Do you want an isolated IoT network, accepting that casting/discovery may need extra rules? (answer: yes)\", \"evidence\": [], \"benefit\": \"IoT zone isolated, no inbound from IoT to LAN, LAN->IoT allowed\", \"breakage_or_preconditions\": \"Same scenario as OW-FW-08 (ow-zone-02-iot). batch uses {lan_device} in place of the lab's eth3. check runs in the lab's iot namespace and names lab addresses; {client_lab_ip} is resolved at apply time.\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-UPD-02\", \"current_state\": \"not audited\", \"desired_state\": \"hardened opt-in\", \"owner_reason\": \"Do you want a read-only firmware-update availability check? (answer: yes)\", \"evidence\": [], \"benefit\": \"Auto-update\", \"breakage_or_preconditions\": \"package owut\", \"confidence\": \"medium\", \"status\": \"audit-only\"}], \"unanswered\": [\"dnssec\", \"encrypted_dns\", \"ipv6_off\", \"ssh_password_off\", \"upnp\", \"wifi_wpa2\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  },
+  {
+   "answers": {
+    "ipv6_off": "unsure",
+    "upnp": "yes",
+    "strictness": "maximum",
+    "wifi_wpa2": "unsure",
+    "dnssec": "yes",
+    "encrypted_dns": "yes"
+   },
+   "report_json": "{\"report\": \"guided_setup_report\", \"tier\": \"lockdown\", \"answers\": [{\"id\": \"strictness\", \"answer\": \"maximum\"}, {\"id\": \"wifi_wpa2\", \"answer\": \"unsure\"}, {\"id\": \"upnp\", \"answer\": \"yes\"}, {\"id\": \"dnssec\", \"answer\": \"yes\"}, {\"id\": \"encrypted_dns\", \"answer\": \"yes\"}, {\"id\": \"ipv6_off\", \"answer\": \"unsure\"}], \"audit_run\": [], \"scans_run\": [], \"scans_not_run\": [\"nmap_inside\", \"nmap_outside\", \"wifi_scan\", \"kismet\"], \"findings\": [], \"recommendations\": [{\"control_id\": \"OW-WIFI-02\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown\", \"owner_reason\": \"Do any Wi-Fi devices need WPA2, or are you unsure? (answer: unsure)\", \"evidence\": [], \"benefit\": \"WPA2/3 mixed\", \"breakage_or_preconditions\": \"Both WPA2 and WPA3 devices can join; very old devices without WPA2 cannot. Proven on real hardware (Pulsar, 2026-10-23).\", \"confidence\": \"low\", \"status\": \"gap\"}, {\"control_id\": \"OW-FW-06\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in form (UPnP on)\", \"owner_reason\": \"Do games or consoles need UPnP/NAT-PMP to open ports automatically? (answer: yes)\", \"evidence\": [], \"benefit\": \"UPnP/NAT-PMP off (UPnP on)\", \"breakage_or_preconditions\": \"package miniupnpd-nftables\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-DNS-04\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you want DNSSEC validation, with a correct clock and dnsmasq-full installed? (answer: yes)\", \"evidence\": [], \"benefit\": \"DNSSEC validation\", \"breakage_or_preconditions\": \"package dnsmasq-full; router clock correct (NTP synced)\", \"confidence\": \"high\", \"status\": \"plan-ready\"}, {\"control_id\": \"OW-DNS-05\", \"current_state\": \"not audited\", \"desired_state\": \"lockdown opt-in\", \"owner_reason\": \"Do you want encrypted upstream DNS despite captive-portal/bootstrap risk? (answer: yes)\", \"evidence\": [], \"benefit\": \"Encrypted upstream (DoH)\", \"breakage_or_preconditions\": \"package https-dns-proxy\", \"confidence\": \"low\", \"status\": \"gap\"}], \"unanswered\": [\"fw_update_check\", \"guest_network\", \"iot_network\", \"ssh_password_off\"], \"approval\": \"recommendations only; each plan needs its own out-of-band owner approval\"}"
+  }
+ ]
+}

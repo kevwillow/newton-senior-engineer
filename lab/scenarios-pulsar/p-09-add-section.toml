@@ -1,0 +1,17 @@
+# PORT of 09-add-section. Changed: device -> pulsar; host IP 192.168.150.209 -> 192.168.1.209.
+name = "p-09-add-section"
+description = "Anonymous add of a static DHCP host; plan must stage cleanly and apply must confirm. (port of 09-add-section)"
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+timeout = 60
+probes = [["conf-has", "dnsmasq", "substr", "present", "02:00:00:00:00:09"]]
+batch = """add dhcp host
+set dhcp.@host[-1].name='newton-add-test'
+set dhcp.@host[-1].mac='02:00:00:00:00:09'
+set dhcp.@host[-1].ip='192.168.1.209'"""
+
+[[post]]
+device = "pulsar"
+cmd = "echo $(uci -q get dhcp.@host[-1].name) $(uci -q get dhcp.@host[-1].mac) $(uci -q get dhcp.@host[-1].ip)"
+expect_stdout = "^newton-add-test 02:00:00:00:00:09 192\\.168\\.1\\.209$"

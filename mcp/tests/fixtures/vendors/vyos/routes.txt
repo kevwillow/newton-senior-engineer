@@ -1,0 +1,7 @@
+# synthetic
+Codes: K - kernel route, C - connected, S - static, R - RIP,
+       O - OSPF, IA - OSPF inter area, E1 - OSPF external type 1,
+       E2 - OSPF external type 2, B - BGP, > - selected route
+S>* 0.0.0.0/0 [1/0] via 192.0.2.254, eth0
+C>* 192.0.2.0/24 is directly connected, eth0
+C>* 192.0.2.64/26 is directly connected, eth1

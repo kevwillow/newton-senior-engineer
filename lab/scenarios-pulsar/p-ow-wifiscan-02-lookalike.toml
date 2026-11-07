@@ -1,0 +1,106 @@
+# the same scan, but the access point beacons the
+# look-alike name "newton-test-Iab" (a capital I for an l) and the host's own
+# module classifies the pair (the router's own SSID newton-test-lab against
+# the seen one) as a homoglyph.
+#
+# The classification runs in the host's own code (mcp/newton_mcp/wifiscan.py),
+# the way newton_run_scan does it, so the scenario proves the host's rule and
+# not a copy of it.  The post prints the rule and the channel only: never an
+# SSID, never a BSSID.
+name = "p-ow-wifiscan-02-lookalike"
+description = "the same Wi-Fi scan as p-ow-wifiscan-01-injection, but the access point beacons the look-alike name newton-test-Iab (a capital I for an l) and the pair is classified by the host's own module. The batch is the p-ow-wifi-04 shape on radio1 (5 GHz, ch36, HE20, country US, txpower 3 dBm) with the router's own SSID newton-test-lab, sae-mixed and the key from the secret var, and without the hidden line: the router's own access point has to be visible in the scan, or there is nothing to compare a seen name against. The effect starts the Panda's access point (an OPEN wpa_supplicant in mode 2, key_mgmt NONE, on 5220 MHz = channel 44, txpower fixed at 1 dBm, the SSID given as hex so the name never reaches a shell word or a config quoting rule, and `timeout` as its watchdog so it cannot outlive its 120 s) and then reads the router's own wireless config: radio1 has to be enabled for the scan to see anything, so the effect fails before the apply and passes after it. The first post waits 4 s, reads wifiscan radio1 over the key lane and pipes the raw JSON into the host's own code (mcp/newton_mcp/scans.py parses the reply, mcp/newton_mcp/wifiscan.py summarises it): the reply must be JSON with a results list, the look-alike name must be in it exactly once, and the summary must carry a lookalike_ssid finding whose rule is homoglyph for the pair (the router's own newton-test-lab against the seen newton-test-Iab: the folded names are equal and the raw names differ). The post prints one line only - `lookalike: rule=homoglyph channel=44` - and never an SSID and never a BSSID: the two names stay inside the host's envelope. The second post reads wifiscan radio1 again at once and expects the router's rate limit to refuse it: rc 2 and `error scan-rate-limited` on stderr (one scan per radio per 60 s). No neighbour SSID and no neighbour BSSID is ever printed or stored: only the lab's own newton-test names appear, and only as the hex they are passed in."
+target = "pulsar"
+reset = ["pulsar"]
+reset_after = ["pulsar"]
+after_reset = ["p_radios_off", "p_panda_ap_off"]
+approval = true
+expect = "confirmed"
+timeout = 300
+setup = ["wifi_script_install", "wifi_key_install", "wifi_prep"]
+cleanup = ["wifi_cleanup"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen", "p_client_on_pulsar"]
+probes = [["iface-field", "wlan", "up", "true"], ["uci-equals", "wireless.default_radio1.disabled", "0"]]
+batch = '''
+set network.wlan=interface
+set network.wlan.proto='static'
+set network.wlan.ipaddr='192.168.152.1'
+set network.wlan.netmask='255.255.255.0'
+set dhcp.wlan=dhcp
+set dhcp.wlan.interface='wlan'
+set dhcp.wlan.start='100'
+set dhcp.wlan.limit='50'
+set dhcp.wlan.leasetime='1h'
+set firewall.wlz=zone
+set firewall.wlz.name='wlz'
+set firewall.wlz.network='wlan'
+set firewall.wlz.input='ACCEPT'
+set firewall.wlz.output='ACCEPT'
+set firewall.wlz.forward='ACCEPT'
+set firewall.wlz_wan=forwarding
+set firewall.wlz_wan.src='wlz'
+set firewall.wlz_wan.dest='wan'
+set wireless.radio1.country='US'
+set wireless.radio1.channel='36'
+set wireless.radio1.htmode='HE20'
+set wireless.radio1.txpower='3'
+set wireless.default_radio1.disabled='0'
+set wireless.default_radio1.network='wlan'
+set wireless.default_radio1.ssid='newton-test-lab'
+set wireless.default_radio1.encryption='sae-mixed'
+set wireless.default_radio1.ieee80211w='1'
+set wireless.default_radio1.key='{wifi_psk}'
+'''
+
+[[effect]]
+device = "local"
+timeout = 180
+cmd = '''
+# The Panda becomes an open access point with the look-alike name (one SSID
+# per run: the driver allows one access point at a time).  The router's own
+# radio1 has to be enabled for the scan to see it, so this fails before the
+# apply and passes after it.
+timeout 60 ssh -i "$LAB_SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile={lab_wifi_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR -o ConnectTimeout=8 -o "ProxyCommand=$LAB_SSH_PROXY" {lab_wifi_user}@10.109.0.51 'sudo /usr/local/bin/newton-wifi.py ap start --ssid-hex 6e6577746f6e2d746573742d496162 --freq 5220 --secs 120' || exit 1
+d=$(timeout 40 ssh -i {pulsar_runner_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 '/usr/libexec/newton/newton-router read uci get wireless.default_radio1.disabled' 2>/dev/null)
+[ "$d" = "0" ] || { echo "wifiscan: radio1 is not enabled on the router" >&2; exit 1; }
+'''
+expect_stdout = '^ap: started ssid_len=15 freq=5220$'
+
+[[post]]
+device = "local"
+timeout = 120
+cmd = '''
+sleep 4
+o=$(timeout 40 ssh -i {pulsar_runner_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 '/usr/libexec/newton/newton-router read wifiscan radio1')
+rc=$?
+if [ "$rc" != "0" ]; then echo "lookalike: the router refused the scan (rc=$rc)"; exit 1; fi
+printf '%s' "$o" | python3 -I -c '
+import sys
+sys.path.insert(0, "{repo_root}/mcp")
+from newton_mcp import scans, wifiscan
+try:
+    rows = scans.parse_wifi_results(sys.stdin.read())
+except Exception:
+    sys.exit("lookalike: the reply was not understood")
+want = bytes.fromhex("6e6577746f6e2d746573742d496162").decode("utf-8", "replace")
+seen = [r for r in rows if r["ssid"] == want]
+if len(seen) != 1:
+    sys.exit("lookalike: the seen name was not in the scan exactly once")
+summary = wifiscan.summarise(radio="radio1", results=rows, own_ssids=["newton-test-lab"], own_channel=36, own_bssids=set(), source="router-radio")
+found = [f for f in summary["findings"] if f.get("finding") == "lookalike_ssid" and f.get("rule") == "homoglyph"]
+if not found:
+    sys.exit("lookalike: the host code found no homoglyph finding")
+print("lookalike: rule=%s channel=%d" % (found[0]["rule"], found[0]["channel"]))
+'
+'''
+expect_stdout = '^lookalike: rule=homoglyph channel=44$'
+
+[[post]]
+device = "local"
+timeout = 120
+cmd = '''
+out=$(timeout 40 ssh -i {pulsar_runner_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 '/usr/libexec/newton/newton-router read wifiscan radio1' 2>&1); rc=$?
+printf '%s\n' "$out" | head -1
+exit $rc
+'''
+expect_rc = 2
+expect_stdout = '^error scan-rate-limited$'

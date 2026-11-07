@@ -1,0 +1,3 @@
+#!/bin/sh
+# Fixture helper stub (addendum R3 4.5): one line, does nothing.
+exit 0

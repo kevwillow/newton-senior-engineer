@@ -1,0 +1,73 @@
+#!/usr/bin/python3
+"""uci fake: replays the staged `changes` lines and the staged/committed `show` views of every
+touched (config, section) from the JSON built by Scenario.build(). The root is taken from
+sys.argv[0] as the program's convention expects (`<root>/bin/uci`)."""
+import json
+import sys
+
+ctl = sys.argv[0].rsplit("/bin/", 1)[0] + "/control"
+args = sys.argv[1:]
+open(ctl + "/calls.log", "a").write("uci " + " ".join(args) + "\n")
+staged = False
+quiet = False
+savedir = None
+if args[:1] == ["-P"]:
+    staged = True
+    savedir = args[1]
+    args = args[2:]
+if args[:1] == ["-q"]:
+    quiet = True
+    args = args[1:]
+data = json.load(open(ctl + "/uci.json"))
+if not args:
+    sys.exit(1)
+cmd = args[0]
+if cmd == "batch" and savedir is not None:
+    # check-staged's canary: keep the batch where the fake utpl can find it
+    open(savedir + "/batch", "w").write(sys.stdin.read())
+    sys.exit(0)
+if cmd == "changes":
+    if staged:
+        for l in data["changes"]:
+            print(l)
+    sys.exit(0)
+if cmd == "show":
+    target = args[1]
+    scope = "staged" if staged else "committed"
+    for fault in data.get("show_fail", []):
+        if fault["target"] == target and fault["scope"] == scope:
+            sys.stderr.write(fault["stderr"])
+            sys.exit(fault["rc"])
+    if "." not in target:
+        if not staged:
+            lines = data.get("full_firewall") if target == "firewall" else None
+            if lines is not None:
+                for l in lines:
+                    print(l)
+                sys.exit(0)
+        if not quiet:
+            sys.stderr.write("uci: Entry not found\n")
+        sys.exit(1)
+    lines = data["staged" if staged else "committed"].get(target)
+    if lines is None:
+        if not quiet:
+            sys.stderr.write("uci: Entry not found\n")
+        sys.exit(1)
+    for l in lines:
+        print(l)
+    sys.exit(0)
+if cmd == "get":
+    target = args[1]
+    lines = data["staged" if staged else "committed"].get(target.rsplit(".", 1)[0])
+    if lines is None:
+        if not quiet:
+            sys.stderr.write("uci: Entry not found\n")
+        sys.exit(1)
+    for l in lines:
+        if l.startswith(target + "="):
+            print(l.split("=", 1)[1].replace("'", ""))
+            sys.exit(0)
+    if not quiet:
+        sys.stderr.write("uci: Entry not found\n")
+    sys.exit(1)
+sys.exit(1)

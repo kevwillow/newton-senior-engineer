@@ -1,0 +1,1028 @@
+#!/usr/bin/env bash
+# Verify that an agent user can reach Newton only through the no-argument MCP sudo rule.
+#
+# NEWTON_DOCTOR_SEAMS is the single switch between the two copies of this script.
+# 1 (this repo copy) honours the NEWTON_DOCTOR_* test seams so the test suite can
+# fake sudo, ssh, the filesystem root and timings.  newton-install rewrites the
+# constant to 0 when it installs /usr/local/bin/newton-doctor; there every seam
+# variable is ignored and all tools come from system directories only.  The maintainer runs
+# the installed copy, never a report produced by the agent from this repo copy.
+#
+# The installed copy re-executes itself once with a clean environment so a
+# caller-exported LD_PRELOAD or stray NEWTON_DOCTOR_* seam cannot change its
+# exit code.  It re-execs under `/usr/bin/env -i` with the allowlist (PATH
+# HOME TERM SSH_AUTH_SOCK LANG) and always with `/bin/bash -p`, prints the
+# names (never the values) of the dropped NEWTON_DOCTOR_* (test seams, even
+# though they are ignored) and the LD_*, BASH_*, SHELLOPTS, BASHOPTS, ENV,
+# CDPATH, GLOBIGNORE and PS4 variables, and refuses to run if the
+# environment is still dirty after the re-exec.  Honest caveat: this
+# removes inherited variables only; a library that was already loaded into
+# the first process can still interfere, so run the doctor from a shell
+# you trust (a fresh terminal, not one the agent configured).
+set -uo pipefail
+
+# Remember whether the caller's environment carries NEWTON_DOCTOR_SEAMS itself:
+# the constant assignment below would otherwise mask it.
+SEAM_SEAMS_FROM_ENV=0
+[[ -v NEWTON_DOCTOR_SEAMS ]] && SEAM_SEAMS_FROM_ENV=1
+
+NEWTON_DOCTOR_SEAMS=1  # newton-install rewrites this to 0 in /usr/local/bin/newton-doctor
+
+reexec_with_clean_environment() {
+	local LC_ALL=C
+	# Names bash itself exports at startup are PWD, OLDPWD, SHLVL and _;
+	# _NEWTON_DOCTOR_CLEAN is our own loop guard, set on the re-execed
+	# process so we can tell the first call from the second.
+	local -a allowlist=(PATH HOME TERM SSH_AUTH_SOCK LANG PWD OLDPWD SHLVL _ _NEWTON_DOCTOR_CLEAN)
+	local -a names=()
+	local name='' key=''
+	local i=0 j=0 found=0
+	while IFS= read -r name; do
+		[[ -n $name ]] || continue
+		found=0
+		for key in "${allowlist[@]}"; do
+			if [[ $name == "$key" ]]; then
+				found=1
+				break
+			fi
+		done
+		(( found )) && continue
+		names+=("$name")
+	done < <(compgen -e)
+	if (( ${#names[@]} == 0 )); then
+		unset _NEWTON_DOCTOR_CLEAN
+		return 0
+	fi
+	if [[ -v _NEWTON_DOCTOR_CLEAN ]]; then
+		printf 'ERROR: the environment is not clean after the re-exec; refusing to run (unexpected variable %s)\n' "${names[0]}" >&2
+		exit 2
+	fi
+	# Insertion sort in byte order; LC_ALL=C above keeps the comparison
+	# deterministic regardless of the caller's locale.
+	for (( i=1; i<${#names[@]}; i++ )); do
+		key=${names[i]}
+		j=$(( i - 1 ))
+		while (( j >= 0 )) && [[ ${names[j]} > $key ]]; do
+			names[j + 1]=${names[j]}
+			j=$(( j - 1 ))
+		done
+		names[j + 1]=$key
+	done
+	for name in "${names[@]}"; do
+		if [[ $name == NEWTON_DOCTOR_* ]]; then
+			printf 'INFO ignored test seam %s (disabled in the installed copy)\n' "$name"
+		elif [[ $name == LD_* || $name == BASH_* || $name == SHELLOPTS || $name == BASHOPTS || $name == ENV || $name == CDPATH || $name == GLOBIGNORE || $name == PS4 ]]; then
+			printf 'INFO dropped environment variable %s (the installed copy runs with a clean environment)\n' "$name"
+		fi
+	done
+	local -a keep=()
+	for name in HOME TERM SSH_AUTH_SOCK LANG; do
+		if [[ -v $name ]]; then
+			keep+=("$name=${!name}")
+		fi
+	done
+	exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin _NEWTON_DOCTOR_CLEAN=1 ${keep[@]+"${keep[@]}"} /bin/bash -p -- "${BASH_SOURCE[0]}" "$@"
+}
+
+if (( NEWTON_DOCTOR_SEAMS )); then
+	ROOT=${NEWTON_DOCTOR_ROOT:-}
+	SUDO=${NEWTON_DOCTOR_SUDO:-sudo}
+	SSH=${NEWTON_DOCTOR_SSH:-ssh}
+	TIMEOUT=${NEWTON_DOCTOR_TIMEOUT:-10}
+	HOLD=${NEWTON_DOCTOR_HOLD:-3}
+	AGENT_UID=${NEWTON_DOCTOR_AGENT_UID:-$(id -u)}
+	# The uid that owns the root-owned files.  It is 0 on a real system;
+	# the fake root of the test suite is written by the test user, so the
+	# seam names the uid that counts as root there.
+	ROOT_UID=${NEWTON_DOCTOR_ROOT_UID:-0}
+else
+	reexec_with_clean_environment "$@"
+	ROOT=''
+	SUDO=/usr/bin/sudo
+	SSH=/usr/bin/ssh
+	TIMEOUT=10
+	HOLD=3
+	# Force PATH before running any command (even id): a fake id earlier
+	# on the caller's PATH must not be able to lie about the agent uid.
+	PATH=/usr/sbin:/usr/bin:/sbin:/bin
+	export PATH
+	AGENT_UID=$(id -u)
+	ROOT_UID=0
+fi
+
+# Names (never values) of the NEWTON_DOCTOR_* variables present in the
+# environment.  Collected after PATH is forced in the installed copy so
+# `sort` and `id` come from system directories, not the caller's PATH.
+# NEWTON_DOCTOR_SEAMS is included only when the environment actually
+# carried it before the constant above masked it.
+SEAM_ENV_VARS=()
+while IFS= read -r seam_name; do
+	[[ -n $seam_name ]] || continue
+	[[ $seam_name == NEWTON_DOCTOR_SEAMS ]] && (( !SEAM_SEAMS_FROM_ENV )) && continue
+	SEAM_ENV_VARS+=("$seam_name")
+done < <(compgen -A variable NEWTON_DOCTOR_ | LC_ALL=C sort)
+
+if [[ -n $ROOT ]]; then
+	[[ $ROOT == /* && $ROOT != / ]] || {
+		printf 'ERROR: NEWTON_DOCTOR_ROOT must be an absolute path other than /\n' >&2
+		exit 2
+	}
+	ROOT=${ROOT%/}
+fi
+
+NEWTON_DIR=$ROOT/var/lib/newton
+INVENTORY=$NEWTON_DIR/devices.toml
+CODE_ROOT=$ROOT/opt/newton
+LAUNCHER_FILE=$ROOT/usr/local/bin/newton-mcp
+APPROVE_FILE=$ROOT/usr/local/bin/newton-approve
+DOCTOR_FILE=$ROOT/usr/local/bin/newton-doctor
+# The setup and enrol launchers read the approval passphrase or show the authenticator seed.
+SETUP_FILE=$ROOT/usr/local/bin/newton-router-setup
+VANTAGE_SETUP_FILE=$ROOT/usr/local/bin/newton-vantage-setup
+ENROL_FILE=$ROOT/usr/local/bin/newton-enrol
+SUDOERS_FILE=$ROOT/etc/sudoers.d/newton-mcp
+# The Claude Code managed-settings file: the guard that stops an agent
+# hook from answering Newton's approval dialog for the owner.
+MANAGED_SETTINGS_FILE=$ROOT/etc/claude-code/managed-settings.json
+LAUNCHER=/usr/local/bin/newton-mcp
+FAILURES=0
+INCONCLUSIVE=0
+ROUTERS=()
+DEVICES=()
+
+# constants: the groups and sockets that hand the agent user root, the one
+# sudo rule the MCP server needs, and the short reasons printed with each FAIL.
+ROOT_EQUIVALENT_GROUPS=(docker lxd incus libvirt kvm disk)
+declare -A ROOT_GROUP_WHY=(
+	[docker]='mount / and run as root'
+	[lxd]='privileged container'
+	[incus]='privileged container'
+	[libvirt]='define or run VMs with host devices'
+	[kvm]='define or run VMs with host devices'
+	[disk]='raw read/write of the block devices'
+)
+ROOT_SOCKETS=(/var/run/docker.sock /run/podman/podman.sock /var/run/libvirt/libvirt-sock)
+declare -A ROOT_SOCKET_WHY=(
+	[/var/run/docker.sock]='the docker daemon runs as root'
+	[/run/podman/podman.sock]='the podman service runs as root'
+	[/var/run/libvirt/libvirt-sock]='libvirtd runs as root'
+)
+EXPECTED_MCP_RULE='(newton) NOPASSWD: /usr/local/bin/newton-mcp ""'
+
+usage() {
+	printf 'usage: %s --router user@host [--router user@host]... [--device NAME]...\n' "${0##*/}" >&2
+	exit 2
+}
+
+while (( $# )); do
+	case $1 in
+	--router)
+		(( $# >= 2 )) || usage
+		[[ $2 =~ ^[A-Za-z_][A-Za-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9_.:-]*$ ]] || {
+			printf 'ERROR: invalid router destination: %s\n' "$2" >&2
+			exit 2
+		}
+		ROUTERS+=("$2")
+		shift 2
+		;;
+	--device)
+		(( $# >= 2 )) || usage
+		[[ $2 =~ ^[a-z][a-z0-9-]{0,31}$ ]] || {
+			printf 'ERROR: invalid device name: %s\n' "$2" >&2
+			exit 2
+		}
+		DEVICES+=("$2")
+		shift 2
+		;;
+	*) usage ;;
+	esac
+done
+
+if (( ${#ROUTERS[@]} == 0 )); then
+	printf 'ERROR: at least one --router user@host is required (the router check proves the agent user cannot log in)\n' >&2
+	exit 2
+fi
+
+if (( NEWTON_DOCTOR_SEAMS )); then
+	# The constant itself is the mode switch, not a seam; never list it here.
+	seam_use=()
+	for seam_name in "${SEAM_ENV_VARS[@]}"; do
+		[[ $seam_name != "NEWTON_DOCTOR_SEAMS" ]] && seam_use+=("$seam_name")
+	done
+	if (( ${#seam_use[@]} )); then
+		printf 'INFO test seams in use: %s (repo copy; run /usr/local/bin/newton-doctor for the host report)\n' "${seam_use[*]}"
+	fi
+else
+	for seam_name in "${SEAM_ENV_VARS[@]}"; do
+		printf 'INFO ignored test seam %s (disabled in the installed copy)\n' "$seam_name"
+	done
+fi
+
+pass() {
+	printf 'PASS %s\n' "$1"
+}
+
+fail() {
+	printf 'FAIL %s: %s\n' "$1" "$2"
+	FAILURES=$((FAILURES + 1))
+}
+
+inconclusive() {
+	printf 'INCONCLUSIVE %s: %s\n' "$1" "$2"
+	INCONCLUSIVE=$((INCONCLUSIVE + 1))
+}
+
+# Print untrusted text (ssh/sudo/id output) with every byte outside 0x20-0x7e as
+# \xNN, cut to 200 bytes with a marker; pure bash, byte semantics via LC_ALL=C.
+escape_text() {
+	local input=$1 out='' suffix='' ch
+	local -i i len code
+	local LC_ALL=C
+	if (( ${#input} > 200 )); then
+		input=${input:0:200}
+		suffix='...[truncated]'
+	fi
+	len=${#input}
+	for ((i = 0; i < len; i++)); do
+		ch=${input:i:1}
+		printf -v code '%d' "'$ch"
+		if (( code >= 32 && code <= 126 )); then
+			out+=$ch
+		else
+			printf -v ch '\\x'"%02x" "$((code & 255))"
+			out+=$ch
+		fi
+	done
+	printf '%s%s\n' "$out" "$suffix"
+}
+
+report_agent_credentials() {
+	local config_dir=${HOME:-}/.config/newton file
+	local -a readable_credentials=()
+	if [[ -n ${HOME:-} && -d $config_dir ]]; then
+		for file in "$config_dir"/*.pw "$config_dir"/devices.toml; do
+			[[ -f $file && -r $file ]] && readable_credentials+=("$file")
+		done
+	fi
+	printf 'INFO agent-readable credentials:'
+	if (( ${#readable_credentials[@]} )); then
+		for file in "${readable_credentials[@]}"; do
+			printf ' %s' "$(escape_text "$file")"
+		done
+	else
+		printf ' none'
+	fi
+	printf ' (lab devices only)\n'
+}
+
+check_creds_unreadable() {
+	local readable='' file
+	if [[ -f $INVENTORY ]] && head -c 1 -- "$INVENTORY" >/dev/null 2>&1; then
+		readable=$INVENTORY
+	fi
+	if [[ -z $readable && -d $NEWTON_DIR ]]; then
+		while IFS= read -r -d '' file; do
+			if head -c 1 -- "$file" >/dev/null 2>&1; then
+				readable=$file
+				break
+			fi
+		done < <(find "$NEWTON_DIR" -type f -print0 2>/dev/null)
+	fi
+	if [[ -n $readable ]]; then
+		fail creds-unreadable "agent can read $(escape_text "$readable")"
+	else
+		pass creds-unreadable
+	fi
+}
+
+# the restricted ssh keys under the newton home must be unreadable by
+# the agent user. The keys directory may not exist yet (no key was ever
+# made): that is a PASS with a note. Only the fact that a file is readable
+# is reported; file content is never read or printed.
+check_restricted_key_unreadable() {
+	local keys_dir=$NEWTON_DIR/keys file readable=''
+	if [[ ! -d $keys_dir ]]; then
+		pass 'restricted-key-unreadable: no keys directory this account can see'
+		return
+	fi
+	while IFS= read -r -d '' file; do
+		if head -c 1 -- "$file" >/dev/null 2>&1; then
+			readable=$file
+			break
+		fi
+	done < <(find "$keys_dir" -type f -print0 2>/dev/null)
+	if [[ -n $readable ]]; then
+		fail restricted-key-unreadable "agent can read $(escape_text "$readable")"
+	else
+		pass restricted-key-unreadable
+	fi
+}
+
+# ---- agent-has-no-root-path (numeric root and group/netgroup runas are handled here) ----
+
+# True when a runas spec like "(ALL : ALL)", "(ALL, !root)", "(root)" or
+# "(newton : newton)" contains the exact word $2, unnegated ("!root" never
+# matches "root").  Split on parentheses, commas, colons and whitespace so
+# "ALL,", "root," and "ALL:ALL" yield plain words.  When $2 is "root", a
+# numeric uid zero ("#0", "0", "#00", ...) also matches via the regex
+# ^#?0+$, but uids such as "#1000", "#10", "10", "#100" do not.
+sudo_runas_has() {
+	local runas=$1 want=$2 word
+	local -a words=()
+	runas=${runas//['(),:']/ }
+	read -r -a words <<<"$runas"
+	for word in "${words[@]}"; do
+		[[ $word == "$want" ]] && return 0
+		if [[ $want == root ]] && [[ $word =~ ^#?0+$ ]]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+# Print the first word of a runas spec that names a group ("%wheel") or a
+# netgroup ("+admins"); a negated word such as "!%wheel" starts with "!" and
+# is not matched.  Splits the spec on parentheses, commas, colons and
+# whitespace, like sudo_runas_has.  Returns 0 when a word is printed, 1 when
+# the spec has no such word.
+sudo_runas_group_word() {
+	local runas=$1 word
+	local -a words=()
+	runas=${runas//['(),:']/ }
+	read -r -a words <<<"$runas"
+	for word in "${words[@]}"; do
+		[[ -z $word ]] && continue
+		case $word in
+		%*|+*) printf '%s' "$word"; return 0 ;;
+		esac
+	done
+	return 1
+}
+
+# Short escalation reason for a passwordless command that runs as root;
+# prints nothing when the command is not in the known-dangerous list.
+sudo_command_why() {
+	local base=$1
+	base=${base##*/}
+	case $base in
+	apt-get | apt | dpkg) printf 'maintainer scripts run as root' ;;
+	systemctl) printf 'unit files run as root' ;;
+	fail2ban-client) printf 'actions run as root' ;;
+	ufw) printf 'rewrites the host firewall' ;;
+	docker | podman) printf 'the container engine runs as root' ;;
+	sh | bash | env | python | python3 | perl | find | awk | vi | tee | cp | mv | install | chmod | chown | sed)
+		printf 'runs or writes arbitrary files as root'
+		;;
+	*) return 1 ;;
+	esac
+	return 0
+}
+
+# Evaluate one parsed command of a sudo rule: $1 runas spec, $2 command,
+# $3 1 when passwordless, $4 the whole rule (whitespace collapsed) for the
+# exact newton-mcp exemption.
+sudo_eval_command() {
+	local runas=$1 cmd=$2 nopasswd=$3 whole=$4 first='' why='' msg='' word=''
+	(( nopasswd )) || return 0
+	# A rule without a runas spec defaults to root.
+	[[ -z $runas ]] && runas=root
+	if sudo_runas_has "$runas" root || sudo_runas_has "$runas" ALL; then
+		msg="sudo NOPASSWD rule runs as root: $(escape_text "$cmd")"
+		if [[ $cmd == ALL ]]; then
+			msg+=' (unrestricted root)'
+		else
+			first=${cmd%% *}
+			why=$(sudo_command_why "$first")
+			[[ -n $why ]] && msg+=" ($why)"
+		fi
+		fail agent-has-no-root-path "$msg"
+	elif sudo_runas_has "$runas" newton && [[ $whole != "$EXPECTED_MCP_RULE" ]]; then
+		fail agent-has-no-root-path "sudo NOPASSWD rule runs as newton (the credential owner): $(escape_text "$cmd")"
+	elif word=$(sudo_runas_group_word "$runas"); then
+		fail agent-has-no-root-path "sudo NOPASSWD rule runs as members of $(escape_text "$word") (cannot prove root is not among them): $(escape_text "$cmd")"
+	fi
+	return 0
+}
+
+# Parse and report one sudo rule line (leading whitespace removed, runs of
+# whitespace collapsed, wrapped continuation lines already joined).  $2 is 1
+# when a Defaults !authenticate makes every rule passwordless.
+sudo_report_rule() {
+	local rule=$1 global_nopasswd=$2
+	local -a words=() cmd=()
+	local w='' runas='' collecting_runas=0 nopasswd=0 yielded=0 saw_nopasswd_tag=0
+	read -r -a words <<<"$rule"
+	for w in "${words[@]}"; do
+		if (( collecting_runas )); then
+			runas+=" $w"
+			[[ $w == *')' ]] && collecting_runas=0
+			continue
+		fi
+		if [[ $w == '('* ]]; then
+			# A runas spec starts a new command list, e.g. "(ALL : ALL)".
+			if (( ${#cmd[@]} )); then
+				sudo_eval_command "$runas" "${cmd[*]}" "$((nopasswd || global_nopasswd))" "$rule"
+				yielded=1
+				cmd=()
+			fi
+			runas=$w
+			[[ $w != *')' ]] && collecting_runas=1
+			continue
+		fi
+		if [[ $w =~ ^[A-Z_]+:$ ]]; then
+			# Tags persist along the comma list; only the password ones
+			# matter, other tags (SETENV:, NOEXEC:, ...) are ignored.
+			case $w in
+			NOPASSWD:) nopasswd=1 saw_nopasswd_tag=1 ;;
+			PASSWD:) nopasswd=0 ;;
+			esac
+			continue
+		fi
+		if [[ $w == *, ]]; then
+			w=${w%,}
+			[[ -n $w ]] && cmd+=("$w")
+			if (( ${#cmd[@]} )); then
+				sudo_eval_command "$runas" "${cmd[*]}" "$((nopasswd || global_nopasswd))" "$rule"
+				yielded=1
+				cmd=()
+			fi
+			continue
+		fi
+		if [[ $w == , ]]; then
+			if (( ${#cmd[@]} )); then
+				sudo_eval_command "$runas" "${cmd[*]}" "$((nopasswd || global_nopasswd))" "$rule"
+				yielded=1
+				cmd=()
+			fi
+			continue
+		fi
+		cmd+=("$w")
+	done
+	if (( ${#cmd[@]} )); then
+		sudo_eval_command "$runas" "${cmd[*]}" "$((nopasswd || global_nopasswd))" "$rule"
+		yielded=1
+	fi
+	# Fail closed: the line mentions NOPASSWD but no NOPASSWD: tag token was
+	# recognised (e.g. "NOPASSWD apt-get install everything"), or the line
+	# said NOPASSWD but nothing could be parsed from it.
+	if [[ $rule == *NOPASSWD* ]] && (( !saw_nopasswd_tag )); then
+		fail agent-has-no-root-path "unparsed sudo rule containing NOPASSWD: $(escape_text "$rule")"
+	elif (( !yielded )) && (( nopasswd )); then
+		fail agent-has-no-root-path "unparsed sudo rule containing NOPASSWD: $(escape_text "$rule")"
+	fi
+	return 0
+}
+
+# report every path the agent user has to root: passwordless sudo rules,
+# root-equivalent groups, writable privileged sockets.
+check_agent_no_root_path() {
+	local before=$FAILURES
+	local user='' output='' rc='' line='' trimmed=''
+	local in_rules=0 current=''
+	local global_nopasswd=0 reported_auth=0
+	local groups='' g='' req='' why='' socket=''
+	local -a gwords=()
+	local -A gseen=()
+	user=$(id -un)
+
+	# (a) passwordless sudo rules, read without a password or we fail closed.
+	output=$(LC_ALL=C "$SUDO" -n -l 2>&1)
+	rc=$?
+	if (( rc != 0 )); then
+		if ! grep -Eq 'may not run sudo|not allowed to run sudo' <<<"$output"; then
+			fail agent-has-no-root-path "cannot read sudo rules with 'sudo -n -l' ($(escape_text "${output%%$'\n'*}")); cannot prove there is no passwordless root path"
+		fi
+	else
+		while IFS= read -r line || [[ -n $line ]]; do
+			trimmed=${line#"${line%%[![:space:]]*}"}
+			[[ -z $trimmed ]] && continue
+			if [[ $line != "$trimmed" ]]; then
+				# Indented: Defaults content, or a (wrapped) rule line.
+				if (( in_rules )); then
+				if [[ $trimmed == '('* ]]; then
+					if [[ -n $current ]]; then
+						sudo_report_rule "$current" "$global_nopasswd"
+					fi
+					current=$trimmed
+				elif [[ -n $current ]]; then
+					# Indented non-runas line: a wrapped continuation of
+					# the current rule (sudo rewraps long lists, not
+					# only ones with the deeper indent).
+					current+=" $trimmed"
+				else
+					current=$trimmed
+					fi
+				elif (( !reported_auth )) && [[ $trimmed == *'!authenticate'* ]]; then
+					fail agent-has-no-root-path "sudo defaults contain !authenticate: every sudo rule is treated as passwordless"
+					reported_auth=1
+					global_nopasswd=1
+				fi
+			else
+				# Unindented: a section header ends the current rule.
+				if [[ -n $current ]]; then
+					sudo_report_rule "$current" "$global_nopasswd"
+					current=''
+				fi
+				if [[ $line == *'may run the following commands'* ]]; then
+					in_rules=1
+				else
+					in_rules=0
+				fi
+			fi
+		done <<<"$output"
+		if [[ -n $current ]]; then
+			sudo_report_rule "$current" "$global_nopasswd"
+		fi
+	fi
+
+	# (b) root-equivalent groups.
+	if (( NEWTON_DOCTOR_SEAMS )) && [[ -v NEWTON_DOCTOR_GROUPS ]]; then
+		groups=$NEWTON_DOCTOR_GROUPS
+	else
+		groups="$(id -Gn 2>/dev/null || true) $(id -Gn "$user" 2>/dev/null || true)"
+	fi
+	read -r -a gwords <<<"$groups"
+	# ROOT_EQUIVALENT_GROUPS is the single source of truth for membership
+	# (exact word match); ROOT_GROUP_WHY only supplies the reason text.
+	for g in "${gwords[@]}"; do
+		[[ -z ${gseen[$g]+x} ]] || continue
+		for req in "${ROOT_EQUIVALENT_GROUPS[@]}"; do
+			[[ $g == "$req" ]] || continue
+			gseen[$g]=1
+			why=${ROOT_GROUP_WHY[$g]:-}
+			[[ -n $why ]] || why='gives root'
+			fail agent-has-no-root-path "$user is in group $g, which gives root ($why)"
+			break
+		done
+	done
+
+	# (c) writable privileged sockets.
+	for socket in "${ROOT_SOCKETS[@]}"; do
+		if [[ -S $ROOT$socket && -w $ROOT$socket ]]; then
+			fail agent-has-no-root-path "$user can write $ROOT$socket (${ROOT_SOCKET_WHY[$socket]})"
+		fi
+	done
+
+	if (( FAILURES == before )); then
+		pass agent-has-no-root-path
+	fi
+	return 0
+}
+
+check_sudo_only() {
+	local bad=''
+	if "$SUDO" -n -u newton /usr/bin/id >/dev/null 2>&1; then
+		bad='/usr/bin/id was allowed'
+	elif "$SUDO" -n -u newton "$LAUNCHER" --x >/dev/null 2>&1; then
+		bad='newton-mcp with arguments was allowed'
+	fi
+	if [[ -n $bad ]]; then fail sudo-only-mcp "$bad"; else pass sudo-only-mcp; fi
+}
+
+initialize_payload() {
+	printf '%s\n' \
+		'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"newton-doctor","version":"1"}}}'
+}
+
+list_payload() {
+	initialize_payload
+	printf '%s\n' \
+		'{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+		'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"newton_list_devices","arguments":{}}}'
+}
+
+run_mcp() {
+	timeout "$TIMEOUT" "$SUDO" -n -u newton "$LAUNCHER"
+}
+
+check_mcp_works() {
+	local output
+	output=$(initialize_payload | run_mcp 2>/dev/null) || true
+	if grep -Eq '"jsonrpc"[[:space:]]*:[[:space:]]*"2\.0"' <<<"$output" &&
+		grep -Eq '"id"[[:space:]]*:[[:space:]]*1' <<<"$output"; then
+		pass sudo-mcp-works
+	else
+		fail sudo-mcp-works 'initialize did not return a JSON-RPC reply'
+	fi
+}
+
+check_env_ignored() {
+	local sentinel inventory output
+	sentinel="doctor_poison_${RANDOM}_$$"
+	inventory=$(mktemp /tmp/newton-doctor-inventory.XXXXXX) || {
+		fail env-ignored 'could not create sentinel inventory'
+		return
+	}
+	printf '[devices.%s]\nplatform = "openwrt"\nhost = "192.0.2.1"\nuser = "root"\n' "$sentinel" >"$inventory"
+	chmod 0644 "$inventory"
+	output=$({ list_payload; sleep "$HOLD"; } | NEWTON_INVENTORY="$inventory" run_mcp 2>/dev/null) || true
+	rm -f -- "$inventory"
+	if ! grep -Eq '"id"[[:space:]]*:[[:space:]]*2' <<<"$output"; then
+		fail env-ignored 'device-list request did not return a JSON-RPC reply'
+	elif grep -Fq "$sentinel" <<<"$output"; then
+		fail env-ignored 'caller NEWTON_INVENTORY reached the MCP server'
+	else
+		pass env-ignored
+	fi
+}
+
+# The owner's Claude Code debug logging (ADR-019): a typed approval
+# passphrase lands in ~/.claude/debug, where the agent can read it back.
+# The doctor warns about that, it never fails the install: the install is
+# sound, the owner only has to turn the debug log off and rotate the
+# passphrase.
+#
+# Only the invoking owner's own files are read (the home of $SUDO_USER,
+# found with getent), and nothing in that home is executed: the check
+# looks at file timestamps and at two settings keys.
+check_claude_debug_logging() {
+	local name='claude-debug-logging'
+	local owner_home='' entry='' stamp_path='' stamp=0
+	local candidate='' candidate_stamp=0 debug_dir='' file='' mtime=''
+	local settings='' reason=''
+	# The owner's home comes from the password database, not from $HOME:
+	# a caller can point $HOME anywhere, and this check must look at the
+	# home of the user who invoked the doctor.  The installed copy fixes
+	# PATH before it gets here, so getent is the system's own.
+	if [[ -n ${SUDO_USER:-} ]]; then
+		entry=$(getent passwd "$SUDO_USER" 2>/dev/null) || entry=''
+		owner_home=$(printf '%s\n' "$entry" | cut -d: -f6)
+	elif [[ -n ${HOME:-} && $HOME != / ]]; then
+		# Run as the owner (no sudo): HOME survives the clean re-exec and
+		# SUDO_USER does not, so the owner's own home is the one to read.
+		owner_home=$HOME
+	fi
+	if [[ -z $owner_home ]]; then
+		# Without SUDO_USER the doctor cannot tell whose Claude Code
+		# settings to read.  The note goes to stderr and does not count:
+		# a run that cannot tell whose files to read says nothing about
+		# the install, and the doctor must not turn inconclusive over it.
+		printf 'INCONCLUSIVE %s: SUDO_USER is not set, so the doctor cannot tell whose Claude Code settings to read\n' "$name" >&2
+		return 0
+	fi
+	# The install stamp: the newest of the installed files.  A debug log
+	# older than the install cannot have caught an approval typed after
+	# Newton was set up.
+	for candidate in "$APPROVE_FILE" "$CODE_ROOT"; do
+		[[ -e $candidate ]] || continue
+		candidate_stamp=$(stat -c %Y -- "$candidate" 2>/dev/null) || continue
+		[[ $candidate_stamp =~ ^[0-9]+$ ]] || continue
+		if (( candidate_stamp > stamp )); then
+			stamp=$candidate_stamp
+			stamp_path=$candidate
+		fi
+	done
+	if [[ -z $stamp_path ]]; then
+		printf 'INCONCLUSIVE %s: the Newton install stamp is missing, so the doctor cannot tell which debug logs are new\n' "$name" >&2
+		return 0
+	fi
+	# A debug log written after the install is where a typed approval
+	# passphrase can be read back by the agent.
+	debug_dir=$owner_home/.claude/debug
+	if [[ -d $debug_dir ]]; then
+		while IFS= read -r -d '' file; do
+			mtime=$(stat -c %Y -- "$file" 2>/dev/null) || continue
+			[[ $mtime =~ ^[0-9]+$ ]] || continue
+			if (( mtime > stamp )); then
+				reason='a file in ~/.claude/debug is newer than the Newton install'
+				break
+			fi
+		done < <(find "$debug_dir" -type f -print0 2>/dev/null)
+	fi
+	# The debug log can also be switched on in the settings.
+	if [[ -z $reason ]]; then
+		for settings in "$owner_home/.claude/settings.json" "$owner_home/.claude/settings.local.json"; do
+			[[ -f $settings ]] || continue
+			if grep -Eq '"debug"[[:space:]]*:[[:space:]]*true' -- "$settings" 2>/dev/null; then
+				reason='the Claude Code settings turn the debug log on'
+				break
+			fi
+		done
+	fi
+	# And the environment of this run can turn it on as well.
+	if [[ -z $reason ]]; then
+		if [[ -v DEBUG ]]; then
+			reason='DEBUG is set in the environment'
+		elif [[ -v CLAUDE_CODE_DEBUG ]]; then
+			reason='CLAUDE_CODE_DEBUG is set in the environment'
+		fi
+	fi
+	if [[ -n $reason ]]; then
+		inconclusive "$name" "$reason: Claude Code debug logging looks enabled: a typed approval passphrase lands in ~/.claude/debug where the agent can read it. Turn it off and rotate the passphrase (newton-enrol rotate <device>) if you approved while it was on."
+	else
+		pass "$name"
+	fi
+	return 0
+}
+
+# The Claude Code managed-settings guard.  Claude Code
+# reads /etc/claude-code/managed-settings.json with the highest priority
+# and Newton needs allowManagedHooksOnly there, so that an agent cannot
+# add an Elicitation hook which answers the approval dialog for the
+# owner.  Like the debug-logging check this one never fails the install:
+# a wrong guard is INCONCLUSIVE, the owner only has to fix the file.
+#
+# The file is parsed with python3 -I (isolated: no user site, no PYTHON*
+# from the environment) and is never executed.
+managed_settings_state() {
+	local file=$1 state=''
+	state=$(/usr/bin/python3 -I -c '
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "rb") as handle:
+        data = json.load(handle)
+except Exception:
+    print("invalid")
+    sys.exit(0)
+if isinstance(data, dict) and data.get("allowManagedHooksOnly") is True:
+    print("true")
+else:
+    print("absent")
+' "$file" 2>/dev/null) || state=invalid
+	case $state in
+		true|absent|invalid) printf '%s\n' "$state" ;;
+		*) printf 'invalid\n' ;;
+	esac
+}
+
+check_managed_settings_guard() {
+	local name='managed-settings-guard'
+	local file=$MANAGED_SETTINGS_FILE
+	local owner='' mode='' dir_owner='' dir_mode='' state='' reason=''
+	if [[ -L $file ]]; then
+		reason="the Claude Code managed settings file $(escape_text "$file") is a symlink"
+	elif [[ ! -e $file ]]; then
+		reason="the Claude Code managed settings file $(escape_text "$file") is missing"
+	else
+		owner=$(stat -c %u -- "$file" 2>/dev/null || true)
+		mode=$(stat -c %a -- "$file" 2>/dev/null || true)
+		dir_owner=$(stat -c %u -- "${file%/*}" 2>/dev/null || true)
+		dir_mode=$(stat -c %a -- "${file%/*}" 2>/dev/null || true)
+		if [[ -z $owner || -z $mode || -z $dir_owner || -z $dir_mode ]]; then
+			reason="the Claude Code managed settings file $(escape_text "$file") could not be read"
+		elif [[ $owner != "$ROOT_UID" ]]; then
+			reason="the Claude Code managed settings file $(escape_text "$file") is not owned by root"
+		elif [[ ! $mode =~ ^[0-7]+$ ]] || (( (8#$mode & 8#022) != 0 )); then
+			reason="the Claude Code managed settings file $(escape_text "$file") is writable by group or other"
+		elif [[ $dir_owner != "$ROOT_UID" ]] || [[ ! $dir_mode =~ ^[0-7]+$ ]] || (( (8#$dir_mode & 8#022) != 0 )); then
+			reason="the directory of the Claude Code managed settings file $(escape_text "$file") is not owned by root or is writable by group or other, so the file can be swapped"
+		elif [[ ! -r $file ]]; then
+			reason="the Claude Code managed settings file $(escape_text "$file") cannot be read, so the doctor cannot tell whether the guard is set"
+		else
+			state=$(managed_settings_state "$file")
+			if [[ $state == invalid ]]; then
+				reason="the Claude Code managed settings file $(escape_text "$file") is not valid JSON"
+			elif [[ $state != true ]]; then
+				reason="the Claude Code managed settings file $(escape_text "$file") does not set \"allowManagedHooksOnly\": true"
+			fi
+		fi
+	fi
+	if [[ -n $reason ]]; then
+		inconclusive "$name" "$reason: until it does, an agent can add a Claude Code hook that answers Newton's approval dialog for the owner. Add this line to $(escape_text "$file"): \"allowManagedHooksOnly\": true. Adding it stops your own Claude Code hooks from running; every approval still needs your passphrase or authenticator code."
+		return 0
+	fi
+	pass "$name"
+	return 0
+}
+
+# helpers: one FAIL line per distinct offending path, deduplicated across
+# every walk below (several items share parent directories).
+cw_report() {
+	local path=$1 message=$2
+	[[ -n ${cw_seen[$path]+x} ]] && return 0
+	cw_seen[$path]=1
+	fail code-not-writable "$message"
+	return 0
+}
+
+# Test one path component: writable, owned by the agent, or a symlink whose
+# target (and every ancestor of it, up to the real /) is reachable by the agent.
+cw_test() {
+	local c=$1 target='' owner='' ancestor='' c_esc=''
+	# Every path printed below comes from the filesystem and may contain
+	# hostile bytes; escape each one so nothing raw reaches the terminal.
+	c_esc=$(escape_text "$c")
+	if [[ -L $c ]]; then
+		target=$(readlink -f -- "$c" 2>/dev/null || true)
+		if [[ -n $target ]]; then
+			# Test the target and every ancestor up to (but excluding) the
+			# real /; with no ROOT seam the item walk tests / itself anyway.
+			ancestor=$target
+			while [[ $ancestor != / ]]; do
+				owner=''
+				if [[ -w $ancestor ]]; then
+					cw_report "$ancestor" "symlink $c_esc -> $(escape_text "$target"): target path $(escape_text "$ancestor") is writable"
+				else
+					owner=$(stat -c %u -- "$ancestor" 2>/dev/null || true)
+					if [[ -n $owner && $owner == "$AGENT_UID" ]]; then
+						cw_report "$ancestor" "symlink $c_esc -> $(escape_text "$target"): target path $(escape_text "$ancestor") is writable"
+					fi
+				fi
+				ancestor=$(dirname -- "$ancestor")
+			done
+		fi
+	fi
+	if [[ -w $c ]]; then
+		cw_report "$c" "agent can write $c_esc"
+	else
+		owner=$(stat -c %u -- "$c" 2>/dev/null || true)
+		if [[ -n $owner && $owner == "$AGENT_UID" ]]; then
+			cw_report "$c" "agent owns $c_esc (an owner can chmod it)"
+		fi
+	fi
+	return 0
+}
+
+# Walk every component of $1 from the boundary down to the item itself and
+# test each one.  The boundary is $ROOT (not itself tested) when set, else /
+# (which is tested).
+cw_walk() {
+	local path=$1 component='' part
+	local -a parts=()
+	if [[ -z $ROOT ]]; then
+		cw_test /
+	else
+		component=$ROOT
+		path=${path#"$ROOT"/}
+	fi
+	IFS='/' read -r -a parts <<<"${path#/}"
+	for part in "${parts[@]}"; do
+		component+="/$part"
+		cw_test "$component"
+	done
+	return 0
+}
+
+# code-not-writable covers every installed item, every parent up to the
+# boundary, symlink targets and everything under /opt/newton.
+check_code_not_writable() {
+	local before=$FAILURES item hit total
+	local -A cw_seen=()
+	local -a required=(
+		"$CODE_ROOT"
+		"$CODE_ROOT/venv"
+		"$CODE_ROOT/venv/bin/python"
+		"$LAUNCHER_FILE"
+		"$APPROVE_FILE"
+		"$DOCTOR_FILE"
+		"$SETUP_FILE"
+		"$VANTAGE_SETUP_FILE"
+		"$ENROL_FILE"
+	)
+	local -a hits=()
+	for item in "${required[@]}"; do
+		[[ -e $item ]] || fail code-not-writable "installed code or launcher is missing: $(escape_text "$item")"
+	done
+	cw_walk "$CODE_ROOT/venv/bin/python"
+	cw_walk "$LAUNCHER_FILE"
+	cw_walk "$APPROVE_FILE"
+	cw_walk "$DOCTOR_FILE"
+	cw_walk "$SETUP_FILE"
+	cw_walk "$VANTAGE_SETUP_FILE"
+	cw_walk "$ENROL_FILE"
+	# The sudoers file is special: the agent normally cannot even traverse
+	# /etc/sudoers.d, so an unreadable or absent file is not a failure here;
+	# only a writable one (or chain) is.
+	cw_walk "$SUDOERS_FILE"
+	if [[ -d $CODE_ROOT ]]; then
+		while IFS= read -r -d '' hit; do
+			hits+=("$hit")
+		done < <(find "$CODE_ROOT" \( -writable -o -uid "$AGENT_UID" \) -print0 2>/dev/null)
+		total=${#hits[@]}
+		for hit in "${hits[@]:0:20}"; do
+			if [[ -w $hit ]]; then
+				cw_report "$hit" "agent can write $(escape_text "$hit")"
+			else
+				cw_report "$hit" "agent owns $(escape_text "$hit") (an owner can chmod it)"
+			fi
+		done
+		if (( total > 20 )); then
+			fail code-not-writable "... and $((total - 20)) more"
+		fi
+	fi
+	if (( FAILURES == before )); then
+		pass code-not-writable
+	fi
+	return 0
+}
+
+# PASS only on ssh's explicit authentication denial; anything the agent could
+# have caused (timeout, refused, host key, dns) is INCONCLUSIVE, never a PASS.
+# ssh is invoked with -F /dev/null so neither ~/.ssh/config nor
+# /etc/ssh/ssh_config takes part. A config can rewrite HostName/Port, run a
+# ProxyCommand (which is how a hostile stanza would forge the very
+# "Permission denied" message this check keys on) or hide keys via
+# IdentitiesOnly; honouring any of those would let the agent doctor itself
+# into a PASS. With the config bypassed ssh still consults its default
+# identity files, the ssh-agent and ~/.ssh/known_hosts, so a router that
+# needs a non-default port, a jump host or a key file named differently
+# therefore reports INCONCLUSIVE (never PASS).
+check_router() {
+	local router=$1 name="router-unreachable[$1]" rc='' stderr_text='' why=''
+	stderr_text=$(timeout 30 "$SSH" -F /dev/null -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes -o LogLevel=ERROR "$router" true </dev/null 2>&1 >/dev/null)
+	rc=$?
+	if (( rc == 0 || (rc >= 1 && rc <= 123) )); then
+		fail "$name" 'SSH authentication succeeded from the agent user'
+		return
+	fi
+	if (( rc == 124 )); then
+		inconclusive "$name" 'timeout'
+		return
+	fi
+	# PASS requires ssh's own failure code (255) AND its explicit
+	# authentication denial; any other status that reaches the stderr
+	# classification below must not be able to produce a PASS.
+	if (( rc != 255 )); then
+		inconclusive "$name" "unexpected ssh exit status $rc"
+		return
+	fi
+	if grep -Eq 'Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED|Offending|No .* host key is known' <<<"$stderr_text"; then
+		why='host key unknown or changed (fix known_hosts, then re-run)'
+	elif grep -Fq 'timed out' <<<"$stderr_text"; then
+		why='timeout'
+	elif grep -Fq 'Connection refused' <<<"$stderr_text"; then
+		why='refused'
+	elif grep -Eq 'Could not resolve hostname|Name or service not known|Temporary failure in name resolution' <<<"$stderr_text"; then
+		why='dns'
+	elif grep -Eq 'No route to host|Network is unreachable' <<<"$stderr_text"; then
+		why='no route'
+	elif grep -Eq 'Permission denied \(' <<<"$stderr_text"; then
+		pass "$name"
+		return
+	else
+		why="unrecognised ssh result: $(escape_text "${stderr_text%%$'\n'*}")"
+	fi
+	inconclusive "$name" "$why"
+}
+
+# the router line is restricted. For each --device NAME the doctor runs
+# `sudo -u newton /usr/local/bin/newton-router-setup NAME check` in the maintainer's
+# own terminal (the sudo rule has no NOPASSWD, so sudo asks for the owner's
+# password; the tty stays attached, stdin is never redirected, and only
+# stdout is captured, so the tool's own prompts stay visible).
+# (a) the tool exiting non-zero is INCONCLUSIVE (sudo or the tool failed),
+#     never a PASS;
+# (b) any report line starting with `FAIL proof ` is the setup tool's own
+#     failing proof line: FAIL, naming the first such line escaped and cut
+#     to 200 characters;
+# (c) PASS only when the report holds both proof lines as whole lines
+#     (`PASS proof hello: restricted identity` and
+#     `PASS proof unknown-and-empty: rejected`; that is what the setup
+#     tool's proofs print -- the router's literal `error unknown-subcommand`
+#     is consumed inside the tool and never reaches the report);
+# (d) otherwise INCONCLUSIVE: the setup tool's check action does not print
+#     the proofs (they live in its restricted-key action), and absence of a
+#     proof is not evidence of a violation -- never a PASS, never a FAIL.
+check_router_line() {
+	local device=$1 name="router-line-restricted[$1]" output rc line
+	# stdout only: the report lines are on stdout, and the tool's prompts
+	# (the router root password after swap-key) and errors go to stderr,
+	# which stays on the owner's terminal
+	output=$(timeout --foreground 600 "$SUDO" -u newton /usr/local/bin/newton-router-setup "$device" check)
+	rc=$?
+	if (( rc != 0 )); then
+		inconclusive "$name" "newton-router-setup exited $rc (sudo or the setup tool failed; never a PASS)"
+		return
+	fi
+	line=$(grep -m1 '^FAIL proof ' <<<"$output" || true)
+	if [[ -n $line ]]; then
+		fail "$name" "$(escape_text "$line")"
+		return
+	fi
+	if grep -Fxq 'PASS proof hello: restricted identity' <<<"$output" &&
+		grep -Fxq 'PASS proof unknown-and-empty: rejected' <<<"$output"; then
+		pass "$name"
+		return
+	fi
+	inconclusive "$name" 'the setup report carries no restricted-line proof (the setup tool'"'"'s check action does not print the proofs; run its restricted-key proofs another way or upgrade the tool)'
+}
+
+if (( EUID == 0 )); then
+	fail non-root 'newton-doctor must run as the agent user, never root'
+fi
+report_agent_credentials
+check_creds_unreadable
+check_restricted_key_unreadable
+check_agent_no_root_path
+check_sudo_only
+check_mcp_works
+check_env_ignored
+check_claude_debug_logging
+check_managed_settings_guard
+check_code_not_writable
+for router in "${ROUTERS[@]}"; do check_router "$router"; done
+if (( ${#DEVICES[@]} )); then
+	for device in "${DEVICES[@]}"; do check_router_line "$device"; done
+else
+	printf 'INFO router-line check skipped (no --device given; pass --device NAME to prove the restricted router line)\n'
+fi
+
+if (( FAILURES )); then
+	exit 1
+fi
+if (( INCONCLUSIVE )); then
+	exit 3
+fi
+exit 0

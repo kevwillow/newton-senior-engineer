@@ -1,0 +1,8 @@
+# recorded lab:chr:7.24.5:2026-10-18
+     enabled: no     
+        mode: unicast
+     servers:        
+         vrf: main   
+  freq-drift: 0 PPM  
+      status: stopped
+

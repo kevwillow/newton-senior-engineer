@@ -1,0 +1,31 @@
+name = "ev-02-forward-remove"
+description = "Remove the pf_client port forward (the WAN tcp 2222 redirect that portfwd_on adds) so WAN tcp 2222 stops forwarding into the client LAN. Before the change the port forwards to the client's sshd so the nft probe (no rule with dport 2222) fails and a connect from lab-isp to {r1_wan_ip}:2222 is answered rather than refused. After the confirmed apply the dport 2222 rule is gone from nft, the same connect is refused at once by the wan zone input REJECT, and `uci -q get firewall.pf_client` prints nothing."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 90
+approval = true
+setup = ["portfwd_on"]
+regression = "default"
+breaks = ["portfwd"]
+probes = [["nft-rule", "inet", "fw4", "ruleset", "absent", "dport 2222"]]
+batch = """delete firewall.pf_client"""
+
+[[effect]]
+device = "lab-isp"
+timeout = 30
+cmd = '''
+t=$(mktemp); nc {r1_wan_ip} 2222 </dev/null >/dev/null 2>$t & n=$!
+i=0; while [ ! -s $t ] && [ $i -lt 4 ]; do sleep 1; i=$((i+1)); done
+r=$(cat $t); kill $n 2>/dev/null; rm -f $t
+case "$r" in *refused*) echo "port 2222 on {r1_wan_ip}: refused";; "") echo "port 2222 on {r1_wan_ip}: no answer in 4 s";; *) echo "port 2222 on {r1_wan_ip}: $r";; esac
+'''
+expect_stdout = ': refused$'
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+v=$(uci -q get firewall.pf_client) || v=
+if [ -z "$v" ]; then echo "pf_client: gone"; else echo "pf_client: still there"; fi
+'''
+expect_stdout = '^pf_client: gone$'

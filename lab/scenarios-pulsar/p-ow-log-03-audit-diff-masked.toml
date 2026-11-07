@@ -1,0 +1,34 @@
+# PORT of ow-log-03. Changed: lab-r1 -> pulsar, r1_wan_ip -> p_wan_ip, regression -> pulsar's default list. 
+name = "p-ow-log-03-audit-diff-masked"
+description = "a deliberately secret-looking system option is confirmed, but its raw value must never enter the run audit. The local posts require a masked DIFF and the lab-runner operator identity."
+target = "pulsar"
+reset = ["pulsar"]
+setup = ["portfwd_on"]
+expect = "confirmed"
+timeout = 60
+regression = "default"
+batch = '''
+set system.@system[0].newton_test_password='lab-secret-123'
+'''
+
+[[post]]
+device = "local"
+cmd = '''
+grep -E "DIFF session=[0-9a-f]{32}: .*newton_test_password='<masked>'" "$OWRT_AUDIT_LOG"
+'''
+expect_stdout = "newton_test_password='<masked>'"
+
+[[post]]
+device = "local"
+cmd = '''
+if grep -Fq 'lab-secret-123' "$OWRT_AUDIT_LOG"; then exit 1; fi
+echo 'raw audit secret absent'
+'''
+expect_stdout = '^raw audit secret absent$'
+
+[[post]]
+device = "local"
+cmd = '''
+grep -E 'OPERATOR session=[0-9a-f]{32}: lab-runner$' "$OWRT_AUDIT_LOG"
+'''
+expect_stdout = 'OPERATOR session=[0-9a-f]{32}: lab-runner$'

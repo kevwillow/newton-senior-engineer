@@ -1,0 +1,44 @@
+#!/bin/sh
+# Fixture init script for scripts/newton-router-setup tests (WAN-health
+# extras addendum): enable makes the S95 symlink, disable removes it,
+# stop, start and restart record tmp/ markers. Runs under the fake
+# router fs so the test harness can exercise install/uninstall without
+# /etc/rc.common.
+
+FS=${FAKE_ROUTER_FS:-/nonexistent}
+
+case "${1:-}" in
+  enable)
+    mkdir -p "$FS/etc/rc.d"
+    ln -sfn ../init.d/newton-wan-health "$FS/etc/rc.d/S95newton-wan-health"
+    ;;
+  disable)
+    rm -f "$FS/etc/rc.d/S95newton-wan-health"
+    ;;
+  stop)
+    : > "$FS/tmp/newton-wan-health.stop"
+    # the real init's stop_service runs the daemon's restore, which
+    # removes the run-time state files; the fixture runs the real
+    # daemon of the repository (not the copy of it the install puts on
+    # the fake router), with its state dir under the fake router fs
+    NEWTON_WAN_HEALTH_STATE="$FS/var/run/newton-wan-health" \
+        sh "$FAKE_NEWTON_REPO/scripts/newton-wan-health.sh" restore
+    ;;
+  start)
+    # live OpenWrt 25.12 finding: procd only registers
+    # `procd_add_reload_trigger newton_wanhealth` once the init has been
+    # STARTED at least once. Setup's install therefore runs `start`
+    # right after `enable`, and `start` on a fresh router is a no-op
+    # until newton_wanhealth.main.enabled=1. Recording the call to a
+    # tmp/ marker lets the install test prove start actually ran (not
+    # just appeared in the rsh_admin command text).
+    : > "$FS/tmp/newton-wan-health.start"
+    ;;
+	  restart)
+	    : > "$FS/tmp/newton-wan-health.restart"
+	    ;;
+  *)
+	    echo "usage: newton-wan-health.init enable|disable|stop|start|restart" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,102 @@
+# the two radios of Pulsar are independent.
+#
+# radio0 carries no access point of its own (its interface is disabled in
+# the baseline and the batch leaves it alone), so the posts prove only that
+# the verb works on a radio without an access point: rc 0, a JSON reply with
+# a results list and the count of the networks it lists.  No SSID and no
+# BSSID is printed.
+#
+# The rate limit is per radio: the first post reads radio1 (which consumes
+# radio1's window), the second reads radio0 (which is not refused: radio0 has
+# a window of its own) and the third reads radio0 again at once and expects
+# the refusal.
+name = "p-ow-wifiscan-03-radio0-independent"
+description = "the rate limit of the Wi-Fi scan is per radio. The batch is the p-ow-wifi-04 shape on radio1 (5 GHz, ch36, HE20, country US, txpower 3 dBm) with the router's own SSID newton-test-lab, sae-mixed and the key from the secret var, and without the hidden line; radio0 is left exactly as the baseline has it, with its interface disabled, so it carries no access point of its own. Three posts read the router's own radios over the restricted key lane with the router program 1.2.0's `read wifiscan radioN` verb: the first reads radio1 and proves the verb answers on the radio that does carry an access point (rc 0, a JSON reply with a results list, the count of the networks it lists and nothing else), the second reads radio0 at once and is NOT refused, because radio0 has a rate-limit window of its own and radio1's read did not touch it (rc 0, a JSON reply with a results list, the count only: radio0 carries no access point of its own, so this proves that the verb works on a radio without one), and the third reads radio0 again and expects the router's rate limit to refuse it (rc 2 and `error scan-rate-limited` on stderr: one scan per radio per 60 s). The count is the only thing any of them prints: no SSID and no BSSID of any neighbour is ever printed or stored, and only the lab's own newton-test names appear anywhere in this scenario."
+target = "pulsar"
+reset = ["pulsar"]
+reset_after = ["pulsar"]
+after_reset = ["p_radios_off", "p_panda_ap_off"]
+approval = true
+expect = "confirmed"
+timeout = 300
+setup = ["wifi_script_install", "wifi_key_install", "wifi_prep"]
+cleanup = ["wifi_cleanup"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen", "p_client_on_pulsar"]
+probes = [["iface-field", "wlan", "up", "true"], ["uci-equals", "wireless.default_radio1.disabled", "0"]]
+batch = '''
+set network.wlan=interface
+set network.wlan.proto='static'
+set network.wlan.ipaddr='192.168.152.1'
+set network.wlan.netmask='255.255.255.0'
+set dhcp.wlan=dhcp
+set dhcp.wlan.interface='wlan'
+set dhcp.wlan.start='100'
+set dhcp.wlan.limit='50'
+set dhcp.wlan.leasetime='1h'
+set firewall.wlz=zone
+set firewall.wlz.name='wlz'
+set firewall.wlz.network='wlan'
+set firewall.wlz.input='ACCEPT'
+set firewall.wlz.output='ACCEPT'
+set firewall.wlz.forward='ACCEPT'
+set firewall.wlz_wan=forwarding
+set firewall.wlz_wan.src='wlz'
+set firewall.wlz_wan.dest='wan'
+set wireless.radio1.country='US'
+set wireless.radio1.channel='36'
+set wireless.radio1.htmode='HE20'
+set wireless.radio1.txpower='3'
+set wireless.default_radio1.disabled='0'
+set wireless.default_radio1.network='wlan'
+set wireless.default_radio1.ssid='newton-test-lab'
+set wireless.default_radio1.encryption='sae-mixed'
+set wireless.default_radio1.ieee80211w='1'
+set wireless.default_radio1.key='{wifi_psk}'
+'''
+
+[[post]]
+device = "local"
+timeout = 120
+cmd = '''
+o=$(timeout 40 ssh -i {pulsar_runner_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 '/usr/libexec/newton/newton-router read wifiscan radio1')
+rc=$?
+if [ "$rc" != "0" ]; then echo "wifiscan: the router refused the scan of radio1 (rc=$rc)"; exit 1; fi
+printf '%s' "$o" | python3 -I -c '
+import json, sys
+data = json.load(sys.stdin)
+results = data.get("results") if isinstance(data, dict) else None
+if not isinstance(results, list):
+    sys.exit("wifiscan: the reply carried no results list")
+print("wifiscan: radio1 results=%d" % len(results))
+'
+'''
+expect_stdout = '^wifiscan: radio1 results=[0-9]+$'
+
+[[post]]
+device = "local"
+timeout = 120
+cmd = '''
+o=$(timeout 40 ssh -i {pulsar_runner_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 '/usr/libexec/newton/newton-router read wifiscan radio0')
+rc=$?
+if [ "$rc" != "0" ]; then echo "wifiscan: the router refused the scan of radio0 (rc=$rc)"; exit 1; fi
+printf '%s' "$o" | python3 -I -c '
+import json, sys
+data = json.load(sys.stdin)
+results = data.get("results") if isinstance(data, dict) else None
+if not isinstance(results, list):
+    sys.exit("wifiscan: the reply carried no results list")
+print("wifiscan: radio0 results=%d" % len(results))
+'
+'''
+expect_stdout = '^wifiscan: radio0 results=[0-9]+$'
+
+[[post]]
+device = "local"
+timeout = 120
+cmd = '''
+out=$(timeout 40 ssh -i {pulsar_runner_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 '/usr/libexec/newton/newton-router read wifiscan radio0' 2>&1); rc=$?
+printf '%s\n' "$out" | head -1
+exit $rc
+'''
+expect_rc = 2
+expect_stdout = '^error scan-rate-limited$'

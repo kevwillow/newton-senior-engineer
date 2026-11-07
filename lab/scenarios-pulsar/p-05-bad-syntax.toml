@@ -1,0 +1,14 @@
+# PORT of 05-bad-syntax. Changed: device -> pulsar; reset = [] -> ["pulsar"].
+name = "p-05-bad-syntax"
+description = "Malformed uci batch (set without value); plan must reject. (port of 05-bad-syntax)"
+target = "pulsar"
+reset = ["pulsar"]
+expect = "rejected"
+reject_match = 'uci batch rejected the changes \(exit \d+\), nothing staged: uci: Invalid argument'
+timeout = 60
+batch = "set network.lan.ipaddr"
+
+[[post]]
+device = "pulsar"
+cmd = "uci changes | wc -l"
+expect_stdout = "^0$"

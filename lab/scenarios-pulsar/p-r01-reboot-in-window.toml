@@ -1,0 +1,27 @@
+# NEW (no lab-r1 original: the lab crash matrix G4 r02 ran as a shell harness). A rollback window with a change that is never
+# confirmed (fail probe) and a reboot 8 s into the window, on real hardware. Expected by design 6.7: the guard restores the config at boot and owrt-change.sh ends with
+# an ALERT line naming the boot restore. The runner classifies that ALERT as "rebooted_restored" (post checks run like a rollback); the posts below carry the real proof (config byte-identical after the boot).
+name = "p-r01-reboot-in-window"
+description = "Reboot Pulsar 8 s into an unconfirmed rollback window; the guard must restore the old config at boot (G4 r02 on hardware)."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "rebooted_restored"
+timeout = 240
+setup = ["reboot_watch_on"]
+probes = [["conf-has", "dnsmasq", "substr", "present", "newton-never-present-marker"]]
+batch = "set system.@system[0].description='p-r01-reboot-in-window'"
+
+[[post]]
+device = "pulsar"
+cmd = "uci -q get system.@system[0].description; echo rc=$?"
+expect_stdout = "rc=1"
+
+[[post]]
+device = "pulsar"
+cmd = "/usr/libexec/newton-guard status | head -1"
+expect_stdout = "^restored "
+
+[[post]]
+device = "pulsar"
+cmd = "uci changes | wc -l"
+expect_stdout = "^0$"

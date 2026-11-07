@@ -1,0 +1,1542 @@
+# lab/lab.example.toml -- the shipped twin of lab/lab.toml.
+#
+# lab/lab.toml is the live lab file: it names the maintainer's Proxmox host,
+# the lab VMs and the key and token files, so it is not part of this
+# repository.  This file has the same structure and the same keys, with
+# synthetic values: made-up hosts, documentation-range addresses, synthetic
+# VM ids and placeholder paths under /home/user/.  Copy it, fill in your own
+# values and point the runner at the copy:
+#
+#   python3 lab/newton-lab-test.py --lab lab.toml --list
+#
+# (lab/pulsar.example.toml is the same idea for the physical Pulsar lab.)
+
+[pve]
+host = "192.0.2.11"
+node = "Apollo"
+token_file = "/home/user/.config/pve/apollo.token"
+pin_file = "/home/user/.config/pve/apollo.pin"
+
+[ssh]
+proxy = "ssh -i /home/user/.ssh/apollo -o BatchMode=yes -W %h:%p root@192.0.2.11"
+password_file = "/home/user/.config/newton/lab-root.pw"
+key = "/home/user/.ssh/apollo"
+# The runner's restricted key and the lab approval passphrase (RD7 = A): both files are created at setup time by
+# `newton-router-setup lab-r1 add-key --new-key lab-runner change` and `approval-key`; they are lab-only, and the runner never
+# creates or reads the passphrase file except to derive the approval token for approval = true scenarios.
+router_key = "/home/user/.ssh/newton-lab-runner"
+approve_passphrase_file = "/home/user/.config/newton/lab-approve.pw"
+# Known hosts file for the key lane. Created once at lab setup from lab-r1's host key
+# (ssh-keyscan through the proxy); the runner never creates or updates it. Required when
+# --lane key is used: the key lane's hello preflight pins lab-r1 against this file with
+# StrictHostKeyChecking=yes, and scripts/owrt-change.sh does the same whenever
+# OWRT_KNOWN_HOSTS is set (otherwise ssh would fall back to the user's real
+# the known-hosts file and either refuse an unknown router under BatchMode, or silently
+# write lab-r1's key there after every snapshot reset).
+known_hosts = "/home/user/.config/newton/lab-known-hosts"
+
+# SSH answers before OpenWrt finishes bringing interfaces up, and procd can restart dnsmasq afterward.
+# Require a stable boot fingerprint before setup captures any baseline state.
+[settle]
+quiet_s = 10   # Seconds the successful fingerprint must remain unchanged.
+timeout_s = 120 # Maximum seconds to wait for a device to settle.
+poll_s = 1     # Seconds between settle fingerprint polls.
+
+[devices.lab-isp]
+vmid = 9101
+host = "10.109.0.10"
+user = "root"
+snapshot = "baseline"
+settle_cmd = "{ ubus call service list; ubus call network.interface dump | jsonfilter -e '@.interface[*].interface' -e '@.interface[*].up'; } | md5sum"
+
+[devices.lab-r1]
+vmid = 9102
+host = "10.109.0.11"
+user = "root"
+snapshot = "baseline-newton-1-3-0"   # RD7 = A: pve_snapshot_name of the router program's version (see newton-router-setup lab-snapshot)
+settle_cmd = "{ ubus call service list; ubus call network.interface dump | jsonfilter -e '@.interface[*].interface' -e '@.interface[*].up'; } | md5sum"
+
+[devices.lab-client]
+vmid = 9105
+host = "10.109.0.50"
+user = "labuser"
+snapshot = "baseline"
+settle_cmd = 'systemctl is-system-running && [ "$(systemctl list-jobs --no-legend | wc -l)" = 0 ] && echo idle'
+
+# The VENDOR device: a VyOS VM, not an OpenWrt router. It says which platform it speaks and that it may
+# write (vendor_write), and lab/newton-vendor-lab.py is the runner that drives it: it rolls the VM back to
+# the snapshot, plans through the real MCP server, writes the approval record the way newton-approve does
+# and applies. It has no settle command: the OpenWrt settle fingerprint means nothing on a VyOS VM, and
+# the vendor driver waits for ssh and for the configuration hash instead (lab/vendor-shapes.toml).
+# The VM's own known_hosts file and its own write key: the lab's [ssh] router_key is the OpenWrt runner's
+# restricted key and pins no VyOS host. The driver reads them from here, opens the tunnel to the VM
+# through apollo and rewrites the known_hosts file for the tunnel's local endpoint.
+[devices.lab-vyos]
+vmid = 9104
+host = "10.109.0.31"
+user = "newton"
+platform = "vyos"
+vendor_write = true
+snapshot = "baseline-newton-write"
+settle_cmd = ""
+known_hosts = "/home/user/.config/newton/lab-vyos/known_hosts"
+admin_key = "/home/user/.config/newton/lab-vyos/newton"
+
+# The second VENDOR device: a MikroTik CHR (RouterOS 7).  Its revert is a
+# reboot into the backup, so the driver reads the configuration with the
+# CHR operations (the export of a CHR hashes as the CHR hashes it) and the
+# baseline table of the CHR lives in lab/vendor-shapes.toml.
+[devices.lab-chr]
+vmid = 9103
+host = "10.109.0.21"
+user = "newton"
+platform = "routeros"
+vendor_write = true
+snapshot = "baseline-newton-write"
+settle_cmd = ""
+known_hosts = "/home/user/.config/newton/lab-chr/known_hosts"
+admin_key = "/home/user/.config/newton/lab-chr/newton"
+
+# The third VENDOR device: a Junos.  Its revert is native (the apply
+# commits with "commit confirmed N"), so the device holds the revert
+# before the change is on it.  A Junos takes six to eight minutes to
+# boot from a cold rollback, so the device asks for the fast reset: the
+# driver reads the hash of the running configuration and the pending
+# state, and a device that is already at the baseline with nothing
+# pending skips the Proxmox rollback.  The baseline table of the Junos
+# lives in lab/vendor-shapes.toml.
+[devices.lab-junos]
+vmid = 9106
+host = "10.109.0.41"
+user = "newton"
+platform = "junos"
+vendor_write = true
+snapshot = "baseline-newton-write"
+settle_cmd = ""
+known_hosts = "/home/user/.config/newton/lab-junos/known_hosts"
+admin_key = "/home/user/.config/newton/lab-junos/newton"
+fast_reset = true
+
+# A PHYSICAL device (kind = "physical") is reset by restoring a `sysupgrade -b` archive over a direct,
+# host-key-pinned ssh session with the admin key (no Proxmox, no [ssh] proxy), then verified by a state
+# fingerprint; a mismatch stops the run. It never has vmid or snapshot. Every path is absolute and must exist,
+# and baseline_sha256 must equal the archive's sha256, or the loader refuses the file. The admin key plays the role
+# of a VM's [ssh] key (checks, steps, vars, posts, settle and the reset); the change lane and the hello
+# preflight use [ssh] router_key unless router_key is set here. Left disabled: copy the block
+# into a local override with real paths to use it.
+#
+# [devices.pulsar]
+# kind = "physical"
+# lab = true                                           # required; also pins device-id == table name, profile == lab (router and baseline archive)
+# board_name = "..."                                   # required; read it from /tmp/sysinfo/board_name on the router
+# host = "192.0.2.1"
+# user = "root"
+# proxy = false
+# known_hosts = "/home/user/.config/newton/pulsar/known-hosts"
+# admin_key = "/home/user/.config/newton/pulsar/admin-key"
+# baseline_backup = "/home/user/.config/newton/pulsar/baseline.tar.gz"
+# baseline_sha256 = "<sha256 of baseline.tar.gz>"
+# # router_key = "/home/user/.config/newton/pulsar/change-key"   # optional; default is [ssh] router_key
+# # settle_cmd = "..."                                  # optional, run with the admin key after the reboot
+
+[vars]
+client_lab_ip = { device = "lab-client", cmd = "ip -4 -o addr show eth0 | awk '{print $4}' | cut -d/ -f1" }
+
+# The user names the scenarios' own ssh commands use.  They are vars and not literals because a scenario
+# ships: the command names the var, the var resolves to the user of the device table (id -un over the
+# runner's own ssh), so the live lab keeps working and no user name is written down.
+[vars.client_lab_user]
+device = "lab-client"
+cmd = "id -un"
+
+# The lab-r1 VM id and the serial port lab/lab-serial.sh bridges it to (the
+# script's port is 7000 + the VM id).  A scenario names the vars, so no VM id
+# is written down in the tree that ships.
+[vars.lab_r1_vmid]
+device = "local"
+cmd = "echo 702"
+
+[vars.lab_r1_serial_port]
+device = "local"
+cmd = "echo 7702"
+
+# The agent host: the workstation that runs the runner.  agent_ip is its address on the router's LAN and
+# agent_nonlocal_ip one of its own addresses outside every subnet the router has (a DNS query sourced from
+# it proves the dnsmasq local-service behaviour).  The live values go in the operator's own
+# lab/lab.toml, which is not part of this repository; lab/pulsar.example.toml carries the same two vars with
+# documentation-range placeholders, so the example ships without a house address and the operator's copy carries the live ones.
+[vars.agent_ip]
+device = "local"
+cmd = "echo 192.168.1.242"
+
+[vars.agent_nonlocal_ip]
+device = "local"
+cmd = "echo 192.0.2.10"
+
+# The WAN addresses of lab-r1. A reset boots lab-r1 and the runner starts as soon as ssh answers, which can be before wan2 (the
+# second DHCP lease, about 10 to 20 s after boot) has an address, so each var waits up to 25 s for it (the runner allows a var 30 s).
+[vars.r1_wan_ip]
+device = "lab-r1"
+cmd = '''
+i=0; while [ $i -lt 25 ]; do a=$(ifstatus wan | jsonfilter -e '@["ipv4-address"][0].address'); [ -n "$a" ] && { echo "$a"; exit 0; }; sleep 1; i=$((i+1)); done; exit 1
+'''
+
+[vars.r1_wan2_ip]
+device = "lab-r1"
+cmd = '''
+i=0; while [ $i -lt 25 ]; do a=$(ifstatus wan2 | jsonfilter -e '@["ipv4-address"][0].address'); [ -n "$a" ] && { echo "$a"; exit 0; }; sleep 1; i=$((i+1)); done; exit 1
+'''
+
+# Firewall section ids resolved by name at run time, so a scenario never depends on an index (the stock wan zone is
+# @zone[1] on lab-r1, the Allow-Ping rule @rule[1], but that is only today's order). Each prints exactly one id or fails.
+[vars.fw_wan_zone]
+device = "lab-r1"
+cmd = '''
+n=$(uci show firewall | sed -n "s/^firewall\.\(@zone\[[0-9]*\]\)\.name='wan'\$/\1/p")
+[ "$(echo "$n" | grep -c .)" = 1 ] && echo "$n"
+'''
+
+[vars.fw_allow_ping]
+device = "lab-r1"
+cmd = '''
+n=$(uci show firewall | sed -n "s/^firewall\.\(@rule\[[0-9]*\]\)\.name='Allow-Ping'\$/\1/p")
+[ "$(echo "$n" | grep -c .)" = 1 ] && echo "$n"
+'''
+
+# Baseline checks and steps shared by the OpenWrt profile scenarios (lab/scenarios/openwrt/).
+# "mgmt side" = lab-r1 `lan` (br-lan, 10.109.0.0/24); "client side" = lab-r1 `lab` (eth3, 192.168.150.0/24).
+# Every cmd runs over ssh on its device, like a [[post]] cmd; device = "local" runs it on this host instead, with
+# LAB_SSH_KEY and LAB_SSH_PROXY in the environment. The runner treats every {identifier} in a cmd as
+# a [vars] placeholder, so a cmd must not contain shell ${name} or curl %{name} forms.
+
+[checks.mgmt_ssh]
+device = "lab-r1"
+cmd = "echo mgmt-ssh-ok"
+expect_stdout = '^mgmt-ssh-ok$'
+description = "The runner's key-auth ssh path to lab-r1 works. Does not cover password auth, which owrt-change.sh uses."
+
+[checks.mgmt_ssh_pw]
+device = "local"
+timeout = 60
+# Same ssh options as scripts/owrt-change.sh uses with OWRT_SSH_PASSWORD_FILE: password auth only, no key. The password
+# is read by a throwaway askpass script that cats /home/user/.config/newton/lab-root.pw; it never appears on a command line,
+# in the output, or in a file (the askpass script holds the path only, and is deleted on exit).
+cmd = '''
+D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
+printf '#!/bin/sh\nexec cat %s\n' /home/user/.config/newton/lab-root.pw > "$D/askpass"; chmod 700 "$D/askpass"
+SSH_ASKPASS="$D/askpass" SSH_ASKPASS_REQUIRE=force DISPLAY=x timeout 40 ssh -o BatchMode=no -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" root@10.109.0.11 'echo mgmt-ssh-pw-ok'
+'''
+expect_stdout = '^mgmt-ssh-pw-ok$'
+description = "Password-only ssh to lab-r1 works: the auth path owrt-change.sh uses for plan, apply and every verify round. mgmt_ssh (key) does not cover it."
+
+# The key lane's auth path: hello over the runner's restricted key (the only command that key may run), through the
+# same proxy. The nonce is fixed in the cmd; the expect regex pins the hello line's shape and door=ssh (key auth),
+# like mgmt_ssh_pw pins the password path.
+[checks.mgmt_ssh_newton]
+device = "local"
+timeout = 60
+cmd = '''
+timeout 40 ssh -i /home/user/.ssh/newton-lab-runner -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" root@10.109.0.11 '/usr/libexec/newton/newton-router hello 0011223344556677'
+'''
+expect_stdout = '^hello 0011223344556677 .*door=ssh'
+description = "The runner's restricted key reaches lab-r1's newton-router: a hello over the key lane answers with the hello line and door=ssh. mgmt_ssh_pw (password) does not cover it."
+
+[checks.mgmt_luci]
+device = "lab-client"
+cmd = "curl -sk -o /dev/null -D - --max-time 10 https://10.109.0.11/"
+expect_stdout = '^HTTP/\S+ 200'
+description = "uhttpd answers 200 on https://10.109.0.11/ over the mgmt network (lab-client eth1)."
+
+[checks.client_internet]
+device = "lab-client"
+cmd = "curl -sk -o /dev/null --max-time 8 https://1.1.1.1/"
+description = "A TLS exchange with an internet IP literal completes through lab-r1 NAT (no DNS involved)."
+
+[checks.client_dns]
+device = "lab-client"
+cmd = "host -W 5 openwrt.org 192.168.150.1"
+expect_stdout = 'has address'
+description = "dnsmasq on 192.168.150.1 resolves an internet name for the client LAN."
+
+[checks.client_dhcp]
+device = "lab-client"
+timeout = 30
+# DISCOVER/OFFER only, on eth0 through a raw AF_PACKET socket: random locally administered chaddr, broadcast flag,
+# no REQUEST, so no lease is created on lab-r1 and lab-client's own eth0 lease (systemd-networkd) is never touched.
+# dnsmasq pings the address before it offers, so a healthy OFFER takes about 3 s; the probe gives up after 12 s.
+cmd = '''
+sudo python3 - <<'EOF'
+import os, socket, struct, sys, time
+
+IFACE = 'eth0'
+SERVER = '192.168.150.1'
+WAIT = 12.0
+
+def csum(b):
+    s = sum(struct.unpack('!%dH' % (len(b) // 2), b))
+    s = (s >> 16) + (s & 0xffff)
+    s += s >> 16
+    return ~s & 0xffff
+
+def opts_of(buf):
+    out, i = {}, 0
+    while i < len(buf):
+        c = buf[i]
+        if c == 255:
+            break
+        if c == 0:
+            i += 1
+            continue
+        out[c] = buf[i + 2:i + 2 + buf[i + 1]]
+        i += 2 + buf[i + 1]
+    return out
+
+mac = bytes([0x02]) + os.urandom(5)
+xid = struct.unpack('!I', os.urandom(4))[0]
+nic = bytes.fromhex(open('/sys/class/net/' + IFACE + '/address').read().strip().replace(':', ''))
+
+body = struct.pack('!BBBBIHH4s4s4s4s16s64s128s4s', 1, 1, 6, 0, xid, 0, 0x8000,
+                   bytes(4), bytes(4), bytes(4), bytes(4), mac + bytes(10), bytes(64), bytes(128),
+                   b'\x63\x82\x53\x63')
+body += b'\x35\x01\x01' + b'\x3d\x07\x01' + mac + b'\x37\x05\x01\x03\x06\x0f\x33' + b'\xff'
+body += bytes(max(0, 300 - len(body)))
+udp = struct.pack('!HHHH', 68, 67, 8 + len(body), 0) + body
+ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0, bytes(4), b'\xff' * 4)
+ip = ip[:10] + struct.pack('!H', csum(ip)) + ip[12:]
+frame = b'\xff' * 6 + nic + b'\x08\x00' + ip + udp
+
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+s.bind((IFACE, 0))
+t0 = time.time()
+nxt = 0.0
+while time.time() - t0 < WAIT:
+    if time.time() - t0 >= nxt:
+        s.send(frame)
+        nxt += 4.0
+    s.settimeout(0.5)
+    try:
+        pkt, info = s.recvfrom(4096)
+    except socket.timeout:
+        continue
+    if info[2] == socket.PACKET_OUTGOING or len(pkt) < 14 + 20 + 8 + 240:
+        continue
+    ihl = (pkt[14] & 0x0f) * 4
+    if pkt[14 + 9] != 17:
+        continue
+    sport, dport = struct.unpack('!HH', pkt[14 + ihl:14 + ihl + 4])
+    d = pkt[14 + ihl + 8:]
+    if sport != 67 or dport != 68 or len(d) < 240 or d[0] != 2:
+        continue
+    if struct.unpack('!I', d[4:8])[0] != xid or d[28:34] != mac or d[236:240] != b'\x63\x82\x53\x63':
+        continue
+    o = opts_of(d[240:])
+    if o.get(53) != b'\x02':
+        continue
+    srv = socket.inet_ntoa(pkt[14 + 12:14 + 16])
+    if srv != SERVER:
+        continue
+    print('DHCPOFFER from %s yiaddr=%s after %.1fs (chaddr %s, no REQUEST sent)' % (
+        srv, socket.inet_ntoa(d[16:20]), time.time() - t0, ':'.join('%02x' % b for b in mac)))
+    sys.exit(0)
+print('no DHCPOFFER from %s on %s within %.0fs' % (SERVER, IFACE, WAIT))
+sys.exit(1)
+EOF
+'''
+expect_stdout = '^DHCPOFFER from 192\.168\.150\.1 '
+description = "lab-r1 answers a fresh DHCPDISCOVER on the client LAN with an OFFER (random MAC, nothing leased)."
+
+[checks.client_ext_dns]
+device = "lab-client"
+cmd = "host -W 5 openwrt.org 1.1.1.1"
+expect_stdout = 'has address'
+description = "The client can query 1.1.1.1 on port 53 directly. Breaks target for DNS-08."
+
+[checks.client_dot]
+device = "lab-client"
+cmd = "timeout 6 bash -c 'exec 3<>/dev/tcp/1.1.1.1/853' && echo dot-open"
+expect_stdout = '^dot-open$'
+description = "The client can open tcp 853 to 1.1.1.1. Breaks target for DNS-07."
+
+[checks.client_isp_ssh]
+device = "lab-client"
+timeout = 30
+cmd = "timeout 6 bash -c 'exec 3<>/dev/tcp/10.100.0.1/22' && echo open"
+expect_stdout = '^open$'
+description = "The client can open tcp 22 to lab-isp at 10.100.0.1 (lab-isp's ispa-side address, reached through lab-r1 NAT). Breaks target for EV-07."
+
+[checks.portfwd]
+device = "lab-isp"
+cmd = "(nc {r1_wan_ip} 2222 </dev/null > /tmp/b 2>/dev/null &) ; sleep 3; head -c 7 /tmp/b; rm -f /tmp/b"
+expect_stdout = '^SSH-2\.0'
+description = "WAN tcp 2222 on lab-r1 reaches the client's sshd, tested from lab-isp. Needs step portfwd_on."
+
+[checks.wan_closed_refused]
+device = "lab-isp"
+timeout = 30
+# lab-isp has no `timeout`, no fractional sleep and a bare busybox `nc` (no -z, no -w): start nc in the background, poll
+# its stderr once a second for up to 4 s, then kill it. A REJECT answers with a reset at once ("Connection refused");
+# a DROP gives no answer at all. The router's own ping answer is a separate fact (Allow-Ping), so it is not used here.
+cmd = '''
+t=$(mktemp); nc {r1_wan_ip} 9 </dev/null >/dev/null 2>$t & n=$!
+i=0; while [ ! -s $t ] && [ $i -lt 4 ]; do sleep 1; i=$((i+1)); done
+r=$(cat $t); kill $n 2>/dev/null; rm -f $t
+case "$r" in *refused*) echo "closed port 9 on {r1_wan_ip}: refused";; "") echo "closed port 9 on {r1_wan_ip}: no answer in 4 s";; *) echo "closed port 9 on {r1_wan_ip}: $r";; esac
+'''
+expect_stdout = ': refused$'
+description = "A closed tcp port on lab-r1's WAN address is refused at once (wan zone input REJECT), tested from lab-isp. Breaks target for FW-01 and FW-07 (DROP makes it time out)."
+
+[steps.portfwd_on]
+device = "lab-r1"
+cmd = '''
+set -e
+uci -q delete firewall.pf_client || true
+uci set firewall.pf_client=redirect
+uci set firewall.pf_client.name='pf_client'
+uci set firewall.pf_client.src='wan'
+uci set firewall.pf_client.src_dport='2222'
+uci set firewall.pf_client.dest='lab'
+uci set firewall.pf_client.dest_ip='{client_lab_ip}'
+uci set firewall.pf_client.dest_port='22'
+uci set firewall.pf_client.proto='tcp'
+uci set firewall.pf_client.target='DNAT'
+uci commit firewall
+for kv in src=wan src_dport=2222 dest=lab dest_ip={client_lab_ip} dest_port=22 proto=tcp target=DNAT; do
+  k=${kv%%=*}; v=${kv#*=}
+  [ "$(uci -q get firewall.pf_client.$k)" = "$v" ] || { echo "portfwd_on: firewall.pf_client.$k is not $v" >&2; exit 1; }
+done
+/etc/init.d/firewall reload
+nft list ruleset | grep -q 'dport 2222' || { echo "portfwd_on: no dport 2222 rule after firewall reload" >&2; exit 1; }
+'''
+description = "Redirect pf_client: WAN tcp 2222 -> client LAN host port 22, by direct uci, verified by read-back."
+
+[steps.fw_ruleset_save]
+device = "lab-r1"
+cmd = '''
+nft list ruleset | sed 's/packets [0-9]* bytes [0-9]*/packets N bytes N/' > /tmp/fw-ruleset.before
+[ "$(wc -l < /tmp/fw-ruleset.before)" -gt 50 ]
+'''
+description = "Save the live nft ruleset with the counters masked to /tmp/fw-ruleset.before on lab-r1, for a later 'ruleset unchanged' post (diff against the same command)."
+
+[steps.fw_wan_log_on]
+device = "lab-r1"
+timeout = 60
+# Direct uci, then a firewall RESTART (a reload does not change the rate of an existing named limit object, see ow-fw-09b),
+# so that the wan zone already logs with log_limit 10/minute before the scenario's batch runs.
+cmd = '''
+set -e
+uci set firewall.{fw_wan_zone}.log='1'
+uci set firewall.{fw_wan_zone}.log_limit='10/minute'
+uci commit firewall
+/etc/init.d/firewall restart >/dev/null 2>&1
+nft list ruleset | grep -A3 'limit wan.log_limit' | grep -q 'rate 10/minute'
+'''
+description = "lab-r1: the wan zone logs with log_limit 10/minute, set directly and live (firewall restarted); verified in the ruleset."
+
+# A named nft set made live before the batch (ow-proto-01 and ow-proto-02): ipset nw_block (ipv4, src_ip, two
+# TEST-NET-1 entries) and a rule that drops them from the wan zone, set by direct uci and loaded by a firewall restart.
+# A reload keeps an existing named set: an entry removed from the config stays in the live set, and a changed timeout or
+# match type makes the whole reload fail (nft "File exists" / "existing set lacks interval flag") while fw4 exits 0.
+[steps.fw_ipset_on]
+device = "lab-r1"
+timeout = 60
+cmd = '''
+set -e
+uci -q delete firewall.nw_block || true
+uci -q delete firewall.nw_block_drop || true
+uci set firewall.nw_block=ipset
+uci set firewall.nw_block.name='nw_block'
+uci set firewall.nw_block.family='ipv4'
+uci set firewall.nw_block.match='src_ip'
+uci add_list firewall.nw_block.entry='192.0.2.1'
+uci add_list firewall.nw_block.entry='192.0.2.2'
+uci set firewall.nw_block_drop=rule
+uci set firewall.nw_block_drop.name='nw_block_drop'
+uci set firewall.nw_block_drop.src='wan'
+uci set firewall.nw_block_drop.ipset='nw_block'
+uci set firewall.nw_block_drop.proto='all'
+uci set firewall.nw_block_drop.target='DROP'
+uci commit firewall
+/etc/init.d/firewall restart >/dev/null 2>&1
+s=$(nft list set inet fw4 nw_block | tr -d ' \t\n')
+case "$s" in *"typeipv4_addr"*"elements={192.0.2.1,192.0.2.2}"*) ;; *) echo "fw_ipset_on: live set is not {192.0.2.1, 192.0.2.2}: $s" >&2; exit 1;; esac
+nft list chain inet fw4 input_wan | grep -q '@nw_block' || { echo "fw_ipset_on: input_wan has no rule using @nw_block" >&2; exit 1; }
+'''
+description = "lab-r1: ipset nw_block {192.0.2.1, 192.0.2.2} and the rule nw_block_drop (src wan, DROP), set directly and live (firewall restarted); verified in the ruleset."
+
+# ev-10: break `fw4 check` so scripts/owrt-change.sh's apply-time health gate
+# (the router's `health-snapshot` helper, called between plan and apply) dies
+# with `the firewall config already fails fw4 check before the change: ...`,
+# which owrt-change.sh wraps as `cannot record service and firewall health
+# before the apply; nothing applied, session <SID> is still staged; helper
+# said: ...`.  A bad protocol name in a rule (here: nosuchproto on a wan
+# ACCEPT) makes `fw4 check` exit 1; a bad include path or a bad forwarding
+# zone only warn (rc 0), so they would not exercise the gate.  The firewall
+# is NOT reloaded, so the live ruleset stays valid -- only the on-disk
+# /etc/config/firewall is broken, which is what `fw4 check` reads.  The
+# runner plans, the plan seals probes and stages cleanly, the apply then
+# fails on the health gate, the runner classifies the apply as refused and
+# calls owrt-change.sh abort to clean the staged session up.  `fw4_break_off`
+# deletes every rule section whose name is ev10_broken (tolerating the
+# section being gone) and commits; after it, `fw4 check` exits 0.
+[steps.fw4_break_on]
+device = "lab-r1"
+timeout = 30
+cmd = '''
+set -e
+for s in $(uci show firewall | sed -n "s/^\(firewall\.[^.=]*\)\.name='ev10_broken'$/\1/p"); do uci delete "$s"; done
+uci add firewall rule
+uci set firewall.@rule[-1].name='ev10_broken'
+uci set firewall.@rule[-1].src='wan'
+uci set firewall.@rule[-1].proto='nosuchproto'
+uci set firewall.@rule[-1].target='ACCEPT'
+uci commit firewall
+fw4 check >/tmp/fw4.out 2>&1 || rc=$? || true
+rc=${rc:-0}
+[ "$rc" = "1" ] || { echo "fw4_break_on: fw4 check exited $rc, expected 1; output follows:" >&2; cat /tmp/fw4.out >&2; exit 1; }
+grep -q -E 'Could not resolve protocol name|Error:' /tmp/fw4.out || { echo "fw4_break_on: fw4 check output has neither 'Could not resolve protocol name' nor 'Error:'" >&2; cat /tmp/fw4.out >&2; exit 1; }
+rm -f /tmp/fw4.out
+echo "fw4_break_on: rule ev10_broken (proto=nosuchproto) committed; fw4 check exits 1"
+'''
+description = "lab-r1: add firewall rule ev10_broken (src=wan, proto=nosuchproto, target=ACCEPT) by direct uci + commit; fails loudly unless `fw4 check` exits 1 and names the bad protocol."
+
+[steps.fw4_break_off]
+device = "lab-r1"
+timeout = 30
+cmd = '''
+set -e
+deleted=0
+for s in $(uci show firewall | sed -n "s/^\(firewall\.[^.=]*\)\.name='ev10_broken'$/\1/p"); do uci delete "$s"; deleted=$((deleted+1)); done
+uci commit firewall
+fw4 check >/tmp/fw4.out 2>&1; rc=$?
+[ "$rc" = "0" ] || { echo "fw4_break_off: fw4 check exited $rc after cleanup, expected 0; output follows:" >&2; cat /tmp/fw4.out >&2; exit 1; }
+rm -f /tmp/fw4.out
+echo "fw4_break_off: deleted $deleted ev10_broken rule(s); fw4 check exits 0"
+'''
+description = "lab-r1: delete every firewall rule section whose name is ev10_broken (tolerant of none), commit, verify `fw4 check` exits 0; fails loudly otherwise."
+
+# Once a second, the live rate of the named limit wan.log_limit, logged only when it changes (uptime, then the rate or
+# "none" while the object or the table is absent). Used by ow-fw-09c to show the rate it went through during an apply
+# and a rollback.
+[steps.fw_rate_observer_start]
+device = "lab-r1"
+timeout = 30
+cmd = '''
+rm -f /tmp/fw-rate.log /tmp/fw-rate.pid
+cat > /tmp/fw-rate.sh <<'EOS'
+last=""
+while :; do
+  r=$(nft list ruleset 2>/dev/null | grep -A3 'limit wan.log_limit' | grep -o 'rate [0-9]*/[a-z]*' | head -1)
+  [ -n "$r" ] || r=none
+  [ "$r" = "$last" ] || { echo "$(cut -d' ' -f1 /proc/uptime) $r" >> /tmp/fw-rate.log; last=$r; }
+  sleep 1
+done
+EOS
+setsid sh /tmp/fw-rate.sh </dev/null >/dev/null 2>&1 &
+echo $! > /tmp/fw-rate.pid
+sleep 3
+[ -s /tmp/fw-rate.log ] || { echo "fw_rate_observer_start: the sampler wrote nothing to /tmp/fw-rate.log" >&2; exit 1; }
+'''
+description = "Start the once-per-second sampler of the live wan.log_limit rate on lab-r1 (log in /tmp/fw-rate.log, one line per change)."
+
+[steps.fw_rate_observer_stop]
+device = "lab-r1"
+cmd = '''
+kill $(cat /tmp/fw-rate.pid) 2>/dev/null
+rm -f /tmp/fw-rate.sh /tmp/fw-rate.log /tmp/fw-rate.pid
+exit 0
+'''
+description = "Stop the wan.log_limit rate sampler and remove its files."
+
+# Raw TCP segments from lab-client (python3 stdlib, run with sudo): `newton-tcpraw.py DST DPORT COUNT FLAGS [GAP_S]
+# [--min N] [--max N]` sends COUNT segments with the given TCP flags (0x02 SYN, 0x03 SYN+FIN) from distinct source
+# ports, counts the distinct ports that got any TCP answer (RST or SYN-ACK) within 2 s, prints one line and exits 1 when
+# the count is outside [--min, --max]. Used to measure the router's own input chain: SYN flood limiter (25/s, burst 50)
+# and the invalid-packet drop. The receive buffer is forced to 8 MB because the replies are read after the send loop.
+[steps.tcpraw_on]
+device = "lab-client"
+cmd = '''
+cat > /tmp/newton-tcpraw.py <<'EOF'
+import argparse, random, socket, struct, sys, time
+
+def csum(b):
+    if len(b) % 2:
+        b += b'\0'
+    s = sum(struct.unpack('!%dH' % (len(b) // 2), b))
+    s = (s >> 16) + (s & 0xffff)
+    s += s >> 16
+    return ~s & 0xffff
+
+def segment(src, dst, sport, dport, flags):
+    tcp = struct.pack('!HHIIBBHHH', sport, dport, random.getrandbits(32), 0, 5 << 4, flags, 1024, 0, 0)
+    pseudo = socket.inet_aton(src) + socket.inet_aton(dst) + struct.pack('!BBH', 0, 6, len(tcp))
+    tcp = tcp[:16] + struct.pack('!H', csum(pseudo + tcp)) + tcp[18:]
+    ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(tcp), random.getrandbits(16), 0, 64, 6, 0,
+                     socket.inet_aton(src), socket.inet_aton(dst))
+    return ip[:10] + struct.pack('!H', csum(ip)) + ip[12:] + tcp
+
+ap = argparse.ArgumentParser()
+ap.add_argument('dst')
+ap.add_argument('dport', type=int)
+ap.add_argument('count', type=int)
+ap.add_argument('flags')
+ap.add_argument('gap', type=float, nargs='?', default=0.0)
+ap.add_argument('--min', type=int, default=0)
+ap.add_argument('--max', type=int, default=None)
+a = ap.parse_args()
+dst, dport, count, flags, gap = a.dst, a.dport, a.count, int(a.flags, 0), a.gap
+lo, hi = a.min, (a.max if a.max is not None else a.count)
+probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+probe.connect((dst, 9))
+src = probe.getsockname()[0]
+probe.close()
+rx = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+rx.setsockopt(socket.SOL_SOCKET, getattr(socket, 'SO_RCVBUFFORCE', 33), 8 << 20)
+tx = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
+base = random.randint(20000, 50000)
+for i in range(count):
+    tx.sendto(segment(src, dst, base + i, dport, flags), (dst, 0))
+    if gap:
+        time.sleep(gap)
+got = set()
+rx.settimeout(0.3)
+end = time.time() + 2.0
+while time.time() < end:
+    try:
+        buf, addr = rx.recvfrom(4096)
+    except socket.timeout:
+        continue
+    if addr[0] != dst:
+        continue
+    ihl = (buf[0] & 15) * 4
+    sp, dp = struct.unpack('!HH', buf[ihl:ihl + 4])
+    if sp == dport and base <= dp < base + count:
+        got.add(dp)
+ok = lo <= len(got) <= hi
+print('sent=%d answered=%d flags=0x%02x to %s:%d (allowed %d..%d) %s' % (count, len(got), flags, dst, dport, lo, hi, 'OK' if ok else 'OUT OF RANGE'))
+sys.exit(0 if ok else 1)
+EOF
+python3 -c "import ast; ast.parse(open('/tmp/newton-tcpraw.py').read())" && [ -s /tmp/newton-tcpraw.py ]
+'''
+description = "Install the raw TCP segment sender /tmp/newton-tcpraw.py on lab-client (see the comment above). Pair with tcpraw_off."
+
+[steps.tcpraw_off]
+device = "lab-client"
+cmd = "rm -f /tmp/newton-tcpraw.py; [ ! -e /tmp/newton-tcpraw.py ]"
+description = "Remove /tmp/newton-tcpraw.py from lab-client."
+
+# HTTP listener on lab-client for ev-06-fw-user-allow: a python3 -m http.server bound to 0.0.0.0:8080 and serving a fixed
+# body 'newton-ev-ok' from /tmp/ev-www/index.html. Started detached with nohup (so it survives the ssh session), pid in
+# /tmp/ev-http8080.pid, stdout/err in /tmp/ev-http8080.out. Verified by curl-ing 127.0.0.1:8080 and grepping the body.
+# lab-client has no `sudo` requirement here (port >= 1024) and no native http server other than python3.
+[steps.http8080_on]
+device = "lab-client"
+timeout = 30
+cmd = '''
+set -e
+mkdir -p /tmp/ev-www
+printf 'newton-ev-ok\n' > /tmp/ev-www/index.html
+[ -s /tmp/ev-www/index.html ] || { echo "http8080_on: index.html is empty" >&2; exit 1; }
+if [ -f /tmp/ev-http8080.pid ]; then
+  kill "$(cat /tmp/ev-http8080.pid)" 2>/dev/null || true
+  rm -f /tmp/ev-http8080.pid
+fi
+nohup python3 -m http.server 8080 --bind 0.0.0.0 --directory /tmp/ev-www </dev/null >/tmp/ev-http8080.out 2>&1 &
+echo $! > /tmp/ev-http8080.pid
+i=0
+while [ $i -lt 15 ]; do
+  if curl -sf --max-time 2 http://127.0.0.1:8080/ 2>/dev/null | grep -q 'newton-ev-ok'; then
+    echo "http8080_on: listening on 8080, body 'newton-ev-ok' served"; exit 0
+  fi
+  sleep 1; i=$((i+1))
+done
+echo "http8080_on: listener on 8080 did not answer with 'newton-ev-ok' within 15 s" >&2; exit 1
+'''
+description = "lab-client: serve /tmp/ev-www/index.html (body 'newton-ev-ok') on tcp 8080 detached with nohup; pid in /tmp/ev-http8080.pid; verified by curl on 127.0.0.1:8080."
+
+[steps.http8080_off]
+device = "lab-client"
+cmd = '''
+if [ -f /tmp/ev-http8080.pid ]; then kill "$(cat /tmp/ev-http8080.pid)" 2>/dev/null; fi
+rm -rf /tmp/ev-www /tmp/ev-http8080.pid /tmp/ev-http8080.out
+if ss -ltn 2>/dev/null | grep -qE ':8080 '; then
+  echo "http8080_off: something still listens on 8080" >&2; exit 1
+fi
+exit 0
+'''
+description = "lab-client: kill the http.server started by http8080_on (tolerates a missing pid file), remove /tmp/ev-www and the pid/out files; verified by ss -ltn that nothing listens on 8080."
+
+# Package install by direct apk (lab-r1 reaches downloads.openwrt.org through lab-isp). Newton's rollback does not cover a
+# package: only the next reset of lab-r1 removes it. The step below fails loudly (rc 1 and a message on stderr, which the
+# runner shows as "setup <step> failed") if the install did not give the state the scenarios rely on.
+[steps.miniupnpd_install]
+device = "lab-r1"
+timeout = 180
+cmd = '''
+apk update >/dev/null 2>&1 || { echo "miniupnpd_install: apk update failed (no internet on lab-r1?)" >&2; exit 1; }
+apk add miniupnpd-nftables >/dev/null 2>&1 || { echo "miniupnpd_install: apk add miniupnpd-nftables failed" >&2; exit 1; }
+apk info -e miniupnpd-nftables >/dev/null 2>&1 || { echo "miniupnpd_install: miniupnpd-nftables is not installed after apk add" >&2; exit 1; }
+[ -f /etc/config/upnpd ] || { echo "miniupnpd_install: /etc/config/upnpd is missing" >&2; exit 1; }
+[ "$(uci -q get upnpd.config.enabled)" = 0 ] || { echo "miniupnpd_install: shipped upnpd.config.enabled is not 0" >&2; exit 1; }
+if netstat -lun | grep -q ':1900 '; then echo "miniupnpd_install: something already listens on udp 1900" >&2; exit 1; fi
+'''
+description = "Install miniupnpd-nftables (fw4 build) on lab-r1 with apk; checks the package, /etc/config/upnpd, the shipped enabled=0 and that nothing listens on udp 1900."
+
+# Zone clients on lab-client (ZONE-01 guest, ZONE-02 IoT). A zone client is a network namespace holding one 802.1Q
+# sub-interface of eth0 (apollo's vmbr102 is a plain bridge, so tagged frames pass between lab-client and lab-r1's eth3,
+# where the router side is an interface on device eth3.<vid>). The `_on` steps are idempotent: they first kill the
+# processes in the namespace, delete the namespace and the link if they exist, then create everything; the `_off` steps
+# do the same removal, unload 8021q if nothing else uses it (it was not loaded before), and fail if anything is left.
+# The 8021q module is loaded by `ip link add ... type vlan` on demand.
+[steps.guest_ns_on]
+device = "lab-client"
+cmd = '''
+set -e
+sudo ip netns pids guest 2>/dev/null | xargs -r sudo kill 2>/dev/null || true
+sudo ip netns del guest 2>/dev/null || true
+sudo ip link del eth0.30 2>/dev/null || true
+sudo ip netns add guest
+sudo ip link add link eth0 name eth0.30 type vlan id 30
+sudo ip link set eth0.30 netns guest
+sudo ip netns exec guest ip link set lo up
+sudo ip netns exec guest ip link set eth0.30 up
+sudo ip netns exec guest ip addr add 192.168.30.50/24 dev eth0.30
+sudo ip netns exec guest ip route add default via 192.168.30.1
+sudo ip netns exec guest ip -4 -br addr show eth0.30 | grep -q 192.168.30.50
+'''
+description = "lab-client: namespace guest with eth0.30 (VLAN 30 on eth0), 192.168.30.50/24, default via 192.168.30.1."
+
+[steps.guest_ns_off]
+device = "lab-client"
+cmd = '''
+sudo ip netns pids guest 2>/dev/null | xargs -r sudo kill 2>/dev/null || true
+sudo ip netns del guest 2>/dev/null || true
+sudo ip link del eth0.30 2>/dev/null || true
+sudo modprobe -r 8021q 2>/dev/null || true
+! ip netns list | grep -qw guest && ! ip link show eth0.30 >/dev/null 2>&1
+'''
+description = "lab-client: remove namespace guest and the eth0.30 link (also after a failed run); fails if either is left."
+
+[steps.iot_ns_on]
+device = "lab-client"
+cmd = '''
+set -e
+sudo ip netns pids iot 2>/dev/null | xargs -r sudo kill 2>/dev/null || true
+sudo ip netns del iot 2>/dev/null || true
+sudo ip link del eth0.40 2>/dev/null || true
+sudo ip netns add iot
+sudo ip link add link eth0 name eth0.40 type vlan id 40
+sudo ip link set eth0.40 netns iot
+sudo ip netns exec iot ip link set lo up
+sudo ip netns exec iot ip link set eth0.40 up
+sudo ip netns exec iot ip addr add 192.168.40.50/24 dev eth0.40
+sudo ip netns exec iot ip route add default via 192.168.40.1
+sudo ip netns exec iot ip -4 -br addr show eth0.40 | grep -q 192.168.40.50
+# the IoT "device": a tcp service on 8080 that greets and closes (socat, started detached inside the namespace)
+sudo ip netns exec iot setsid socat TCP-LISTEN:8080,fork,reuseaddr SYSTEM:'echo iot-host-ok' </dev/null >/dev/null 2>&1 &
+sleep 1
+sudo ip netns exec iot ss -ltn | grep -q ':8080 '
+'''
+description = "lab-client: namespace iot with eth0.40 (VLAN 40 on eth0), 192.168.40.50/24, default via 192.168.40.1, and a socat tcp 8080 greeter inside it."
+
+[steps.iot_ns_off]
+device = "lab-client"
+cmd = '''
+sudo ip netns pids iot 2>/dev/null | xargs -r sudo kill 2>/dev/null || true
+sleep 1
+sudo ip netns del iot 2>/dev/null || true
+sudo ip link del eth0.40 2>/dev/null || true
+sudo modprobe -r 8021q 2>/dev/null || true
+! ip netns list | grep -qw iot && ! ip link show eth0.40 >/dev/null 2>&1
+'''
+description = "lab-client: kill the processes in namespace iot, remove it and the eth0.40 link (also after a failed run); fails if either is left."
+
+# DHCP offer probe for a zone client: `python3 /tmp/newton-dhcp-offer.py IFACE SERVER`, run inside the namespace. Same
+# method as the client_dhcp check (random chaddr, raw AF_PACKET DISCOVER, wait for the OFFER, never send a REQUEST, so no
+# lease is taken), with the interface and the expected server as arguments.
+[steps.zone_probe_on]
+device = "lab-client"
+cmd = '''
+cat > /tmp/newton-dhcp-offer.py <<'EOF'
+import os, socket, struct, sys, time
+
+IFACE, SERVER, WAIT = sys.argv[1], sys.argv[2], 12.0
+
+def csum(b):
+    s = sum(struct.unpack('!%dH' % (len(b) // 2), b))
+    s = (s >> 16) + (s & 0xffff)
+    s += s >> 16
+    return ~s & 0xffff
+
+def opts_of(buf):
+    out, i = {}, 0
+    while i < len(buf):
+        c = buf[i]
+        if c == 255:
+            break
+        if c == 0:
+            i += 1
+            continue
+        out[c] = buf[i + 2:i + 2 + buf[i + 1]]
+        i += 2 + buf[i + 1]
+    return out
+
+mac = bytes([0x02]) + os.urandom(5)
+xid = struct.unpack('!I', os.urandom(4))[0]
+nic = bytes.fromhex(open('/sys/class/net/' + IFACE + '/address').read().strip().replace(':', ''))
+body = struct.pack('!BBBBIHH4s4s4s4s16s64s128s4s', 1, 1, 6, 0, xid, 0, 0x8000,
+                   bytes(4), bytes(4), bytes(4), bytes(4), mac + bytes(10), bytes(64), bytes(128),
+                   b'\x63\x82\x53\x63')
+body += b'\x35\x01\x01' + b'\x3d\x07\x01' + mac + b'\x37\x05\x01\x03\x06\x0f\x33' + b'\xff'
+body += bytes(max(0, 300 - len(body)))
+udp = struct.pack('!HHHH', 68, 67, 8 + len(body), 0) + body
+ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0, bytes(4), b'\xff' * 4)
+ip = ip[:10] + struct.pack('!H', csum(ip)) + ip[12:]
+frame = b'\xff' * 6 + nic + b'\x08\x00' + ip + udp
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+s.bind((IFACE, 0))
+t0 = time.time()
+nxt = 0.0
+while time.time() - t0 < WAIT:
+    if time.time() - t0 >= nxt:
+        s.send(frame)
+        nxt += 4.0
+    s.settimeout(0.5)
+    try:
+        pkt, info = s.recvfrom(4096)
+    except socket.timeout:
+        continue
+    if info[2] == socket.PACKET_OUTGOING or len(pkt) < 14 + 20 + 8 + 240:
+        continue
+    ihl = (pkt[14] & 0x0f) * 4
+    if pkt[14 + 9] != 17:
+        continue
+    sport, dport = struct.unpack('!HH', pkt[14 + ihl:14 + ihl + 4])
+    d = pkt[14 + ihl + 8:]
+    if sport != 67 or dport != 68 or len(d) < 240 or d[0] != 2:
+        continue
+    if struct.unpack('!I', d[4:8])[0] != xid or d[28:34] != mac or d[236:240] != b'\x63\x82\x53\x63':
+        continue
+    o = opts_of(d[240:])
+    if o.get(53) != b'\x02':
+        continue
+    srv = socket.inet_ntoa(pkt[14 + 12:14 + 16])
+    if srv != SERVER:
+        continue
+    print('DHCPOFFER from %s yiaddr=%s after %.1fs (no REQUEST sent)' % (srv, socket.inet_ntoa(d[16:20]), time.time() - t0))
+    sys.exit(0)
+print('no DHCPOFFER from %s on %s within %.0fs' % (SERVER, IFACE, WAIT))
+sys.exit(1)
+EOF
+python3 -c "import ast; ast.parse(open('/tmp/newton-dhcp-offer.py').read())" && [ -s /tmp/newton-dhcp-offer.py ]
+'''
+description = "Install the DHCP offer probe /tmp/newton-dhcp-offer.py on lab-client (see the comment above). Pair with zone_probe_off."
+
+[steps.zone_probe_off]
+device = "lab-client"
+cmd = "rm -f /tmp/newton-dhcp-offer.py; [ ! -e /tmp/newton-dhcp-offer.py ]"
+description = "Remove /tmp/newton-dhcp-offer.py from lab-client."
+
+[steps.vantage_checks_on]
+device = "local"
+timeout = 180
+cmd = '''
+set -e
+V="$HOME/.config/newton/lab-vantage"
+mkdir -p "$V"
+chmod 700 "$V"
+case "$LAB_SSH_KEY" in
+  "~/"*) LAB_SSH_KEY="$HOME/$(printf %s "$LAB_SSH_KEY" | cut -c3-)" ;;
+esac
+ssh -i "$LAB_SSH_KEY" -o BatchMode=yes -o ProxyCommand="$LAB_SSH_PROXY" -o UserKnownHostsFile=$V/known_hosts -o StrictHostKeyChecking=accept-new {client_lab_user}@10.109.0.50 true
+[ -f "$V/lab-vantage-key" ] || ssh-keygen -q -t ed25519 -N '' -f "$V/lab-vantage-key"
+chmod 600 "$V/lab-vantage-key"
+umask 077
+cat > "$V/inventory.toml" <<EOF
+[devices.lab-r1]
+host = "10.109.0.11"
+
+[vantages.lab-client]
+host = "10.109.0.50"
+user = "labuser"
+key_file = "$V/lab-vantage-key"
+known_hosts = "$V/known_hosts"
+proxy_command = "$LAB_SSH_PROXY"
+role = "inside"
+devices = ["lab-r1"]
+admin_key = "$LAB_SSH_KEY"
+check_targets = ["10.109.0.0/24", "192.168.30.0/24", "192.168.150.0/24"]
+
+[[vantages.lab-client.zones]]
+name = "guest"
+src = "192.168.30.50"
+canary = "192.168.30.1:53"
+iface = "eth0.30"
+netns = "guest"
+EOF
+chmod 600 "$V/inventory.toml"
+NEWTON_INVENTORY="$V/inventory.toml" NEWTON_VANTAGE_CHECK_SOURCE="$NEWTON_REPO/scripts/newton-vantage-check" "$NEWTON_REPO/scripts/newton-vantage-setup" lab-client install-client-checks
+'''
+description = "Register lab-client as the inside vantage for the guest zone: pin its host key, create its scan key, write the private inventory, and install the forced client-check command."
+
+[steps.vantage_checks_off]
+device = "lab-client"
+cmd = '''
+set -e
+AUTH="$HOME/.ssh/authorized_keys"
+if [ -f "$AUTH" ]; then
+  TMP=$(mktemp)
+  grep -v "newton-vantage-check" "$AUTH" > "$TMP" || true
+  cat "$TMP" > "$AUTH"
+  rm -f "$TMP"
+fi
+rm -f "$HOME/.local/libexec/newton-vantage-check" "$HOME/.local/libexec/newton-vantage-check.allow"
+! grep -q "newton-vantage-check" "$AUTH" 2>/dev/null
+[ ! -e "$HOME/.local/libexec/newton-vantage-check" ]
+[ ! -e "$HOME/.local/libexec/newton-vantage-check.allow" ]
+'''
+description = "Remove lab-client's client-check authorized_keys line and forced-command files, then verify none is left."
+
+# A scenario that expects rolled_back never sees its change live in a probe: the apply, the failed verify rounds and the
+# rollback all happen inside owrt-change.sh. These two steps put a once-per-second sampler on lab-r1 (read-only: it
+# writes only /tmp/ssh-observer.log) so a [[post]] can show that dropbear really ran the new config during the window.
+# Each log line is "epoch|dropbear command line|tcp :22 listeners". lab-r1 is reset before the next scenario anyway.
+[steps.ssh_observer_start]
+device = "lab-r1"
+timeout = 30
+cmd = '''
+rm -f /tmp/ssh-observer.log /tmp/ssh-observer.pid
+cat > /tmp/ssh-observer.sh <<'EOS'
+while :; do
+  cmd=$(tr '\0' ' ' < /proc/$(cat /var/run/dropbear.main.pid 2>/dev/null)/cmdline 2>/dev/null)
+  lst=$(netstat -tln | awk '$4 ~ /:22$/ {printf "%s ", $4}')
+  echo "$(date +%s)|$cmd|$lst" >> /tmp/ssh-observer.log
+  sleep 1
+done
+EOS
+setsid sh /tmp/ssh-observer.sh </dev/null >/dev/null 2>&1 &
+echo $! > /tmp/ssh-observer.pid
+sleep 3
+[ -s /tmp/ssh-observer.log ]
+'''
+description = "Start the once-per-second dropbear/:22 sampler on lab-r1 (log in /tmp/ssh-observer.log)."
+
+[steps.ssh_observer_stop]
+device = "lab-r1"
+cmd = '''
+kill $(cat /tmp/ssh-observer.pid) 2>/dev/null
+rm -f /tmp/ssh-observer.sh /tmp/ssh-observer.log /tmp/ssh-observer.pid
+exit 0
+'''
+description = "Stop the sampler and remove its files."
+
+# DNS group (OW-DNS-01 to 08). Steps that put lab-r1's dnsmasq into a known state by direct uci (not through Newton), so that a
+# scenario's batch starts from that state and the plan diff holds only the batch. lab-r1 is reset before every scenario.
+# lab-r1's stock upstream is lab-isp's dnsmasq (10.100.0.1, 10.101.0.1) and, behind it, Quasar's resolver. Both strip RFC1918
+# answers (rebind protection) and the chain validates DNSSEC, so a probe through the stock path cannot tell lab-r1's own policy
+# from its upstream's: dns_upstream_direct removes the two hops.
+
+[steps.dns_upstream_direct]
+device = "lab-r1"
+timeout = 60
+cmd = '''
+set -e
+uci set dhcp.@dnsmasq[0].noresolv='1'
+uci -q delete dhcp.@dnsmasq[0].server || true
+uci add_list dhcp.@dnsmasq[0].server='1.1.1.1'
+uci commit dhcp
+/etc/init.d/dnsmasq reload
+i=0
+while [ $i -lt 30 ]; do
+  if grep -qx 'no-resolv' /var/etc/dnsmasq.conf.* && grep -qx 'server=1.1.1.1' /var/etc/dnsmasq.conf.* && nslookup openwrt.org 127.0.0.1 2>&1 | grep -q '^Name:'; then
+    echo "dns_upstream_direct: dnsmasq forwards to 1.1.1.1 only (no-resolv) and resolves"; exit 0
+  fi
+  sleep 1; i=$((i+1))
+done
+echo "dns_upstream_direct: dnsmasq does not resolve through 1.1.1.1 only after 30 s" >&2; exit 1
+'''
+description = "lab-r1: dnsmasq uses 1.1.1.1 as its only upstream (noresolv=1, server=1.1.1.1), set directly and live; checked in the generated conf and by a lookup."
+
+[steps.dns_logqueries_on]
+device = "lab-r1"
+timeout = 60
+cmd = '''
+set -e
+uci set dhcp.@dnsmasq[0].logqueries='1'
+uci commit dhcp
+/etc/init.d/dnsmasq reload
+i=0
+while [ $i -lt 30 ]; do
+  if grep -qx 'log-queries=extra' /var/etc/dnsmasq.conf.* && nslookup openwrt.org 127.0.0.1 2>&1 | grep -q '^Name:' && logread | grep -q 'query\[A\] openwrt.org from'; then
+    echo "dns_logqueries_on: dnsmasq logs every query and every forward"; exit 0
+  fi
+  sleep 1; i=$((i+1))
+done
+echo "dns_logqueries_on: dnsmasq does not log queries after 30 s" >&2; exit 1
+'''
+description = "lab-r1: dnsmasq logs every query and every forward to logread (logqueries=1), set directly and live; checked in the generated conf and in the log."
+
+# Package swap by direct apk (lab-r1 reaches downloads.openwrt.org through lab-isp). Newton's rollback does not cover a package:
+# only the next reset of lab-r1 removes it. apk replaces dnsmasq with dnsmasq-full in one transaction (about 5 s), keeps
+# /etc/config/dhcp (a new default is left beside it as dhcp.apk-new, which uci ignores) and the package's post-install restarts
+# dnsmasq. The step fails loudly (rc 1 and a message on stderr, shown by the runner as "setup <step> failed") unless the full
+# build is installed and running with DNS and DHCP bound, the stock package is gone, and ntpd has reported valid time (the init
+# script adds --dnssec-no-timecheck until /var/state/dnsmasqsec exists). A DHCP answer to a real client is checked by the
+# scenario's regression (client_dhcp) before anything is applied.
+[steps.dnsmasq_full_install]
+device = "lab-r1"
+timeout = 300
+cmd = '''
+fail() { echo "dnsmasq_full_install: $1" >&2; exit 1; }
+apk update >/dev/null 2>&1 || fail "apk update failed (no internet on lab-r1?)"
+apk add dnsmasq-full >/dev/null 2>&1 || fail "apk add dnsmasq-full failed"
+apk info -e dnsmasq-full >/dev/null 2>&1 || fail "dnsmasq-full is not installed after apk add"
+[ "$(apk list -I | grep -c '^dnsmasq-[0-9]')" = 0 ] || fail "the stock dnsmasq package is still installed next to dnsmasq-full"
+dnsmasq --version | grep -q ' DNSSEC ' || fail "dnsmasq --version does not report DNSSEC"
+i=0
+while [ $i -lt 40 ]; do
+  if logread | grep 'dnsmasq\[' | grep 'compile time options' | tail -1 | grep -q ' DNSSEC ' && netstat -lun | grep -q ':67 ' && netstat -lun | grep -q '127.0.0.1:53 ' && nslookup openwrt.org 127.0.0.1 2>&1 | grep -q '^Name:'; then break; fi
+  sleep 1; i=$((i+1))
+done
+[ $i -lt 40 ] || fail "dnsmasq-full is not running with DNS on 127.0.0.1:53 and DHCP on udp 67 after 40 s"
+j=0
+while [ ! -f /var/state/dnsmasqsec ] && [ $j -lt 120 ]; do sleep 1; j=$((j+1)); done
+[ -f /var/state/dnsmasqsec ] || fail "ntpd has not reported valid time after 120 s (dnssec would run with --dnssec-no-timecheck)"
+echo "dnsmasq_full_install: $(apk list -I dnsmasq-full | cut -d' ' -f1) running, DNSSEC compiled in, DNS answers, udp 67 bound, ntpd time valid ($(date -u +%H:%M:%S) UTC)"
+'''
+description = "Install dnsmasq-full on lab-r1 with apk (replaces dnsmasq); checks the packages, the version string, the running instance's startup log, DNS and DHCP listeners, a lookup, and ntpd's valid-time flag."
+
+# What the protocol's verify rounds see while a change is applied but not yet confirmed (ow-dns-04a, 04c). owrt-change.sh runs
+# `ping -c1 -W3 1.1.1.1 && nslookup openwrt.org 127.0.0.1 && <check>` on the router in every round, so a rollback can come from any of
+# the three clauses, a network fault included. This sampler (read-only, writes only /tmp/verify-observer.*) records the same three
+# facts about once every two seconds on lab-r1, with the value of dhcp.@dnsmasq[0].dnssec so that the samples taken while the change
+# is applied can be told apart: "epoch|cfg=<dnssec option or ->|ping=ok|fail|dns=ok|fail|hang|dnssec_in_conf=yes|no". lab-r1 has no
+# `timeout`, so a hung nslookup is killed after 3 s by the loop itself. The log is gone with the next reset of lab-r1.
+[steps.verify_observer_start]
+device = "lab-r1"
+timeout = 30
+cmd = '''
+rm -f /tmp/verify-observer.log /tmp/verify-observer.pid /tmp/verify-observer.dns
+cat > /tmp/verify-observer.sh <<'EOS'
+while :; do
+  ping -c 1 -W 1 1.1.1.1 >/dev/null 2>&1 && p=ok || p=fail
+  nslookup openwrt.org 127.0.0.1 >/tmp/verify-observer.dns 2>&1 &
+  q=$!; i=0
+  while kill -0 $q 2>/dev/null && [ $i -lt 3 ]; do sleep 1; i=$((i+1)); done
+  if kill -0 $q 2>/dev/null; then kill $q 2>/dev/null; d=hang
+  elif grep -q '^Name:' /tmp/verify-observer.dns; then d=ok; else d=fail; fi
+  if cat /var/etc/dnsmasq.conf.* 2>/dev/null | grep -q '^dnssec$'; then c=yes; else c=no; fi
+  v=$(uci -q get dhcp.@dnsmasq[0].dnssec); [ -n "$v" ] || v=-
+  echo "$(date +%s)|cfg=$v|ping=$p|dns=$d|dnssec_in_conf=$c" >> /tmp/verify-observer.log
+  sleep 1
+done
+EOS
+setsid sh /tmp/verify-observer.sh </dev/null >/dev/null 2>&1 &
+echo $! > /tmp/verify-observer.pid
+sleep 5
+[ -s /tmp/verify-observer.log ] || { echo "verify_observer_start: the sampler wrote nothing to /tmp/verify-observer.log" >&2; exit 1; }
+'''
+description = "Start the sampler of the verify clauses on lab-r1 (ping 1.1.1.1, nslookup via 127.0.0.1, dnssec line in the dnsmasq conf, with the dnssec option's value); log in /tmp/verify-observer.log."
+
+[steps.verify_observer_stop]
+device = "lab-r1"
+cmd = '''
+kill $(cat /tmp/verify-observer.pid) 2>/dev/null
+rm -f /tmp/verify-observer.sh /tmp/verify-observer.log /tmp/verify-observer.pid /tmp/verify-observer.dns
+exit 0
+'''
+description = "Stop the verify-clause sampler and remove its files."
+
+# A DNS client whose source address is outside every subnet attached to lab-r1 (DNS-02, dnsmasq --local-service): lab-client holds
+# 198.51.100.7/32 (documentation range TEST-NET-2) on lo, and lab-r1 has a runtime route for it via lab-client's client LAN
+# address, so that a query from that source reaches 192.168.150.1:53 and an answer, if there is one, finds its way back. Neither
+# is persistent: the _off steps remove them, a reset of lab-r1 drops the route.
+[steps.dns_nonlocal_src_on]
+device = "lab-client"
+cmd = '''
+sudo ip addr del 198.51.100.7/32 dev lo 2>/dev/null
+sudo ip addr add 198.51.100.7/32 dev lo
+ip -4 -o addr show dev lo | grep -q ' 198.51.100.7/32 ' || { echo "dns_nonlocal_src_on: 198.51.100.7/32 is not on lo" >&2; exit 1; }
+'''
+description = "lab-client: 198.51.100.7/32 on lo (a source address outside every subnet attached to lab-r1). Pair with dns_nonlocal_src_off."
+
+[steps.dns_nonlocal_route_on]
+device = "lab-r1"
+cmd = '''
+ip route del 198.51.100.7/32 2>/dev/null
+ip route add 198.51.100.7/32 via {client_lab_ip} dev eth3
+ip route | grep -q '^198.51.100.7 via {client_lab_ip} dev eth3' || { echo "dns_nonlocal_route_on: no route 198.51.100.7 via {client_lab_ip} dev eth3" >&2; exit 1; }
+'''
+description = "lab-r1: runtime route 198.51.100.7/32 via lab-client's client LAN address, so that replies to that source reach lab-client. Pair with dns_nonlocal_route_off."
+
+[steps.dns_nonlocal_src_off]
+device = "lab-client"
+cmd = '''
+sudo ip addr del 198.51.100.7/32 dev lo 2>/dev/null
+if ip -4 -o addr show dev lo | grep -q ' 198.51.100.7/32 '; then echo "dns_nonlocal_src_off: 198.51.100.7/32 is still on lo" >&2; exit 1; fi
+'''
+description = "lab-client: remove 198.51.100.7/32 from lo; fails if it is still there."
+
+[steps.dns_nonlocal_route_off]
+device = "lab-r1"
+cmd = '''
+ip route del 198.51.100.7/32 2>/dev/null
+if ip route | grep -q '^198.51.100.7 '; then echo "dns_nonlocal_route_off: the route 198.51.100.7/32 is still there" >&2; exit 1; fi
+'''
+description = "lab-r1: remove the runtime route 198.51.100.7/32; fails if it is still there."
+
+# https-dns-proxy by direct apk. The package starts itself at install with its shipped defaults (two DoH instances, Cloudflare
+# on 127.0.0.1:5053 and Google on :5054; force_dns for the interface `lan`; dnsmasq_config_update '*'), and its init script then
+# edits and commits /etc/config/dhcp (noresolv, the server list, doh_* bookkeeping), restarts dnsmasq, and hands fw4 redirect
+# and reject rules through ubus. None of that is covered by Newton's rollback. Only the next reset of lab-r1 removes it. The
+# step fails loudly unless both proxies listen, dnsmasq's running conf forwards to them only (no-resolv, the two server lines),
+# fw4 holds the shipped `lan` redirect, the init has logged the end of its start, and a lookup through dnsmasq works.
+[steps.https_dns_proxy_install]
+device = "lab-r1"
+timeout = 240
+cmd = '''
+fail() { echo "https_dns_proxy_install: $1" >&2; exit 1; }
+apk update >/dev/null 2>&1 || fail "apk update failed (no internet on lab-r1?)"
+apk add https-dns-proxy >/dev/null 2>&1 || fail "apk add https-dns-proxy failed"
+apk info -e https-dns-proxy >/dev/null 2>&1 || fail "https-dns-proxy is not installed after apk add"
+i=0
+while [ $i -lt 90 ]; do
+  if netstat -tln | grep -q '127.0.0.1:5053 ' && netstat -tln | grep -q '127.0.0.1:5054 ' \
+     && grep -qx 'no-resolv' /var/etc/dnsmasq.conf.* && grep -qx 'server=127.0.0.1#5053' /var/etc/dnsmasq.conf.* && grep -qx 'server=127.0.0.1#5054' /var/etc/dnsmasq.conf.* \
+     && nft list chain inet fw4 dstnat_lan 2>/dev/null | grep -q 'ubus:https-dns-proxy' \
+     && logread | grep -q 'https-dns-proxy.*Setting trigger for wan' \
+     && nslookup openwrt.org 127.0.0.1 2>&1 | grep -q '^Name:'; then
+    echo "https_dns_proxy_install: $(apk list -I | grep '^https-dns-proxy-' | cut -d' ' -f1) serves dnsmasq on 127.0.0.1#5053 and #5054 (no-resolv), fw4 redirects DNS from lan, lookups work"; exit 0
+  fi
+  sleep 1; i=$((i+1))
+done
+fail "the two DoH proxies, dnsmasq's conf, the fw4 rules and a lookup are not all in place after 90 s"
+'''
+description = "Install https-dns-proxy on lab-r1 with apk and wait for its own start (proxies, dnsmasq conf, fw4 rules, a lookup through DoH); see the comment above for what the package does by itself."
+
+[steps.r1_clock_ok]
+device = "local"
+timeout = 60
+cmd = '''
+fail() { echo "r1_clock_ok: $1" >&2; exit 1; }
+r=$(timeout 30 ssh -i "$LAB_SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=8 -o "ProxyCommand=$LAB_SSH_PROXY" root@10.109.0.11 'date +%s') || fail "cannot read lab-r1's clock"
+l=$(date +%s)
+d=$((r - l)); [ $d -lt 0 ] && d=$((0 - d))
+[ $d -le 60 ] || fail "lab-r1's clock is $d s away from this host's"
+echo "r1_clock_ok: lab-r1's clock is within $d s of this host's"
+'''
+description = "lab-r1's clock is within 60 s of the runner host's (DNSSEC validation needs a valid time)."
+
+# DHCP, NTP, logging and IPv6 groups (C4). Probe scripts for lab-client and a state snapshot for lab-r1; each _on step is
+# paired with an _off step that removes what it installed.
+
+# DHCP probe with requested addresses: `sudo python3 /tmp/newton-dhcp-probe.py IFACE SERVER [REQUESTED_IP|none]...`. One raw
+# AF_PACKET DISCOVER per argument (random chaddr, broadcast flag, option 50 = the requested address unless "none"), no REQUEST
+# ever sent, so no lease is taken. dnsmasq answers a DISCOVER with the requested address when it lies inside a dynamic range
+# and is free, otherwise with an address of its own choosing from the pool, so the offered address shows where the pool ends.
+# dnsmasq pings each candidate for about 3 s before it offers and handles one at a time, so the probe waits up to 30 s.
+# Prints one line per argument: "requested X offered Y chaddr M" or "requested X no OFFER from S within 30s"; exit 1 if any is missing.
+[steps.dhcp_probe_on]
+device = "lab-client"
+cmd = '''
+cat > /tmp/newton-dhcp-probe.py <<'EOF'
+import os, socket, struct, sys, time
+
+IFACE, SERVER = sys.argv[1], sys.argv[2]
+REQS = sys.argv[3:] or ['none']
+WAIT = 30.0
+
+def csum(b):
+    s = sum(struct.unpack('!%dH' % (len(b) // 2), b))
+    s = (s >> 16) + (s & 0xffff)
+    s += s >> 16
+    return ~s & 0xffff
+
+def opts_of(buf):
+    out, i = {}, 0
+    while i < len(buf):
+        c = buf[i]
+        if c == 255:
+            break
+        if c == 0:
+            i += 1
+            continue
+        out[c] = buf[i + 2:i + 2 + buf[i + 1]]
+        i += 2 + buf[i + 1]
+    return out
+
+nic = bytes.fromhex(open('/sys/class/net/' + IFACE + '/address').read().strip().replace(':', ''))
+
+def discover(mac, xid, req):
+    body = struct.pack('!BBBBIHH4s4s4s4s16s64s128s4s', 1, 1, 6, 0, xid, 0, 0x8000,
+                       bytes(4), bytes(4), bytes(4), bytes(4), mac + bytes(10), bytes(64), bytes(128),
+                       b'\x63\x82\x53\x63')
+    body += b'\x35\x01\x01' + b'\x3d\x07\x01' + mac
+    if req != 'none':
+        body += b'\x32\x04' + socket.inet_aton(req)
+    body += b'\x37\x05\x01\x03\x06\x0f\x33' + b'\xff'
+    body += bytes(max(0, 300 - len(body)))
+    udp = struct.pack('!HHHH', 68, 67, 8 + len(body), 0) + body
+    ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0, bytes(4), b'\xff' * 4)
+    ip = ip[:10] + struct.pack('!H', csum(ip)) + ip[12:]
+    return b'\xff' * 6 + nic + b'\x08\x00' + ip + udp
+
+want = {}
+for req in REQS:
+    mac = bytes([0x02]) + os.urandom(5)
+    xid = struct.unpack('!I', os.urandom(4))[0]
+    want[xid] = (req, mac, discover(mac, xid, req))
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+s.bind((IFACE, 0))
+got = {}
+t0 = time.time()
+nxt = 0.0
+while time.time() - t0 < WAIT and len(got) < len(want):
+    if time.time() - t0 >= nxt:
+        for xid, (req, mac, frame) in want.items():
+            if xid not in got:
+                s.send(frame)
+        nxt += 6.0
+    s.settimeout(0.5)
+    try:
+        pkt, info = s.recvfrom(4096)
+    except socket.timeout:
+        continue
+    if info[2] == socket.PACKET_OUTGOING or len(pkt) < 14 + 20 + 8 + 240:
+        continue
+    ihl = (pkt[14] & 0x0f) * 4
+    if pkt[14 + 9] != 17:
+        continue
+    sport, dport = struct.unpack('!HH', pkt[14 + ihl:14 + ihl + 4])
+    d = pkt[14 + ihl + 8:]
+    if sport != 67 or dport != 68 or len(d) < 240 or d[0] != 2:
+        continue
+    xid = struct.unpack('!I', d[4:8])[0]
+    if xid not in want or d[28:34] != want[xid][1] or d[236:240] != b'\x63\x82\x53\x63':
+        continue
+    if opts_of(d[240:]).get(53) != b'\x02':
+        continue
+    if socket.inet_ntoa(pkt[14 + 12:14 + 16]) != SERVER:
+        continue
+    got[xid] = socket.inet_ntoa(d[16:20])
+bad = 0
+for xid, (req, mac, frame) in want.items():
+    if xid in got:
+        print('requested %s offered %s chaddr %s' % (req, got[xid], ':'.join('%02x' % b for b in mac)))
+    else:
+        print('requested %s no OFFER from %s within %.0fs' % (req, SERVER, WAIT))
+        bad += 1
+sys.exit(1 if bad else 0)
+EOF
+python3 -c "import ast; ast.parse(open('/tmp/newton-dhcp-probe.py').read())" && [ -s /tmp/newton-dhcp-probe.py ]
+'''
+description = "Install the DHCP probe with requested addresses /tmp/newton-dhcp-probe.py on lab-client (see the comment above). Pair with dhcp_probe_off."
+
+[steps.dhcp_probe_off]
+device = "lab-client"
+cmd = "rm -f /tmp/newton-dhcp-probe.py; [ ! -e /tmp/newton-dhcp-probe.py ]"
+description = "Remove /tmp/newton-dhcp-probe.py from lab-client."
+
+# DHCP probe with a chosen chaddr: `sudo python3 /tmp/newton-dhcp-probe-mac.py IFACE SERVER MAC [MAC...]`. One raw AF_PACKET
+# DISCOVER per argument (the chaddr is the given MAC, broadcast flag, no option 50, no REQUEST ever sent, so no lease is
+# taken). A DISCOVER from a MAC that has a static lease gets the lease address back in yiaddr; one from a MAC that has no
+# lease gets a pool address. dnsmasq pings each candidate for about 3 s before it offers and handles one at a time, so the
+# probe waits up to 30 s. Prints one line per argument: "chaddr M offered Y" or "chaddr M no OFFER from S within 30s"; exit
+# 1 if any is missing.
+[steps.dhcp_probe_mac_on]
+device = "lab-client"
+cmd = '''
+cat > /tmp/newton-dhcp-probe-mac.py <<'EOF'
+import os, socket, struct, sys, time
+
+IFACE, SERVER = sys.argv[1], sys.argv[2]
+MACS = sys.argv[3:]
+WAIT = 30.0
+
+def csum(b):
+    s = sum(struct.unpack('!%dH' % (len(b) // 2), b))
+    s = (s >> 16) + (s & 0xffff)
+    s += s >> 16
+    return ~s & 0xffff
+
+def opts_of(buf):
+    out, i = {}, 0
+    while i < len(buf):
+        c = buf[i]
+        if c == 255:
+            break
+        if c == 0:
+            i += 1
+            continue
+        out[c] = buf[i + 2:i + 2 + buf[i + 1]]
+        i += 2 + buf[i + 1]
+    return out
+
+nic = bytes.fromhex(open('/sys/class/net/' + IFACE + '/address').read().strip().replace(':', ''))
+
+def discover(mac, xid):
+    body = struct.pack('!BBBBIHH4s4s4s4s16s64s128s4s', 1, 1, 6, 0, xid, 0, 0x8000,
+                       bytes(4), bytes(4), bytes(4), bytes(4), mac + bytes(10), bytes(64), bytes(128),
+                       b'\x63\x82\x53\x63')
+    body += b'\x35\x01\x01' + b'\x3d\x07\x01' + mac
+    body += b'\x37\x05\x01\x03\x06\x0f\x33' + b'\xff'
+    body += bytes(max(0, 300 - len(body)))
+    udp = struct.pack('!HHHH', 68, 67, 8 + len(body), 0) + body
+    ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0, bytes(4), b'\xff' * 4)
+    ip = ip[:10] + struct.pack('!H', csum(ip)) + ip[12:]
+    return b'\xff' * 6 + nic + b'\x08\x00' + ip + udp
+
+want = {}
+for mac_str in MACS:
+    mac = bytes.fromhex(mac_str.replace(':', '').replace('-', ''))
+    xid = struct.unpack('!I', os.urandom(4))[0]
+    want[xid] = (mac_str, mac, discover(mac, xid))
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+s.bind((IFACE, 0))
+got = {}
+t0 = time.time()
+nxt = 0.0
+while time.time() - t0 < WAIT and len(got) < len(want):
+    if time.time() - t0 >= nxt:
+        for xid, (mac_str, mac, frame) in want.items():
+            if xid not in got:
+                s.send(frame)
+        nxt += 6.0
+    s.settimeout(0.5)
+    try:
+        pkt, info = s.recvfrom(4096)
+    except socket.timeout:
+        continue
+    if info[2] == socket.PACKET_OUTGOING or len(pkt) < 14 + 20 + 8 + 240:
+        continue
+    ihl = (pkt[14] & 0x0f) * 4
+    if pkt[14 + 9] != 17:
+        continue
+    sport, dport = struct.unpack('!HH', pkt[14 + ihl:14 + ihl + 4])
+    d = pkt[14 + ihl + 8:]
+    if sport != 67 or dport != 68 or len(d) < 240 or d[0] != 2:
+        continue
+    xid = struct.unpack('!I', d[4:8])[0]
+    if xid not in want or d[28:34] != want[xid][1] or d[236:240] != b'\x63\x82\x53\x63':
+        continue
+    if opts_of(d[240:]).get(53) != b'\x02':
+        continue
+    if socket.inet_ntoa(pkt[14 + 12:14 + 16]) != SERVER:
+        continue
+    got[xid] = socket.inet_ntoa(d[16:20])
+bad = 0
+for xid, (mac_str, mac, frame) in want.items():
+    if xid in got:
+        print('chaddr %s offered %s' % (mac_str, got[xid]))
+    else:
+        print('chaddr %s no OFFER from %s within %.0fs' % (mac_str, SERVER, WAIT))
+        bad += 1
+sys.exit(1 if bad else 0)
+EOF
+python3 -c "import ast; ast.parse(open('/tmp/newton-dhcp-probe-mac.py').read())" && [ -s /tmp/newton-dhcp-probe-mac.py ]
+'''
+description = "Install the DHCP probe with a chosen chaddr /tmp/newton-dhcp-probe-mac.py on lab-client (see the comment above). Pair with dhcp_probe_mac_off."
+
+[steps.dhcp_probe_mac_off]
+device = "lab-client"
+cmd = "rm -f /tmp/newton-dhcp-probe-mac.py; [ ! -e /tmp/newton-dhcp-probe-mac.py ]"
+description = "Remove /tmp/newton-dhcp-probe-mac.py from lab-client."
+
+# SNTP client, read-only: `python3 /tmp/newton-sntp.py HOST` sends mode 3 requests (up to 3, 1 s apart) to HOST:123 from an
+# ordinary UDP socket and prints one line. It never sets a clock; the offset it prints is only the difference between this
+# host's clock and the answer. A reply counts only when it is mode 4 (server) and echoes the request's transmit timestamp.
+# Exit 0 on such a reply, else 1. The line then says "no reply" (nothing came back in 3 tries) or "reply too short", or it is the
+# reply line itself with mode= or originate_echoed=no showing why the reply does not count.
+[steps.sntp_on]
+device = "lab-client"
+cmd = '''
+cat > /tmp/newton-sntp.py <<'EOF'
+import socket, struct, sys, time
+
+HOST, PORT = sys.argv[1], 123
+NTP_EPOCH = 2208988800
+
+def ntp_ts(t):
+    return struct.pack('!II', int(t) + NTP_EPOCH, int((t - int(t)) * 2**32))
+
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(1.0)
+t0 = time.time()
+tx = ntp_ts(t0)
+req = bytes([0x23]) + bytes(39) + tx
+got = None
+for attempt in range(3):
+    s.sendto(req, (HOST, PORT))
+    try:
+        d, a = s.recvfrom(512)
+    except socket.timeout:
+        continue
+    got = (d, a, time.time())
+    break
+if got is None:
+    print('sntp %s:%d no reply' % (HOST, PORT))
+    sys.exit(1)
+d, a, t3 = got
+if len(d) < 48:
+    print('sntp reply too short: %d bytes' % len(d))
+    sys.exit(1)
+mode = d[0] & 7
+srv_t = struct.unpack('!II', d[40:48])
+srv = srv_t[0] - NTP_EPOCH + srv_t[1] / 2**32
+echoed = d[24:32] == tx
+print('sntp reply from %s:%d mode=%d stratum=%d li=%d originate_echoed=%s offset=%.3fs' % (a[0], a[1], mode, d[1], d[0] >> 6, 'yes' if echoed else 'no', srv - (t0 + t3) / 2))
+sys.exit(0 if mode == 4 and echoed else 1)
+EOF
+python3 -c "import ast; ast.parse(open('/tmp/newton-sntp.py').read())" && [ -s /tmp/newton-sntp.py ]
+'''
+description = "Install the read-only SNTP client /tmp/newton-sntp.py on lab-client (see the comment above). Pair with sntp_off."
+
+[steps.sntp_off]
+device = "lab-client"
+cmd = "rm -f /tmp/newton-sntp.py; [ ! -e /tmp/newton-sntp.py ]"
+description = "Remove /tmp/newton-sntp.py from lab-client."
+
+# UDP syslog receiver: `sudo python3 /tmp/newton-syslog-listen.py SECONDS` binds 0.0.0.0:514 for SECONDS, prints "<sender ip> <datagram>"
+# per datagram and exits. A real receiver matters: with nothing listening, lab-client answers each datagram with an ICMP port unreachable
+# and the router's `logread -r` forwarder then drops about every other message (ow-log-01).
+[steps.syslog_listen_on]
+device = "lab-client"
+cmd = '''
+cat > /tmp/newton-syslog-listen.py <<'EOF'
+import socket, sys, time
+
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(('0.0.0.0', 514))
+s.settimeout(0.5)
+end = time.time() + float(sys.argv[1])
+while time.time() < end:
+    try:
+        d, a = s.recvfrom(4096)
+    except socket.timeout:
+        continue
+    print('%s %s' % (a[0], d.decode('utf-8', 'replace').replace('\n', ' ')), flush=True)
+EOF
+python3 -c "import ast; ast.parse(open('/tmp/newton-syslog-listen.py').read())" && [ -s /tmp/newton-syslog-listen.py ]
+'''
+description = "Install the UDP syslog receiver /tmp/newton-syslog-listen.py on lab-client (see the comment above). Pair with syslog_listen_off."
+
+[steps.syslog_listen_off]
+device = "lab-client"
+cmd = "sudo rm -f /tmp/newton-syslog-listen.py /tmp/newton-syslog.out; [ ! -e /tmp/newton-syslog-listen.py ] && [ ! -e /tmp/newton-syslog.out ]"
+description = "Remove the syslog receiver script and its output file from lab-client."
+
+# What dnsmasq and odhcpd are doing, before a change that must not alter either (ow-v6-04): the md5 of the generated conf the running
+# dnsmasq was started with, the pids of dnsmasq and odhcpd, and odhcpd's own list of the interfaces it serves RAs on
+# (`ubus call dhcp ipv6ra`). A post computes the same four lines after the apply and compares.
+[steps.dhcp_state_save]
+device = "lab-r1"
+cmd = '''
+c=; for p in $(pidof dnsmasq); do c=$(tr '\0' ' ' < /proc/$p/cmdline | sed -n 's/.*dnsmasq -C \([^ ]*\).*/\1/p'); [ -n "$c" ] && break; done
+[ -f "$c" ] || { echo "dhcp_state_save: no conf found for the running dnsmasq" >&2; exit 1; }
+{ echo "dnsmasq-conf-md5 $(md5sum < $c | cut -d' ' -f1)"; echo "dnsmasq-pids $(pidof dnsmasq | tr ' ' ',')"; echo "odhcpd-pids $(pidof odhcpd | tr ' ' ',')"; echo "ra-state $(ubus call dhcp ipv6ra | tr -d ' \t\n')"; } > /tmp/dhcp-state.before
+[ "$(wc -l < /tmp/dhcp-state.before)" = 4 ] && ! grep -q 'pids $' /tmp/dhcp-state.before
+'''
+description = "Save to /tmp/dhcp-state.before on lab-r1 the md5 of the running dnsmasq's conf, the pids of dnsmasq and odhcpd, and odhcpd's list of RA interfaces."
+
+[regression]
+default = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "client_internet", "client_dns", "client_dhcp", "portfwd"]
+
+# Dual-WAN scenarios (lab/scenarios/dualwan/) install the WAN-health tool
+# (scripts/newton-wan-health.sh + .init, both already in the repo) on lab-r1
+# and put two nft state objects on lab-isp (a per-upstream packet counter and
+# an optional upstream cut that drops eth2 except udp 67/68). The probe
+# target is 198.51.100.9/32 on lab-isp's `lo`: it is reached by either WAN
+# gateway from lab-r1 and owned by lab-isp, so the packets are INPUT traffic
+# on lab-isp, not forwarded. Every step here runs on the runner host with
+# device = "local" (LAB_SSH_KEY / LAB_SSH_PROXY in env); lab-r1 runs as root,
+# so no sudo is needed. Each `_on` is paired with an `_off` and the whole
+# pair is re-runnable: the runner resets lab-r1 per scenario so this is a
+# fresh install every time. The uci package newton_wanhealth is a known
+# package of the router program (R9a), so on the lab profile the dualwan scenarios need no approval.
+
+[steps.dw_wanhealth_install]
+device = "local"
+timeout = 90
+cmd = '''
+fail() { echo "dw_wanhealth_install: $1" >&2; exit 1; }
+ROOT="root@10.109.0.11"
+r1() { ssh -i "$LAB_SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=8 -o "ProxyCommand=$LAB_SSH_PROXY" "$ROOT" "$@"; }
+LOCAL_SH="scripts/newton-wan-health.sh"
+LOCAL_INIT="scripts/newton-wan-health.init"
+[ -r "$LOCAL_SH" ] || fail "missing $LOCAL_SH on the runner host"
+[ -r "$LOCAL_INIT" ] || fail "missing $LOCAL_INIT on the runner host"
+WANT_SH=$(sha256sum "$LOCAL_SH" | awk '{print $1}')
+WANT_INIT=$(sha256sum "$LOCAL_INIT" | awk '{print $1}')
+# mkdir the dir, push the two files (cat >), chmod 755, ensure the UCI
+# config file exists (empty, 600 so uci set on an unknown package works on
+# a router that has never seen the package), enable the init symlink.
+r1 'mkdir -p /usr/libexec/newton && cat > /usr/libexec/newton/newton-wan-health && chmod 755 /usr/libexec/newton/newton-wan-health' <"$LOCAL_SH" || fail "push of the script to lab-r1 failed"
+r1 'cat > /etc/init.d/newton-wan-health && chmod 755 /etc/init.d/newton-wan-health' <"$LOCAL_INIT" || fail "push of the init to lab-r1 failed"
+r1 '[ -e /etc/config/newton_wanhealth ] || { : > /etc/config/newton_wanhealth && chmod 600 /etc/config/newton_wanhealth; }; /etc/init.d/newton-wan-health enable; /etc/init.d/newton-wan-health start' </dev/null || fail "config or enable failed on lab-r1"
+# Re-verify by reading the two router files' sha256 from the router. If a
+# line is missing, mismatch, or the order is wrong, fail.
+OUT=$(r1 'sha256sum /usr/libexec/newton/newton-wan-health /etc/init.d/newton-wan-health' </dev/null 2>/dev/null) || fail "cannot read sha256 from lab-r1"
+GOT_SH=$(printf '%s\n' "$OUT" | awk '$2 == "/usr/libexec/newton/newton-wan-health" {print $1}')
+GOT_INIT=$(printf '%s\n' "$OUT" | awk '$2 == "/etc/init.d/newton-wan-health" {print $1}')
+[ "$GOT_SH" = "$WANT_SH" ] || fail "router sha256 of newton-wan-health does not match the runner copy: got $GOT_SH want $WANT_SH"
+[ "$GOT_INIT" = "$WANT_INIT" ] || fail "router sha256 of newton-wan-health.init does not match the runner copy: got $GOT_INIT want $WANT_INIT"
+echo "dw_wanhealth_install: scripts/newton-wan-health.sh and .init on lab-r1, sha256 verified, init enabled"
+'''
+description = "lab-r1: install the WAN-health tool (scripts/newton-wan-health.sh + .init) at /usr/libexec/newton/newton-wan-health and /etc/init.d/newton-wan-health (mode 755), create /etc/config/newton_wanhealth empty (mode 600) if absent, run `enable`, verify sha256 of both router files equals the runner copies'. Re-runnable: the runner resets lab-r1 per scenario."
+
+[steps.dw_isp_target_on]
+device = "lab-isp"
+timeout = 30
+cmd = '''
+fail() { echo "dw_isp_target_on: $1" >&2; exit 1; }
+[ "$(ip -4 -o addr show dev lo | grep -c ' 198.51.100.9/32 ')" = 0 ] || exit 0
+ip addr add 198.51.100.9/32 dev lo || fail "ip addr add failed"
+ip -4 -o addr show dev lo | grep -q ' 198.51.100.9/32 ' || fail "198.51.100.9/32 not on lo after add"
+echo "dw_isp_target_on: 198.51.100.9/32 on lo"
+'''
+description = "lab-isp: add 198.51.100.9/32 to lo (the probe target both WAN gateways from lab-r1 reach). Idempotent. Pair with dw_isp_target_off."
+
+[steps.dw_isp_target_off]
+device = "lab-isp"
+cmd = '''
+ip addr del 198.51.100.9/32 dev lo 2>/dev/null
+if ip -4 -o addr show dev lo | grep -q ' 198.51.100.9/32 '; then echo "dw_isp_target_off: 198.51.100.9/32 is still on lo" >&2; exit 1; fi
+exit 0
+'''
+description = "lab-isp: remove 198.51.100.9/32 from lo; fails if it is still there."
+
+[steps.dw_isp_count_on]
+device = "lab-isp"
+timeout = 30
+cmd = '''
+fail() { echo "dw_isp_count_on: $1" >&2; exit 1; }
+# Pair with dw_isp_count_off: a clean state -> rebuild the table so the
+# counters start from 0 even when dw_cut_clear leaves a stale object behind.
+nft delete table inet nwcount 2>/dev/null || true
+nft add table inet nwcount || fail "add table inet nwcount"
+nft 'add chain inet nwcount input { type filter hook input priority -50; policy accept; }' || fail "add chain input"
+nft 'add rule inet nwcount input iifname "eth2" ip daddr 198.51.100.9 icmp type echo-request ip length 228 counter comment "nw-eth2"' || fail "input rule eth2"
+nft 'add rule inet nwcount input iifname "eth3" ip daddr 198.51.100.9 icmp type echo-request ip length 228 counter comment "nw-eth3"' || fail "input rule eth3"
+nft list ruleset | grep -q 'comment "nw-eth2"' || fail "eth2 counter rule not in ruleset"
+nft list ruleset | grep -q 'comment "nw-eth3"' || fail "eth3 counter rule not in ruleset"
+echo "dw_isp_count_on: inet nwcount with eth2 and eth3 200-byte-payload counters"
+'''
+description = "lab-isp: nft table `inet nwcount`, an input chain at -50, and two named counter rules keyed by iifname eth2/eth3 that count only ICMP echo-request 200-byte-payload (length 228) datagrams to 198.51.100.9 -- the runner's lib sends exactly 200-byte pings; the health tool's 56-byte probes do not match. Pair with dw_isp_count_off."
+
+[steps.dw_isp_count_off]
+device = "lab-isp"
+cmd = "nft delete table inet nwcount 2>/dev/null; exit 0"
+description = "lab-isp: delete the table `inet nwcount`; tolerates absence."
+
+# Cleanup for any dualwan scenario that may have crashed mid-run. Pinned as
+# a cleanup step on every dualwan scenario so a mid-run failure leaves no
+# `inet nwcut` table and ispa is up on lab-isp.
+[steps.dw_cut_clear]
+device = "lab-isp"
+timeout = 30
+cmd = '''
+nft delete table inet nwcut 2>/dev/null || true
+if nft list ruleset 2>/dev/null | grep -q 'inet nwcut'; then echo "dw_cut_clear: inet nwcut is still present" >&2; exit 1; fi
+ifup ispa 2>/dev/null || true
+exit 0
+'''
+description = "lab-isp: delete `inet nwcut` if present and `ifup ispa` (the dw-05 fault), so a crashed dualwan scenario leaves nothing behind."

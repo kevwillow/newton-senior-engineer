@@ -1,0 +1,19 @@
+#!/bin/sh
+# Fixture init script (addendum R3 4.5): enable makes the S09 symlink,
+# disable removes it, both under $FAKE_ROUTER_FS.
+
+FS=${FAKE_ROUTER_FS:-/nonexistent}
+
+case "${1:-}" in
+  enable)
+    mkdir -p "$FS/etc/rc.d"
+    ln -sfn ../init.d/newton-guard "$FS/etc/rc.d/S09newton-guard"
+    ;;
+  disable)
+    rm -f "$FS/etc/rc.d/S09newton-guard"
+    ;;
+  *)
+    echo "usage: newton-guard.init enable|disable" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,20 @@
+name = "ow-upd-01-apk-updates-audit"
+description = "OW-UPD-01 (not UCI, audit only): report the package updates that are available, never apply them. The post runs `apk update` (fetches the package indexes of the 25.12.5 feeds from downloads.openwrt.org through lab-isp and the house network; it writes only /var/cache/apk, a tmpfs, on lab-r1, which the next reset discards) and then `apk list -u`, and requires both to exit 0; it prints the number of upgradable packages and the first three names. `apk upgrade` and `apk add` are never run. At the last hand run `apk list -u` listed 36 packages, among them base packages that are part of the firmware image (ca-bundle, libmbedtls21, libucode20230711, cgi-io, luci), which is the catalogue's caveat that a blind `apk upgrade` on a router replaces base packages. No batch, so expect none; the default regression runs before and after as in ow-00-baseline. The audit depends on the real internet (the OpenWrt download servers): an outage makes it red, never green. Hand run: with the feed unreachable (tcp 443 rejected in the output chain) `apk update` fails and the post fails (results file)."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "none"
+setup = ["portfwd_on"]
+regression = "default"
+
+[[post]]
+device = "lab-r1"
+timeout = 120
+cmd = '''
+o=$(apk update 2>&1); rc=$?
+t=$(echo "$o" | tail -1)
+l=$(apk list -u 2>&1); rc2=$?
+n=$(echo "$l" | grep -c .)
+echo "apk update rc=$rc: $t"
+echo "apk list -u rc=$rc2: $n upgradable packages, first: $(echo "$l" | head -3 | cut -d' ' -f1 | tr '\n' ' ')"
+[ $rc = 0 ] && [ $rc2 = 0 ]'''
+expect_stdout = '^apk update rc=0: OK: \d+ distinct packages available\napk list -u rc=0: \d+ upgradable packages, first: '

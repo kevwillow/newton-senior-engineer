@@ -1,0 +1,76 @@
+# OW-ZONE-03, the client isolation pair, half one: isolation OFF on Pulsar's radio1 (5 GHz ch36 HE20, country US,
+# txpower 3 dBm). Same self-contained batch as p-ow-wifi-02 (sae-mixed, ieee80211w 1) plus wireless.default_radio1.
+# isolate='0', so this is the CONTROL for the pair: the same two stations, the same VRF wiring and the same cross ping as
+# p-ow-wifi-05b-isolate-on, and they must succeed. A two-value proof means nothing if the blocked half could have failed
+# because the cross path never worked at all; this half is what says the path works.
+# The two stations are two vifs of the one Panda MT7921AU on lab-wifi (VM 9107, passed through from apollo): the driver
+# allows #{managed, P2P-client} <= 2, so a second managed vif associates alongside the first on the same BSSID, each with
+# its own wpa_supplicant. One VRF each is the method: a single namespace cannot carry a station-to-station ping (the kernel
+# drops or loops the local-source frames - accept_local, rp_filter and ip rule tricks were all tried and all failed,
+# measured), so each station's address lives in its own routing table and the ping leaves vrfa for the other one.
+name = "p-ow-wifi-05a-isolate-off"
+description = "OW-ZONE-03, the client isolation pair, half one: the CONTROL, the same run with isolation off. Interface wlan on radio1 (5 GHz, ch36, HE20, country US, txpower 3 dBm), dhcp section wlan, zone wlz (input/output/forward ACCEPT) with forwarding wlz to wan, and wireless.default_radio1 edited to disabled 0, ssid newton-test, network wlan, encryption sae-mixed, ieee80211w 1, isolate 0, with the key from the secret var. The effect is one newton-wifi.py pair run on lab-wifi, --bssid pinned to radio1's MAC and the channel to 5180 MHz: it adds a second managed vif (sta2) to the one Panda, gives each of the two vifs its own wpa_supplicant, waits for both to reach wpa_state COMPLETED on that pinned BSSID, turns power save off on both, puts one VRF per station with an address outside the DHCP pool in each and a permanent neighbour entry for the other station, pings the gateway from each VRF, and then pings the other station across the air. What it proves here: two clients of this network reach each other when isolation is off, and each still reaches the gateway, so the cross path itself works and the blocked half of the pair can be read as isolation and nothing else. A post reads wireless.default_radio1.isolate back off the router and requires 0. Two vifs of the one adapter and never two adapters: the stations are two vifs of the one Panda MT7921AU, each in its own VRF, and its combination limit #{managed, P2P-client} <= 2 is what the method rests on. The two VRFs are why a single namespace could not be used (the kernel drops or loops the frames a ping of the other station would send back out of the same one). The regression is Pulsar's baseline list; approval = true because the batch touches firewall."
+target = "pulsar"
+reset = ["pulsar"]
+reset_after = ["pulsar"]
+after_reset = ["p_radios_off"]
+approval = true
+expect = "confirmed"
+timeout = 300
+setup = ["wifi_script_install", "wifi_key_install", "wifi_prep"]
+cleanup = ["wifi_cleanup"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen", "p_client_on_pulsar"]
+probes = [["iface-field", "wlan", "up", "true"], ["uci-equals", "wireless.default_radio1.disabled", "0"]]
+batch = '''
+set network.wlan=interface
+set network.wlan.proto='static'
+set network.wlan.ipaddr='192.168.152.1'
+set network.wlan.netmask='255.255.255.0'
+set dhcp.wlan=dhcp
+set dhcp.wlan.interface='wlan'
+set dhcp.wlan.start='100'
+set dhcp.wlan.limit='50'
+set dhcp.wlan.leasetime='1h'
+set firewall.wlz=zone
+set firewall.wlz.name='wlz'
+set firewall.wlz.network='wlan'
+set firewall.wlz.input='ACCEPT'
+set firewall.wlz.output='ACCEPT'
+set firewall.wlz.forward='ACCEPT'
+set firewall.wlz_wan=forwarding
+set firewall.wlz_wan.src='wlz'
+set firewall.wlz_wan.dest='wan'
+set wireless.radio1.country='US'
+set wireless.radio1.channel='36'
+set wireless.radio1.htmode='HE20'
+set wireless.radio1.txpower='3'
+set wireless.default_radio1.disabled='0'
+set wireless.default_radio1.network='wlan'
+set wireless.default_radio1.ssid='newton-test'
+set wireless.default_radio1.encryption='sae-mixed'
+set wireless.default_radio1.ieee80211w='1'
+set wireless.default_radio1.isolate='0'
+set wireless.default_radio1.key='{wifi_psk}'
+'''
+
+# One effect, and it is an effect rather than a post: before the apply there is no AP at all, so neither station reaches
+# COMPLETED and the line is pair: a=SCANNING b=SCANNING gw=fail received=0/8, which fails this expect_stdout (and the
+# runner refuses an effect that already passes before the change). received=5..8 rather than exactly 8: the half that
+# passes is "the two stations reach each other at all".
+[[effect]]
+device = "lab-wifi"
+timeout = 200
+cmd = "sudo /usr/local/bin/newton-wifi.py pair --ssid newton-test --bssid {p_wifi_bssid} --freq 5180 --ieee80211w 1 --secs 40 --expect-cross reachable"
+expect_stdout = '^pair: a=COMPLETED b=COMPLETED gw=ok received=([5-8])/8$'
+
+# The value the measurement rests on, read back off the router rather than
+# assumed from the batch.
+[[post]]
+device = "pulsar"
+timeout = 30
+cmd = '''
+v=$(uci -q get wireless.default_radio1.isolate)
+[ "$v" = 0 ] || { echo "wireless.default_radio1.isolate is '$v', not 0" >&2; exit 1; }
+echo "isolate is 0 in the config"
+'''
+expect_stdout = '^isolate is 0 in the config$'

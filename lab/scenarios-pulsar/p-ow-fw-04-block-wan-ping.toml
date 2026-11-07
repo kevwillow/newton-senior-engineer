@@ -1,0 +1,43 @@
+# PORT of ow-fw-04. Changed: lab-r1 -> pulsar, r1_wan_ip -> p_wan_ip, regression names -> pulsar's checks; single WAN: the wan2 probe and its second expected line are dropped.
+name = "p-ow-fw-04-block-wan-ping"
+description = "OW-FW-04: the stock rule Allow-Ping (found by name) gets enabled='0'. Effects: lab-isp's ping to the router's two WAN addresses (wan 10.100.0.x and wan2 10.101.0.x) gets no echo reply, while the router is shown alive in the same probe (a closed tcp port on each address is still refused at once: the wan zone is still REJECT, so the upstream sees an ICMP error, not silence); the live input_wan chain has no Allow-Ping rule and keeps Allow-DHCP-Renew. Silence also needs OW-FW-01 (DROP). The default regression includes the port forward and the WAN DHCP path must stay untouched."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+approval = true
+probes = [["nft-rule", "inet", "fw4", "input_wan", "absent", "Allow-Ping"], ["nft-rule", "inet", "fw4", "input_wan", "present", "Allow-DHCP-Renew"]]
+batch = '''
+set firewall.{fw_allow_ping}.enabled='0'
+'''
+
+[[effect]]
+device = "lab-isp"
+timeout = 40
+cmd = '''
+probe() {
+  ping -c 1 -W 2 $1 >/dev/null 2>&1 && p=replies || p=no-reply
+  t=$(mktemp); nc $1 9 </dev/null >/dev/null 2>$t & n=$!
+  i=0; while [ ! -s $t ] && [ $i -lt 4 ]; do sleep 1; i=$((i+1)); done
+  r=$(cat $t); kill $n 2>/dev/null; rm -f $t
+  case "$r" in *refused*) c=refused;; "") c="no answer in 4 s";; *) c="$r";; esac
+  echo "$1: ping=$p closed-port-9=$c"
+  [ "$p" = no-reply ] && [ "$c" = refused ]
+}
+probe {p_wan_ip}
+'''
+expect_stdout = '^10\.100\.0\.\d+: ping=no-reply closed-port-9=refused$'
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+a=$(nft list chain inet fw4 input_wan | grep -c 'Allow-Ping'); d=$(nft list chain inet fw4 input_wan | grep -c 'Allow-DHCP-Renew')
+echo "input_wan: Allow-Ping rules=$a Allow-DHCP-Renew rules=$d"; [ "$a" = 0 ] && [ "$d" = 1 ]
+'''
+expect_stdout = '^input_wan: Allow-Ping rules=0 Allow-DHCP-Renew rules=1$'
+
+[[post]]
+device = "pulsar"
+cmd = "echo \"name=$(uci -q get firewall.{fw_allow_ping}.name) enabled=$(uci -q get firewall.{fw_allow_ping}.enabled)\""
+expect_stdout = '^name=Allow-Ping enabled=0$'

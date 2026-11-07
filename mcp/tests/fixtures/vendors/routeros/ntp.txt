@@ -1,0 +1,6 @@
+# synthetic
+         enabled: yes
+             mode: unicast
+          servers: 192.0.2.250,198.51.100.250
+     server-dns-names: pool.example.invalid
+       active-server: 192.0.2.250

@@ -1,0 +1,55 @@
+# recorded lab:vyos:2026.10.01-0035-rolling:2026-10-18
+Rulesets Information
+
+---------------------------------
+ipv4 Firewall "input filter"
+
+Rule     Action    Protocol      Packets    Bytes  Conditions
+-------  --------  ----------  ---------  -------  -------------------------------------------------
+10       accept    tcp                 0        0  tcp dport 2010  accept
+20       accept    tcp                 0        0  tcp dport 2020  accept
+30       accept    tcp                 0        0  tcp dport 2030  accept
+40       accept    tcp                 0        0  tcp dport 2040  accept
+50       accept    tcp                 0        0  tcp dport 2050  accept
+60       accept    tcp                 0        0  tcp dport 2060  accept
+70       accept    tcp                 0        0  tcp dport 2070  accept
+80       accept    tcp                 0        0  tcp dport 2080  accept
+90       accept    tcp                 0        0  tcp dport 2090  accept
+100      accept    tcp                 0        0  tcp dport 2100  accept
+110      accept    tcp                 0        0  tcp dport 2110  accept
+120      accept    tcp                 0        0  tcp dport 2120  accept
+130      accept    tcp                 0        0  tcp dport 2130  accept
+140      accept    tcp                 0        0  tcp dport 2140  accept
+150      accept    tcp                 0        0  tcp dport 2150  accept
+160      accept    tcp                 0        0  tcp dport 2160  accept
+170      accept    tcp                 0        0  tcp dport 2170  accept
+180      accept    tcp                 0        0  tcp dport 2180  accept
+190      accept    tcp                 0        0  tcp dport 2190  accept
+200      accept    tcp                 0        0  tcp dport 2200  accept
+210      accept    tcp                 0        0  tcp dport 2210  accept
+220      accept    tcp                 0        0  tcp dport 2220  accept
+230      accept    tcp                 0        0  tcp dport 2230  accept
+240      accept    tcp                 0        0  tcp dport 2240  accept
+250      accept    tcp                 0        0  tcp dport 2250  accept
+260      accept    tcp                 0        0  tcp dport 2260  accept
+270      accept    tcp                 0        0  tcp dport 2270  accept
+280      accept    tcp                 0        0  tcp dport 2280  accept
+290      accept    tcp                 0        0  tcp dport 2290  accept
+300      accept    tcp                 0        0  tcp dport 2300  accept
+310      accept    tcp                 0        0  tcp dport 2310  accept
+320      accept    tcp                 0        0  tcp dport 2320  accept
+330      accept    tcp                 0        0  tcp dport 2330  accept
+340      accept    tcp                 0        0  tcp dport 2340  accept
+350      accept    tcp                 0        0  tcp dport 2350  accept
+360      accept    tcp                 0        0  tcp dport 2360  accept
+370      accept    tcp                 0        0  tcp dport 2370  accept
+380      accept    tcp                 0        0  tcp dport 2380  accept
+390      accept    tcp                 0        0  tcp dport 2390  accept
+400      accept    tcp                 0        0  tcp dport 2400  accept
+410      accept    tcp                 0        0  tcp dport 2410  accept
+420      accept    tcp                 0        0  tcp dport 2420  accept
+430      accept    tcp                 0        0  tcp dport 2430  accept
+440      accept    tcp                 0        0  tcp dport 2440  accept
+450      accept    tcp                 0        0  tcp dport 2450  accept
+default  accept    all                77    19032  accept comment "INP-filter default-action accept"
+

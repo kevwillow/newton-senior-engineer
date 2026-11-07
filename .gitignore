@@ -1,0 +1,6 @@
+mcp/.venv/
+mcp/.pytest_cache/
+__pycache__/
+*.pyc
+.venv/
+lab/.results/

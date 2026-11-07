@@ -1,0 +1,54 @@
+# PORT of ow-mgmt-04. Changed: lab-r1 -> pulsar; local ssh goes direct to 192.168.1.1 with the admin key and pulsar known_hosts (no proxy); password check from the agent host. Only the key lane is run on pulsar (expect_password path not exercised).
+name = "p-ow-mgmt-04-ssh-key-only"
+description = "OW-MGMT-04: PasswordAuth='0' and RootPasswordAuth='0' (key-only ssh). scripts/owrt-change.sh with OWRT_SSH_PASSWORD_FILE verifies over fresh ssh connections that offer password and keyboard-interactive only (measured: ssh -vv shows 'Next authentication method: password', dropbear logs 'Password auth succeeded'), and the one key in pulsar's authorized_keys is the runner's probe key, which the protocol never offers in that mode. In the key lane the restricted key is the only path the apply can speak to dropbear once PasswordAuth='0' lands, so the verify rounds are over the restricted key, the change confirms, and mgmt_ssh_pw is the intended break. In the password lane (expect_password=rolled_back) the verify path is password, the change rolls back, and the dropbear sampler and the 'Exit before auth' count record the lockout evidence. The effect (dropbear gets -s and -g, password-only ssh refused while key ssh works) fails before and after in both lanes; it was shown to pass by applying the config by hand. Uses an explicit regression list: the default without mgmt_ssh_pw (mgmt_ssh_pw moves to breaks for the key lane and the runner moves it back for the password lane)."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+expect_password = "rolled_back"
+approval = true
+setup = ["portfwd_on", "ssh_observer_start"]
+cleanup = ["ssh_observer_stop"]
+regression = ["mgmt_ssh", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen", "portfwd"]
+breaks = ["mgmt_ssh_pw"]
+breaks_password = []
+batch = '''
+set dropbear.@dropbear[0].PasswordAuth='0'
+set dropbear.@dropbear[0].RootPasswordAuth='0'
+'''
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+tr '\0' '\n' < /proc/$(cat /var/run/dropbear.main.pid)/cmdline | grep -cx -e -s -e -g | grep -qx 2 && echo "dropbear has -s and -g"
+'''
+expect_stdout = '^dropbear has -s and -g$'
+
+[[effect]]
+device = "local"
+timeout = 90
+cmd = '''
+D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
+printf '#!/bin/sh\nexec cat %s\n' {pulsar_root_pw} > "$D/askpass"; chmod 700 "$D/askpass"
+ssh_opts="-o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR"
+pw=$(SSH_ASKPASS="$D/askpass" SSH_ASKPASS_REQUIRE=force DISPLAY=x timeout 40 ssh $ssh_opts -o BatchMode=no -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 root@192.168.1.1 'echo pw-login-ok' 2>&1)
+key=$(timeout 40 ssh $ssh_opts -i {pulsar_admin_key} -o BatchMode=yes -o IdentitiesOnly=yes root@192.168.1.1 'echo key-login-ok' 2>&1)
+case "$pw" in *pw-login-ok*) echo "password login still works"; exit 1;; *"Permission denied"*) ;; *) echo "password probe inconclusive: $pw"; exit 1;; esac
+case "$key" in *key-login-ok*) echo "password login refused, key login works";; *) echo "key login failed: $key"; exit 1;; esac
+'''
+expect_stdout = '^password login refused, key login works$'
+
+[[post]]
+device = "pulsar"
+lanes = ["password"]
+cmd = '''
+awk -F'|' '$2 ~ / -s / && $2 ~ / -g / {n++} END{print "samples with dropbear running -s and -g: " n+0; exit !(n>=5)}' /tmp/ssh-observer.log
+'''
+expect_stdout = '^samples with dropbear running -s and -g: [0-9]+$'
+
+[[post]]
+device = "pulsar"
+lanes = ["password"]
+cmd = '''
+n=$(logread | grep -c 'Exit before auth'); [ "$n" -ge 5 ] && echo "dropbear logged $n connections that ended before auth"
+'''
+expect_stdout = '^dropbear logged [0-9]+ connections that ended before auth$'

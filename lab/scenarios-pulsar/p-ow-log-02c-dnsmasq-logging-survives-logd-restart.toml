@@ -1,0 +1,37 @@
+# PORT of ow-log-02c-dnsmasq-logging-survives-logd-restart. Changed: lab-r1 -> pulsar; the DISCOVER probe runs on lab-client over the proxy and the logread runs on pulsar over the pinned admin-key path (r() to 192.168.1.1, no proxy); the log pattern is DHCPDISCOVER(wan.151); regression = pulsar's default list plus the client checks.
+name = "p-ow-log-02c-dnsmasq-logging-survives-logd-restart"
+description = "OW-LOG-02, the side effect of the restart (known gap, this scenario is RED on purpose until Newton or the profile handles it): the same batch as p-ow-log-02 (log_size='512') makes the log init script restart logd, and dnsmasq, the only service on this image whose procd jail has the log socket mounted (jail log=true; ntpd's jail has log=false), then logs nothing any more: the jail keeps a bind mount of the old /dev/log, which is replaced when logd restarts. odhcpd, dropbear and the kernel log are not affected. So after the apply every DHCP line (DHCPDISCOVER, DHCPOFFER, DHCPACK) and, with logqueries, every DNS query line is missing from logread until dnsmasq is restarted for some other reason (hand run, results file: baseline, after the logd restart, after /etc/init.d/dnsmasq restart). The post asserts the correct behaviour: after the apply a fresh DHCPDISCOVER from a random MAC (the dhcp probe, no REQUEST, no lease) must appear in pulsar's log as 'DHCPDISCOVER(wan.151) <that mac>'. It fails today. The effect only proves that the change itself is live (logd -S 512), so that a red result here cannot be a change that did not apply. Everything else in the group is green; flip nothing here when the gap is fixed, the post will turn green. The post could also turn green for a reason that is not the fix: any restart of dnsmasq between the apply and the post (a later reload that changes the generated conf) re-opens its log socket. Nothing in this scenario restarts dnsmasq. A control that restarts logd (log_size, log_buffer_size) needs a follow-up restart of dnsmasq, or Newton has to warn that DHCP and DNS logging stop until then."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on", "dhcp_probe_on"]
+cleanup = ["dhcp_probe_off"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen", "portfwd", "p_client_on_pulsar", "client_internet", "client_dns", "client_dhcp"]
+probes = [["proc-args", "logd", "-S 512"]]
+batch = '''
+set system.@system[0].log_size='512'
+'''
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+c=" $(tr '\0' ' ' < /proc/$(pidof logd | cut -d' ' -f1)/cmdline)"
+echo "logd command:$c"
+case "$c" in " /sbin/logd -S 512 "*) exit 0;; esac
+exit 1'''
+expect_stdout = '^logd command: /sbin/logd -S 512 $'
+
+[[post]]
+device = "local"
+timeout = 90
+cmd = '''
+sshx() { h=$1; shift; timeout 50 ssh -i "$LAB_SSH_KEY" -o BatchMode=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" "$h" "$@"; }
+r() { timeout 40 ssh -i {pulsar_admin_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 "$@"; }
+out=$(sshx {client_lab_user}@10.109.0.50 'sudo python3 /tmp/newton-dhcp-probe.py eth0 192.168.151.1 none')
+mac=$(echo "$out" | sed -n 's/.* chaddr \([0-9a-f:]*\)$/\1/p')
+sleep 2
+n=$(r "logread | grep -c 'DHCPDISCOVER(wan.151) $mac'")
+echo "probe: $out"
+echo "dnsmasq log lines for DHCPDISCOVER from $mac: $n"
+[ -n "$mac" ] && [ "$n" -ge 1 ]'''
+expect_stdout = 'dnsmasq log lines for DHCPDISCOVER from 02:[0-9a-f:]+: [1-9]'

@@ -1,0 +1,13 @@
+/* source: https://openwrt.org/docs/guide-user/network/dsa/start?do=export_raw | retrieved 2026-10-03 by Kev (browser) | CC BY-SA 4.0, (c) OpenWrt contributors | raw DokuWiki markup, unmodified below this line */
+====== DSA Networking ======
+
+Starting in OpenWrt 21.02, many target architectures have switched from swconfig to DSA [[https://www.kernel.org/doc/html/latest/networking/dsa/dsa.html|(Distributed Switch Architecture)]], the Linux kernel subsystem for network switches. DSA configuration is incompatible with swconfig.
+
+See the links below to learn more about using OpenWrt and DSA.
+
+  * **[[:docs:guide-user:network:dsa:dsa-mini-tutorial|DSA Mini-Tutorial]]** gives an overview of the concepts of DSA and configuration examples 
+
+  * **[[:docs:guide-user:network:dsa:converting-to-dsa|Converting to DSA]]** tells how to convert your //swconfig// configuration files to //DSA//
+
+  * **[[:docs:guide-user:network:dsa:upgrading-to-2102|Upgrading to OpenWrt 21.02.0]]** gives other recommendations and requirements for upgrading to OpenWrt 21.02
+

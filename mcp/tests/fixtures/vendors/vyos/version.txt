@@ -1,0 +1,13 @@
+# synthetic
+Version:          VyOS 1.4.0
+Release train:    sagitta
+Built by:         lab@example.invalid
+Built on:         Fri Mar  6 09:14:22 UTC 2026
+Build UUID:       11111111-2222-3333-4444-555555555555
+Architecture:     x86_64
+Boot via:         installed image
+System type:      KVM guest
+Hardware model:   lab-vyos-r1
+Hardware serial:  lab-serial-0001
+Hardware UUID:    aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+Copyright:        VyOS maintainers and contributors

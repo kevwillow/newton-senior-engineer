@@ -1,0 +1,13 @@
+name = "05-bad-syntax"
+description = "Malformed uci batch (set without value); plan must reject."
+target = "lab-r1"
+reset = []
+expect = "rejected"
+reject_match = 'uci batch rejected the changes \(exit \d+\), nothing staged: uci: Invalid argument'
+timeout = 60
+batch = "set network.lan.ipaddr"
+
+[[post]]
+device = "lab-r1"
+cmd = "uci changes | wc -l"
+expect_stdout = "^0$"

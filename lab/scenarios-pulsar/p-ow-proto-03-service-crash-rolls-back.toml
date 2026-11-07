@@ -1,0 +1,27 @@
+# PORT of ow-proto-03-service-crash-rolls-back. Changed: lab-r1 -> pulsar, r1_wan_ip -> p_wan_ip, regression list -> pulsar's default list (pulsar checks come from the local config); no other change.
+name = "p-ow-proto-03-service-crash-rolls-back"
+description = "uhttpd main.home=/nonexistent was selected because pulsar procd keeps uhttpd/instance1 present with running=false after the invalid directory makes uhttpd exit 1, while ping, DNS and DHCP remain healthy. The health check must catch that otherwise invisible service crash and rollback must restore uhttpd."
+target = "pulsar"
+reset = ["pulsar"]
+setup = ["portfwd_on"]
+expect = "rolled_back"
+timeout = 60
+regression = "default"
+approval = true
+batch = '''
+set uhttpd.main.home='/nonexistent'
+'''
+
+[[post]]
+device = "pulsar"
+cmd = '''
+ubus call service list '{"name":"uhttpd"}' | jsonfilter -e '@.uhttpd.instances.instance1.running' | grep -qx true && echo 'uhttpd instance1 running after rollback'
+'''
+expect_stdout = '^uhttpd instance1 running after rollback$'
+
+[[post]]
+device = "pulsar"
+cmd = '''
+[ "$(uci -q get uhttpd.main.home)" = /www ] && echo 'uhttpd home restored to /www'
+'''
+expect_stdout = '^uhttpd home restored to /www$'

@@ -1,0 +1,13 @@
+name = "03-mgmt-firewall-drop"
+description = "Drop INPUT on lab-r1 zone 0; expect automatic rollback."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "rolled_back"
+timeout = 60
+approval = true
+batch = "set firewall.@zone[0].input='DROP'"
+
+[[post]]
+device = "lab-r1"
+cmd = "uci get firewall.@zone[0].input"
+expect_stdout = "^ACCEPT$"

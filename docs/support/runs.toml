@@ -1,0 +1,89 @@
+# One [[run]] per recorded lab run, appended by `scripts/support-table.py record`. Names and counts only.
+
+[[run]]
+platform = "openwrt"
+version = "25.12.5"
+target = "Asus RT-AX57M"
+kind = "hardware"
+date = "2026-10-23"
+results_sha256 = "74db56953542e5197336717a3f5e831a61b12bdca5a84bcb55ef1a0fef36e0bf"
+access = "installed"
+scenarios_passed = 97
+scenarios_failed = 0
+shapes_passed = ["p-01-static-lease", "p-02-mgmt-ip-lockout", "p-03-mgmt-firewall-drop", "p-04-commit-smuggling", "p-05-bad-syntax", "p-06-port-forward-from-isp", "p-07-wan-down-isolation"]
+shapes_failed = []
+
+[[run]]
+platform = "openwrt"
+version = "25.12.5"
+target = "virtual image (x86/64)"
+kind = "virtual"
+date = "2026-10-24"
+results_sha256 = "98d1232025c0433946eb455d8757860b5aa283ed64c68ef88e127a82a57ff059"
+access = "installed"
+scenarios_passed = 7
+scenarios_failed = 0
+shapes_passed = ["01-static-lease", "02-mgmt-ip-lockout", "03-mgmt-firewall-drop", "04-commit-smuggling", "05-bad-syntax", "06-port-forward-from-isp", "07-wan-down-isolation"]
+shapes_failed = []
+
+[[run]]
+platform = "vyos"
+version = "2026.10.01"
+target = "virtual image"
+kind = "virtual"
+date = "2026-10-25"
+results_sha256 = "f61320189c1a12ea9544a753a44664cbe1e411eda82f06105a06844c76c3e81d"
+scenarios_passed = 8
+scenarios_failed = 0
+shapes_passed = ["01-harmless", "02-mgmt-ip", "03-input-drop", "04-injection", "05-bad-syntax", "06-service-reachable", "07-uplink-down"]
+shapes_failed = []
+
+[[run]]
+platform = "routeros"
+version = "7.24.5"
+target = "virtual image"
+kind = "virtual"
+date = "2026-10-25"
+results_sha256 = "5688fd89343d0fb65b733c5712ba44ce3b2bbb15e63ee9067a94b74866c9b3fe"
+scenarios_passed = 8
+scenarios_failed = 0
+shapes_passed = ["01-harmless", "02-mgmt-ip", "03-input-drop", "04-injection", "05-bad-syntax", "06-service-reachable", "07-uplink-down"]
+shapes_failed = []
+
+[[run]]
+platform = "junos"
+version = "26.2R1.7"
+target = "virtual image"
+kind = "virtual"
+date = "2026-10-25"
+results_sha256 = "6f281b9522ceca83f1c7ddef7b6705d148a3ae6f281e901592ce507007000730"
+scenarios_passed = 8
+scenarios_failed = 0
+shapes_passed = ["01-harmless", "02-mgmt-ip", "03-input-drop", "04-injection", "05-bad-syntax", "06-service-reachable", "07-uplink-down"]
+shapes_failed = []
+
+[[run]]
+platform = "openwrt"
+version = "25.12.5"
+target = "Asus RT-AX57M"
+kind = "hardware"
+date = "2026-11-02"
+results_sha256 = "3084f98bdb420a013abe7bcb5a581d2827f7e9010787663ba0e5f1f9720a34f7"
+access = "no-install"
+scenarios_passed = 6
+scenarios_failed = 1
+shapes_passed = ["n-01-static-lease", "n-02-mgmt-ip-lockout", "n-03-mgmt-firewall-drop", "n-04-commit-smuggling", "n-05-bad-syntax", "n-06-port-forward-from-isp"]
+shapes_failed = ["n-07-wan-down-isolation"]
+
+[[run]]
+platform = "openwrt"
+version = "25.12.5"
+target = "Asus RT-AX57M"
+kind = "hardware"
+date = "2026-11-02"
+results_sha256 = "116dfdc41e659f89df7fb4464f9ef1498f53efaf83734ed3171c4db3043c5313"
+access = "no-install"
+scenarios_passed = 7
+scenarios_failed = 0
+shapes_passed = ["n-01-static-lease", "n-02-mgmt-ip-lockout", "n-03-mgmt-firewall-drop", "n-04-commit-smuggling", "n-05-bad-syntax", "n-06-port-forward-from-isp", "n-07-wan-down-isolation"]
+shapes_failed = []

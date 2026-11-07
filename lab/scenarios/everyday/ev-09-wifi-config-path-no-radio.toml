@@ -1,0 +1,56 @@
+name = "ev-09-wifi-config-path-no-radio"
+description = "No radio: config path only, not a Wi-Fi pass. lab-r1 is a Proxmox VM with no wireless hardware and no /etc/config/wireless, so a batch that adds a wifi-iface (ssid newton-ev-test, psk2, made-up key EvMadeUpKey-7f3a91c2) cannot be staged: first live run, Newton's plan is rejected at staging with 'uci batch rejected the changes ... Entry not found' and nothing is applied. This scenario records that and asserts two things: the made-up key never shows up in Newton's output that the runner can reach (the router's syslog and the runner's audit.log; the plan and apply output are scanned by the dispatcher from the results file), and the router ends in the state it started in (no ev_test in uci show wireless or uci changes). The recorder post lands `ls /etc/config/wireless` and `wifi status` in the run record. No approval: a wireless change is not a firewall change."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "rejected"
+reject_match = "uci batch rejected the changes"
+timeout = 60
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "client_internet", "client_dns", "client_dhcp"]
+batch = """set wireless.ev_test=wifi-iface
+set wireless.ev_test.device='radio0'
+set wireless.ev_test.mode='ap'
+set wireless.ev_test.network='lab'
+set wireless.ev_test.ssid='newton-ev-test'
+set wireless.ev_test.encryption='psk2'
+set wireless.ev_test.key='EvMadeUpKey-7f3a91c2'"""
+
+# Recorder: what /etc/config/wireless looks like and the first lines of `wifi status` on
+# lab-r1 after the apply. No expect fields; rc 0 (the trailing true keeps it that way
+# even when wifi status itself exits non-zero), stdout lands in rec["post"][i]["stdout"].
+[[post]]
+device = "lab-r1"
+cmd = "ls /etc/config/wireless 2>&1; wifi status 2>&1 | head -5; true"
+
+# Raw key must not appear unmasked in lab-r1's syslog (logread).
+[[post]]
+device = "lab-r1"
+cmd = '''
+n=$(logread | grep -c EvMadeUpKey-7f3a91c2)
+echo "logread matches for the made-up key: $n"
+[ "$n" = 0 ]
+'''
+expect_stdout = '^logread matches for the made-up key: 0$'
+
+# Raw key must not appear unmasked in the runner's audit log (the script's DIFF lines,
+# OPERATOR and APPLIED/CONFIRMED/ROLLBACK records) -- this is the only file a [[post]] on
+# "local" can grep; in-memory plan_log/apply_log are in rec only.
+[[post]]
+device = "local"
+cmd = '''
+[ -s "$OWRT_AUDIT_LOG" ] || { echo "audit.log is missing or empty: the check would prove nothing"; exit 1; }
+n=$(grep -F -c "EvMadeUpKey-7f3a91c2" "$OWRT_AUDIT_LOG")
+echo "audit.log matches for the made-up key: $n"
+[ "$n" = 0 ]
+'''
+expect_stdout = '^audit\.log matches for the made-up key: 0$'
+
+# Router state matches start: no ev_test in uci show wireless and none in uci changes.
+[[post]]
+device = "lab-r1"
+cmd = '''
+n=$(uci -q show wireless | grep -c ev_test)
+c=$(uci changes wireless | grep -c ev_test)
+echo "ev_test in uci show wireless: $n; in uci changes: $c"
+[ "$n" = 0 ] && [ "$c" = 0 ]
+'''
+expect_stdout = '^ev_test in uci show wireless: 0; in uci changes: 0$'

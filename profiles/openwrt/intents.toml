@@ -1,0 +1,156 @@
+# OpenWrt intent -> control mapping.
+#
+# Newton writes short explanations for every intent; ledger ids and
+# doc links live here too. The vendor-neutral intent id is the key
+# returned by guided.recommend(); this file is the only place the
+# mapping to an OpenWrt control id, tier selector and form selector
+# lives -- when the maintainer turns a control on or off, this is the file to edit.
+#
+# Keys of an [[intent]] entry, in this order:
+#   id            vendor-neutral intent id, e.g. INT-WIFI-WPA2-COMPAT
+#   explanation   Newton-written short description (a single sentence).
+#   doc           source-of-truth doc file the intent was paraphrased
+#                 from, or "" when the intent is audit-only.
+#                 Default: "profiles/openwrt/manifest.toml"
+#   ledger        ledger id for the explanation, or "" everywhere today.
+#   audit         audit getter ids the intent runs against the live device.
+#   control_id    OW-* control id this intent maps to on OpenWrt,
+#                 absent when the intent is audit-only.
+#   tier          manifest tier (standard | hardened | lockdown | opt-in)
+#                 selecting between same-id entries, absent for
+#                 audit-only intents.
+#   form_of       alternative-form selector for ids that share their base;
+#                 "" when the chosen entry is the base.
+#
+# Every key is a string except ``audit``, which is a list of strings
+# made of AUDIT_ITEMS ids ("listeners", "services", "port_forwards",
+# "upnp", "wifi", "dhcp"). Audit lists for mapped intents follow the
+# guided.py table; audit-only intents use the curated lists in this
+# file ("port_forwards", "upnp" for INT-INBOUND-NONE; "listeners",
+# "services" for INT-MGMT-NO-TELNET).
+#
+# Intent ids not listed here are returned by recommend() with guidance
+# "none" and explanation "no guidance for openwrt yet"; they never map
+# to a control id.
+[[intent]]
+id = 'INT-WIFI-WPA2-COMPAT'
+explanation = 'Keep WPA2 compatibility on so older devices can join the Wi-Fi.'
+doc = 'profiles/openwrt/manifest.toml'
+ledger = ''
+audit = ['wifi']
+control_id = 'OW-WIFI-02'
+tier = 'standard'
+form_of = ''
+
+[[intent]]
+id = 'INT-WIFI-WPA3-ONLY'
+explanation = 'Run Wi-Fi in WPA3-only mode; older Wi-Fi devices cannot join.'
+doc = 'profiles/openwrt/manifest.toml'
+ledger = ''
+audit = ['wifi']
+control_id = 'OW-WIFI-01'
+tier = 'hardened'
+form_of = ''
+
+[[intent]]
+id = 'INT-SEG-GUEST'
+explanation = 'Add a guest zone that cannot reach the main LAN.'
+doc = 'profiles/openwrt/manifest.toml'
+ledger = ''
+audit = ['port_forwards']
+control_id = 'OW-ZONE-01'
+tier = 'opt-in'
+form_of = ''
+
+[[intent]]
+id = 'INT-SEG-IOT'
+explanation = 'Add an isolated IoT zone; casting and discovery may need extra rules.'
+doc = 'profiles/openwrt/manifest.toml'
+ledger = ''
+audit = ['port_forwards']
+control_id = 'OW-ZONE-02'
+tier = 'hardened'
+form_of = ''
+
+[[intent]]
+id = 'INT-UPNP-ON'
+explanation = 'Enable the opt-in UPnP/NAT-PMP form so consoles can open ports on demand.'
+doc = 'profiles/openwrt/manifest.toml'
+ledger = ''
+audit = ['upnp']
+control_id = 'OW-FW-06'
+tier = 'opt-in'
+form_of = 'standard'
+
+[[intent]]
+id = 'INT-UPNP-OFF'
+explanation = 'Keep UPnP off; the miniupnpd-nftables package may still need removing.'
+doc = 'profiles/openwrt/manifest.toml'
+ledger = ''
+audit = ['upnp']
+control_id = 'OW-FW-06'
+tier = 'standard'
+form_of = ''
+
+[[intent]]
+id = 'INT-SSH-KEYS-ONLY'
+explanation = 'Disable SSH password login after a key login is proven.'
+doc = 'profiles/openwrt/manifest.toml'
+ledger = ''
+audit = ['listeners']
+control_id = 'OW-MGMT-04'
+tier = 'opt-in'
+form_of = ''
+
+[[intent]]
+id = 'INT-DNS-DNSSEC'
+explanation = 'Enable DNSSEC validation; needs dnsmasq-full and a correct clock.'
+doc = 'profiles/openwrt/manifest.toml'
+ledger = ''
+audit = []
+control_id = 'OW-DNS-04'
+tier = 'opt-in'
+form_of = ''
+
+[[intent]]
+id = 'INT-DNS-ENCRYPTED'
+explanation = 'Send upstream DNS over an encrypted channel; captive-portal risk is real.'
+doc = 'profiles/openwrt/manifest.toml'
+ledger = ''
+audit = []
+control_id = 'OW-DNS-05'
+tier = 'opt-in'
+form_of = ''
+
+[[intent]]
+id = 'INT-V6-OFF'
+explanation = 'Disable IPv6 across the router.'
+doc = 'profiles/openwrt/manifest.toml'
+ledger = ''
+audit = []
+control_id = 'OW-V6-03'
+tier = 'opt-in'
+form_of = ''
+
+[[intent]]
+id = 'INT-FW-UPDATE-CHECK'
+explanation = 'Add a read-only firmware-update availability check.'
+doc = 'profiles/openwrt/manifest.toml'
+ledger = ''
+audit = []
+control_id = 'OW-UPD-02'
+tier = 'opt-in'
+
+[[intent]]
+id = 'INT-INBOUND-NONE'
+explanation = 'No inbound services; audit port_forwards and upnp so nothing leaks in.'
+doc = ''
+ledger = ''
+audit = ['port_forwards', 'upnp']
+
+[[intent]]
+id = 'INT-MGMT-NO-TELNET'
+explanation = 'telnet absent from admin_access; audit listeners and services for plain-text admin ports.'
+doc = ''
+ledger = ''
+audit = ['listeners', 'services']

@@ -1,0 +1,41 @@
+platform = "eos"
+
+[[getter]]
+id = "version"
+command = "show version"
+why = "Shows the EOS software image version and hardware model."
+expect = ["Software image version: *"]
+enabled = true
+verified = "unverified"
+source = "https://www.arista.com/en/um-eos"
+error_markers = ["% Incomplete command", "% Ambiguous command", "% Authorization denied", "% Unavailable command"]
+
+[[getter]]
+id = "interfaces"
+command = "show ip interface brief"
+why = "Lists interfaces with IP address and status in one table."
+expect = ["Interface IP Address Status Protocol"]
+enabled = true
+verified = "unverified"
+source = "https://www.arista.com/en/um-eos"
+error_markers = ["% Incomplete command", "% Ambiguous command", "% Authorization denied", "% Unavailable command"]
+
+[[getter]]
+id = "routes"
+command = "show ip route"
+why = "Shows the IPv4 routing table with the gateway of last resort."
+expect = ["Codes: * - *", "Gateway of last resort"]
+enabled = true
+verified = "unverified"
+source = "https://www.arista.com/en/um-eos"
+error_markers = ["% Incomplete command", "% Ambiguous command", "% Authorization denied", "% Unavailable command"]
+
+[[getter]]
+id = "running_config"
+command = "show running-config sanitized"
+why = "Shows the running configuration with secrets removed (disabled until a lab proves it)."
+expect = ["! Command: show running-config"]
+enabled = false
+verified = "unverified"
+source = "https://www.arista.com/en/um-eos"
+error_markers = ["% Incomplete command", "% Ambiguous command", "% Authorization denied", "% Unavailable command"]

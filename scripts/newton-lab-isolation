@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+# Check that no lab device leaks DHCP server replies or IPv6 router adverts onto a house-LAN interface.
+# Run it as: sudo scripts/newton-lab-isolation --iface eth0 --allow-mac aa:bb:cc:dd:ee:ff --seconds 300
+# PASS: a line "PASS no foreign DHCP server or router advert on <iface> in <N> s (<n> packets from allowed sources)".
+# FAIL: one "FAIL foreign[<mac>]: <kind> x<n> not in allow list" line per offending source, then a final FAIL line and exit 1.
+# Blind spots: an RA behind IPv6 extension headers is not matched (ip6[40]); the allow list is by source MAC,
+# so a device that spoofs an allowed MAC passes; only Ethernet interfaces work.
+set -uo pipefail
+
+MAC_RE='^([0-9a-f]{2}:){5}[0-9a-f]{2}$'
+LINE_RE='^[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+ +(([0-9a-f]{2}:){5}[0-9a-f]{2}) >'
+FILTER='(udp src port 67) or (udp src port 547) or (icmp6 and ip6[40] == 134) or (vlan and ((udp src port 67) or (udp src port 547) or (icmp6 and ip6[40] == 134)))'
+IFACE=''
+DURATION=120
+FROM_FILE=''
+CAPTURE_DIR=''
+FAILURES=0
+ALLOWED_TOTAL=0
+FOREIGN_TOTAL=0
+declare -A ALLOWED=()
+declare -A SEEN=()
+ORDER=()
+UNREADABLE=0
+FIRST_UNREADABLE=''
+EARLY=0
+WINDOW=0
+
+cleanup() {
+	if [[ -n $CAPTURE_DIR ]]; then
+		rm -rf -- "$CAPTURE_DIR"
+	fi
+}
+trap cleanup EXIT
+
+usage_line() {
+	printf 'usage: %s --iface <name> --allow-mac <mac> [--allow-mac <mac>...] [--seconds N] [--from-file <pcap-text>]\n' "${0##*/}"
+}
+
+usage() {
+	usage_line >&2
+	exit 2
+}
+
+help() {
+	usage_line
+	printf '  --iface <name>    interface to capture on; must be an Ethernet interface (not any, tun, wg)\n'
+	printf '  --allow-mac <mac> every MAC that is meant to serve DHCP or send router adverts on this LAN (the house router); never a lab router'"'"'s MAC; may be given multiple times\n'
+	printf '  --seconds N       capture window in seconds (default 120, range 10-3600)\n'
+	printf '  --from-file <pcap-text>    parse a saved tcpdump text capture instead of capturing\n'
+	printf 'example: sudo scripts/newton-lab-isolation --iface eth0 --allow-mac aa:bb:cc:dd:ee:ff --seconds 300\n'
+	printf 'exit codes: 0 PASS, 1 FAIL, 2 bad arguments, tcpdump missing or failed, capture ended early\n'
+	exit 0
+}
+
+unknown_option() {
+	printf 'ERROR: unknown option: %s\n' "$1" >&2
+	usage_line >&2
+	exit 2
+}
+
+while (( $# )); do
+	case $1 in
+	-h|--help)
+		help
+		;;
+	--iface)
+		(( $# >= 2 )) || usage
+		[[ $2 =~ ^[A-Za-z0-9._-]{1,15}$ ]] || {
+			printf 'ERROR: invalid interface name: %s\n' "$2" >&2
+			exit 2
+		}
+		IFACE=$2
+		shift 2
+		;;
+	--allow-mac)
+		(( $# >= 2 )) || usage
+		mac=${2,,}
+		[[ $mac =~ $MAC_RE ]] || {
+			printf 'ERROR: invalid MAC (expected lower-cased aa:bb:cc:dd:ee:ff): %s\n' "$2" >&2
+			exit 2
+		}
+		ALLOWED[$mac]=1
+		shift 2
+		;;
+	--seconds)
+		(( $# >= 2 )) || usage
+		[[ $2 =~ ^[0-9]{1,4}$ ]] || {
+			printf 'ERROR: --seconds must be a number: %s\n' "$2" >&2
+			exit 2
+		}
+		DURATION=$((10#$2))
+		(( DURATION >= 10 && DURATION <= 3600 )) || {
+			printf 'ERROR: --seconds must be between 10 and 3600: %s\n' "$2" >&2
+			exit 2
+		}
+		shift 2
+		;;
+	--from-file)
+		(( $# >= 2 )) || usage
+		FROM_FILE=$2
+		shift 2
+		;;
+	*) unknown_option "$1" ;;
+	esac
+done
+
+[[ -n $IFACE ]] || usage
+(( ${#ALLOWED[@]} )) || usage
+
+pass() {
+	printf 'PASS %s\n' "$1"
+}
+
+fail() {
+	printf 'FAIL %s: %s\n' "$1" "$2"
+	FAILURES=$((FAILURES + 1))
+}
+
+note() {
+	local key="$1 $2"
+	[[ -n ${SEEN[$key]:-} ]] || ORDER+=("$key")
+	SEEN[$key]=$(( ${SEEN[$key]:-0} + 1 ))
+}
+
+parse_lines() {
+	local line mac
+	while IFS= read -r line || [[ -n $line ]]; do
+		if [[ -z ${line//[[:space:]]/} || $line =~ ^(tcpdump: |listening on |reading from file |dropped privs to |[0-9]+\ packets?\ (captured|received\ by\ filter|dropped\ by\ kernel)) ]]; then
+			continue
+		fi
+		if [[ $line =~ $LINE_RE ]]; then
+			mac=${BASH_REMATCH[1]}
+			if [[ $line == *'router advertisement'* ]]; then
+				note "$mac" router-advert
+				continue
+			elif [[ $line == *'.67 > '* ]]; then
+				note "$mac" dhcp-server
+				continue
+			elif [[ $line == *'.547 > '* ]]; then
+				note "$mac" dhcpv6-server
+				continue
+			fi
+		fi
+		note unknown unreadable
+		UNREADABLE=$((UNREADABLE + 1))
+		[[ -n $FIRST_UNREADABLE ]] || FIRST_UNREADABLE=${line:0:200}
+	done
+}
+
+report() {
+	local key mac kind count
+	for key in "${ORDER[@]}"; do
+		mac=${key%% *}
+		kind=${key##* }
+		count=${SEEN[$key]}
+		if [[ -n ${ALLOWED[$mac]:-} ]]; then
+			printf 'INFO %s %s x%d (allowed)\n' "$mac" "$kind" "$count"
+			ALLOWED_TOTAL=$((ALLOWED_TOTAL + count))
+		else
+			fail "foreign[$mac]" "$kind x$count not in allow list"
+			FOREIGN_TOTAL=$((FOREIGN_TOTAL + count))
+		fi
+	done
+}
+
+if [[ -n $FROM_FILE ]]; then
+	[[ -r $FROM_FILE ]] || {
+		printf 'ERROR: cannot read capture file: %s\n' "$FROM_FILE" >&2
+		exit 2
+	}
+	WINDOW=$DURATION
+	parse_lines <"$FROM_FILE"
+else
+	[[ $(id -u) == 0 ]] || {
+		printf 'ERROR: packet capture needs root; re-run with sudo, or pass --from-file <pcap-text>\n' >&2
+		exit 2
+	}
+	command -v tcpdump >/dev/null 2>&1 || {
+		printf 'ERROR: tcpdump not found in PATH\n' >&2
+		exit 2
+	}
+	CAPTURE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/newton-lab-isolation.XXXXXXXXXX") || {
+		printf 'ERROR: cannot create a temporary directory\n' >&2
+		exit 2
+	}
+	start=$SECONDS
+	timeout "$DURATION" tcpdump -n -e -l -i "$IFACE" -c 10000 "$FILTER" \
+		>"$CAPTURE_DIR/tcpdump.out" 2>"$CAPTURE_DIR/tcpdump.err"
+	status=$?
+	case $status in
+	124)
+		WINDOW=$DURATION
+		;;
+	0)
+		WINDOW=$((SECONDS - start))
+		EARLY=1
+		;;
+	*)
+		cat -- "$CAPTURE_DIR/tcpdump.err" >&2
+		printf 'ERROR: tcpdump failed with status %d; no PASS is reported\n' "$status" >&2
+		exit 2
+		;;
+	esac
+	parse_lines <"$CAPTURE_DIR/tcpdump.out"
+fi
+
+packets() {
+	if (( $1 == 1 )); then
+		printf '1 packet'
+	else
+		printf '%d packets' "$1"
+	fi
+}
+
+report
+
+if (( UNREADABLE > 0 )); then
+	if (( UNREADABLE == 1 )); then
+		nlines='1 line'
+	else
+		nlines="$UNREADABLE lines"
+	fi
+	fail unreadable "$nlines could not be attributed to a source MAC (is --iface an Ethernet interface? any, tun and wg cannot be checked); first: $FIRST_UNREADABLE"
+fi
+
+if (( FAILURES )); then
+	printf 'FAIL foreign DHCP server or router advert on %s in %s s (%s from foreign sources)\n' \
+		"$IFACE" "$WINDOW" "$(packets "$FOREIGN_TOTAL")"
+	exit 1
+fi
+
+if (( EARLY )); then
+	printf 'ERROR: tcpdump stopped after %d s of the %d s window (the 10000-packet cap was reached or tcpdump was interrupted); the window was not fully observed, so no PASS is reported\n' \
+		"$WINDOW" "$DURATION" >&2
+	exit 2
+fi
+
+pass "no foreign DHCP server or router advert on $IFACE in $WINDOW s ($(packets "$ALLOWED_TOTAL") from allowed sources)"
+
+if (( ALLOWED_TOTAL == 0 )); then
+	printf 'NOTE: no DHCP or router advert packet was seen, not even from an allowed source; if the house router normally sends router adverts, check that --iface is the house-LAN interface\n' >&2
+fi

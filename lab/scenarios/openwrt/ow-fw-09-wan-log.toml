@@ -1,0 +1,57 @@
+name = "ow-fw-09-wan-log"
+description = "OW-FW-09: the wan zone (found by name) gets log='1' and log_limit='10/minute'. Effects: (1) a local probe has lab-isp connect to a closed tcp port on the router's WAN address, a random port in 40000 to 59999 so that no older line or other traffic can match, and then reads lab-r1's logread for a line 'reject wan in: ... SRC=10.100.0.1 DST=<wan ip> ... DPT=<that port>' (the prefix is 'reject wan in:' with the stock REJECT policy; it is 'drop wan in:' only together with OW-FW-01); up to 3 attempts, 2 s apart, well inside the 10 per minute limit. Nothing is logged before. (2) The live ruleset has the named limit object wan.log_limit at rate 10/minute and the log rule in reject_from_wan. (3) The limit is enforced: 15 refused connects in a row to one random closed port produce between 1 and 9 log lines (burst 5, then one per 6 s), not 15. The default regression includes the port forward and must still pass."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+probes = [["nft-rule", "inet", "fw4", "reject_from_wan", "present", "log prefix \"reject wan in: \""]]
+batch = '''
+set firewall.{fw_wan_zone}.log='1'
+set firewall.{fw_wan_zone}.log_limit='10/minute'
+'''
+
+[[effect]]
+device = "local"
+timeout = 90
+cmd = '''
+sshx() { h=$1; shift; timeout 40 ssh -i "$LAB_SSH_KEY" -o BatchMode=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" "$h" "$@"; }
+P=$(( 40000 + RANDOM % 20000 ))
+l=""
+for i in 1 2 3; do
+  sshx root@10.109.0.10 "nc {r1_wan_ip} $P </dev/null >/dev/null 2>&1; true"
+  sleep 2
+  l=$(sshx root@10.109.0.11 "logread | grep 'reject wan in: .*DPT=$P ' | head -1")
+  [ -n "$l" ] && break
+done
+[ -n "$l" ] && echo "firewall log: $(echo "$l" | sed 's/.*\(reject wan in: \).*\(SRC=[0-9.]*\) .*\(DST=[0-9.]*\) .*\(DPT=[0-9]*\) .*/\1\2 \3 \4/')"
+'''
+expect_stdout = '^firewall log: reject wan in: SRC=10\.100\.0\.1 DST=10\.100\.0\.\d+ DPT=\d+$'
+
+[[effect]]
+device = "lab-r1"
+cmd = '''
+nft list chain inet fw4 reject_from_wan | grep -q 'log prefix "reject wan in: "' && nft list ruleset | grep -A3 'limit wan.log_limit' | grep -q 'rate 10/minute' && echo "reject_from_wan logs with prefix 'reject wan in: ', limit wan.log_limit is 10/minute"
+'''
+expect_stdout = '^reject_from_wan logs with prefix .reject wan in: ., limit wan\.log_limit is 10/minute$'
+
+[[effect]]
+device = "local"
+timeout = 90
+cmd = '''
+sshx() { h=$1; shift; timeout 40 ssh -i "$LAB_SSH_KEY" -o BatchMode=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" "$h" "$@"; }
+P=$(( 40000 + RANDOM % 20000 ))
+sshx root@10.109.0.10 'sh -s' "$P" <<'EOS'
+i=0; while [ $i -lt 15 ]; do nc {r1_wan_ip} $1 </dev/null >/dev/null 2>&1; i=$((i+1)); done
+EOS
+sleep 2
+n=$(sshx root@10.109.0.11 "logread | grep -c 'reject wan in: .*DPT=$P '")
+echo "15 refused connects in a row were logged as $n lines (limit 10/minute, burst 5)"
+[ "$n" -ge 1 ] && [ "$n" -le 9 ]
+'''
+expect_stdout = '^15 refused connects in a row were logged as [1-9] lines '
+
+[[post]]
+device = "lab-r1"
+cmd = "echo \"log=$(uci -q get firewall.{fw_wan_zone}.log) log_limit=$(uci -q get firewall.{fw_wan_zone}.log_limit)\""
+expect_stdout = '^log=1 log_limit=10/minute$'

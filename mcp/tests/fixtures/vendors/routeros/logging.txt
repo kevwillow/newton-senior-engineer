@@ -1,0 +1,4 @@
+# synthetic
+ 0  action=memory     prefix=""              topics=system,info
+ 1  action=print      prefix=""              topics=critical
+ 2  action=disk       prefix="router"        topics=firewall

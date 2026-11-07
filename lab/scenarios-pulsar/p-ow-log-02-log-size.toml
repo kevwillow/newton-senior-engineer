@@ -1,0 +1,40 @@
+# PORT of ow-log-02. Changed: lab-r1 -> pulsar, r1_wan_ip -> p_wan_ip, regression -> pulsar's default list. 
+name = "p-ow-log-02-log-size"
+description = "OW-LOG-02 in the catalogue form: system.@system[0].log_size='512' (stock pulsar has '128'; log_buffer_size is unset, so the init script's fallback applies: logd gets -S <log_size>). The log init script restarts logd with the new size (new pid; the ring is emptied by the restart). The check reads logd's arguments from /proc, so Newton rolls the change back if logd did not restart with the new size. Effects: (1) the running logd has the arguments -S 512 (before: -S 128); (2) the ring really is larger: a probe writes 2000 numbered lines of about 100 characters through logger (about 300 KB) and reads them back with logread; a 128 KB ring keeps only about 900 of them (hand run: 909 of 4000 lines, 135441 bytes), a 512 KB ring keeps all of them, so the effect requires the first and the last line and at least 1950 lines. Post: the uci options. Side effect of the restart, measured by hand and asserted by ow-log-02c: dnsmasq stops logging after logd restarts. See ow-log-02b for log_buffer_size, the option the 25.12 init prefers."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on"]
+regression = "default"
+probes = [["proc-args", "logd", "-S 512"]]
+batch = '''
+set system.@system[0].log_size='512'
+'''
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+for p in $(pidof logd); do c=$(tr '\0' ' ' < /proc/$p/cmdline); echo "logd command: $c"; done
+c=" $(tr '\0' ' ' < /proc/$(pidof logd | cut -d' ' -f1)/cmdline)"
+case "$c" in " /sbin/logd -S 512 "*) exit 0;; esac
+exit 1'''
+expect_stdout = '^logd command: /sbin/logd -S 512 $'
+
+[[effect]]
+device = "pulsar"
+timeout = 90
+cmd = '''
+run=$RANDOM$RANDOM
+i=1; while [ $i -le 2000 ]; do echo "newton-fill $run $i xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; i=$((i+1)); done | logger -t newton-fill
+sleep 2
+n=$(logread | grep -c "newton-fill: newton-fill $run ")
+f=$(logread | grep -c "newton-fill: newton-fill $run 1 ")
+l=$(logread | grep -c "newton-fill: newton-fill $run 2000 ")
+echo "ring buffer kept $n of 2000 lines, first line kept=$f, last line kept=$l"
+[ "$n" -ge 1950 ] && [ "$f" = 1 ] && [ "$l" = 1 ]'''
+expect_stdout = '^ring buffer kept (19[5-9][0-9]|2000) of 2000 lines, first line kept=1, last line kept=1$'
+
+[[post]]
+device = "pulsar"
+cmd = "echo \"log_size=$(uci -q get system.@system[0].log_size) log_buffer_size=$(uci -q get system.@system[0].log_buffer_size)\""
+expect_stdout = '^log_size=512 log_buffer_size=$'

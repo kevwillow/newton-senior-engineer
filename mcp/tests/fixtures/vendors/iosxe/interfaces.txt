@@ -1,0 +1,8 @@
+# synthetic
+Interface              IP-Address      OK? Method Status                Protocol
+GigabitEthernet1         198.51.100.10   YES unset up                    up
+GigabitEthernet2         198.51.100.11   YES unset up                    up
+GigabitEthernet3         unassigned      YES unset down                  down
+Loopback0                192.0.2.10      YES unset up                    up
+Loopback1                203.0.113.10    YES unset up                    up
+Vlan100                  198.51.100.100  YES unset up                    up

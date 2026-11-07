@@ -1,0 +1,78 @@
+# PORT of ow-ntp-01. Changed: lab-r1 -> pulsar, lab-client -> local (the agent host is the LAN client), 192.168.150.1 -> 192.168.1.1, regression -> pulsar's default list. interface 'lab' -> 'lan'; ntpd -I eth3 -> br-lan; the 'no reply on the mgmt address' post is dropped (one LAN); sntp steps run on the agent host; one WAN only.
+name = "p-ow-ntp-01-local-server"
+description = "OW-NTP-01: local NTP service for the client LAN. Batch: system.ntp.use_dhcp='0', enable_server='1', interface='lab' (the client LAN interface; on a stock router it is 'lan'; sysntpd turns it into the device with network_get_device and passes -I <device>), and the server list replaced by time.cloudflare.com, time.google.com and pool.ntp.org (enabled='1' is already the stock value). Live state: sysntpd restarts busybox ntpd with -l -I eth3 and the three -p peers (the stock command line has the four openwrt.org pool peers and no -l). The check reads the running ntpd's arguments (/proc/<pid>/cmdline), so Newton rolls the change back if the service did not pick it up. Effects: (1) the ntpd command line carries -l, -I with the device of interface lab, the three new peers and none of the old ones, and ntpd holds a udp :123 listener; (2) from lab-client an SNTP query (python3, read-only, never sets a clock) to 192.168.1.1:123 gets a server reply (mode 4, our transmit timestamp echoed); before the change nothing answers. Posts: the uci options; the router's management address 192.168.1.1:123 does NOT answer an SNTP query from lab-client's management NIC (ntpd is bound to the client LAN device, so the interface option is what keeps the service off every other interface, firewall aside; hand run: without interface it answers there); the served time is synchronized (stratum 1 to 15, leap indicator not 3) and within 2 s of lab-client's clock, polled for up to 40 s because ntpd restarts at the apply (a router synchronized to a wrong source would be hours off); lab-isp asks both WAN addresses with busybox ntpd in -w mode (query only, never sets the clock) and gets no reply. That post shows the symptom (nobody on the WAN segment can get time from the router), not which layer stops it: with ntpd bound to eth3 the WAN cannot be answered even if udp 123 were opened in input_wan, so it cannot detect a firewall opening; the management address post is the isolation proof for the interface option. Hand run: with the interface option removed and udp 123 opened in input_wan the WAN address answers (4 queries, 4 replies). No clock is stepped by any probe: the only ntpd instances are the router's own service and the read-only -w queries."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on", "sntp_on"]
+cleanup = ["sntp_off"]
+regression = "default"
+probes = [["proc-args", "ntpd", "-l", "-I @dev:lan", "-p time.cloudflare.com", "-p time.google.com", "-p pool.ntp.org", "!~openwrt.pool.ntp.org"]]
+batch = '''
+set system.ntp.use_dhcp='0'
+set system.ntp.enable_server='1'
+set system.ntp.interface='lan'
+delete system.ntp.server
+add_list system.ntp.server='time.cloudflare.com'
+add_list system.ntp.server='time.google.com'
+add_list system.ntp.server='pool.ntp.org'
+'''
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+d=$(ifstatus lan | jsonfilter -e '@.device'); [ -n "$d" ] || { echo "no device for interface lan"; exit 1; }
+for p in $(pidof ntpd); do
+  c=" $(tr '\0' ' ' < /proc/$p/cmdline)"
+  case "$c" in " /usr/sbin/ntpd "*) :;; *) continue;; esac
+  ok=1
+  for t in " -l " " -I $d " " -p time.cloudflare.com " " -p time.google.com " " -p pool.ntp.org "; do
+    case "$c" in *"$t"*) :;; *) ok=0;; esac
+  done
+  case "$c" in *"openwrt.pool.ntp.org"*) ok=0;; esac
+  l=$(netstat -ulpn | grep -c ':123 .*ntpd')
+  echo "ntpd:$c| listener udp :123 lines=$l"
+  [ $ok = 1 ] && [ "$l" -ge 1 ] && exit 0
+  exit 1
+done
+echo "no ntpd process"; exit 1'''
+expect_stdout = '^ntpd: /usr/sbin/ntpd -n -N -l -I br-lan -S /usr/sbin/ntpd-hotplug -p time\.cloudflare\.com -p time\.google\.com -p pool\.ntp\.org \| listener udp :123 lines=[1-9]'
+
+[[effect]]
+device = "local"
+timeout = 30
+cmd = "python3 /tmp/newton-sntp.py 192.168.1.1"
+expect_stdout = '^sntp reply from 192\.168\.1\.1:123 mode=4 stratum=\d+ li=\d originate_echoed=yes offset='
+
+[[post]]
+device = "pulsar"
+cmd = "echo \"use_dhcp=$(uci -q get system.ntp.use_dhcp) enable_server=$(uci -q get system.ntp.enable_server) interface=$(uci -q get system.ntp.interface) servers=$(uci -q get system.ntp.server)\""
+expect_stdout = '^use_dhcp=0 enable_server=1 interface=lan servers=time\.cloudflare\.com time\.google\.com pool\.ntp\.org$'
+
+[[post]]
+device = "local"
+timeout = 90
+cmd = '''
+i=0
+while [ $i -lt 8 ]; do
+  o=$(python3 /tmp/newton-sntp.py 192.168.1.1); echo "$o"
+  case "$o" in *"stratum=16 "*|*"li=3 "*|*"no reply"*) i=$((i+1)); sleep 5;; *) break;; esac
+done
+off=$(echo "$o" | sed -n 's/.* offset=\(-*[0-9.]*\)s$/\1/p')
+ok=$(echo "$off" | awk '{v = ($1 < 0 ? -$1 : $1); print (v < 2 ? "yes" : "no")}')
+echo "clock offset between lab-client and the router's served time: $off seconds, below 2 s: $ok"
+[ "$ok" = yes ] && case "$o" in *"stratum=16 "*|*"li=3 "*|*"no reply"*) exit 1;; *) exit 0;; esac'''
+expect_stdout = 'stratum=([1-9]|1[0-5]) li=[0-2] originate_echoed=yes offset=[-0-9.]+s\nclock offset between lab-client and the router.s served time: -?[0-9.]+ seconds, below 2 s: yes$'
+
+[[post]]
+device = "lab-isp"
+timeout = 60
+cmd = '''
+for ip in {p_wan_ip}; do
+  ntpd -w -d -n -p $ip > /tmp/newton-ntpq.out 2>&1 & p=$!
+  sleep 7; kill $p 2>/dev/null; wait $p 2>/dev/null
+  q=$(grep -c 'sending query' /tmp/newton-ntpq.out); r=$(grep -c 'reply from' /tmp/newton-ntpq.out)
+  echo "$ip: queries=$q replies=$r"
+done
+rm -f /tmp/newton-ntpq.out'''
+expect_stdout = '^10\.100\.0\.\d+: queries=[1-9]\d* replies=0$'

@@ -1,0 +1,104 @@
+# PORT of ev-09, on the real radio and with the real key. lab-r1 is a VM with no wireless hardware and no
+# /etc/config/wireless, so ev-09 could only record that the wireless change path was refused there and that a
+# made-up key never showed up. Pulsar has both radios (disabled in the baseline) and a real client adapter
+# (lab-wifi, VM 9107, the Panda MT7921AU passed through from apollo), so the change is now applied, confirmed and
+# measured: a WPA2-PSK AP on radio1 that a real client associates to, with the assertions ev-09 made carried over
+# and made real - the key itself must not turn up in the router's syslog or in the runner's audit log. The key is
+# the secret var, so it reaches the batch only and never a command line: the two posts grep with
+# `grep -c -F -f FILE` (patterns read from the file) and print the count, never the value.
+name = "p-ev-09-wifi-radio"
+description = "EV-09, ported to a router with a radio. Interface wlan on radio1 (5 GHz, ch36, HE20, country US, txpower 3 dBm), dhcp section wlan, zone wlz (input/output/forward ACCEPT) with forwarding wlz to wan, and wireless.default_radio1 edited to disabled 0, ssid newton-test-ev, network wlan, encryption psk2, with the real key from the secret var (ev-09 used a made-up one on a router that could not stage a wireless change at all, so the change is now applied and confirmed rather than refused). Effects from the Panda on lab-wifi, --bssid pinned to radio1's MAC and the channel pinned to 5180 MHz: the monitor parses that BSSID's beacons and the AKM suite set is exactly {PSK 00-0f-ac:2} with MFPC=0 and MFPR=0 (no protected frames offered on a psk2 network without ieee80211w), at least five beacons; then a WPA2-PSK client reaches wpa_state COMPLETED, takes a 192.168.152.0/24 lease by DHCP and pings 192.168.152.1. The assertions ev-09 made carry over with the real key and are checked without ever printing it: the router's logread (fetched over the runner's restricted key lane) and the runner's audit log ($OWRT_AUDIT_LOG, which carries the staged diff) hold zero matches, each post printing only a count; the grep takes its patterns from the key file with -F -f, never the key as a word, so the value cannot reach a command line. The recorder post shows the router-side config the change left behind (radio1 enabled, on channel 36 HE20, carrying the SSID). The regression is Pulsar's baseline list; approval = true because the batch touches firewall."
+target = "pulsar"
+reset = ["pulsar"]
+reset_after = ["pulsar"]
+after_reset = ["p_radios_off"]
+approval = true
+expect = "confirmed"
+timeout = 240
+setup = ["wifi_script_install", "wifi_key_install", "wifi_prep"]
+cleanup = ["wifi_cleanup"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen", "p_client_on_pulsar"]
+probes = [["iface-field", "wlan", "up", "true"], ["uci-equals", "wireless.default_radio1.disabled", "0"]]
+batch = '''
+set network.wlan=interface
+set network.wlan.proto='static'
+set network.wlan.ipaddr='192.168.152.1'
+set network.wlan.netmask='255.255.255.0'
+set dhcp.wlan=dhcp
+set dhcp.wlan.interface='wlan'
+set dhcp.wlan.start='100'
+set dhcp.wlan.limit='50'
+set dhcp.wlan.leasetime='1h'
+set firewall.wlz=zone
+set firewall.wlz.name='wlz'
+set firewall.wlz.network='wlan'
+set firewall.wlz.input='ACCEPT'
+set firewall.wlz.output='ACCEPT'
+set firewall.wlz.forward='ACCEPT'
+set firewall.wlz_wan=forwarding
+set firewall.wlz_wan.src='wlz'
+set firewall.wlz_wan.dest='wan'
+set wireless.radio1.country='US'
+set wireless.radio1.channel='36'
+set wireless.radio1.htmode='HE20'
+set wireless.radio1.txpower='3'
+set wireless.default_radio1.disabled='0'
+set wireless.default_radio1.network='wlan'
+set wireless.default_radio1.ssid='newton-test-ev'
+set wireless.default_radio1.encryption='psk2'
+set wireless.default_radio1.key='{wifi_psk}'
+'''
+
+[[effect]]
+device = "lab-wifi"
+timeout = 60
+cmd = "sudo /usr/local/bin/newton-wifi.py monitor --freq 5180 --bssid {p_wifi_bssid} --secs 20 --min-beacons 5 --expect-akm 2 --expect-mfpc 0 --expect-mfpr 0"
+expect_stdout = '^monitor: beacons=[1-9][0-9]* ssid=newton-test-ev akm=2 mfpc=0 mfpr=0 wps=0 ciphers=ccmp '
+
+[[effect]]
+device = "lab-wifi"
+timeout = 120
+cmd = "sudo /usr/local/bin/newton-wifi.py client --mode psk --ssid newton-test-ev --bssid {p_wifi_bssid} --freq 5180 --ieee80211w 0 --secs 40"
+expect_stdout = '^client: state=COMPLETED ip=192\.168\.152\.[0-9]{1,3} ping=ok scan_ssid_seen=1$'
+
+# The router-side config the confirmed change left behind (ev-09's recorder post,
+# with a radio that is really on).
+[[post]]
+device = "pulsar"
+timeout = 30
+cmd = '''
+d=$(uci -q get wireless.default_radio1.disabled)
+[ "$d" = 0 ] || { echo "radio1 disabled=$d" >&2; exit 1; }
+s=$(uci -q get wireless.default_radio1.ssid)
+echo "pulsar radio1: disabled=0 ssid=$s channel=$(uci -q get wireless.radio1.channel) htmode=$(uci -q get wireless.radio1.htmode) country=$(uci -q get wireless.radio1.country)"
+[ "$s" = newton-test-ev ]
+'''
+expect_stdout = '^pulsar radio1: disabled=0 ssid=newton-test-ev channel=36 htmode=HE20 country=US$'
+
+# ev-09's assertion with the real key: the router's syslog must not carry it.
+# The log text is fetched over the restricted key lane and grepped here on the
+# runner, with the patterns read from the key file (-F -f), so the key is
+# never an argument and only a count is printed.
+[[post]]
+device = "local"
+timeout = 60
+cmd = '''
+o=$(timeout 40 ssh -i {pulsar_runner_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 'logread')
+n=$(printf '%s\n' "$o" | grep -c -F -f {wifi_psk_file})
+echo "logread matches for the wifi key: $n"
+[ "$n" = 0 ]
+'''
+expect_stdout = '^logread matches for the wifi key: 0$'
+
+# ev-09's other assertion, also with the real key and also only a count: the
+# runner's audit log holds the staged diff, so this is where a key would show.
+[[post]]
+device = "local"
+timeout = 30
+cmd = '''
+[ -s "$OWRT_AUDIT_LOG" ] || { echo "audit.log is missing or empty: the check would prove nothing" >&2; exit 1; }
+n=$(grep -c -F -f {wifi_psk_file} "$OWRT_AUDIT_LOG")
+echo "audit.log matches for the wifi key: $n"
+[ "$n" = 0 ]
+'''
+expect_stdout = '^audit\.log matches for the wifi key: 0$'

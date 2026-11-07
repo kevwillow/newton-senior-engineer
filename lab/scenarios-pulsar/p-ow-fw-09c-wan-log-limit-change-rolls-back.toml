@@ -1,0 +1,36 @@
+# PORT of ow-fw-09c. Changed: lab-r1 -> pulsar, r1_wan_ip -> p_wan_ip, regression -> pulsar's default list. fw_wan_log_on / fw_rate_observer_* are cloned steps.
+name = "p-ow-fw-09c-wan-log-limit-change-rolls-back"
+description = "OW-FW-09, the rolled-back path of a log limit change. Same start as ow-fw-09b (the wan zone logs with log_limit 10/minute, live) and the same batch (log_limit 30/minute), but the check is `false`, so every verify round fails and Newton lets the change roll back. Sequence on the router: the apply's reload keeps the old object at 10/minute; Newton restarts the firewall (named object touched), so 30/minute goes live; the rounds fail; at the deadline rpcd restores the old config and reloads the firewall, and a reload keeps the existing object, now at 30/minute, while the config says 10/minute; Newton then restarts the firewall again after the rollback window, which brings the live rate back to 10/minute. A once-per-second sampler of the live rate (setup step) records that sequence: post 1 requires 30/minute to have been live (the restart after the apply) and the last rate seen to be 10/minute (the restart after the rollback); post 2 shows the config and the live rate at 10/minute. The [[effect]] (live rate 30/minute) fails before and must fail after the rollback. Without the restart after the rollback the effect passes after and both posts fail (planted fault, results notes); On the earlier protocol post 1 fails, because 30/minute never goes live."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "rolled_back"
+timeout = 60
+setup = ["portfwd_on", "fw_wan_log_on", "fw_rate_observer_start"]
+cleanup = ["fw_rate_observer_stop"]
+regression = "default"
+probes = [["fail"]]
+batch = '''
+set firewall.{fw_wan_zone}.log_limit='30/minute'
+'''
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+nft list ruleset | grep -A3 'limit wan.log_limit' | grep -q 'rate 30/minute' && echo "live limit wan.log_limit is 30/minute"
+'''
+expect_stdout = '^live limit wan\.log_limit is 30/minute$'
+
+[[post]]
+device = "pulsar"
+cmd = '''
+seq=$(grep -v ' none$' /tmp/fw-rate.log | cut -d' ' -f2- | tr '\n' ',' | sed 's/,$//')
+echo "live rates seen, in order: $seq"
+case ",$seq," in *",rate 30/minute,"*) ;; *) echo "30/minute was never live: no restart after the apply"; exit 1;; esac
+case "$seq" in *"rate 10/minute") ;; *) echo "the last live rate is not 10/minute: no restart after the rollback"; exit 1;; esac
+'''
+expect_stdout = '^live rates seen, in order: rate 10/minute,.*rate 30/minute,.*rate 10/minute$'
+
+[[post]]
+device = "pulsar"
+cmd = "echo \"uci log_limit=$(uci -q get firewall.{fw_wan_zone}.log_limit); live: $(nft list ruleset | grep -A3 'limit wan.log_limit' | grep rate | tr -d '\\t')\""
+expect_stdout = '^uci log_limit=10/minute; live: rate 10/minute$'

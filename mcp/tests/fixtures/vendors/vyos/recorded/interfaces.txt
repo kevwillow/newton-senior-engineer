@@ -1,0 +1,8 @@
+# recorded lab:vyos:2026.10.01-0035-rolling:2026-10-18
+Codes: S - State, L - Link, u - Up, D - Down, A - Admin Down
+Interface    IP Address          MAC                VRF        MTU  S/L    Description
+-----------  ------------------  -----------------  -------  -----  -----  -----------------------------------
+eth0         198.51.100.126/24  00:00:5e:00:53:01  default   1500  u/u    lab-lan (Proxmox net1, vmbr102)
+eth1         192.0.2.31/24      00:00:5e:00:53:02  default   1500  u/u    newton-mgmt (Proxmox net0, vmbr109)
+lo           127.0.0.1/8         00:00:00:00:00:00  default  65536  u/u
+             ::1/128

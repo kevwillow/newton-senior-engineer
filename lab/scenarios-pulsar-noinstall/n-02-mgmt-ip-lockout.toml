@@ -1,0 +1,16 @@
+name = "n-02-mgmt-ip-lockout"
+description = "No-install: moving the LAN address away is refused at plan time: a change that cuts Newton's way in could never be confirmed, so nothing is applied and nothing needs a rollback. (no-install port of p-02)"
+target = "pulsar"
+access = "no-install"
+expect = "none"
+
+[[post]]
+device = "local"
+timeout = 900
+cmd = '{ni_env} {ni_py} -I {ni_shape} n02'
+expect_stdout = '== END fails=0'
+
+[[post]]
+device = "local"
+cmd = '''{pr} 'uci get network.lan.ipaddr''''
+expect_stdout = '^192\.168\.1\.1/24$'

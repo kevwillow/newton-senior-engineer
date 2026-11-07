@@ -1,0 +1,381 @@
+/* source: https://openwrt.org/docs/guide-user/network/network_configuration?do=export_raw | retrieved 2026-10-03 by Kev (browser) | CC BY-SA 4.0, (c) OpenWrt contributors | raw DokuWiki markup, unmodified below this line */
+====== Network configuration /etc/config/network ======
+See also:
+[[docs:guide-user:network:ipv4:configuration|IPv4 configuration]],
+[[docs:guide-user:network:ipv6:configuration|IPv6 configuration]],
+[[docs:guide-user:network:routing:routes_configuration|Static routes]],
+[[docs:guide-user:network:wan:wan_interface_protocols|WAN interface protocols]],
+[[docs:guide-developer:network-scripting#examples|Network scripting]],
+[[docs:guide-user:network:protocol.dhcp|DHCP client scripting]]
+
+===== Overview =====
+The OpenWrt network configuration stack of a typical home gateway enabled for Internet (plain IPv4+IPv6, no PPP or tunnels), IPTV (or VoIP) on ISP's separate VLAN, primary LAN, and second Guest's (or IoT) dedicated wired VLAN and wireless SSID looks like this:
+
+^ LuCI -> Network ^ Comment ^ Example ^^^^^^^^
+| Firewall | Rules for traffic between zones |  Forwarding Rules, Traffic Rules, Custom Rules  |||||||||
+| Firewall / Interfaces | Network zone configuration |  wan  ||  iptv  |  lan  |||  guests  |||
+| Interfaces -> Interfaces | IP configuration |  wan  |  wan6  |  iptv  |  lan  |||  guests  |||
+| Interfaces -> Devices | wired VLANs and wireless virtual APs for children SSIDs |  -  ||  wan.2  |  -  |||  br-guests (br-lan.42 + wl0_1 + wl1_1)  |||
+| Interfaces -> Devices | Bridge device (i.e. software switch) |  -  ||  -  |  br-lan (lan1/2/3/4 + wl0 + wl1)  ||||||
+| Interfaces -> Devices | Network device (i.e. either NIC or projected DSA switch port) |  wan  |||  lan1, lan2, lan3, lan4  ||||  wl0  |  wl1  |
+| Interfaces -> Devices | Switch device (i.e. hardware switch) |  -  |||  eth0  ||||  -  ||
+| Wireless | Wireless radio (i.e. 2.4GHz, 5GHz, ...) |  -  |||  -  ||||  radio0  |  radio1  |
+| - | Internal jack labels and radio labels |  WAN  |||  LAN 1  |  LAN 2  |  LAN 3  |  LAN 4  |  -  |  -  |
+| - | Common labels on backside of a device or aired wireless networks names |  "Internet"  |||  "1"  |  "2"  |  "3"  |  "4"  |  "Home Wi-Fi 2.4GHz" + "Guests Wi-Fi 2.4GHz"  |  "Home Wi-Fi 5GHz" + "Guests Wi-Fi 5GHz"  |
+
+Your device may vary slightly in features or numbering scheme.
+A minimal network configuration for a router usually consists of at least two //interfaces// (''lan'' and ''wan'') and their associated //devices// (''br-lan'' and ''eth0''), as well as a //switch// section if applicable.
+
+Note that the labels WAN and LAN can mean different things depending on the context.
+
+===== Managing configuration =====
+The central network configuration is handled by the UCI **network** subsystem, and stored in the file ''/etc/config/network''.
+This UCI subsystem is responsible for defining //switch VLANs//, //interface configurations// and //network routes//.
+After network configuration customization you need to reload or restart the ''network'' service to apply the changes.
+
+The ''network'' service manages both wired and wireless networking with [[docs:guide-developer:netifid]] and [[https://github.com/openwrt/openwrt/blob/main/package/base-files/files/sbin/wifi|wifi]] respectively.
+
+Individual interfaces can be brought up with ''ifup //name//'' or down with ''ifdown //name//'' where //name// corresponds to the //logical interface name// of the corresponding ''config interface'' section.
+Keep in mind that ''ifup'' is normally enough to reload an interface since it includes ''ifdown''.
+
+Note that wireless interfaces are managed externally and ''ifup'' may break the relation to existing bridges.
+In such a case it is required to run ''wifi up'' after ''ifup'' in order to re-establish the bridge connection.
+
+<code bash>
+# Soft network reload
+service network reload
+
+# Hard network restart
+service network restart
+
+# Reconnect interface
+ifdown wan6
+ifup wan6
+
+# Wireless reload
+wifi down
+wifi up
+
+# List interfaces
+ubus list network.interface.*
+
+# Status information
+ifstatus wan6
+</code>
+
+===== Example configuration =====
+Here an example network UCI subsystem with default settings on a device that uses [[:docs:guide-user:network:dsa:dsa-mini-tutorial|DSA]] (e.g. GL-MT6000).\\
+Notice here that [[wp>Classless_Inter-Domain_Routing]] (CIDR) notation is used by default in OpenWrt 25.12:
+
+<code bash>
+config interface 'loopback'
+        option device 'lo'
+        option proto 'static'
+        list ipaddr '127.0.0.1/8'
+
+config globals 'globals'
+        option dhcp_default_duid '0004redacted'
+        option ula_prefix 'fd9f:acbd:1234::/48'
+        option packet_steering '2'
+
+config device
+        option name 'br-lan'
+        option type 'bridge'
+        list ports 'lan1'
+        list ports 'lan2'
+        list ports 'lan3'
+        list ports 'lan4'
+        list ports 'lan5'
+
+config interface 'lan'
+        option device 'br-lan'
+        option proto 'static'
+        list ipaddr '192.168.1.1/24'
+        option ip6assign '60'
+
+config interface 'wan'
+        option device 'eth1'
+        option proto 'dhcp'
+
+config interface 'wan6'
+        option device 'eth1'
+        option proto 'dhcpv6'
+</code>
+
+Here an example network UCI subsystem with default settings on a device that uses [[:docs:techref:swconfig|swconfig]] (e.g. TL-WR1043ND).\\
+Notice this config prior to OpenWrt 25.12 sets ipaddr and netmask in separate lines:
+
+<code bash>
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	option ipaddr '127.0.0.1'
+	option netmask '255.0.0.0'
+
+config globals 'globals'
+	option ula_prefix 'fd27:70fa:5c1d::/48'
+
+config device 'lan_br'
+	option name 'br-lan'
+	option type 'bridge'
+	list ports 'eth0.1'
+
+config interface 'lan'
+	option device 'br-lan'
+	option proto 'static'
+	option netmask '255.255.255.0'
+	option ip6assign '60'
+	option ipaddr '192.168.1.1'
+
+config interface 'wan'
+	option device 'eth0.2'
+	option proto 'dhcp'
+
+config interface 'wan6'
+	option device 'eth0.2'
+	option proto 'dhcpv6'
+
+config switch
+	option name 'switch0'
+	option reset '1'
+	option enable_vlan '1'
+
+config switch_vlan
+	option device 'switch0'
+	option vlan '1'
+	option ports '1 2 3 4 5t'
+
+config switch_vlan
+	option device 'switch0'
+	option vlan '2'
+	option ports '0 5t'
+</code>
+
+===== Section "globals" =====
+The ''globals'' section contains interface-independent options affecting the network configuration in general.
+
+<code bash>
+config globals 'globals'
+	option ula_prefix 'fd27:70fa:5c1d::/48'
+</code>
+
+^ Name                 ^ Type                     ^ Required  ^ Default     ^ Description                                                                                              ^
+| ''ula_prefix''       | IPv6-prefix or ''auto''  | no        | //(none)//  | IPv6 [[wp>Unique_local_address|ULA]] prefix for this device: ''auto'' - auto-generate a new ULA prefix   |
+| ''packet_steering''  | number                   | no        | 0           | Use every CPU to handle packet traffic. ''0'' - disabled, ''1'' - enabled, ''2'' - enabled for all CPUs  |
+| ''dhcp_default_duid''| hex string                | no        | //DUID-UUID// (type 4) | The default DUID for this system, used when acting as a DHCP/DHCPv6 server or client. Randomly generated on first boot. Some non-compliant ISPs might not accept a [[https://datatracker.ietf.org/doc/html/rfc6355|type 4 DUID]] so you can remove this value which will then default to a [[https://datatracker.ietf.org/doc/html/rfc8415#section-11.4|type 3 DUID]] (based on MAC address). Or you can override the client identifier on a per-interface basis for [[docs:guide-user:network:ipv4:configuration##protocol_dhcp|DHCP]] and [[docs:guide-user:network:ipv6:configuration##protocol_dhcpv6|DHCPv6]]. **Note:** In some cases where the ISP doesn't accept **any** client identifier, you'll need to revert to [[https://forum.openwrt.org/t/problem-with-dhcp-client-and-forced-clientid-in-v25-12/247164|older behaviour]]. If empty, you can generate a new type 4 DUID by running ''sh /rom/etc/uci-defaults/14_network-generate-duid'' [[https://github.com/openwrt/openwrt/commit/7dee632beedbee923c0f993d8e332a8bb3677cc8|More info]] |
+| ''tcp_l3mdev''       | boolean                  | no        | 0           | Toggles net.ipv4.tcp_l3mdev_accept flag (For VRF)                                                        |
+| ''udp_l3mdev''       | boolean                  | no        | 0           | Toggles net.ipv4.udp_l3mdev_accept flag (For VRF)                                                        |
+| ''netifd_loglevel''  | number                   | no        | 2           | Configures netifd log level                                                                              |
+
+===== Section "device" =====
+The ''device'' section is optional when L2 and L3 is the same device, i.e. MAC and IP on the same physical interface.
+
+<code bash>
+config device 'lan_br'
+	option name 'br-lan'
+	option type 'bridge'
+	list ports 'eth0.1'
+</code>
+
+Other example: **enable flow control** for interface eth2:
+<code>
+config device                          
+        option name 'eth2'                        
+        option rxpause '1'             
+        option txpause '1'
+</code>
+
+^ Name         ^ Type    ^ Required  ^ Default     ^ Description                                                                                                                                                                                                                                            ^
+| ''name''     | string  | yes       | //(none)//  | L3 device name.\\ Needs to match the ''device'' option of the respective ''interface'' section                                                                                                                                                         |
+| ''macaddr''  | string  | no        | //(none)//  | MAC address overriding the default one for this device, e.g. ''62:11:22:aa:bb:cc''                                                                                                                                                                     |
+| ''type''     | string  | no        | //(none)//  | If set to ''bridge'', creates a bridge of the given ''name'' using L2 devices listed in ''ports'' and wireless interfaces assigned using the ''network'' option in the [[docs:guide-user:network:wifi:basic#wi-fi_interfaces|wireless configuration]]  |
+| ''ifname''   | string  | no(*)     | //(none)//  | The base L2 device required when using the ''macvlan'' device type. Install the [[packages:pkgdata:kmod-macvlan]] package if necessary.                                                                                                                |
+| ''ports''    | list    | no        | //(none)//  | List of L2 device names.                                                                                                                                                                                                                               |
+| ''rxpause''  | string  | no        | //(none)//  | controls the receive (RX) flow control. Setting it to ''1'' enables RX pause frames, which allows the interface to signal the sender to pause transmission when overwhelmed by incoming data.                                                          |
+| ''txpause''  | string  | no        | //(none)//  | controls the transmission flow control (TX). Setting the value to ''1'' enables TX pause frames, allowing the interface to temporarily stop sending data when the receiver indicates that it is overloaded.                                            |
+| ''autoneg''  | string  | no        | //(none)//  | by setting to ''1'' enables auto-negotiation that determines whether the interface will automatically negotiate the best link parameters (such as speed, duplex mode) with the connected device.                                                       |
+| ''speed''    | string  | no        | //(none)//  | configures speed of the device.                                                                                                                                                                                                                        |
+| ''duplex''   | string  | no        | //(none)//  | by setting ''1'' configures Full Duplex and ''0'' for Half Duplex.                                                                                                                                                                                         |
+| ''table''    | string  | no        | 10          | When ''type'' is set to ''vrf'', set routing table name or number here                                                                                                                                                                                 |
+
+
+TODO: move everything related to bridges and layer 2 here.
+
+===== Section "interface" =====
+Sections of the type ''interface'' declare logical networks serving as containers for IP address settings, [[docs:guide-user:network:network_interface_alias|aliases]], [[docs:guide-user:network:routing:routes_configuration|routes]], physical interface names and [[docs:guide-user:firewall:start|firewall rules]] - they play a central role within the OpenWrt configuration concept.
+
+A minimal interface declaration consists of the following lines:
+
+<code bash>
+config 'interface' 'wan'
+	option 'proto' 'dhcp'
+	option 'device' 'eth0.2'
+</code>
+
+  * ''wan'' is a unique //logical interface name//
+  * ''dhcp'' specifies the //interface protocol//, DHCP in this example
+  * ''eth0.2'' is the //physical interface// associated with this section
+
+<WRAP important>
+The Linux kernel limits the //physical interface name// length to max 14 usable characters including the automatically added prefix that is added for some protocols (e.g.''6in4'', ''pppoa-'', ''pppoe-'', ''gre4t-'') or with bridges (''br-'').
+
+Depending on the protocol type, the //logical interface name// may thus be limited to only 8 characters.
+E.g. ''abcde6789'' is a valid interface name for a normal interface using dhcp, but not for a pppoe interface where the final name would be ''pppoe-abcde6789'', which is more than 14 chars.
+
+If using .VLAN notation, an additional 5 characters may be needed, limiting the "parent" interface name to 3 characters for protocols such as GRE.
+''abcd.NNNN'' => ''gre4t-abc.NNNN'' for 14 characters.
+
+Using a too long name will lead to silent errors, with interface creation or modification not being successful. Example of this silent error when using br- and different length .VLAN notation can be seen in the forum at https://forum.openwrt.org/t/network-interface-warning-has-a-issue/182420/14
+</WRAP>
+
+The //interface protocol// may be one of the following:
+
+^ Protocol ^ Description ^ Program ^
+| ''static'' | Static configuration with fixed address and netmask | ''ip''/''ifconfig'' |
+| ''dhcp'' | Address and netmask are assigned by DHCP | ''udhcpc'' (Busybox) |
+| ''dhcpv6'' | Address and netmask are assigned by DHCPv6 | ''odhcpc6c'' |
+| ''ppp'' | PPP protocol - dialup modem connections | ''pppd'' |
+| ''pppoe'' | PPP over Ethernet - DSL broadband connection | ''pppd'' + ''plugin rp-pppoe.so'' |
+| ''pppoa'' | PPP over ATM - DSL connection using a builtin modem | ''pppd'' + plugin ... |
+| ''3g'' | CDMA, UMTS or GPRS connection using an AT-style 3G modem | ''comgt'' |
+| ''qmi'' | USB modems using QMI protocol | ''uqmi'' |
+| ''ncm'' | USB modems using NCM protocol | ''comgt-ncm'' + ? |
+| ''wwan'' | USB modems with protocol autodetection | ''wwan'' |
+| ''hnet'' | Self-managing home network (HNCP) | ''hnet-full'' |
+| ''pptp'' | Connection via PPtP VPN | ? |
+| ''6in4'' | IPv6-in-IPv4 tunnel for use with Tunnel Brokers like HE.net | ? |
+| ''aiccu'' | Anything-in-anything tunnel | ''aiccu'' |
+| ''6to4'' | Stateless IPv6 over IPv4 transport | ? |
+| ''6rd'' | IPv6 rapid deployment | ''6rd'' |
+| ''dslite'' | Dual-Stack Lite | ''ds-lite'' |
+| ''l2tp'' | PPP over L2TP Pseudowire Tunnel | ''xl2tpd'' |
+| ''relay'' | relayd pseudo-bridge | ''relayd'' |
+| ''gre'', ''gretap'' | GRE over IPv4 | ''gre'' + ''kmod-gre'' |
+| ''grev6'', ''grev6tap'' | GRE over IPv6 | ''gre'' + ''kmod-gre6'' |
+| ''vti'' | VTI over IPv4 | ''vti'' + ''kmod-ip_vti'' |
+| ''vtiv6'' | VTI over IPv6 | ''vti'' + ''kmod-ip6_vti'' |
+| ''vxlan'' | VXLAN protocol for layer 2 virtualization, see [[docs:guide-user:network:tunneling_interface_protocols|here]] for further information and a configuration example | ''vxlan'' + ''kmod-vxlan'' + ''ip-full'' |
+| ''none'' | Unspecified protocol, therefore all the other interface settings will be ignored (like disabling the configuration) | - |
+
+Depending on the used //interface protocol// several other options may be required for a complete interface declaration.
+The corresponding options for each protocol are listed below.
+Options marked as "yes" in the "Required" column //must// be defined in the interface section if the corresponding protocol is used, options marked as "no" //may// be defined but can be omitted as well.
+
+:!: If an interface section has no protocol defined (not even ''none'' ), the other settings are completely ignored.
+The result is that, if the interface section is mentioning a physical network interface (i.e. eth0), this will be down even if a cable is connected (with proto 'none' the interface is up).
+
+==== Common options ====
+Common options options valid for all protocol types.
+
+^ Name ^ Type ^ Required ^ Default ^ Description ^
+| ''device'' | string | yes(*) | //(none)// | L3 device name, such as ''eth0.1'', ''eth2'', ''tun0'', ''br-lan'', etc.\\ Needs to match the ''name'' option of the respective ''device'' section.\\ :!: Do not specify wireless interfaces as their names and behavior can be dynamic and unpredictable, instead assign wireless interfaces to bridges using the ''network'' option in [[docs:guide-user:network:wifi:basic#wi-fi_interfaces|wireless configuration]].\\ This option may be empty or missing if only a wireless interface references this network or if the protocol is ''pptp'', ''pppoa'', ''6in4'', etc. |
+| ''mtu'' | number | no | //(none)// | Override the default MTU on this interface |
+| ''auto'' | boolean | no | ''0'' for proto ''none'', else ''1'' | Specifies whether to bring up interface on boot |
+| ''ipv6'' | boolean | no | ''1'' | Specifies whether to enable (1) or disable (0) IPv6 on this interface (Barrier Breaker and later only) |
+| ''force_link'' | boolean | no | ''1'' for protocol ''static'', else ''0'' | Specifies whether ip address, route, and optionally gateway are assigned to the interface regardless of the link being active ('1') or only after the link has become active ('0'); when set to '1', carrier sense events do not invoke hotplug handlers |
+| ''disabled'' | boolean | no | ''0'' | enable or disable the interface section |
+| ''ip4table'' | string | no | //(none)// | IPv4 routing table for routes of this interface, see: ''ip rule show; ip route show table <ip4table>'' |
+| ''ip6table'' | string | no | //(none)// | IPv6 routing table for routes of this interface, see: ''ip -6 rule show; ip -6 route show table <ip6table>'' |
+
+==== Bridge options ====
+:!: All bridge settings are optional.
+
+^ Name ^ Type ^ Default ^ Range ^ Description ^
+| ''bridge_empty'' | boolean | ''0'' | ''0'', ''1'' | Enables creating empty bridges |
+| ''vlan_filtering'' | boolean | ''0'' | ''0'', ''1'' | Enables **VLAN** aware bridge mode |
+| ''igmp_snooping'' | boolean | ''0'' | ''0'', ''1'' | Enables **IGMP** snooping on the bridge, an optimization that only sends multicast traffic to ports with multicast clients or routers |
+| ''multicast_querier'' | boolean | (''igmp_snooping'' setting) | ''0'', ''1'' | **IGMP** Enables the bridge as a multicast querier, which keeps the multicast group to port mappings current. Only one querier is elected per subnet |
+| ''query_interval'' | number | ''12500'' | - | **IGMP** Interval in 1/100 seconds between querier general queries (so default is 125 seconds) |
+| ''query_response_interval'' | number | ''1000'' | (less than ''query_interval'') | **IGMP** Max time in 1/100 seconds responses to queries should be sent (increase to make IGMP less bursty) |
+| ''last_member_interval'' | number | ''100'' | - | **IGMP** Max time in 1/100s responses to queries after "leave group" messages (the leave latency) |
+| ''hash_max'' | number | ''512'' | - | **IGMP** Size of kernel multicast hash table (larger to avoid collisions that disable snooping) |
+| ''robustness'' | number | ''2'' | - | **IGMP** Sets Startup Query Count and Last Member Count. Also combined with ''query_interval'' and ''query_response_interval'' to calculate Group Membership Interval and "other querier" timeout (both other values must be set) |
+| ''stp'' | boolean | ''0'' | ''0'', ''1'' | Enables the Spanning Tree Protocol (**STP**) which prevents network loops (and resulting packet storms) |
+| ''forward_delay'' | number | ''2'':!: | ''2'' - ''30'' | **STP** Delay in seconds between port state transitions from Listening -> Learning -> Forwarding (i.e. bridge ports will be blocked for 2x this value when brought up) :!: **NOTE** The default ''2'' is below the minimum 802.1D standard of ''4'', and STP will be ignored by conforming switches. Set to at least ''4'' to work with non-OpenWrt switches! |
+| ''hello_time'' | number | ''2'' | ''1'' - ''10'' | **STP** Seconds between STP packets |
+| ''priority'' | number | ''32767'' | ''0'' - ''65535'' | **STP** Bridge Priority. Lowest priority bridge becomes the Root of the Spanning Tree; most switches default to ''32768'' |
+| ''ageing_time'' | number | ''300'' | ''10'' - ''1000000'' | **STP** Expire in seconds for dynamic MAC entries in the Filtering DB |
+| ''max_age'' | number | ''20'' | ''6'' - ''40'' | **STP** After current Root Bridge absent this many seconds, attempt to become the Root Bridge (effects the speed a dead bridge is identified) |
+
+===== Switch configuration (DSA / bridge-vlan) =====
+<WRAP info>
+This only applies to OpenWrt 21.02 and later, and only for targets that have switched to a DSA driver.
+</WRAP>
+
+See [[docs:guide-user:network:dsa:start|DSA networking]].
+
+===== Switch configuration (legacy swconfig) =====
+<WRAP info>
+This applies to all versions of OpenWrt before 21.02, and to any non-DSA targets after that release.
+
+As of OpenWrt 21.02, swconfig is being phased out and is being replaced with DSA.
+</WRAP>
+
+For many users, the default switch configuration is sufficient.
+Should the user need to configure the switch differently, LuCI, UCI, or direct editing of ''/etc/config/network'' may be used to achieve different configurations.
+Prior to any reconfiguration of the switch, an understanding of the default configuration is important.
+As an example, some devices have a single switch-connected interface, and other have two or more.
+
+See also:
+  * [[docs:techref:swconfig|swconfig]]
+  * [[docs:guide-user:network:vlan:switch_configuration|VLAN]]
+  * [[docs:guide-user:network:vlan:switch|Switch Documentation]] (Older content, but does give discuss single-interface configuration)
+
+The identifier for the switch(es) may be obtained using:
+
+<code bash>
+# swconfig list
+Found: switch0 - ag71xx-mdio.0
+</code>
+
+With the identifier known, the configuration can be viewed:
+
+<code bash>
+# swconfig dev switch0 show
+Global attributes:
+	enable_vlan: 1
+	enable_mirror_rx: 0
+	enable_mirror_tx: 0
+	mirror_monitor_port: 0
+	mirror_source_port: 0
+	arl_age_time: 300
+	arl_table: address resolution table
+[...]
+</code>
+
+There are three types of switch-related configuration stanzas, ''switch'', ''switch_vlan'', and ''switch_port''.
+
+Not all options are available on all hardware.
+Some limitations may be found with ''swconfig dev <dev> help''.
+After making changes, check the output of ''swconfig'' to determine if the configuration was accepted by the switch hardware.
+Note this list of options may be incomplete.
+
+==== Section "switch" ====
+^ Option Name ^ Type ^ Required ^ Default ^ Impact ^ Notes ^
+| ''name'' | string | yes | (none) | defines which switch to configure | |
+| ''reset'' | boolean | | 1 | | |
+| ''enable_vlan'' | boolean | | 1 | | Default may differ by hardware |
+| ''enable_mirror_rx'' | boolean | no | 0 | Mirror received packets from the ''mirror_source_port'' to the ''mirror_monitor_port'' | |
+| ''enable_mirror_tx'' | boolean | no | 0 | Mirror transmitted packets from the ''mirror_source_port'' to the ''mirror_monitor_port'' | |
+| ''mirror_monitor_port'' | integer | no | 0 | Switch port to which packets are mirrored | |
+| ''mirror_source_port'' | integer | no | 0 | Switch port from which packets are mirrored | |
+| ''arl_age_time'' | integer | no | 300 | Adjust the address-resolution (MAC) table's aging time (seconds)| Default may differ by hardware |
+| ''igmp_snooping'' | boolean | no | 0 | Enable IGMP snooping | Unconfirmed if can be set. Unknown how it interacts with interface- or port-level IGMP snooping. |
+| ''igmp_v3'' | boolean | no | 0 | | Unconfirmed if can be set. Unknown how it interacts with interface- or port-level IGMP snooping. |
+
+==== Section "switch_vlan" ====
+^ Option Name ^ Type ^ Required ^ Default ^ Impact ^ Notes ^
+| ''description'' | string | no | (none) | A human-readable description of the VLAN configuration | |
+| ''device'' | string | yes | (none) | defines which switch to configure | |
+| ''vlan'' | integer | yes | (none) | The vlan "table index" to configure | May be limited to 127 or another number. See the output of ''swconfig dev <dev> help'' for limit. Sets defaults for VLAN tag and PVID. |
+| ''vid'' | integer | no | ''vlan'' | The VLAN tag number to use | See the output of ''swconfig dev <dev> help'' for limit. VLANs 0 and 4095 are often considered "special use". |
+| ''ports'' | string | yes | (none) | A string of space-separated port indicies that should be associated with the VLAN. Adding the suffix ''t'' to a port indicates that egress packets should be tagged, for example '''0 1 3t 5t''' | The suffixes ''*'' and ''u'' are referred to in [[docs:guide-user:network:vlan:switch|docs:guide-user:network:switch]] with reference to certain Broadcom switches in the context of older releases. |
+
+==== Section "switch_port" ====
+^ Option Name ^ Type ^ Required ^ Default ^ Impact ^ Notes ^
+| ''device'' | string | yes | (none) | defines which switch to configure | |
+| ''port'' | integer | yes | (none) | The port index to configure | |
+| ''pvid'' | integer | no | † | Port PVID; the VLAN tag†† to assign to untagged ingress packets | †Typically defaults one of the VLAN tags associated with the port. Logic not clear when there are multiple VLANs on the port. '0' can occur. Certain values have been rejected; logic not clear on limitations. ††//May// refer to the VLAN "index" rather than the VLAN tag itself (unconfirmed).|
+| ''enable_eee'' | boolean | no | 0 | Enable "energy saving" features | |
+| ''igmp_snooping'' | boolean | no | 0 | Enable IGMP snooping | Unconfirmed if can be set. Unknown how it interacts with interface- or switch-level IGMP snooping. |
+| ''igmp_v3'' | boolean | no | 0 | | Unconfirmed if can be set. Unknown how it interacts with interface- or switch-level IGMP snooping. |

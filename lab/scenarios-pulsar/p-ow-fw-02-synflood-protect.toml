@@ -1,0 +1,39 @@
+# PORT of ow-fw-02-synflood-protect. Changed: lab-r1 -> pulsar; the router's client LAN address is 192.168.151.1; the tcpraw probe runs on lab-client; regression = pulsar's default list plus the client checks.
+name = "p-ow-fw-02-synflood-protect"
+description = "OW-FW-02: firewall.@defaults[0].synflood_protect='1'. The stock config already has the legacy alias syn_flood='1' and the live ruleset already limits SYNs (chain syn_flood: 25/second, burst 50), so the new option is staged and confirmed with no change in the ruleset, and there is no [[effect]] (nothing can fail before). The posts prove the protection is on and unchanged: the option, the chain content and its jump in input (the chain exists but is empty when both option names are 0, so the chain alone proves nothing), the live ruleset equal to the one saved before the apply (counters masked), and a behavioural measure: 300 SYNs sent in a few milliseconds from lab-client to a closed port on the router's client LAN address get at most 100 answers (the burst of 50 plus refill; sending takes a few milliseconds, so the margin is about 2 s of refill), where an unprotected router answers all 300. The hand proof with both names 0 is in the results file."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on", "fw_ruleset_save", "tcpraw_on"]
+cleanup = ["tcpraw_off"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen", "portfwd", "p_client_on_pulsar", "client_internet", "client_dns", "client_dhcp"]
+probes = [["nft-rule", "inet", "fw4", "syn_flood", "present", "limit rate 25/second burst 50 packets return"], ["uci-equals", "firewall.@defaults[0].synflood_protect", "1"]]
+batch = '''
+set firewall.@defaults[0].synflood_protect='1'
+'''
+
+[[post]]
+device = "pulsar"
+cmd = "echo \"syn_flood=$(uci -q get firewall.@defaults[0].syn_flood) synflood_protect=$(uci -q get firewall.@defaults[0].synflood_protect)\""
+expect_stdout = '^syn_flood=1 synflood_protect=1$'
+
+[[post]]
+device = "pulsar"
+cmd = '''
+nft list chain inet fw4 syn_flood | grep -q 'limit rate 25/second burst 50 packets return' && nft list chain inet fw4 syn_flood | grep -q 'drop' && nft list chain inet fw4 input | grep -q 'jump syn_flood' && echo "syn_flood chain has the 25/s burst 50 limit and input jumps to it"
+'''
+expect_stdout = '^syn_flood chain has the 25/s burst 50 limit and input jumps to it$'
+
+[[post]]
+device = "pulsar"
+cmd = '''
+nft list ruleset | sed 's/packets [0-9]* bytes [0-9]*/packets N bytes N/' > /tmp/fw-ruleset.after
+if cmp -s /tmp/fw-ruleset.before /tmp/fw-ruleset.after; then echo "ruleset identical to the one before the apply (counters masked)"; rm -f /tmp/fw-ruleset.after; else echo "ruleset changed. New lines:"; grep -vxFf /tmp/fw-ruleset.before /tmp/fw-ruleset.after | head -10; echo "Removed lines:"; grep -vxFf /tmp/fw-ruleset.after /tmp/fw-ruleset.before | head -10; rm -f /tmp/fw-ruleset.after; exit 1; fi
+'''
+expect_stdout = '^ruleset identical to the one before the apply'
+
+[[post]]
+device = "lab-client"
+timeout = 30
+cmd = "sudo python3 /tmp/newton-tcpraw.py 192.168.151.1 9 300 0x02 --min 1 --max 100"
+expect_stdout = 'answered=\d+ flags=0x02 to 192\.168\.151\.1:9 \(allowed 1\.\.100\) OK$'

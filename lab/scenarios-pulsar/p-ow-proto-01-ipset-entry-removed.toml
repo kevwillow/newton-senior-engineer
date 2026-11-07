@@ -1,0 +1,28 @@
+# PORT of ow-proto-01-ipset-entry-removed. Changed: lab-r1 -> pulsar, r1_wan_ip -> p_wan_ip, regression -> pulsar's default list. fw_ipset_on is the cloned step.
+name = "p-ow-proto-01-ipset-entry-removed"
+description = "Named nft sets: an entry is removed from an existing ipset. Setup makes ipset nw_block {192.0.2.1, 192.0.2.2} and a wan rule that drops it live (firewall restarted). The batch removes 192.0.2.2. A firewall reload (what the apply triggers) re-declares the set but keeps the elements already in it, so on its own 192.0.2.2 would stay blocked while the config no longer lists it (measured by hand: after a reload the live set was {192.0.2.1, 192.0.2.2, 192.0.2.3} with .2 removed and .3 added in the config). Newton restarts the firewall after the apply when the staged change touches an ipset section, which re-creates the set from the config. The check and the [[effect]] read the live set: it must hold exactly 192.0.2.1 (before: both entries). The post shows the config. On the protocol before this change the reload keeps 192.0.2.2, the check fails and the change rolls back. The default regression (management, client internet, DNS, DHCP, the port forward) must pass after the restart."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+timeout = 90
+setup = ["portfwd_on", "fw_ipset_on"]
+regression = "default"
+approval = true
+probes = [["nft-set-has", "inet", "fw4", "nw_block", "192.0.2.1", "only"]]
+batch = '''
+del_list firewall.nw_block.entry='192.0.2.2'
+'''
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+s=$(nft list set inet fw4 nw_block | tr -d ' \t\n')
+echo "live set nw_block: $(echo "$s" | sed -n 's/.*\(elements=[^}]*}\).*/\1/p')"
+case "$s" in *"elements={192.0.2.1}"*) exit 0;; esac
+exit 1'''
+expect_stdout = '^live set nw_block: elements=\{192\.0\.2\.1\}$'
+
+[[post]]
+device = "pulsar"
+cmd = "echo \"uci entries: $(uci -q get firewall.nw_block.entry)\""
+expect_stdout = '^uci entries: 192\.0\.2\.1$'

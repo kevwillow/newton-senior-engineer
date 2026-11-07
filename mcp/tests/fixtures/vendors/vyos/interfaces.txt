@@ -1,0 +1,8 @@
+# synthetic
+Codes: S - State, L - Link, u - Up, D - Down, A - Admin Down
+Interface        IP Address                        S/L  Description
+---------        ----------                        ---  -----------
+eth0             192.0.2.1/24                      u/u  uplink
+eth1             192.0.2.65/24                     u/u  lan
+lo               127.0.0.1/8                       u/u
+                 ::1/128                           u/u

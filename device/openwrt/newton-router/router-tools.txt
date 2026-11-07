@@ -1,0 +1,50 @@
+# Provisional allowlist of external commands the router program may call.
+# PROVISIONAL until gate G0 writes the real list from lab-r1 and Pulsar
+# (busybox --list, the PATH binaries, type of each word); until then this
+# file is derived from the commands the program uses plus the design G0 list.
+# One command name per line; blank lines and lines starting with # are ignored.
+sha256sum
+md5sum
+flock
+mktemp
+setsid
+head
+tr
+awk
+sed
+sort
+tar
+jsonfilter
+ucode
+utpl
+uci
+ubus
+nft
+fw4
+ifstatus
+netstat
+pidof
+logread
+logger
+nslookup
+ping
+traceroute
+iwinfo
+apk
+cat
+cut
+date
+grep
+kill
+ls
+id
+mkdir
+mv
+rm
+sleep
+sync
+tail
+wc
+chmod
+newton-guard
+newton-safe-apply

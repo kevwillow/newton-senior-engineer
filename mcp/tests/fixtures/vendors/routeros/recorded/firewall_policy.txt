@@ -1,0 +1,7 @@
+# recorded lab:chr:7.24.5:2026-10-18
+0  ;;; mv1-icmp
+   chain=input action=accept protocol=icmp
+ 
+1  ;;; mv1-drop
+   chain=input action=drop in-interface=ether2
+

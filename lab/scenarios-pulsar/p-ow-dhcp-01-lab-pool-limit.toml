@@ -1,0 +1,57 @@
+# PORT of ow-dhcp-01-lab-pool-limit. Changed: lab-r1 -> pulsar; the client LAN is 192.168.151.0/24 (pool .100-.149, probe server 192.168.151.1); the local post reads the router over the pinned admin-key path (r() to 192.168.1.1, no proxy) and lab-client over the proxy as before; the router log pattern is DHCPACK(wan.151); regression = pulsar's default list plus the client checks.
+name = "p-ow-dhcp-01-lab-pool-limit"
+description = "OW-DHCP-01 on the client LAN: dhcp.lab.limit='50' (the section is dhcp.lab, not dhcp.lan: pulsar's lan is the management side (br-lan, 192.168.1.0/24) and keeps its own DHCP pool; start stays 100, leasetime 12h is already the default). The pool shrinks from .100 to .199 to .100 to .149. Effects: (1) the conf the running dnsmasq was started with (found through its -C argument) has dhcp-range=set:lab,192.168.151.100,192.168.151.149; (2) on the wire, three DISCOVERs from random MACs ask for .149, .150 and .199 (DHCP option 50): dnsmasq offers a requested address that is inside a dynamic range and free, so before the change it offers .149, .150 and .199 as asked, and after it offers .149 and an address of its own choice inside .100 to .149 for the other two (no REQUEST is ever sent, so no lease is taken). The check is the conf test, so Newton rolls the change back if dnsmasq did not pick the new range up. Posts: the uci options, and lab-client's own lease (an address inside the pool at baseline) survives: the post first checks that the address lies inside the pool that uci now describes (start to start+limit-1; if not it refuses to renew and fails, because a renewal outside the pool is NAKed), then makes lab-client renew it for real (`networkctl renew eth0`, a unicast DHCPREQUEST like the one it sends at T1) and requires a DHCPACK for that address and MAC in pulsar's log and the address unchanged. Hand run with limit=2: a REQUEST for .150 gets 'DHCPNAK ... address not available', the shape of a device that held a lease outside a pool that shrank (results file). Pool exhaustion is not exercised in this scenario: it needs 50 REQUEST/ACK exchanges, i.e. 50 real leases on pulsar that may include lab-client's own address, which a reset router does not know. It was measured by hand with a two-address pool instead (dhcp.lab.limit=2, throwaway random MACs): the third client gets no OFFER and dnsmasq logs 'DHCPDISCOVER(wan.151) <mac> no address available' on every retry, with no NAK (results file). The regression includes client_dhcp: a fresh DISCOVER still gets an OFFER from the smaller pool."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "confirmed"
+setup = ["portfwd_on", "dhcp_probe_on"]
+cleanup = ["dhcp_probe_off"]
+regression = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_internet", "p_dns", "p_dhcp_listen", "portfwd", "p_client_on_pulsar", "client_internet", "client_dns", "client_dhcp"]
+probes = [["conf-has", "dnsmasq", "prefix", "present", "dhcp-range=set:lab,192.168.151.100,192.168.151.149,"]]
+batch = '''
+set dhcp.lab.limit='50'
+'''
+
+[[effect]]
+device = "pulsar"
+cmd = '''
+c=; for p in $(pidof dnsmasq); do c=$(tr '\0' ' ' < /proc/$p/cmdline | sed -n 's/.*dnsmasq -C \([^ ]*\).*/\1/p'); [ -n "$c" ] && break; done
+[ -f "$c" ] || { echo "no conf found for the running dnsmasq"; exit 1; }
+r=$(grep '^dhcp-range=set:lab,' "$c"); n=$(echo "$r" | grep -c .); echo "running dnsmasq: $r"
+[ "$n" = 1 ] || { echo "dhcp-range lines for tag lab: $n"; exit 1; }
+case "$r" in dhcp-range=set:lab,192.168.151.100,192.168.151.149,*) exit 0;; esac
+exit 1
+'''
+expect_stdout = '^running dnsmasq: dhcp-range=set:lab,192\.168\.151\.100,192\.168\.151\.149,255\.255\.255\.0,12h$'
+
+[[effect]]
+device = "lab-client"
+timeout = 90
+cmd = "sudo python3 /tmp/newton-dhcp-probe.py eth0 192.168.151.1 192.168.151.149 192.168.151.150 192.168.151.199"
+expect_stdout = '^requested 192\.168\.151\.149 offered 192\.168\.151\.149 chaddr [0-9a-f:]+\nrequested 192\.168\.151\.150 offered 192\.168\.151\.1[0-4][0-9] chaddr [0-9a-f:]+\nrequested 192\.168\.151\.199 offered 192\.168\.151\.1[0-4][0-9] chaddr [0-9a-f:]+$'
+
+[[post]]
+device = "pulsar"
+cmd = "echo \"start=$(uci -q get dhcp.lab.start) limit=$(uci -q get dhcp.lab.limit) leasetime=$(uci -q get dhcp.lab.leasetime)\""
+expect_stdout = '^start=100 limit=50 leasetime=12h$'
+
+[[post]]
+device = "local"
+timeout = 90
+cmd = '''
+sshx() { h=$1; shift; timeout 40 ssh -i "$LAB_SSH_KEY" -o BatchMode=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" "$h" "$@"; }
+r() { timeout 40 ssh -i {pulsar_admin_key} -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o UserKnownHostsFile={pulsar_known_hosts} -o StrictHostKeyChecking=yes -o LogLevel=ERROR root@192.168.1.1 "$@"; }
+a=$(sshx {client_lab_user}@10.109.0.50 "ip -4 -o addr show dev eth0 | awk '{print \$4}' | cut -d/ -f1")
+m=$(sshx {client_lab_user}@10.109.0.50 "cat /sys/class/net/eth0/address")
+o=${a##*.}
+lo=$(r 'uci -q get dhcp.lab.start')
+hi=$(r 'echo $(( $(uci -q get dhcp.lab.start) + $(uci -q get dhcp.lab.limit) - 1 ))')
+case "$o$lo$hi" in ''|*[!0-9]*) echo "no usable numbers: lab-client address [$a], pool start [$lo], pool end [$hi]"; exit 1;; esac
+if [ "$o" -lt "$lo" ] || [ "$o" -gt "$hi" ]; then echo "lab-client eth0 $a lies outside the pool .$lo to .$hi, its renewal would be refused; not renewing"; exit 1; fi
+sshx {client_lab_user}@10.109.0.50 "sudo networkctl renew eth0" >/dev/null 2>&1
+sleep 4
+b=$(sshx {client_lab_user}@10.109.0.50 "ip -4 -o addr show dev eth0 | awk '{print \$4}' | cut -d/ -f1")
+n=$(r "logread | grep -c 'DHCPACK(wan.151) $a $m'")
+echo "lab-client $a ($m) renewed its lease: router DHCPACK lines=$n, address after=$b"
+[ "$n" -ge 1 ] && [ "$b" = "$a" ]'''
+expect_stdout = '^lab-client 192\.168\.151\.1[0-4][0-9] \([0-9a-f:]+\) renewed its lease: router DHCPACK lines=[1-9][0-9]*, address after=192\.168\.151\.1[0-4][0-9]$'

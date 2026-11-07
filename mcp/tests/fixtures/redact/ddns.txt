@@ -1,0 +1,8 @@
+ddns.@service[0]=service
+ddns.@service[0].enabled='1'
+ddns.@service[0].service_name='fake-ddns.example.test'
+ddns.@service[0].domain='fake-host.example.test'
+ddns.@service[0].username='fake-ddns-user'
+ddns.@service[0].password='fake-ddns-password-value'
+ddns.@service[0].use_https='1'
+ddns.@service[0].cacert='/etc/ssl/certs/ca-certificates.crt'

@@ -1,0 +1,50 @@
+name = "ow-v6-02-icmpv6-rules"
+description = "OW-V6-02 (audit only): the stock rules Allow-ICMPv6-Input and Allow-ICMPv6-Forward, which IPv6 needs (neighbour discovery, path MTU discovery, echo), are present, enabled and rendered. No batch, so expect none; the default regression runs before and after only to show that the baseline is healthy during the audit. Posts: (1) config: each rule exists exactly once (found by name), has src wan, family ipv6, target ACCEPT and is not disabled (the option is absent or not 0); (2) ruleset: input_wan holds the Allow-ICMPv6-Input rules (two on 25.12.5, because fw4 splits the type list from the type-and-code list) that together name echo-request and the neighbour discovery types (nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert) and packet-too-big, and forward_wan holds the Allow-ICMPv6-Forward rules (also two) with echo-request and packet-too-big; (3) behaviour with the link-local addresses, the only v6 addresses in the lab: lab-isp pings lab-r1's WAN link-local address three times (three separate ping processes, so three conntrack entries: the echo requests of one ping share an id, and every request after the first reply is 'established' and never reaches input_wan) and gets three replies, which needs the neighbour solicitation and advertisement rule as well (the first ping resolves the address), and the packet counter of the echo rule rises by at least 3. The forward rule cannot be exercised: forwarded ICMPv6 needs global addresses on both sides and the lab has no IPv6 upstream; it is checked in config and ruleset only. Newton refusing to disable these rules is a profile-layer behaviour that this runner does not exercise. Hand run: with Allow-ICMPv6-Input set to enabled='0' all three posts fail, the ping is not answered (results file)."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "none"
+setup = ["portfwd_on"]
+regression = "default"
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+bad=0
+for n in Allow-ICMPv6-Input Allow-ICMPv6-Forward; do
+  s=$(uci show firewall | sed -n "s/^firewall\.\(@rule\[[0-9]*\]\)\.name='$n'\$/\1/p")
+  c=$(echo "$s" | grep -c .)
+  if [ "$c" != 1 ]; then echo "$n: $c rules found"; bad=1; continue; fi
+  e=$(uci -q get firewall.$s.enabled); [ -n "$e" ] || e=default
+  src=$(uci -q get firewall.$s.src); fam=$(uci -q get firewall.$s.family); tgt=$(uci -q get firewall.$s.target)
+  echo "$n: src=$src family=$fam target=$tgt enabled=$e"
+  [ "$src" = wan ] && [ "$fam" = ipv6 ] && [ "$tgt" = ACCEPT ] && [ "$e" != 0 ] || bad=1
+done
+exit $bad'''
+expect_stdout = '^Allow-ICMPv6-Input: src=wan family=ipv6 target=ACCEPT enabled=(default|1)\nAllow-ICMPv6-Forward: src=wan family=ipv6 target=ACCEPT enabled=(default|1)$'
+
+[[post]]
+device = "lab-r1"
+cmd = '''
+i=$(nft list chain inet fw4 input_wan | grep 'Allow-ICMPv6-Input'); f=$(nft list chain inet fw4 forward_wan | grep 'Allow-ICMPv6-Forward')
+ni=$(echo "$i" | grep -c .); nf=$(echo "$f" | grep -c .); bad=0
+for t in echo-request nd-neighbor-solicit nd-neighbor-advert nd-router-solicit nd-router-advert packet-too-big; do echo "$i" | grep -q "$t" || { echo "input_wan lacks $t"; bad=1; }; done
+for t in echo-request packet-too-big; do echo "$f" | grep -q "$t" || { echo "forward_wan lacks $t"; bad=1; }; done
+echo "input_wan Allow-ICMPv6-Input rules=$ni, forward_wan Allow-ICMPv6-Forward rules=$nf"
+[ "$ni" -ge 1 ] && [ "$nf" -ge 1 ] && [ $bad = 0 ]'''
+expect_stdout = '^input_wan Allow-ICMPv6-Input rules=[1-9]\d*, forward_wan Allow-ICMPv6-Forward rules=[1-9]\d*$'
+
+[[post]]
+device = "local"
+timeout = 90
+cmd = '''
+sshx() { h=$1; shift; timeout 30 ssh -i "$LAB_SSH_KEY" -o BatchMode=yes -o ConnectTimeout=8 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o "ProxyCommand=$LAB_SSH_PROXY" "$h" "$@"; }
+wd=$(sshx root@10.109.0.11 "ifstatus wan | jsonfilter -e '@.l3_device'")
+ll=$(sshx root@10.109.0.11 "ip -6 addr show dev $wd | awk '/inet6 fe80/ {print \$2}' | cut -d/ -f1")
+idev=$(sshx root@10.109.0.10 "uci -q get network.ispa.device")
+ec() { sshx root@10.109.0.11 "nft list chain inet fw4 input_wan | grep 'echo-request' | grep 'Allow-ICMPv6-Input' | sed -n 's/.*counter packets \([0-9]*\) .*/\1/p' | head -1"; }
+c0=$(ec)
+r=$(sshx root@10.109.0.10 "r=0; for i in 1 2 3; do ping6 -c 1 -W 2 -I $idev $ll >/dev/null 2>&1 && r=\$((r + 1)); done; echo \$r")
+c1=$(ec)
+echo "ping6 from lab-isp ($idev) to the WAN link-local $ll: $r of 3 replies; echo rule counter $c0 -> $c1"
+[ -n "$ll" ] && [ "$r" = 3 ] && [ $((c1 - c0)) -ge 3 ]'''
+expect_stdout = '^ping6 from lab-isp \(eth2\) to the WAN link-local fe80::[0-9a-f:]+: 3 of 3 replies; echo rule counter \d+ -> \d+$'

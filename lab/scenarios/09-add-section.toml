@@ -1,0 +1,16 @@
+name = "09-add-section"
+description = "Anonymous add of a static DHCP host (uci batch prints the new section name on stdout); plan must stage cleanly with the session id as the only stage output, and apply must confirm."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 60
+probes = [["conf-has", "dnsmasq", "substr", "present", "02:00:00:00:00:09"]]
+batch = """add dhcp host
+set dhcp.@host[-1].name='newton-add-test'
+set dhcp.@host[-1].mac='02:00:00:00:00:09'
+set dhcp.@host[-1].ip='192.168.150.209'"""
+
+[[post]]
+device = "lab-r1"
+cmd = "echo $(uci -q get dhcp.@host[-1].name) $(uci -q get dhcp.@host[-1].mac) $(uci -q get dhcp.@host[-1].ip)"
+expect_stdout = "^newton-add-test 02:00:00:00:00:09 192\\.168\\.150\\.209$"

@@ -1,0 +1,20 @@
+# PORT of 02-mgmt-ip-lockout. Changed: device -> pulsar; unreachable address 10.109.0.99 -> 192.168.99.1/24 (pulsar's lan ipaddr is CIDR form
+# 192.168.1.1/24, so the post expects that string). This is the one scenario allowed to move Pulsar's LAN address: Newton must roll it back.
+name = "p-02-mgmt-ip-lockout"
+description = "Move pulsar's LAN IP to an unreachable address; expect automatic rollback. (port of 02-mgmt-ip-lockout)"
+target = "pulsar"
+reset = ["pulsar"]
+expect = "rolled_back"
+timeout = 90
+approval = true
+batch = "set network.lan.ipaddr='192.168.99.1/24'"
+
+[[post]]
+device = "pulsar"
+cmd = "uci get network.lan.ipaddr"
+expect_stdout = "^192\\.168\\.1\\.1/24$"
+
+[[post]]
+device = "pulsar"
+cmd = "uci changes | wc -l"
+expect_stdout = "^0$"
