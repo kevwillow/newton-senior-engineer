@@ -36,16 +36,16 @@ seed into the app by hand. Mention it; do not install it.
 
 ## 2. Get the latest release and show its commit
 ```sh
-git ls-remote --tags --refs https://github.com/kevwillow/newton-network-engineer.git
+git ls-remote --tags --refs https://github.com/kevwillow/newton-senior-engineer.git
 ```
 Pick the highest version tag of the form `vX.Y.Z` (no `-rc`, no other suffix; sort with `sort -V`). Then:
 ```sh
-git clone --branch <TAG> https://github.com/kevwillow/newton-network-engineer.git ~/newton
+git clone --branch <TAG> https://github.com/kevwillow/newton-senior-engineer.git ~/newton
 git -C ~/newton rev-parse 'HEAD^{commit}'      # the 40-hex commit id
 git -C ~/newton status --short                  # must print nothing
 ```
 If `~/newton` already exists, use `~/newton-<TAG>` instead; never reuse or overwrite an existing directory.
-Tell the user: the tag, the 40-hex commit id, and "open https://github.com/kevwillow/newton-network-engineer/commit/<40hex> in your
+Tell the user: the tag, the 40-hex commit id, and "open https://github.com/kevwillow/newton-senior-engineer/commit/<40hex> in your
 browser and check that the id matches and the commit is on the release page". Wait for them to say it matches.
 Do not continue on a mismatch.
 

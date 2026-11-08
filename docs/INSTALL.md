@@ -42,12 +42,12 @@ by setup, which stops with a plain message when one is missing.
 List the release tags:
 
 ```sh
-git ls-remote --tags --refs https://github.com/kevwillow/newton-network-engineer.git
+git ls-remote --tags --refs https://github.com/kevwillow/newton-senior-engineer.git
 ```
 Take the highest tag of the form `vX.Y.Z`, then clone it:
 
 ```sh
-git clone --branch vX.Y.Z https://github.com/kevwillow/newton-network-engineer.git ~/newton
+git clone --branch vX.Y.Z https://github.com/kevwillow/newton-senior-engineer.git ~/newton
 ```
 If `~/newton` already exists, use `~/newton-vX.Y.Z` instead, and use that path in place of `~/newton` in every command below. Never overwrite a directory that is already there.
 
@@ -57,7 +57,7 @@ Read the commit id and check that the tree is clean:
 git -C ~/newton rev-parse 'HEAD^{commit}'
 git -C ~/newton status --short
 ```
-The first prints 40 hex characters, the second must print nothing. Open the commit page in your browser: `https://github.com/kevwillow/newton-network-engineer/commit/<40-hex-commit-id>`.
+The first prints 40 hex characters, the second must print nothing. Open the commit page in your browser: `https://github.com/kevwillow/newton-senior-engineer/commit/<40-hex-commit-id>`.
 That shows the commit exists on GitHub. Also open the page of the release tag `vX.Y.Z` on GitHub and check that it names
 the same commit. Do not go on if they differ.
 

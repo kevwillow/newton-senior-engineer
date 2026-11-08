@@ -6,7 +6,7 @@ in the installed mode, and over the router's own web API (HTTPS, pinned certific
 ## Reporting a vulnerability
 
 Do not open a public issue for a vulnerability. Use GitHub private vulnerability reporting: open
-<https://github.com/kevwillow/newton-network-engineer/security> and choose "Report a vulnerability", or email
+<https://github.com/kevwillow/newton-senior-engineer/security> and choose "Report a vulnerability", or email
 <kev@gurutechnology.services>.
 
 Include in the report:

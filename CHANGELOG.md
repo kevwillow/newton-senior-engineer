@@ -13,6 +13,15 @@ Two version numbers exist and are separate:
 
 ## [Unreleased]
 
+### Changed
+- The public repository is renamed from `newton-network-engineer` to `newton-senior-engineer`, because Newton is
+  growing past networks. GitHub redirects the old address; the clone commands, the security-report link and the
+  install guide name the new one.
+- The roadmap has a new release order: 1.3 Windows and an Active Directory audit, 1.4 Active Directory changes, 1.5
+  Linux hosts, 1.6 FortiGate and more vendors, 1.7 a security engineer persona, passkey approvals in 1.x; firmware
+  upgrades and site files move to Later. The 1.2 plan renames "network promises" to "network rules" and plans to
+  re-check them on every change to the router they belong to, not only on changes that touch them.
+
 ## [1.1.2] - 2026-11-06
 
 ### Changed
@@ -807,5 +816,5 @@ Early work on the safe apply path, in short:
   from a verified commit).
 - **Profiles:** Standard, Hardened and Lockdown tier files generated from `profiles/openwrt/manifest.toml`.
 
-[Unreleased]: https://github.com/kevwillow/newton-network-engineer/compare/v1.1.2...HEAD
-[1.1.2]: https://github.com/kevwillow/newton-network-engineer/releases/tag/v1.1.2
+[Unreleased]: https://github.com/kevwillow/newton-senior-engineer/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/kevwillow/newton-senior-engineer/releases/tag/v1.1.2

@@ -123,7 +123,7 @@ Paste this into Claude Code on the Linux machine that will manage your router (f
 [`docs/SETUP-CLIENTS.md`](docs/SETUP-CLIENTS.md)):
 
 ```text
-Install Newton from https://github.com/kevwillow/newton-network-engineer and follow SETUP.md there.
+Install Newton from https://github.com/kevwillow/newton-senior-engineer and follow SETUP.md there.
 ```
 
 That's it. The agent reads [`SETUP.md`](SETUP.md) and does the rest. It checks the prerequisites, installs the
