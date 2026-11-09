@@ -6,7 +6,13 @@
 
 **Change a router. Prove it. Roll back if it broke.**
 
-Website: [gurutechnology.services/newton-engineer](https://gurutechnology.services/newton-engineer/), with the install line, the security boundaries, the roadmap, and how to help test Newton on network gear the lab does not have.
+**Install:** paste this into Claude Code on the Linux machine that will manage your router ([Get started](#get-started) has the details):
+
+```text
+Install Newton from https://github.com/kevwillow/newton-senior-engineer and follow SETUP.md there.
+```
+
+Website: [gurutechnology.services/newton-engineer](https://gurutechnology.services/newton-engineer/), with the security boundaries, the roadmap, and how to help test Newton on network gear the lab does not have.
 
 Newton lets an AI assistant like Claude Code set up and change your network for you: routers, VLANs, Wi-Fi, firewall
 rules, port forwards, DHCP, DNS and dual-WAN. It is the safe way to let the AI do the work. On the default setup every change is shown to
