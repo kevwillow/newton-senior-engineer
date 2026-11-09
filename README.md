@@ -391,11 +391,17 @@ after confirm, client-side checks and receipts. **1.1** adds a no-install mode f
 the router but one limited web-interface user, applies DHCP reservations and DNS entries under OpenWrt's own undo
 timer, and hands every other change to you as a script you approve and run. Next:
 
-- **1.2:** network promises (rules like "the work laptop reaches the printer", re-checked on every change),
-  reviewed recipes for common jobs, a blast-radius view, a generated network-map page.
-- **1.3:** Linux hosts: network config, the local firewall and a hardening level.
-- **1.4:** OpenWrt firmware upgrades.
-- **1.5:** site files and rollouts for many devices.
+- **1.2:** network rules (rules like "the work laptop reaches the printer", re-checked on every change),
+  reviewed recipes for common jobs, a blast-radius view, a network map and a local dashboard.
+- **1.3:** a read-only Active Directory audit of Windows Server AD and Samba AD domains.
+- **1.4:** Active Directory changes that have a clean undo, each approved by you, with the undo armed on the domain
+  controller first; a change is confirmed only when every domain controller shows it.
+- **1.5:** Active Directory build mode, opt-in: a whole company domain from one plan you approve.
+- **1.6:** Linux and Windows 11 hosts, with a gaming performance advisor for Windows 11.
+- **1.7:** more vendors: FortiGate, then Arista EOS and Cisco IOS XE.
+- **1.8:** a security engineer persona that reads Wazuh alerts.
+
+[`docs/ROADMAP.md`](docs/ROADMAP.md) has the detail.
 
 ## Works with
 
