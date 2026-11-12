@@ -48,6 +48,8 @@ def setup(router, changes, *, owner="agent-one", live=True):
     (txn / "stage-up").write_text("100\n")
     (txn / "boot").write_text("boot-one\n")
     (lock / "sid").write_text(SID + "\n")
+    # the helper records the folder rpcd keeps the session's changes in
+    (lock / f"{SID}.dir").write_text(f"/var/run/rpcd/uci-{SID}\n")
     router.write("control/sessions", (SID + "\n") if live else "")
     router.write("control/utpl.out", "table inet fw4 {\n}\n")
 
@@ -177,7 +179,9 @@ def test_cs15_wrapper_points_at_the_session_dir_only(router):
     wrappers = sorted((router.root / "control").glob("utpl.wrapper.*"))
     assert len(wrappers) == 2, wrappers
     first = wrappers[1].read_text()  # [0] is the canary render
-    assert f'"/var/run/rpcd/uci-{SID}"' in first
+    # the wrapper points at the session dir the helper recorded; the test
+    # root carries the prefix (on the router the path is the plain one)
+    assert f'"{router.root}/var/run/rpcd/uci-{SID}"' in first
     assert 'include("/usr/share/firewall4/main.uc")' in first
     assert "uci.cursor = function" in first
     assert all(c.startswith("utpl -S ") for c in calls(router, "utpl"))

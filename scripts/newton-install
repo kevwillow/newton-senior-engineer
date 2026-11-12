@@ -1178,7 +1178,7 @@ no-install: Every change uses OpenWrt's own undo timer.
 no-install: Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays.
 no-install: Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval.
 no-install: Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run.
-installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 210 KB), no packages and no compiled code.
+installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 216 KB), no packages and no compiled code.
 installed: Newton's key can run that program and nothing else, so the agent never gets a root shell.
 installed: If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck.
 installed: More checks can run, and fewer changes need a script.

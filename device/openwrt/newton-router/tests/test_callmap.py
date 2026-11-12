@@ -122,10 +122,10 @@ def health_setup(router):
 def test_helper_line():
     text = HELPER_PATH.read_text()
     lines = text.splitlines()
-    assert len(lines) == 431, len(lines)
-    assert lines[30] == "SESSION_TIMEOUT=2700", lines[30]
+    assert len(lines) == 527, len(lines)
+    assert lines[38] == "SESSION_TIMEOUT=2700", lines[38]
     mention = [i for i, l in enumerate(lines) if "SESSION_TIMEOUT" in l]
-    assert mention == [30, 98], mention
+    assert mention == [38, 177], mention
 
 
 # =====================================================================

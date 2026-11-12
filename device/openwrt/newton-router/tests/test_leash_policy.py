@@ -259,6 +259,8 @@ def _seal_raw_changes(router, changes: list[str], profile: str, zones: dict) -> 
     (txn / "stage-up").write_text("100\n")
     (txn / "boot").write_text("boot-one\n")
     (lock / "sid").write_text(sid + "\n")
+    # the helper records the folder rpcd keeps the session's changes in
+    (lock / f"{sid}.dir").write_text(f"/var/run/rpcd/uci-{sid}\n")
     sessions = r / "control" / "sessions"
     existing = sessions.read_text() if sessions.exists() else ""
     if sid not in existing.split():

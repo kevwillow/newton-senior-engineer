@@ -41,7 +41,7 @@ WRAPPER = textwrap.dedent(
     proc = subprocess.run([real, *args], input=stdin_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out = proc.stdout
     if " hello " in cmd and os.environ.get("FAKE_HELLO_VERSION"):
-        out = out.replace(b"version=1.3.0", ("version=" + os.environ["FAKE_HELLO_VERSION"]).encode())
+        out = out.replace(b"version=1.3.1", ("version=" + os.environ["FAKE_HELLO_VERSION"]).encode())
     sys.stdout.buffer.write(out)
     sys.stderr.buffer.write(proc.stderr)
     sys.exit(proc.returncode)
@@ -77,7 +77,7 @@ def _stagedcheck_lines(stdout):
 
 # SC-06: a router program without the verb is reported as not-checked, never as a pass.
 def test_sc06_old_router_program_is_not_checked(router13):
-    # the repo's program is 1.3.0 (it has the verb); the fake ssh makes hello say 1.2.0
+    # the repo's program is 1.3.1 (it has the verb); the fake ssh makes hello say 1.2.0
     res = _plan(router13, {"FAKE_HELLO_VERSION": "1.2.0"})
     assert not router13.check_log.exists() or "check-staged" not in router13.check_log.read_text()
     assert res.returncode == 0, res.stdout

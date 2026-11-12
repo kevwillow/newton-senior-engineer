@@ -1008,3 +1008,92 @@ def test_vc15_01_the_approval_view_accepts_a_stored_explanation_with_a_client_cl
     assert "no valid explanation" not in err
     assert "client in zone guest cannot reach router addresses (3 targets)" in out
     assert "10.0.0.1" not in out
+
+
+# ---- VC-19: client_reaches and the owner-supplied target ------------------------
+
+C_REACHES = {"kind": "client_reaches", "zone": "guest", "to": "10.0.0.9:631"}
+C_BLOCKED_TARGET = {"kind": "client_blocked", "zone": "guest", "to": "10.0.0.9:631"}
+
+
+def test_vc19_01_client_reaches_is_a_client_kind():
+    assert "client_reaches" in cc.CLIENT_KINDS
+    assert cc.is_client_claim(C_REACHES) is True
+    assert cc.client_claims([C_UCI, C_REACHES]) == [(2, C_REACHES)]
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        {"kind": "client_reaches", "zone": "guest"},
+        {"kind": "client_reaches", "zone": "guest", "to": "router"},
+        {"kind": "client_reaches", "zone": "guest", "to": "internet"},
+        {"kind": "client_reaches", "zone": "guest", "to": "10.0.0.9:0"},
+        {"kind": "client_reaches", "zone": "guest", "to": "10.0.0.9:65536"},
+        {"kind": "client_reaches", "zone": "guest", "to": "10.0.0.9:053"},
+        {"kind": "client_reaches", "zone": "guest", "to": "010.0.0.9:53"},
+        {"kind": "client_reaches", "zone": "guest", "to": "10.0.0.256:53"},
+        {"kind": "client_reaches", "zone": "guest", "to": "10.0.0.9:53;reboot"},
+    ],
+)
+def test_vc19_02_a_client_reaches_claim_needs_a_target_shape(claim):
+    with pytest.raises(cc.ClientCheckError):
+        cc.fill_targets([claim], lambda: DUMP)
+
+
+def test_vc19_03_fill_targets_fills_the_owner_target_without_the_router_dump():
+    calls: list[int] = []
+
+    def loader():
+        calls.append(1)
+        return DUMP
+
+    filled = cc.fill_targets([C_REACHES, C_BLOCKED_TARGET], loader)
+    assert filled[0]["targets"] == ["10.0.0.9:631"]
+    assert filled[1]["targets"] == ["10.0.0.9:631"]
+    assert calls == []
+
+
+def test_vc19_04_fill_targets_does_not_change_the_claim_it_was_given():
+    claims = [dict(C_REACHES)]
+    cc.fill_targets(claims, lambda: DUMP)
+    assert claims == [C_REACHES]
+
+
+def test_vc19_05_a_client_blocked_claim_with_a_bad_owner_target_is_refused():
+    for bad in ("lan", "10.0.0.9:0", "10.0.0.9:053", "10.0.0.256:22", "10.0.0.9:22;reboot"):
+        with pytest.raises(cc.ClientCheckError):
+            cc.fill_targets([{"kind": "client_blocked", "zone": "guest", "to": bad}], lambda: DUMP)
+
+
+def test_vc19_06_the_spec_carries_the_reach_check_with_its_target():
+    vantages = {"inside-a": a_vantage()}
+    expect = cc.fill_targets(
+        [C_UCI, C_BLOCKED_TARGET, C_REACHES, C_DNS], lambda: DUMP
+    )
+    spec = cc.build_spec(SID, expect, vantages, "lab1")
+    checks = spec["groups"][0]["checks"]
+    assert checks == [
+        {"claim": 2, "kind": "client_blocked", "to": "10.0.0.9:631", "targets": ["10.0.0.9:631"]},
+        {"claim": 3, "kind": "client_reaches", "to": "10.0.0.9:631", "targets": ["10.0.0.9:631"]},
+        {"claim": 4, "kind": "client_dns"},
+    ]
+
+
+def test_vc19_07_a_reaches_claim_without_targets_never_reaches_the_spec():
+    vantages = {"inside-a": a_vantage()}
+    with pytest.raises(cc.ClientCheckError):
+        cc.build_spec(SID, [dict(C_REACHES, to="10.0.0.9:631")], vantages, "lab1")
+
+
+def test_vc19_08_the_old_forced_command_word_maps_to_the_repair_message():
+    assert cc.OLD_FORCED_COMMAND_WORD == "old-forced-command"
+    assert cc.old_forced_command_message("inside-a") == (
+        "re-run newton-vantage-setup inside-a install-client-checks"
+    )
+
+
+@pytest.mark.parametrize("bad", ["", "Inside-A", "inside_a", "inside-a;reboot", "x" * 33, 7])
+def test_vc19_09_the_repair_message_refuses_a_vantage_name_outside_the_grammar(bad):
+    with pytest.raises(cc.ClientCheckError):
+        cc.old_forced_command_message(bad)

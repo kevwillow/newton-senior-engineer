@@ -16,6 +16,9 @@ Test IDs
          allow-list are named, and the CIDR allow-list has sharp edges.
   VC-18  the zone is proved twice: the source address is configured where
          the check runs, and the route to the target leaves through it.
+  VC-19  reach (the inverse of blocked) and the wider port rule: any port
+         1..65535 for a host inside check_targets, the fixed port list for
+         the public resolvers, and never the public resolvers for reach.
 """
 
 import os
@@ -252,6 +255,16 @@ REFUSED = [
     pytest.param("check guest blocked $(id) 22", id="dollar-command"),
     pytest.param("check guest blocked 192.0.2.1 22\nid", id="newline"),
     pytest.param("check guest blocked 2001:db8::1 22", id="ipv6"),
+    pytest.param("check guest reach 192.0.2.1", id="reach-without-port"),
+    pytest.param("check guest reach 192.0.2.1 22 extra", id="reach-extra-token"),
+    pytest.param("check guest reach 192.0.2.1 0", id="reach-port-zero"),
+    pytest.param("check guest reach 192.0.2.1 65536", id="reach-port-too-big"),
+    pytest.param("check guest reach 192.0.2.256 22", id="reach-large-octet"),
+    pytest.param("check guest reach 192.0.2.1:22", id="reach-colon-port"),
+    pytest.param("check guest reach 192.0.2.1 053", id="reach-leading-zero-port"),
+    pytest.param("check guest reach $(id) 22", id="reach-dollar-command"),
+    pytest.param("check guest reach 192.0.2.1 22;id", id="reach-semicolon"),
+    pytest.param("check guest reach 192.0.2.1 22 ", id="reach-trailing-space"),
     pytest.param(" check guest canary", id="leading-space"),
     pytest.param("check  guest canary", id="double-space"),
     pytest.param("check guest canary ", id="trailing-space"),
@@ -486,8 +499,10 @@ def test_vc06_blocked_unreachable_is_not_tested(tmp_path):
 
 
 def test_vc06_blocked_port_outside_the_policy_is_not_allowed(tmp_path):
+    # The public resolvers keep their fixed port list (22|53|80|443); a
+    # host inside the allow-list may be probed on any port (VC-19).
     result, _names, _text = run_check(
-        tmp_path, "check guest blocked 192.168.1.1 8080"
+        tmp_path, "check guest blocked 1.1.1.1 8080"
     )
 
     assert result.returncode == 0
@@ -864,3 +879,152 @@ def test_vc18_06_the_script_runs_with_the_c_locale(tmp_path):
     text = CHECK.read_text()
     assert "LC_ALL=C" in text
     assert "export LC_ALL" in text
+
+
+# ---- VC-19: reach and the wider blocked ports ---------------------------------
+#
+# `reach <ip> <port>` is the inverse of `blocked`: PASS when a TCP
+# connect succeeds, FAIL when it is refused or times out.  The target
+# must be inside the root-owned allow-list `check_targets`; the public
+# resolvers are never a reach target.  For `reach`, and for `blocked`
+# against a host inside `check_targets`, any port 1..65535 is allowed;
+# `blocked` against 1.1.1.1/9.9.9.9 keeps its current port list.
+
+
+def test_vc19_reach_open_passes(tmp_path):
+    result, names, _text = run_check(
+        tmp_path,
+        "check guest reach 192.168.1.50 631",
+        FAKE_OPEN_TARGETS="192.168.1.50:631",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "RESULT PASS reached\n"
+    assert "bash" in names
+
+
+def test_vc19_reach_refused_fails(tmp_path):
+    result, _names, _text = run_check(tmp_path, "check guest reach 192.168.1.50 631")
+
+    assert result.returncode == 0
+    assert result.stdout == "RESULT FAIL refused\n"
+
+
+def test_vc19_reach_timeout_fails(tmp_path):
+    result, _names, _text = run_check(
+        tmp_path,
+        "check guest reach 192.168.1.50 631",
+        FAKE_TIMEOUT_TARGETS="192.168.1.50:631",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "RESULT FAIL timeout\n"
+
+
+def test_vc19_reach_unreachable_is_not_tested(tmp_path):
+    result, _names, _text = run_check(
+        tmp_path,
+        "check guest reach 192.168.1.50 631",
+        FAKE_UNREACHABLE_TARGETS="192.168.1.50:631",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "RESULT NOTTESTED unreachable\n"
+
+
+def test_vc19_reach_outside_the_allow_list_is_not_a_scan_oracle(tmp_path):
+    allow = "zone guest src 192.0.2.50 canary 192.0.2.1 53\ntarget 10.0.0.0/8\n"
+    result, names, _text = run_check(
+        tmp_path, "check guest reach 198.51.100.9 443", allow=allow
+    )
+
+    assert result.stdout == "RESULT NOTTESTED not-allowed\n"
+    # No probe was made at all for a target outside the allow-list.
+    assert "bash" not in names
+
+
+def test_vc19_reach_never_allows_the_public_resolvers(tmp_path):
+    # `blocked` may probe 1.1.1.1 without a target line; `reach` may not:
+    # the public resolvers are not inside check_targets.
+    allow = "zone guest src 192.0.2.50 canary 192.0.2.1 53\n"
+    result, names, _text = run_check(
+        tmp_path, "check guest reach 1.1.1.1 443", allow=allow
+    )
+
+    assert result.stdout == "RESULT NOTTESTED not-allowed\n"
+    assert "bash" not in names
+
+
+def test_vc19_reach_from_the_wrong_zone_is_not_tested(tmp_path):
+    result, names, _text = run_check(
+        tmp_path,
+        "check guest reach 192.168.1.50 631",
+        FAKE_ROUTE_SRC="198.51.100.7",
+        FAKE_OPEN_TARGETS="192.168.1.50:631",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "RESULT NOTTESTED wrong-zone\n"
+    assert "bash" not in names
+
+
+@pytest.mark.parametrize("port", [1, 53, 631, 65535])
+def test_vc19_reach_accepts_the_ports_of_the_whole_range(tmp_path, port):
+    result, _names, _text = run_check(
+        tmp_path,
+        "check guest reach 192.168.1.50 %d" % port,
+        FAKE_OPEN_TARGETS="192.168.1.50:%d" % port,
+    )
+    assert result.returncode == 0
+    assert result.stdout == "RESULT PASS reached\n"
+
+
+@pytest.mark.parametrize("port", [22, 8080, 65535])
+def test_vc19_blocked_inside_the_allow_list_accepts_any_port(tmp_path, port):
+    # 192.168.1.1 is inside the 192.168.0.0/16 target of ALLOW_PLAIN; the
+    # old port list (22|53|80|443) no longer applies to it.
+    result, names, _text = run_check(
+        tmp_path, "check guest blocked 192.168.1.1 %d" % port
+    )
+    assert result.returncode == 0
+    assert result.stdout == "RESULT PASS refused\n"
+    assert "bash" in names
+
+
+def test_vc19_blocked_port_one_inside_the_allow_list_probes(tmp_path):
+    result, _names, _text = run_check(tmp_path, "check guest blocked 10.1.2.3 1")
+
+    assert result.stdout == "RESULT PASS refused\n"
+
+
+@pytest.mark.parametrize("port", [22, 53, 80, 443])
+def test_vc19_blocked_public_resolver_keeps_its_port_list(tmp_path, port):
+    result, _names, _text = run_check(
+        tmp_path, "check guest blocked 1.1.1.1 %d" % port
+    )
+    assert result.returncode == 0
+    assert result.stdout == "RESULT PASS refused\n"
+
+
+def test_vc19_blocked_public_resolver_outside_its_port_list_is_not_allowed(tmp_path):
+    result, names, _text = run_check(
+        tmp_path, "check guest blocked 9.9.9.9 8080"
+    )
+
+    assert result.stdout == "RESULT NOTTESTED not-allowed\n"
+    assert "bash" not in names
+
+
+def test_vc19_blocked_public_resolver_inside_the_targets_uses_any_port(tmp_path):
+    # The allow-list wins over the fixed port list: an owner who lists
+    # 1.1.1.1/32 in check_targets may probe every port of it.
+    allow = (
+        "zone guest src 192.0.2.50 canary 192.0.2.1 53\n"
+        "target 1.1.1.1/32\n"
+    )
+    result, names, _text = run_check(
+        tmp_path, "check guest blocked 1.1.1.1 8080", allow=allow
+    )
+
+    assert result.stdout == "RESULT PASS refused\n"
+    assert "bash" in names

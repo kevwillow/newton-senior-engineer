@@ -6691,7 +6691,7 @@ access_modes_notes() {
 	note "no-install: Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays."
 	note "no-install: Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval."
 	note "no-install: Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run."
-	note "installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 210 KB), no packages and no compiled code."
+	note "installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 216 KB), no packages and no compiled code."
 	note "installed: Newton's key can run that program and nothing else, so the agent never gets a root shell."
 	note "installed: If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck."
 	note "installed: More checks can run, and fewer changes need a script."

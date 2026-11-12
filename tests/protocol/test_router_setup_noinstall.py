@@ -74,7 +74,7 @@ CLOSING_NOTES = [
     "NOTE no-install: Newton applies only DHCP static leases and DNS "
     "entries itself; every other change is a script you approve and run.",
     "NOTE installed: Newton puts a program on the router: a small set of "
-    "shell scripts (6 files, about 210 KB), no packages and no compiled "
+    "shell scripts (6 files, about 216 KB), no packages and no compiled "
     "code.",
     "NOTE installed: Newton's key can run that program and nothing else, "
     "so the agent never gets a root shell.",

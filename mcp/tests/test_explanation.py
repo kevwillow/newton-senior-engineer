@@ -189,8 +189,9 @@ def test_explanation_is_not_executable_anywhere_in_the_schema():
     # no claim kind carries a command string: only probe field lists, a uci path
     # + text, a vendor statement or a host name
     kinds = ex.CLAIM_KINDS
-    # The four client kinds.  They name a kind and a zone (and, for
-    # a blocked claim, the targets Newton derived): still no command string.
+    # The five client kinds.  They name a kind and a zone (and, for
+    # a blocked or reaches claim, the targets Newton derived or the
+    # owner supplied): still no command string.
     assert set(kinds) == {
         "uci_equals",
         "probe",
@@ -200,6 +201,7 @@ def test_explanation_is_not_executable_anywhere_in_the_schema():
         "client_dhcp",
         "client_internet",
         "client_blocked",
+        "client_reaches",
     }
     assert set({"kind": "client_dns", "zone": "guest"}) == {"kind", "zone"}
 
@@ -511,7 +513,8 @@ def test_a_platform_without_a_tokenizer_carries_no_claim_kinds():
 def test_the_allow_list_pins_the_platforms_that_carry_claims():
     """The claim kinds come from an explicit allow-list."""
     assert ex.CLAIM_KINDS_BY_PLATFORM["openwrt"] == (
-        "uci_equals", "probe", "client_dns", "client_dhcp", "client_internet", "client_blocked",
+        "uci_equals", "probe", "client_dns", "client_dhcp", "client_internet",
+        "client_blocked", "client_reaches",
     )
     assert ex.CLAIM_KINDS_BY_PLATFORM["vyos"] == ("config_has", "ping")
     assert ex.CLAIM_KINDS_BY_PLATFORM["routeros"] == ("ping",)

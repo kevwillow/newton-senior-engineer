@@ -11,6 +11,29 @@ Old behaviour kept:
 New behaviour (state in files under <root>/control/; every call is logged as
 "ubus <args>" to calls.log exactly as before, and the listed calls get one
 extra log line that the harness reads):
+  - call session create '{"timeout":T}'
+      the rpcd model only (control/rpcd-mode is "old" or "new"): the
+      session id of control/next-sid (a fixed one when the file is
+      missing), added to control/sessions, and the reply
+      {"ubus_rpc_session": "<sid>"}.
+  - call uci add '{"config":"system","type":"newton_probe",
+      "ubus_rpc_session":SID}'
+      the rpcd model only: the session's folder is made (control/rpcd-mode
+      "old" names it uci-<SID>, "new" gives it a random 32-hex name) and
+      one delta file is written into it: the folder's <config> file holds
+      the line "+<config>.<section>='<type>'". The reply is the section
+      name, pretty-printed the way ubus prints it (measured:
+      {\n\t"section": "cfg06aeb7"\n}). The name is the index of the add in
+      the session plus a hash of the type (that is how libuci names an
+      anonymous section), so two sessions that add at the same index get
+      the SAME name: control/rpcd-stale-session names a session that is
+      still alive and holds the same probe, and then the marker is in two
+      folders.
+  - call uci revert '{"config":"system","ubus_rpc_session":SID}'
+      the rpcd model only: the folder's <config> file is emptied.
+      control/rpcd-record-block and control/rpcd-record-lies are the
+      faults of the record the helper writes (a directory where the
+      record goes, and a link to /dev/null).
   - call uci apply '{"rollback":true,"timeout":T,"ubus_rpc_session":SID}'
       extra log: ubus uci-apply sid=<SID> t=<T> guard-pending=<0|1>
       honour control/ubus.{sleep,out,err}; then control/apply.rc when that
@@ -19,6 +42,8 @@ extra log line that the harness reads):
       every file of control/staged/ (if the directory exists) over
       etc/config/, and record control/rpcd-pending.json = {"sid": SID,
       "deadline": int(<root>/proc/uptime) + T}.
+      The rpcd model applies the deltas of the session's folder instead
+      of control/staged/ (rpcd reads only that folder).
   - call uci confirm '{"ubus_rpc_session":SID}'
       extra log: ubus uci-confirm sid=<SID> guard-pending=<0|1>
       run control/confirm-hook via "sh <file>" with NEWTON_ROUTER_ROOT in the
@@ -32,7 +57,9 @@ extra log line that the harness reads):
       5 when nothing is pending; else restore control/rpcd-backup/ over
       etc/config/, clear the pending rollback, exit 0.
   - call session destroy '{"ubus_rpc_session":SID}'
-      remove the SID from control/sessions, exit 0.
+      remove the SID from control/sessions, exit 0. The rpcd model also
+      removes the session's folder (rpcd removes its own folder when the
+      session is destroyed).
   - call iwinfo phyname '{"section":"radioN"}'
       the radio -> phy resolution of the wifiscan verb. The reply comes from
       control/iwinfo.phyname.out (the exact text, so a test can answer
@@ -59,6 +86,7 @@ control/ubus.argv.json: the calls.log line joins the words with spaces and
 cannot show that a payload was passed as ONE argument.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -88,6 +116,95 @@ def read_ctrl(name):
         return None
     with open(path) as f:
         return f.read().rstrip("\n")
+
+
+def has_ctrl(name):
+    """Whether the control file is there (its content does not matter)."""
+    return os.path.exists(ctrl(name))
+
+
+def rpcd_mode():
+    """The rpcd model in force ("old" or "new"), or "" when it is off."""
+    mode = read_ctrl("rpcd-mode")
+    return mode if mode in ("old", "new") else ""
+
+
+def session_folder_name(sid):
+    """The name of the folder rpcd keeps a session's changes in.
+
+    "old" names it after the session id; "new" gives it a 32-hex name of
+    its own (the rpcd change d99f703). The name is derived from the session
+    id so that a test run is reproducible. control/rpcd-bad-folder makes
+    a folder whose name is not one of rpcd's own."""
+    if has_ctrl("rpcd-bad-folder"):
+        return "uci-not-a-hash"
+    if rpcd_mode() == "old":
+        return "uci-" + sid
+    digest = hashlib.sha256(("rpcd-dir:" + sid).encode()).hexdigest()
+    return "uci-" + digest[:32]
+
+
+def session_dir(sid):
+    """The folder of a session, and the file that names it."""
+    return os.path.join(ROOT, "var", "run", "rpcd", session_folder_name(sid))
+
+
+def live_sessions():
+    """The sessions the fake rpcd knows about."""
+    path = ctrl("sessions")
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        return f.read().split()
+
+
+def add_index(sid):
+    """The number of sections the session has added so far.
+
+    The count is per session and lives in control/rpcd-adds (one
+    "<sid> <count>" line per session).
+    """
+    path = ctrl("rpcd-adds")
+    counts = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f.read().splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[1].isdigit():
+                    counts[parts[0]] = int(parts[1])
+    index = counts.get(sid, 0)
+    counts[sid] = index + 1
+    with open(path, "w") as f:
+        for key in sorted(counts):
+            f.write("{0} {1}\n".format(key, counts[key]))
+    return index
+
+
+def probe_section(sid, stype="newton_probe"):
+    """The section name the marker probe gets.
+
+    Libuci names an anonymous section from the index it got in the
+    package plus a hash of the type, so two sessions that add at the
+    same index get the SAME name.  The name is therefore never derived
+    from the session id: a stale session can hold the same probe name
+    as a new one.
+    """
+    index = add_index(sid)
+    digest = hashlib.sha256(stype.encode()).hexdigest()
+    return "cfg{0:02x}{1}".format(index, digest[:4])
+
+
+def lock_dir():
+    """The transaction lock the helper writes its records in."""
+    path = os.environ.get("NEWTON_LOCK")
+    if path:
+        return path
+    return os.path.join(ROOT, "tmp", "owrt-safe-apply.lock")
+
+
+def record_path(sid):
+    """The file the helper records the session's folder in."""
+    return os.path.join(lock_dir(), sid + ".dir")
 
 
 def uptime_int():
@@ -176,6 +293,91 @@ def json_string(arg, key):
     """The value of a JSON string field of the ubus payload."""
     m = re.search(r'"%s"\s*:\s*"([^"]*)"' % re.escape(key), arg)
     return m.group(1) if m else ""
+
+
+def handle_session_create(arg):
+    """The rpcd model: a session id and its folder."""
+    sid = read_ctrl("next-sid")
+    if not sid:
+        sid = "0123456789abcdef0123456789abcdef"
+    sessions = ctrl("sessions")
+    existing = ""
+    if os.path.exists(sessions):
+        with open(sessions) as f:
+            existing = f.read()
+    if sid not in existing.split():
+        with open(sessions, "a") as f:
+            f.write(sid + "\n")
+    sys.stdout.write(json.dumps({"ubus_rpc_session": sid}) + "\n")
+    sys.stdout.flush()
+    sys.exit(0)
+
+
+def handle_uci_add(arg):
+    """The rpcd model: the marker probe that names the session's folder.
+
+    The control files are the faults a test needs:
+      rpcd-no-folder     the marker is written nowhere (no folder at all)
+      rpcd-extra-folder  a second folder holds the same marker
+      rpcd-add.section   the section name of the reply (a bad one is a
+                         malformed section)
+      rpcd-stale-session a session that is still alive and holds the
+                         same probe name (the marker is in two folders)
+    """
+    sid = parse_sid(arg)
+    config = json_string(arg, "config")
+    stype = json_string(arg, "type")
+    folder = session_dir(sid)
+    section = read_ctrl("rpcd-add.section") or probe_section(sid, stype)
+    if not has_ctrl("rpcd-no-folder"):
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, config), "a") as f:
+            f.write("+{0}.{1}='{2}'\n".format(config, section, stype))
+    if has_ctrl("rpcd-extra-folder"):
+        digest = hashlib.sha256(("rpcd-extra:" + sid).encode()).hexdigest()
+        other = os.path.join(ROOT, "var", "run", "rpcd", "uci-" + digest[:32])
+        os.makedirs(other, exist_ok=True)
+        with open(os.path.join(other, config), "a") as f:
+            f.write("+{0}.{1}='{2}'\n".format(config, section, stype))
+    stale = read_ctrl("rpcd-stale-session")
+    if stale and stale != sid and stale in live_sessions():
+        # a stale session that still holds a probe of the same name: the
+        # marker is in two folders and the lookup has to refuse
+        other = session_dir(stale)
+        os.makedirs(other, exist_ok=True)
+        with open(os.path.join(other, config), "a") as f:
+            f.write("+{0}.{1}='{2}'\n".format(config, section, stype))
+    sys.stdout.write('{{\n\t"section": "{0}"\n}}\n'.format(section))
+    sys.stdout.flush()
+    sys.exit(0)
+
+
+def handle_uci_revert(arg):
+    """The rpcd model: the probe is taken back out of the folder.
+
+    control/rpcd-revert-keeps leaves the marker in place (a revert that
+    did not happen)."""
+    sid = parse_sid(arg)
+    config = json_string(arg, "config")
+    folder = session_dir(sid)
+    path = os.path.join(folder, config)
+    if os.path.exists(path) and not has_ctrl("rpcd-revert-keeps"):
+        with open(path, "w"):
+            pass
+    # the faults a test needs: the helper cannot record the folder
+    #   rpcd-record-block  a directory is where the record goes: the
+    #                      write cannot succeed
+    #   rpcd-record-lies   the record is a link to /dev/null: the write
+    #                      succeeds but the read back is empty
+    if has_ctrl("rpcd-record-block") or has_ctrl("rpcd-record-lies"):
+        record = record_path(sid)
+        if os.path.islink(record) or os.path.isfile(record):
+            os.remove(record)
+        if has_ctrl("rpcd-record-block"):
+            os.makedirs(record, exist_ok=True)
+        else:
+            os.symlink("/dev/null", record)
+    sys.exit(0)
 
 
 def phy_for_section(section):
@@ -287,6 +489,78 @@ def handle_iwinfo_scan(arg):
     sys.exit(0)
 
 
+def apply_delta(conf_path, section, option, value):
+    """Write one delta of a session folder into a config file."""
+    lines = []
+    if os.path.exists(conf_path):
+        with open(conf_path) as f:
+            lines = f.read().splitlines()
+    # the block of the section (the lines from its "config" line to the
+    # next "config" line)
+    start = None
+    end = len(lines)
+    for index, line in enumerate(lines):
+        if not line.strip().startswith("config "):
+            continue
+        name = line.strip()[len("config "):].split()[0].strip("'")
+        if name == section:
+            start = index
+            continue
+        if start is not None:
+            end = index
+            break
+    if start is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        if option:
+            lines.append("config " + section)
+            lines.append("\toption " + option + " '" + value + "'")
+        else:
+            lines.append("config " + section + " '" + value + "'")
+    elif option:
+        replaced = False
+        for index in range(start + 1, end):
+            stripped = lines[index].strip()
+            if stripped.startswith("option " + option + " ") or \
+                    stripped.startswith("option " + option + "="):
+                lines[index] = "\toption " + option + " '" + value + "'"
+                replaced = True
+                break
+        if not replaced:
+            lines.insert(end, "\toption " + option + " '" + value + "'")
+    else:
+        lines[start] = "config " + section + " '" + value + "'"
+    with open(conf_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def apply_session_deltas(sid):
+    """Apply the deltas of a session's folder over etc/config."""
+    folder = session_dir(sid)
+    if not os.path.isdir(folder):
+        return
+    cfg_dir = os.path.join(ROOT, "etc", "config")
+    for name in sorted(os.listdir(folder)):
+        path = os.path.join(folder, name)
+        if not os.path.isfile(path):
+            continue
+        with open(path) as f:
+            deltas = [line for line in f.read().splitlines() if line]
+        for line in deltas:
+            if line[:1] != "+":
+                continue
+            body = line[1:]
+            dpath, _sep, value = body.partition("=")
+            value = value.strip().strip("'")
+            parts = dpath.split(".")
+            config = parts[0]
+            section = parts[1] if len(parts) > 1 else ""
+            option = parts[2] if len(parts) > 2 else ""
+            if not section:
+                continue
+            apply_delta(os.path.join(cfg_dir, config), section, option, value)
+
+
 def handle_uci_apply(arg):
     sid = parse_sid(arg)
     t = parse_timeout(arg)
@@ -311,13 +585,17 @@ def handle_uci_apply(arg):
         src = os.path.join(cfg, name)
         if os.path.isfile(src) and not os.path.islink(src):
             shutil.copyfile(src, os.path.join(backup, name))
-    staged = ctrl("staged")
-    if os.path.isdir(staged):
-        for name in os.listdir(staged):
-            src = os.path.join(staged, name)
-            dst = os.path.join(cfg, name)
-            if os.path.isfile(src) and not os.path.islink(src):
-                shutil.copyfile(src, dst)
+    if rpcd_mode():
+        # rpcd reads only the session's own folder
+        apply_session_deltas(sid)
+    else:
+        staged = ctrl("staged")
+        if os.path.isdir(staged):
+            for name in os.listdir(staged):
+                src = os.path.join(staged, name)
+                dst = os.path.join(cfg, name)
+                if os.path.isfile(src) and not os.path.islink(src):
+                    shutil.copyfile(src, dst)
     with open(ctrl("rpcd-pending.json"), "w") as f:
         json.dump({"sid": sid, "deadline": uptime_int() + t}, f)
     sys.exit(0)
@@ -391,6 +669,11 @@ def handle_session_destroy(arg):
             lines = f.readlines()
         with open(sessions, "w") as f:
             f.writelines(line for line in lines if line.strip() != sid)
+    if rpcd_mode():
+        # rpcd removes its own folder when the session is destroyed
+        folder = session_dir(sid)
+        if os.path.isdir(folder):
+            shutil.rmtree(folder, ignore_errors=True)
     sys.exit(0)
 
 
@@ -428,6 +711,15 @@ def main():
         return
     if len(args) >= 4 and args[0] == "call":
         target, sub, arg = args[1], args[2], args[3]
+        if target == "session" and sub == "create" and rpcd_mode():
+            handle_session_create(arg)
+            return
+        if target == "uci" and sub == "add" and rpcd_mode():
+            handle_uci_add(arg)
+            return
+        if target == "uci" and sub == "revert" and rpcd_mode():
+            handle_uci_revert(arg)
+            return
         if target == "uci" and sub == "apply":
             handle_uci_apply(arg)
             return

@@ -98,6 +98,7 @@ def _make_ssh(tmp_path: Path, rows, *, sleep_s=None):
         "  case \"$kind\" in\n"
         "    reply) printf 'RESULT %s %s\\n' \"$status\" \"$word\" ;;\n"
         "    raw) printf '%s\\n' \"$status\" ;;\n"
+        "    err) printf '%s\\n' \"$status\" >&2 ;;\n"
         "    two) printf 'RESULT PASS reached\\nRESULT PASS reached\\n' ;;\n"
         "    empty) : ;;\n"
         "    hang) exec sleep 60 ;;\n"
@@ -903,3 +904,247 @@ def test_vc18_07_the_claim_lines_come_in_claim_order(tmp_path):
         "vantage-check: claim 3 PASS ok",
         "vantage-check: claim 4 PASS ok",
     ]
+
+
+# ---- VC-19: client_reaches and the old forced command --------------------------
+
+
+def _reaches_check(claim, targets):
+    return {
+        "claim": claim,
+        "kind": "client_reaches",
+        "to": targets[0],
+        "targets": list(targets),
+    }
+
+
+def test_vc19_01_reach_passes_when_the_target_answers(tmp_path):
+    result, calls = _run(
+        tmp_path,
+        [
+            "check guest canary|reply|PASS|reached|0",
+            "check guest reach 192.0.2.10 631|reply|PASS|reached|0",
+        ],
+        [_group(tmp_path, [_reaches_check(2, ["192.0.2.10:631"])])],
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert _claim_lines(result) == ["vantage-check: claim 2 PASS reached"]
+    assert calls[-1][-5:] == ["check", "guest", "reach", "192.0.2.10", "631"]
+
+
+def test_vc19_02_reach_refused_or_timeout_fails_the_claim(tmp_path):
+    for word in ("refused", "timeout"):
+        result, _calls = _run(
+            tmp_path,
+            [
+                "check guest canary|reply|PASS|reached|0",
+                f"check guest reach 192.0.2.10 631|reply|FAIL|{word}|0",
+            ],
+            [_group(tmp_path, [_reaches_check(2, ["192.0.2.10:631"])])],
+        )
+        assert result.returncode == 1, word
+        assert _claim_lines(result) == [f"vantage-check: claim 2 FAIL {word}"]
+
+
+def test_vc19_03_reach_not_allowed_is_not_tested(tmp_path):
+    result, _calls = _run(
+        tmp_path,
+        [
+            "check guest canary|reply|PASS|reached|0",
+            "check guest reach 192.0.2.10 631|reply|NOTTESTED|not-allowed|0",
+        ],
+        [_group(tmp_path, [_reaches_check(2, ["192.0.2.10:631"])])],
+    )
+
+    assert result.returncode == 1
+    assert _claim_lines(result) == ["vantage-check: claim 2 NOT-TESTED not-allowed"]
+
+
+def test_vc19_04_the_old_forced_command_is_detected_for_reach(tmp_path):
+    """A vantage that still runs the OLD forced command does not know the
+    reach verb and answers with its fixed refusal line.  The runner maps
+    exactly that answer (rc 2, one stderr line) to old-forced-command."""
+    result, _calls = _run(
+        tmp_path,
+        [
+            "check guest canary|reply|PASS|reached|0",
+            "check guest reach 192.0.2.10 631|err|newton-vantage-check: refused||2",
+        ],
+        [_group(tmp_path, [_reaches_check(2, ["192.0.2.10:631"])])],
+    )
+
+    assert result.returncode == 1
+    assert _claim_lines(result) == [
+        "vantage-check: claim 2 NOT-TESTED old-forced-command"
+    ]
+
+
+def test_vc19_05_the_old_forced_command_needs_the_exact_answer(tmp_path):
+    for stderr, rc in (
+        ("newton-vantage-check: refused extra", 2),
+        ("newton-vantage-check: refused", 255),
+        ("ssh: connect refused", 2),
+        ("", 2),
+    ):
+        result, _calls = _run(
+            tmp_path,
+            [
+                "check guest canary|reply|PASS|reached|0",
+                f"check guest reach 192.0.2.10 631|err|{stderr}||{rc}",
+            ],
+            [_group(tmp_path, [_reaches_check(2, ["192.0.2.10:631"])])],
+        )
+        assert result.returncode == 1, (stderr, rc)
+        assert _claim_lines(result) == [
+            "vantage-check: claim 2 NOT-TESTED ssh-failed"
+        ], (stderr, rc)
+
+
+def test_vc19_06_the_old_forced_command_is_not_mapped_for_blocked(tmp_path):
+    # Only `reach` is a new verb; a blocked call that fails is the ssh
+    # failure it always was.
+    result, _calls = _run(
+        tmp_path,
+        [
+            "check guest canary|reply|PASS|reached|0",
+            "check guest blocked 192.0.2.10 22|err|newton-vantage-check: refused||2",
+        ],
+        [
+            _group(
+                tmp_path,
+                [
+                    {
+                        "claim": 4,
+                        "kind": "client_blocked",
+                        "to": "router",
+                        "targets": ["192.0.2.10:22"],
+                    }
+                ],
+            )
+        ],
+    )
+
+    assert result.returncode == 1
+    assert _claim_lines(result) == ["vantage-check: claim 4 NOT-TESTED ssh-failed"]
+
+
+def test_vc19_07_the_targets_of_a_reaches_claim_run_at_the_same_time(tmp_path):
+    targets = [f"192.0.2.{index}:631" for index in (10, 11, 12)]
+    rows = ["check guest canary|reply|PASS|reached|0"]
+    rows += [
+        f"check guest reach {target.split(':')[0]} 631|reply|PASS|reached|0"
+        for target in targets
+    ]
+    result, calls = _run(
+        tmp_path,
+        rows,
+        [_group(tmp_path, [_reaches_check(5, targets)])],
+    )
+
+    assert result.returncode == 0
+    assert _claim_lines(result) == ["vantage-check: claim 5 PASS reached"]
+    probed = sorted(call[-2:] for call in calls if call[-3] == "reach")
+    assert probed == [["192.0.2.10", "631"], ["192.0.2.11", "631"], ["192.0.2.12", "631"]]
+
+
+def test_vc19_08_one_target_that_cannot_be_reached_fails_the_claim(tmp_path):
+    result, _calls = _run(
+        tmp_path,
+        [
+            "check guest canary|reply|PASS|reached|0",
+            "check guest reach 192.0.2.10 631|reply|PASS|reached|0",
+            "check guest reach 192.0.2.11 631|reply|FAIL|refused|0",
+        ],
+        [_group(tmp_path, [_reaches_check(5, ["192.0.2.10:631", "192.0.2.11:631"])])],
+    )
+
+    assert result.returncode == 1
+    assert _claim_lines(result) == ["vantage-check: claim 5 FAIL refused"]
+
+
+def test_vc19_09_a_target_that_cannot_be_tested_is_not_a_pass(tmp_path):
+    result, _calls = _run(
+        tmp_path,
+        [
+            "check guest canary|reply|PASS|reached|0",
+            "check guest reach 192.0.2.10 631|reply|PASS|reached|0",
+            "check guest reach 192.0.2.11 631|reply|NOTTESTED|unreachable|0",
+        ],
+        [_group(tmp_path, [_reaches_check(5, ["192.0.2.10:631", "192.0.2.11:631"])])],
+    )
+
+    assert result.returncode == 1
+    assert _claim_lines(result) == ["vantage-check: claim 5 NOT-TESTED unreachable"]
+
+
+def test_vc19_10_a_reaches_check_without_targets_is_refused(tmp_path):
+    groups = [
+        _group(tmp_path, [{"claim": 2, "kind": "client_reaches", "to": "192.0.2.10:631"}])
+    ]
+    result, calls = _run(tmp_path, [], groups)
+
+    assert result.returncode == 1
+    assert re.fullmatch(r"vantage-check: error [a-z-]+\n", result.stderr)
+    assert calls == []
+
+
+def test_vc19_11_a_reaches_check_with_a_bad_to_or_target_is_refused(tmp_path):
+    for check in (
+        {"claim": 2, "kind": "client_reaches", "to": "router", "targets": ["192.0.2.10:631"]},
+        {"claim": 2, "kind": "client_reaches", "to": "192.0.2.10:631", "targets": ["192.0.2.10:not-a-port"]},
+        {"claim": 2, "kind": "client_reaches", "to": "192.0.2.10:631", "targets": []},
+    ):
+        result, calls = _run(tmp_path, [], [_group(tmp_path, [check])])
+        assert result.returncode == 1, check
+        assert re.fullmatch(r"vantage-check: error [a-z-]+\n", result.stderr)
+        assert calls == []
+
+
+def test_vc19_12_a_blocked_check_with_an_owner_target_is_accepted(tmp_path):
+    result, calls = _run(
+        tmp_path,
+        [
+            "check guest canary|reply|PASS|reached|0",
+            "check guest blocked 192.0.2.10 631|reply|PASS|refused|0",
+        ],
+        [
+            _group(
+                tmp_path,
+                [
+                    {
+                        "claim": 4,
+                        "kind": "client_blocked",
+                        "to": "192.0.2.10:631",
+                        "targets": ["192.0.2.10:631"],
+                    }
+                ],
+            )
+        ],
+    )
+
+    assert result.returncode == 0
+    assert _claim_lines(result) == ["vantage-check: claim 4 PASS refused"]
+    assert calls[-1][-2:] == ["192.0.2.10", "631"]
+
+
+def test_vc19_13_a_blocked_check_with_a_bad_owner_to_is_refused(tmp_path):
+    groups = [
+        _group(
+            tmp_path,
+            [
+                {
+                    "claim": 4,
+                    "kind": "client_blocked",
+                    "to": "lan",
+                    "targets": ["192.0.2.10:631"],
+                }
+            ],
+        )
+    ]
+    result, calls = _run(tmp_path, [], groups)
+
+    assert result.returncode == 1
+    assert re.fullmatch(r"vantage-check: error [a-z-]+\n", result.stderr)
+    assert calls == []

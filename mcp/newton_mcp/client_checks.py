@@ -34,11 +34,19 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
-from .scans import Vantage
+from .scans import NAME_RE, Vantage
 
 # A client claim never carries free text: it names a kind and a zone, and the
-# words Newton shows are built from these values.
-CLIENT_KINDS = ("client_dns", "client_dhcp", "client_internet", "client_blocked")
+# words Newton shows are built from these values.  ``client_reaches`` is the
+# inverse of ``client_blocked``: a rule (or a plan) claims a client CAN
+# reach one address and port.
+CLIENT_KINDS = (
+    "client_dns",
+    "client_dhcp",
+    "client_internet",
+    "client_blocked",
+    "client_reaches",
+)
 
 # The ports a blocked-router claim is checked against.
 ROUTER_PORTS = (22, 80, 443)
@@ -52,6 +60,17 @@ MAX_TARGETS = 24
 # The verify budget a plan needs when it claims a client check: the vantage
 # round is slower than a router probe, so the plan's timeout must allow it.
 MIN_TIMEOUT_S = 150
+
+# The word the vantage runner reports when the vantage still runs the OLD
+# forced command, the one that does not know the ``reach`` verb: it answers
+# every reach call with its fixed refusal line, which the runner detects
+# (never guesses) and maps to this word.  The host turns the word into the
+# repair message the plan result shows.
+OLD_FORCED_COMMAND_WORD = "old-forced-command"
+
+# The shape of one owner-supplied target: an IPv4 address and a port,
+# both canonical (no leading zeros, port 1..65535).
+_TARGET_RE = re.compile(r"^([0-9]{1,3}(?:\.[0-9]{1,3}){3}):([1-9][0-9]{0,4})$")
 
 # The one shape the router-side script accepts for OWRT_LOCAL_CHECK: the
 # quoted path of the vantage runner and the session id.
@@ -106,6 +125,42 @@ def _private_v4(text: str) -> ipaddress.IPv4Address | None:
     if any(address in network for network in _PRIVATE_V4) or address in _CGNAT_V4:
         return address
     return None
+
+
+def valid_target(value: Any) -> bool:
+    """True for exactly ``<ipv4>:<port>``, both canonical.
+
+    Octets may not carry leading zeros and must be 0..255; the port is
+    1..65535 with no leading zeros.  This is the one shape an
+    owner-supplied target (a network rule's ``to``) may have.
+    """
+    if not isinstance(value, str):
+        return False
+    match = _TARGET_RE.fullmatch(value)
+    if match is None:
+        return False
+    address, port_text = match.groups()
+    for part in address.split("."):
+        if len(part) > 1 and part.startswith("0"):
+            return False
+        if int(part) > 255:
+            return False
+    if int(port_text) > 65535:
+        return False
+    return True
+
+
+def old_forced_command_message(vantage_name: str) -> str:
+    """What the owner is told when a vantage still runs the old forced command.
+
+    The old script does not know the ``reach`` verb, so every reach check
+    of that vantage answers with its fixed refusal; the fix is to re-run
+    the setup step that installs the checks.  The vantage name is a
+    validated inventory name, so the sentence stays fixed.
+    """
+    if not isinstance(vantage_name, str) or NAME_RE.fullmatch(vantage_name) is None:
+        raise ClientCheckError("the vantage name has an unusable shape")
+    return f"re-run newton-vantage-setup {vantage_name} install-client-checks"
 
 
 def derive_router_targets(dump: dict[str, Any]) -> list[str]:
@@ -174,7 +229,11 @@ def fill_targets(
 
     ``dump_loader`` reads the router's interface dump and is called at most
     once, and only when a claim needs it (a blocked claim against the
-    router's own addresses).  The list that came in is not changed.
+    router's own addresses).  The targets Newton owns (the router's
+    addresses, the public resolvers) are derived here; the one target an
+    owner-supplied claim names (a network rule's ``to``) is validated and
+    carried as the claim's single target.  The list that came in is not
+    changed.
     """
     filled: list[dict[str, Any]] = []
     dump: dict[str, Any] | None = None
@@ -183,10 +242,17 @@ def fill_targets(
             filled.append(claim)
             continue
         kind = claim.get("kind")
-        if kind != "client_blocked":
+        if kind not in ("client_blocked", "client_reaches"):
             filled.append(dict(claim))
             continue
         destination = claim.get("to")
+        if kind == "client_reaches":
+            if not valid_target(destination):
+                raise ClientCheckError(
+                    'a client_reaches claim needs to of "<ipv4>:<port>"'
+                )
+            filled.append({**claim, "targets": [destination]})
+            continue
         if destination == "internet":
             filled.append({**claim, "targets": list(INTERNET_TARGETS)})
             continue
@@ -194,6 +260,12 @@ def fill_targets(
             if dump is None:
                 dump = dump_loader()
             filled.append({**claim, "targets": derive_router_targets(dump)})
+            continue
+        if valid_target(destination):
+            # an owner-supplied target (a network rule): allowed because
+            # the owner wrote it, and still checked against the vantage's
+            # allow-list at plan time
+            filled.append({**claim, "targets": [destination]})
             continue
         raise ClientCheckError(f"a {kind} claim has no known destination")
     return filled
@@ -253,7 +325,7 @@ def build_spec(
             order.append(key)
         kind = claim.get("kind")
         check: dict[str, Any] = {"claim": number, "kind": kind}
-        if kind == "client_blocked":
+        if kind in ("client_blocked", "client_reaches"):
             check["to"] = claim.get("to")
             targets = claim.get("targets")
             if not isinstance(targets, list) or not targets:

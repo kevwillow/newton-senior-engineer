@@ -2,7 +2,7 @@
 # Forced command for Newton's client checks on a vantage host.
 #
 # The original command is DATA: it is parsed with parameter expansion into
-# one of five fixed shapes, and one of a fixed set of argv lists is then
+# one of six fixed shapes, and one of a fixed set of argv lists is then
 # executed.  Nothing the caller sends is ever interpolated into a command
 # string.
 #
@@ -576,30 +576,49 @@ do_dhcp() {
 	return 0
 }
 
-do_blocked() {
-	allowed=0
-	if [ "$1" = 1.1.1.1 ] || [ "$1" = 9.9.9.9 ]; then
-		allowed=1
-	fi
+# in_targets <ipv4>: the address is inside a `target` CIDR of the
+# root-owned allow-list.
+in_targets() {
 	for target in $TARGETS; do
 		if ip_in_cidr "$1" "$target"; then
-			allowed=1
+			return 0
 		fi
 	done
-	if [ "$allowed" != 1 ]; then
+	return 1
+}
+
+# The port rule both TCP checks share: a host inside the allow-list may
+# be probed on any port the grammar already validated (1..65535); the
+# two public resolvers, which `blocked` may probe without a target
+# line, keep their fixed port list.  The allow-list wins: an owner who
+# lists a resolver's /32 in it may probe every port of it.
+tcp_port_allowed() {
+	if in_targets "$1"; then
+		return 0
+	fi
+	if [ "$1" = 1.1.1.1 ] || [ "$1" = 9.9.9.9 ]; then
+		case $2 in
+			22|53|80|443)
+				return 0
+				;;
+		esac
+	fi
+	return 1
+}
+
+do_blocked() {
+	if ! in_targets "$1"; then
+		if [ "$1" != 1.1.1.1 ] && [ "$1" != 9.9.9.9 ]; then
+			STATUS=NOTTESTED
+			WORD=not-allowed
+			return 0
+		fi
+	fi
+	if ! tcp_port_allowed "$1" "$2"; then
 		STATUS=NOTTESTED
 		WORD=not-allowed
 		return 0
 	fi
-	case $2 in
-		22|53|80|443)
-			;;
-		*)
-			STATUS=NOTTESTED
-			WORD=not-allowed
-			return 0
-			;;
-	esac
 	if ! route_src_ok "$1"; then
 		reply NOTTESTED wrong-zone
 	fi
@@ -617,6 +636,44 @@ do_blocked() {
 			case $PROBE_OUT in
 				*'Connection refused'*)
 					STATUS=PASS
+					WORD=refused
+					;;
+				*)
+					STATUS=NOTTESTED
+					WORD=unreachable
+					;;
+			esac
+			;;
+	esac
+	return 0
+}
+
+# reach is the inverse of blocked: the connect must SUCCEED.  One
+# connect per check, the same 6 s probe.  The target must be inside the
+# allow-list; the public resolvers are never a reach target.
+do_reach() {
+	if ! in_targets "$1"; then
+		STATUS=NOTTESTED
+		WORD=not-allowed
+		return 0
+	fi
+	if ! route_src_ok "$1"; then
+		reply NOTTESTED wrong-zone
+	fi
+	probe_tcp "$1" "$2" 6 || true
+	case $PROBE_RC in
+		0)
+			STATUS=PASS
+			WORD=reached
+			;;
+		124)
+			STATUS=FAIL
+			WORD=timeout
+			;;
+		*)
+			case $PROBE_OUT in
+				*'Connection refused'*)
+					STATUS=FAIL
 					WORD=refused
 					;;
 				*)
@@ -665,6 +722,17 @@ case $check in
 		valid_ipv4 "$block_ip" || refuse
 		valid_port "$block_port" || refuse
 		;;
+	reach)
+		reach_pair=${rest#* }
+		[ "$reach_pair" != "$rest" ] || refuse
+		reach_ip=${reach_pair%% *}
+		reach_port=${reach_pair#* }
+		[ "$reach_port" != "$reach_pair" ] || refuse
+		tail=${reach_port#* }
+		[ "$tail" = "$reach_port" ] || refuse
+		valid_ipv4 "$reach_ip" || refuse
+		valid_port "$reach_port" || refuse
+		;;
 	*)
 		refuse
 		;;
@@ -684,6 +752,7 @@ case $check in
 	dhcp) do_dhcp ;;
 	internet) do_internet ;;
 	blocked) do_blocked "$block_ip" "$block_port" ;;
+	reach) do_reach "$reach_ip" "$reach_port" ;;
 esac
 
 reply "$STATUS" "$WORD"

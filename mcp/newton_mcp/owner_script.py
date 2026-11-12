@@ -11,13 +11,18 @@ script and the restore script.  The script arrives on the router over
 
   * every command carries ``</dev/null``: a command that read stdin
     would eat the rest of the script;
-  * there is exactly ONE state-changing call, the ``uci apply`` with
-    the router's own rollback armed.  Before that line only tmpfs is
-    written (``$W`` and ``/var/run/rpcd/uci-$SID``), so a script that
-    dies, is killed or loses ssh leaves ``/etc/config`` untouched;
-  * the script never confirms, never destroys the session (that would
-    cancel the rollback) and never prints the session id.  The session
-    dies by timeout at ``WINDOW + 120``;
+  * there is exactly ONE state-changing call that touches the config, the
+    ``uci apply`` with the router's own rollback armed.  Before that line
+    only tmpfs is written (``$W`` and the rpcd session folder), so a
+    script that dies, is killed or loses ssh leaves ``/etc/config``
+    untouched;
+  * the script never confirms, and it never destroys the session after
+    the apply (that would cancel the rollback).  It does destroy the
+    session when it cannot use it: a session it cannot grant, or a
+    session whose folder it cannot find, is destroyed before the script
+    stops, because nothing has been applied then.  The session dies by
+    timeout at ``WINDOW + 120`` when the script does get that far;
+  * the script never prints the session id before the apply line;
   * every value and every key sits inside single quotes, and the value
     grammar forbids the quote itself, so nothing can become shell
     code.
@@ -116,6 +121,65 @@ UNDO_LINES: tuple[str, ...] = (
 )
 
 
+#: The lines that find the folder rpcd keeps the session's staged changes
+#: in.  The rpcd change d99f703 stopped naming that folder after the session
+#: id: it is ``uci-<32 hex>`` now and no ubus call returns it.  The folder
+#: is found with a marker -- one probe section is added to the session and
+#: taken back out again -- and the one delta file that holds the probe
+#: names the folder.  Every value that comes from the router (the section
+#: name, the folder name) is checked against a grammar before it is used,
+#: so nothing the router says can become shell code.
+#:
+#: Every failure of the lookup ends in ``lookup_fail``: the session the
+#: script opened is destroyed first and the script stops after.  Nothing has
+#: been applied at that point, so the destroy is safe; after the apply the
+#: session must live (the rollback timer is on it).
+LOOKUP_LINES: tuple[str, ...] = (
+    'SECTION=$(ubus call uci add "{\\"config\\":\\"system\\",\\"type\\":'
+    '\\"newton_probe\\",\\"ubus_rpc_session\\":\\"$SID\\"}" </dev/null | '
+    "jsonfilter -e '@.section')",
+    'case "$SECTION" in',
+    "  '' | *[!A-Za-z0-9_]*) lookup_fail ;;",
+    "esac",
+    '[ "${#SECTION}" -le 64 ] || lookup_fail',
+    'NP=$(grep -Fxl "+system.$SECTION=\'newton_probe\'" '
+    "/var/run/rpcd/uci-*/system </dev/null 2>/dev/null)",
+    "NP_N=$(printf '%s\\n' \"$NP\" | grep -c .)",
+    '[ "$NP_N" -eq 1 ] || lookup_fail',
+    'NP_DIR=${NP%/*}',
+    'NP_NAME=${NP_DIR##*/}',
+    'NP_HEX=${NP_NAME#uci-}',
+    '[ "$NP_HEX" != "$NP_NAME" ] || lookup_fail',
+    '[ "${#NP_HEX}" -eq 32 ] || lookup_fail',
+    'case "$NP_HEX" in *[!0-9a-f]*) lookup_fail ;; esac',
+    'case "$NP_DIR" in /var/run/rpcd/*) ;; *) lookup_fail ;; esac',
+    'ubus call uci revert "{\\"config\\":\\"system\\",\\"ubus_rpc_session\\":'
+    '\\"$SID\\"}" </dev/null >/dev/null || lookup_fail',
+    'if [ -s "$NP_DIR/system" ]; then lookup_fail; fi',
+    'D="$NP_DIR"',
+)
+
+
+#: The line that destroys the script's own session.  It is called when the
+#: script cannot use the session: nothing has been applied then, so the
+#: rollback timer of the session is not needed.  Only a session id that
+#: passed the grammar is ever sent, so no text the router said can reach
+#: the ubus payload.
+DROP_SESSION_LINE = (
+    'drop_session() { printf \'%s\' "$SID" | grep -Eq \'^[0-9a-f]{32}$\' || '
+    'return 0; ubus call session destroy "{\\"ubus_rpc_session\\":\\"$SID\\"}" '
+    '</dev/null >/dev/null 2>&1; }'
+)
+
+
+#: The line that ends a failed lookup: the session goes first, then the
+#: script stops.
+LOOKUP_FAIL_LINE = (
+    'lookup_fail() { drop_session; die "could not locate the rpcd session '
+    'folder"; }'
+)
+
+
 #: The template, as an ordered list of lines.  A line that is a marker
 #: (``@@name@@``) is the one place a value from the plan enters the
 #: script; every other line is fixed text.  The template IS the
@@ -150,11 +214,12 @@ TEMPLATE_LINES: tuple[str, ...] = (
     "@@preconditions@@",
     'echo "NEWTON-CHECKED plan=$PLAN"',
     'SID=$(ubus call session create "{\\"timeout\\":$((WINDOW + 120))}" </dev/null | jsonfilter -e \'@.ubus_rpc_session\')',
-    "printf '%s' \"$SID\" | grep -Eq '^[0-9a-f]{32}$' || die \"could not open a session\"",
-    'ubus call session grant "{\\"ubus_rpc_session\\":\\"$SID\\",\\"scope\\":\\"uci\\",\\"objects\\":[[\\"*\\",\\"read\\"],[\\"*\\",\\"write\\"]]}" </dev/null >/dev/null || die "could not open a session"',
-    'ubus call session grant "{\\"ubus_rpc_session\\":\\"$SID\\",\\"scope\\":\\"ubus\\",\\"objects\\":[[\\"uci\\",\\"confirm\\"]]}" </dev/null >/dev/null || die "could not open a session"',
-    'D="/var/run/rpcd/uci-$SID"',
-    'mkdir -p "$D" || die "no staging directory"',
+    DROP_SESSION_LINE,
+    LOOKUP_FAIL_LINE,
+    "printf '%s' \"$SID\" | grep -Eq '^[0-9a-f]{32}$' || { drop_session; die \"could not open a session\"; }",
+    'ubus call session grant "{\\"ubus_rpc_session\\":\\"$SID\\",\\"scope\\":\\"uci\\",\\"objects\\":[[\\"*\\",\\"read\\"],[\\"*\\",\\"write\\"]]}" </dev/null >/dev/null || { drop_session; die "could not open a session"; }',
+    'ubus call session grant "{\\"ubus_rpc_session\\":\\"$SID\\",\\"scope\\":\\"ubus\\",\\"objects\\":[[\\"uci\\",\\"confirm\\"]]}" </dev/null >/dev/null || { drop_session; die "could not open a session"; }',
+    *LOOKUP_LINES,
     'stage() { "$@" </dev/null >/dev/null 2>"$W/err" && [ ! -s "$W/err" ] || die "the router refused a change; nothing was applied"; }',
     "@@stages@@",
     '[ -n "$(uci -P "$D" changes </dev/null)" ] || die "nothing to apply"',
@@ -171,7 +236,7 @@ TEMPLATE_SKELETON = "\n".join(TEMPLATE_LINES) + "\n"
 
 #: The sha256 of the template skeleton.  Changing the template means
 #: changing this number in the same review.
-TEMPLATE_SHA256 = "5aaed5aeb9277e2203388fa44f55032f252c50cad76cc27bbd2e92d28701486f"
+TEMPLATE_SHA256 = "640894606d64e77ae66765e352ed337dd6f38694e6ad5b4bd2e78b47e39e259e"
 
 
 def template_sha256() -> str:
@@ -601,22 +666,26 @@ def parse_script(data: bytes) -> ScriptPlan:
         'SID=$(ubus call session create "{\\"timeout\\":$((WINDOW + 120))}" '
         "</dev/null | jsonfilter -e '@.ubus_rpc_session')"
     )
+    cursor.expect(DROP_SESSION_LINE)
+    cursor.expect(LOOKUP_FAIL_LINE)
     cursor.expect(
-        "printf '%s' \"$SID\" | grep -Eq '^[0-9a-f]{32}$' || die \"could not "
-        'open a session"'
+        "printf '%s' \"$SID\" | grep -Eq '^[0-9a-f]{32}$' || { drop_session; "
+        'die "could not open a session"; }'
     )
     cursor.expect(
         'ubus call session grant "{\\"ubus_rpc_session\\":\\"$SID\\",\\"scope\\":'
         '\\"uci\\",\\"objects\\":[[\\"*\\",\\"read\\"],[\\"*\\",\\"write\\"]]}" '
-        "</dev/null >/dev/null || die \"could not open a session\""
+        "</dev/null >/dev/null || { drop_session; die \"could not open a "
+        'session"; }'
     )
     cursor.expect(
         'ubus call session grant "{\\"ubus_rpc_session\\":\\"$SID\\",\\"scope\\":'
         '\\"ubus\\",\\"objects\\":[[\\"uci\\",\\"confirm\\"]]}" '
-        "</dev/null >/dev/null || die \"could not open a session\""
+        "</dev/null >/dev/null || { drop_session; die \"could not open a "
+        'session"; }'
     )
-    cursor.expect('D="/var/run/rpcd/uci-$SID"')
-    cursor.expect('mkdir -p "$D" || die "no staging directory"')
+    for _lookup_line in LOOKUP_LINES:
+        cursor.expect(_lookup_line)
     cursor.expect(
         'stage() { "$@" </dev/null >/dev/null 2>"$W/err" && [ ! -s "$W/err" ] '
         '|| die "the router refused a change; nothing was applied"; }'

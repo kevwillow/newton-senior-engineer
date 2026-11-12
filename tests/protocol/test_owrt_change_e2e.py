@@ -38,9 +38,12 @@ SCRIPT = REPO / "scripts" / "owrt-change.sh"
 PROG_PATH = "/usr/libexec/newton/newton-router"
 BUSYBOX = "/usr/bin/busybox"
 SID = "0123456789abcdef0123456789abcdef"
-DIFF_TEXT = b"dhcp.cfg01.domain=lan\n"
 POST_DHCP = b"config dnsmasq\n\toption domainneeded '0'\n"
 ORIGINAL_DHCP = b"config dnsmasq\n\toption domainneeded '1'\n"
+#: The staged change, as the rpcd session folder holds it: a delta line.
+DIFF_TEXT = b"+dhcp.cfg01.domain='lan'\n"
+#: The config the apply leaves behind: the committed config plus the delta.
+APPLIED_DHCP = ORIGINAL_DHCP + b"\nconfig cfg01\n\toption domain 'lan'\n"
 
 
 # ----- fake-ssh -----------------------------------------------------------
@@ -149,9 +152,10 @@ MD5SUM_FAKE = textwrap.dedent(
 # changes`` and ``uci -q get <path>``. The router harness's bin/uci is
 # symlinked to the generic fake which logs and exits 0 with empty
 # stdout — that prevents the helper from doing anything. This fake
-# maintains its own per-session state file (control/uci-<sid>.json) so
-# batch writes are visible to a later ``changes`` call in the same
-# session, and treats un-prefixed calls as live (the /etc/config
+# works on the SESSION FOLDER the caller names with -P (the rpcd change
+# d99f703 stopped naming that folder after the session id): the batch
+# writes its deltas into the folder, one file per config, and ``changes``
+# reads them back. The un-prefixed calls are live (the /etc/config
 # directory).
 
 UCI_FAKE = textwrap.dedent(
@@ -191,43 +195,43 @@ UCI_FAKE = textwrap.dedent(
     if not args:
         sys.exit(1)
 
-    def session_state_path():
-        m = re.search(r"rpcd/uci-([0-9a-f]+)", staged_dir)
-        if not m:
-            return None
-        sid = m.group(1)
-        return CONTROL / ("uci-" + sid + ".json"), sid
+    def deltas(folder, config=None):
+        \"\"\"The delta lines of a session folder (of one config in it).\"\"\"
+        out = []
+        if not folder.is_dir():
+            return out
+        for path in sorted(folder.iterdir()):
+            if config is not None and path.name != config:
+                continue
+            if not path.is_file():
+                continue
+            for line in path.read_text().splitlines():
+                if line:
+                    out.append(line)
+        return out
 
-    def live_state_path():
-        return CONTROL / "uci-live.json", None
+    def write_delta(folder, path, value):
+        config = path.split(".", 1)[0]
+        folder.mkdir(parents=True, exist_ok=True)
+        with (folder / config).open("a") as f:
+            f.write("+" + path + "='" + value + "'\\n")
 
     cmd = args[0]
     target = args[1] if len(args) > 1 else ""
 
     if cmd == "changes":
         if staged:
-            sp, sid = session_state_path()
-            if sp is not None and sp.exists():
-                with sp.open() as f:
-                    data = json.load(f)
-                for line in data.get("changes", []):
-                    print(line)
+            config = args[1] if len(args) > 1 else None
+            for line in deltas(Path(staged_dir), config):
+                print(line)
         sys.exit(0)
 
     if cmd == "batch":
         # batch input on stdin; lines that don't start with a recognized
         # verb go to stderr (the helper checks stderr for rejection).
-        state_path, sid = session_state_path()
-        if state_path is None:
-            sys.exit(1)
-        if state_path.exists():
-            data = json.loads(state_path.read_text())
-        else:
-            data = {"changes": [], "values": {}}
-        batch_lines = sys.stdin.read().splitlines()
+        folder = Path(staged_dir)
         bad = []
-        changes = []
-        for line in batch_lines:
+        for line in sys.stdin.read().splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
@@ -236,30 +240,32 @@ UCI_FAKE = textwrap.dedent(
                             "rename", "reorder"):
                 bad.append(line)
                 continue
-            # parse ``set path=value`` -> store value, record an effective
-            # diff line in the form ``path='value'`` (the form the awk
-            # parser in seal/leash_classify accepts).
+            # parse ``set path=value`` -> the delta of that path
             m = re.match(r"set\\s+([A-Za-z0-9_.@\\-\\[\\]]+)=(.*)", stripped)
             if m:
-                path, value = m.group(1), m.group(2)
-                data["values"][path] = value
-                changes.append(path + "=" + value)
-        data["changes"] = changes
-        state_path.write_text(json.dumps(data))
+                write_delta(folder, m.group(1), m.group(2))
         if bad:
             sys.stderr.write("uci: unknown verb: " + bad[0] + "\\n")
             sys.exit(1)
         sys.exit(0)
 
     if cmd == "get":
-        state_path, sid = session_state_path() if staged else live_state_path()
-        if state_path.exists():
-            data = json.loads(state_path.read_text())
-        else:
-            data = {"values": {}}
-        if target in data["values"]:
-            print(data["values"][target])
-            sys.exit(0)
+        if staged:
+            for line in deltas(Path(staged_dir)):
+                body = line[1:] if line[:1] in "+-" else line
+                dpath, _sep, value = body.partition("=")
+                if dpath == target:
+                    print(value.strip().strip("'"))
+                    sys.exit(0)
+            if not quiet:
+                sys.stderr.write("uci: Entry not found\\n")
+            sys.exit(1)
+        state = CONTROL / "uci-live.json"
+        if state.exists():
+            data = json.loads(state.read_text())
+            if target in data.get("values", {}):
+                print(data["values"][target])
+                sys.exit(0)
         if not quiet:
             sys.stderr.write("uci: Entry not found\\n")
         sys.exit(1)
@@ -501,6 +507,10 @@ def e2e(tmp_path):
             link.unlink()
     router.write("bin/uci", UCI_FAKE, mode=0o755)
     router.write("bin/ubus", UBUS_FAKE, mode=0o755)
+    # the rpcd model: the session folder is not named after the session id
+    # (the rpcd change d99f703). "old" names it after the session id.
+    router.write("control/rpcd-mode", "new\n")
+    router.write("control/next-sid", SID + "\n")
 
     # Seed the live uci state from the fake root's /etc/config so the
     # helper's stage can verify it does not change the live config and
@@ -679,6 +689,12 @@ def e2e(tmp_path):
         args = [str(SCRIPT), "abort", "root@lab-r1", sid]
         return _wrap_with_unshare(args, env, 120)
 
+    def set_rpcd_mode(mode):
+        """Which rpcd is in force: "old" names the session's folder after
+        the session id, "new" gives it a 32-hex name of its own (the
+        rpcd change d99f703)."""
+        router.write("control/rpcd-mode", mode + "\n")
+
     return types.SimpleNamespace(
         router=router,
         rc=rc,
@@ -690,6 +706,7 @@ def e2e(tmp_path):
         run_apply=run_apply,
         run_status=run_status,
         run_abort=run_abort,
+        set_rpcd_mode=set_rpcd_mode,
         install_md5sum=lambda: install_md5sum(router),
         install_init_fakes=lambda: install_init_fakes(router),
         install_ucode=lambda: install_ucode(router),
@@ -975,6 +992,43 @@ def test_c_hash_pins_after_plan_and_mutation_refuses_apply(e2e):
     assert (e2e.router.root / "tmp/owrt-safe-apply.lock" / f"{sid}.txn" / "sealed").exists()
 
 
+@pytest.mark.parametrize("mode", ["old", "new"])
+def test_both_rpcd_versions_stage_apply_and_confirm(e2e, mode):
+    """The whole flow works under both rpcd versions.
+
+    The rpcd change d99f703 stopped naming the session's folder after the
+    session id; the helper finds the folder with a marker and records it,
+    and every later step reads it from there. "old" names the folder
+    after the session id, "new" gives it a 32-hex name of its own.
+    """
+    e2e.set_rpcd_mode(mode)
+    _prep_plannable(e2e)
+    e2e.ready_for_arm()
+    e2e.router.set_fake("pidof", out="411\n")
+
+    changes = e2e.root / "changes.uci"
+    changes.write_text("set dhcp.cfg01.domain=lan\n")
+
+    res_plan = e2e.run_plan(changes=changes, timeout=60)
+    assert res_plan.returncode == 0, (mode, res_plan.stdout)
+    meta, _ = _parse_plan_stdout(res_plan.stdout)
+    sid = _sid_from_staged(meta["STAGED"])
+
+    # the folder the helper recorded is one of rpcd's own
+    record = (e2e.router.root / "tmp/owrt-safe-apply.lock"
+              / f"{sid}.dir").read_text().strip()
+    assert re.fullmatch(r"/var/run/rpcd/uci-[0-9a-f]{32}", record), record
+    if mode == "old":
+        assert record == f"/var/run/rpcd/uci-{sid}", record
+    else:
+        assert record != f"/var/run/rpcd/uci-{sid}", record
+
+    res_apply = e2e.run_apply(sid, timeout=60)
+    assert res_apply.returncode == 0, (mode, res_apply.stdout)
+    snap = e2e.snap_cfg()
+    assert snap["dhcp"] == APPLIED_DHCP, (mode, snap)
+
+
 def test_d_full_happy_flow_plan_apply_confirms(e2e):
     """Plan, then apply (T=60): the audit log has STAGED, OPERATOR, DIFF
     lines (masked), APPLIED, CONFIRMED with the probe count; the final
@@ -1014,9 +1068,10 @@ def test_d_full_happy_flow_plan_apply_confirms(e2e):
     assert "APPLIED" in audit_join, audit_join
     assert "CONFIRMED" in audit_join and "0 probes" in audit_join, audit_join
 
-    # The final fake-root config bytes are the staged POST bytes
+    # The final fake-root config bytes are the committed config plus the
+    # delta of the session folder (rpcd applies the folder, nothing else)
     snap = e2e.snap_cfg()
-    assert snap["dhcp"] == POST_DHCP, snap
+    assert snap["dhcp"] == APPLIED_DHCP, snap
 
     # The guard is idle (the program and helper cleaned up after confirm)
     guard_status = subprocess.run(

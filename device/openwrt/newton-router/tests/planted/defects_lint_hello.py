@@ -24,7 +24,7 @@ MUTANTS = [
     ("H12", "logd-pid waits only twice", 'while ! "$PIDOF" logd && [ "$i" -lt 5 ]; do', 'while ! "$PIDOF" logd && [ "$i" -lt 2 ]; do', T),
     ("H13", "hello device read from profile file", '\tIFS= read -r device 2>/dev/null < "$R/etc/newton/device-id" || :', '\tIFS= read -r device 2>/dev/null < "$R/etc/newton/profile" || :', T),
     ("H14", "syslog line missing rc", 'cmd=$CMD_NAME sid=$LOG_SID rc=$RC from=$FROM_ADDR"', 'cmd=$CMD_NAME sid=$LOG_SID from=$FROM_ADDR"', T),
-    ("H15", "hello nonce echo wrong", "printf 'hello %s api=1 version=1.3.0", "printf 'hello x%s api=1 version=1.3.0", T),
+    ("H15", "hello nonce echo wrong", "printf 'hello %s api=1 version=1.3.1", "printf 'hello x%s api=1 version=1.3.1", T),
     ("H16", "forbidden construct: backtick comment", "PROG_PID=$$\n", "PROG_PID=$$\n# `x`\n", T),
     ("H17", "forbidden call timeout in code", "PROG_PID=$$\n", "PROG_PID=$$\ntimeout 1 true\n", T),
 ]

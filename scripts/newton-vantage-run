@@ -21,7 +21,13 @@ ZONE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 RESULT_RE = re.compile(r"^RESULT (PASS|FAIL|NOTTESTED) ([a-z-]{1,24})$")
 WORD_RE = re.compile(r"^[a-z-]{1,24}$")
 CLIENT_KINDS = frozenset(
-    {"client_dns", "client_dhcp", "client_internet", "client_blocked"}
+    {
+        "client_dns",
+        "client_dhcp",
+        "client_internet",
+        "client_blocked",
+        "client_reaches",
+    }
 )
 DEFAULT_CHECK_TIMEOUT_S = 40
 MAX_CHECK_TIMEOUT_S = 40
@@ -37,7 +43,16 @@ VERB_BY_KIND = {
     "client_dns": "dns",
     "client_dhcp": "dhcp",
     "client_internet": "internet",
+    "client_reaches": "reach",
 }
+# The exact line the OLD forced command printed when it refused a verb
+# it did not know (reach is the only new verb): a vantage whose
+# install-client-checks step has not been re-run answers every reach
+# call with rc 2 and this one stderr line.  Only that exact answer is
+# mapped to OLD_FORCED_COMMAND_WORD (never guessed); everything else
+# stays the ssh failure it always was.
+OLD_FORCED_COMMAND_LINE = "newton-vantage-check: refused"
+OLD_FORCED_COMMAND_WORD = "old-forced-command"
 
 
 class SpecError(ValueError):
@@ -162,7 +177,7 @@ def _parse_check(value: Any) -> CheckSpec:
     if kind not in CLIENT_KINDS:
         raise SpecError("bad-kind")
     allowed = {"claim", "kind"}
-    if kind == "client_blocked":
+    if kind in ("client_blocked", "client_reaches"):
         allowed.update({"to", "targets"})
     _exact_keys(value, allowed)
     claim = value["claim"]
@@ -172,8 +187,15 @@ def _parse_check(value: Any) -> CheckSpec:
     targets: tuple[str, ...] = ()
     if kind == "client_blocked":
         to = value["to"]
-        if to not in {"router", "internet"}:
+        if to not in {"router", "internet"} and not _valid_target(to):
+            # the third shape a blocked claim may carry: the one target
+            # an owner-supplied rule names
             raise SpecError("bad-spec")
+    elif kind == "client_reaches":
+        to = value["to"]
+        if not _valid_target(to):
+            raise SpecError("bad-spec")
+    if kind in ("client_blocked", "client_reaches"):
         raw_targets = value["targets"]
         if not isinstance(raw_targets, list) or not 1 <= len(raw_targets) <= MAX_TARGETS:
             raise SpecError("bad-spec")
@@ -334,7 +356,12 @@ def _ssh_argv(
     return argv
 
 
-def _run_ssh(argv: list[str], timeout_s: int) -> tuple[str, str]:
+def _run_ssh(
+    argv: list[str],
+    timeout_s: int,
+    *,
+    map_old_forced_command: bool = False,
+) -> tuple[str, str]:
     try:
         completed = subprocess.run(
             argv,
@@ -352,6 +379,14 @@ def _run_ssh(argv: list[str], timeout_s: int) -> tuple[str, str]:
     except (OSError, UnicodeError, ValueError):
         return ("ERROR", "ssh-failed")
     if completed.returncode != 0:
+        # the old forced command refused the (only new) verb: detected by
+        # its exact answer, never guessed
+        if (
+            map_old_forced_command
+            and completed.returncode == 2
+            and completed.stderr.splitlines() == [OLD_FORCED_COMMAND_LINE]
+        ):
+            return ("NOTTESTED", OLD_FORCED_COMMAND_WORD)
         return ("ERROR", "ssh-failed")
     lines = completed.stdout.splitlines()
     if len(lines) != 1:
@@ -402,15 +437,17 @@ class _Call:
 def _calls_of(group: GroupSpec) -> list[_Call]:
     """The ssh calls of a group, in claim order.
 
-    A blocked claim has one call per target: the targets are probed at
-    the same time, so none of them waits for another.
+    A blocked claim has one call per target, and so has a reaches claim:
+    the targets are probed at the same time, so none of them waits for
+    another.
     """
     calls: list[_Call] = []
     for check in group.checks:
-        if check.kind == "client_blocked":
+        if check.kind in ("client_blocked", "client_reaches"):
+            verb = "blocked" if check.kind == "client_blocked" else "reach"
             for index, target in enumerate(check.targets):
                 address, port = target.rsplit(":", 1)
-                calls.append(_Call(check.claim, "blocked", (address, port), index))
+                calls.append(_Call(check.claim, verb, (address, port), index))
             continue
         calls.append(_Call(check.claim, VERB_BY_KIND[check.kind]))
     return calls
@@ -433,6 +470,21 @@ def _blocked_outcome(outcomes: list[Outcome]) -> Outcome:
     return Outcome("PASS", "refused")
 
 
+def _reaches_outcome(outcomes: list[Outcome]) -> Outcome:
+    """The outcome of a reaches claim: the inverse of blocked.
+
+    Only a claim whose every target answered passes; the first FAIL in
+    target order wins, then the first target that could not be tested.
+    """
+    for outcome in outcomes:
+        if outcome.status == "FAIL":
+            return Outcome("FAIL", outcome.word)
+    for outcome in outcomes:
+        if outcome.status != "PASS":
+            return Outcome("NOT-TESTED", outcome.word)
+    return Outcome("PASS", "reached")
+
+
 def _run_call(
     ssh_path: str,
     group: GroupSpec,
@@ -443,6 +495,7 @@ def _run_call(
         return _run_ssh(
             _ssh_argv(ssh_path, group.vantage, group.zone, call.verb, call.extra),
             timeout_s,
+            map_old_forced_command=call.verb == "reach",
         )
     except Exception:
         return ("ERROR", "ssh-failed")
@@ -478,6 +531,9 @@ def _run_group(spec: RunSpec, ssh_path: str, group: GroupSpec) -> list[tuple[int
         found = by_claim.get(check.claim, [])
         if check.kind == "client_blocked":
             outcomes.append((check.claim, _blocked_outcome(found)))
+            continue
+        if check.kind == "client_reaches":
+            outcomes.append((check.claim, _reaches_outcome(found)))
             continue
         outcomes.append((check.claim, found[0] if found else Outcome("NOT-TESTED", "bad-reply")))
     return outcomes

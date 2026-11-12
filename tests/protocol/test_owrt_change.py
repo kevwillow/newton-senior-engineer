@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import textwrap
 
 import pytest
@@ -765,13 +766,25 @@ def run_named_helper(changes, *, staged=None, live=None, command=None, exports=N
     )
     busybox = shutil.which("busybox")
     assert busybox is not None
-    return subprocess.run(
-        [busybox, "sh", "-c", shell],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=10,
-    )
+    # the helper reads the folder rpcd keeps the session's changes in from
+    # the record of the transaction (rpcd d99f703); the record is the one
+    # of a transaction staged by the current Newton
+    lock = tempfile.mkdtemp(prefix="newton-lock.")
+    try:
+        with open(os.path.join(lock, SID + ".dir"), "w") as f:
+            f.write("/var/run/rpcd/uci-{0}\n".format(SID))
+        env = os.environ.copy()
+        env["NEWTON_LOCK"] = lock
+        return subprocess.run(
+            [busybox, "sh", "-c", shell],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+    finally:
+        shutil.rmtree(lock, ignore_errors=True)
 
 
 def run_fwrestart_helper(protocol, loaded_before, signal_name=None):

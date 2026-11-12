@@ -49,7 +49,7 @@ def test_all_fields_in_order_with_exact_values(router):
     fields, keys = parse(res)
     assert keys == KEYS
     assert fields["api"] == "1"
-    assert fields["version"] == "1.3.0"
+    assert fields["version"] == "1.3.1"
     assert fields["mode"] == "test"
     for name, rel in CODE_FILES.items():
         assert fields[name] == sha(router.root / rel), name

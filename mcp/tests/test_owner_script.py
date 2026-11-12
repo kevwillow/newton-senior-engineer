@@ -309,13 +309,31 @@ def test_every_command_that_could_read_stdin_closes_it(plan):
 
 
 @pytest.mark.parametrize("plan", ALL_PLANS)
-def test_the_script_never_confirms_and_never_destroys_the_session(plan):
-    """The script confirms nothing and destroys nothing."""
+def test_the_script_never_confirms_and_never_destroys_the_session_after_the_apply(
+    plan,
+):
+    """The script confirms nothing, and it destroys its session only when
+    it cannot use it.
+
+    A destroy after the apply would cancel the rollback, so there is
+    none: every destroy is on the way to the apply, where nothing has
+    been applied yet.
+    """
     text = owner_script.render_script(plan).decode()
+    lines = text.split("\n")
     assert "uci confirm" not in text
-    assert "session destroy" not in text
     assert "session delete" not in text
     assert "luci-uploads" not in text
+    apply_line = next(
+        i for i, l in enumerate(lines) if l.startswith("ubus call uci apply")
+    )
+    destroys = [i for i, l in enumerate(lines) if "session destroy" in l]
+    assert destroys, "the script must be able to drop its own session"
+    assert all(i < apply_line for i in destroys), lines
+    # the destroy is called on the failure paths on the way to the apply
+    calls = [i for i, l in enumerate(lines) if "drop_session" in l]
+    assert calls
+    assert all(i < apply_line for i in calls), lines
 
 
 @pytest.mark.parametrize("plan", ALL_PLANS)
@@ -354,7 +372,7 @@ def test_the_script_grants_its_own_session_the_right_to_confirm(plan):
     assert r'\"scope\":\"ubus\"' in confirm_grant
     assert r'\"objects\":[[\"uci\",\"confirm\"]]' in confirm_grant
     assert "</dev/null" in confirm_grant
-    assert '|| die "could not open a session"' in confirm_grant
+    assert '|| { drop_session; die "could not open a session"; }' in confirm_grant
     # the right is the confirm and nothing else
     assert confirm_grant.count(r'\"uci\"') == 1
     assert "read" not in confirm_grant

@@ -48,7 +48,7 @@ fi
 
 if [ "$PROD" -eq 1 ]; then
 	R=
-	unset NEWTON_LOCK NEWTON_CONFIG_DIR NEWTON_UPTIME_FILE NEWTON_FIREWALL_INIT NEWTON_GUARD_ROOT NEWTON_GUARD_CRASH_AT NEWTON_ROUTER_ROOT NEWTON_ROUTER_CRASH_AT ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH
+	unset NEWTON_LOCK NEWTON_CONFIG_DIR NEWTON_UPTIME_FILE NEWTON_FIREWALL_INIT NEWTON_GUARD_ROOT NEWTON_GUARD_CRASH_AT NEWTON_ROUTER_ROOT NEWTON_ROUTER_CRASH_AT NEWTON_RPCD_ROOT ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH
 	UCI='uci'
 	UBUS='ubus'
 	JSONFILTER='jsonfilter'
@@ -1170,10 +1170,38 @@ run_helper() {
 		NEWTON_LOCK="$LOCK"
 		NEWTON_CONFIG_DIR="$R/etc/config"
 		NEWTON_FIREWALL_INIT="$R/etc/init.d/firewall"
+		NEWTON_RPCD_ROOT="$R"
 		PATH="$R/bin:$PATH"
-		export NEWTON_LOCK NEWTON_CONFIG_DIR NEWTON_FIREWALL_INIT PATH
+		export NEWTON_LOCK NEWTON_CONFIG_DIR NEWTON_FIREWALL_INIT NEWTON_RPCD_ROOT PATH
 		exec "$HELPER" "$@"
 	)
+}
+
+# rpcd_dir SID: the folder rpcd keeps the session's staged changes in, with
+# the test-root prefix. The rpcd change d99f703 stopped naming the folder after
+# the session id: the helper records the folder it found in $LOCK/<SID>.dir
+# and every later step reads it from there. Empty when the transaction has no
+# record (a transaction staged by an older Newton); returns 1 when the
+# record holds a path that is not one of rpcd's own folders. The whole path
+# must be /var/run/rpcd/uci- and exactly 32 hex characters: no "..", no extra
+# component, no trailing slash.
+rpcd_dir() {
+	local sid="$1" d rel name
+	d=
+	[ -r "$LOCK/$sid.dir" ] || return 0
+	IFS= read -r d 2>/dev/null < "$LOCK/$sid.dir" || d=
+	[ -n "$d" ] || return 1
+	rel=$d
+	if [ -n "$R" ]; then
+		case "$rel" in
+			"$R"/*) rel=${rel#"$R"/} ;;
+		esac
+	fi
+	name=${rel#/var/run/rpcd/uci-}
+	[ "$name" != "$rel" ] || return 1
+	[ "${#name}" -eq 32 ] || return 1
+	case "$name" in *[!0-9a-f]*) return 1 ;; esac
+	printf '%s\n' "$R/var/run/rpcd/uci-$name"
 }
 
 # open_txn_sid: the SID of the open transaction (design 3.4), or nothing.
@@ -1451,7 +1479,7 @@ cmd_hello() {
 		'') agentv=0 ;;
 		*) agentv=1 ;;
 	esac
-	printf 'hello %s api=1 version=1.3.0 mode=%s prog=%s helper=%s guard=%s init=%s device=%s profile=%s approval-key=%s guard-state=%s busy=%s caller=%s role=%s door=%s tty=%s agent=%s from=%s\n' \
+	printf 'hello %s api=1 version=1.3.1 mode=%s prog=%s helper=%s guard=%s init=%s device=%s profile=%s approval-key=%s guard-state=%s busy=%s caller=%s role=%s door=%s tty=%s agent=%s from=%s\n' \
 		"$nonce" "$MODE_STR" "$prog" "$helper" "$guard" "$init" "$device" "$profile" "$key" "$gstate" "$busy" "$CALLER" "$ROLE" "$DOOR" "$ttyv" "$agentv" "$FROM_ADDR"
 	if [ "$DOOR" = ssh ]; then
 		hello_record "$nonce"
@@ -1713,8 +1741,10 @@ leash_show() {
 # of the stream. The firewall codes, the renames and reorders and the
 # section lines follow design 5.2.
 leash_classify() {
-	local sid="$1" outfile="$2" st chg pairs showf showe line zk zv rest mi mz wz w nw fw cfg sec
+	local sid="$1" outfile="$2" st chg pairs showf showe line zk zv rest mi mz wz w nw fw cfg sec sdir
 	: > "$outfile" || fail internal 1 leash-file
+	sdir=$(rpcd_dir "$sid") || fail internal 1 rpcd-dir
+	[ -n "$sdir" ] || fail internal 1 rpcd-dir
 	st=$(mktemp "$R/tmp/newton/ls.$PROG_PID.XXXXXX") || fail internal 1 mktemp
 	SCRATCH="$SCRATCH $st"
 	chg=$(mktemp "$R/tmp/newton/lc.$PROG_PID.XXXXXX") || fail internal 1 mktemp
@@ -1756,7 +1786,7 @@ leash_classify() {
 		printf 'Z\twan-zone\t%s\n' "$w" >> "$st"
 	done
 	# the staged changes, raw, as C lines
-	"$UCI" -P "$R/var/run/rpcd/uci-$sid" changes </dev/null > "$chg" 2>/dev/null || fail internal 1 uci-changes
+	"$UCI" -P "$sdir" changes </dev/null > "$chg" 2>/dev/null || fail internal 1 uci-changes
 	while IFS= read -r line || [ -n "$line" ]; do
 		printf 'C\t%s\n' "$line" >> "$st"
 	done < "$chg"
@@ -1844,7 +1874,7 @@ leash_classify() {
 		if [ "$cfg" = firewall ]; then
 			fw=1
 		fi
-		leash_show "$showf" "$showe" "$cfg.$sec" "$R/var/run/rpcd/uci-$sid"
+		leash_show "$showf" "$showe" "$cfg.$sec" "$sdir"
 		while IFS= read -r line || [ -n "$line" ]; do
 			printf 'S\t%s\t%s\t%s\n' "$cfg" "$sec" "$line" >> "$st"
 		done < "$showf"
@@ -2906,7 +2936,7 @@ cmd_verify() {
 
 # cmd_confirm: design 6.3; rpcd confirm first, then the guard.
 cmd_confirm() {
-	local sid="$1" txn applied boot_applied rpcd_dl guard_left gout first NL sha post_sha cf w rpcd_lost expected current_sid LOST rc
+	local sid="$1" txn applied boot_applied rpcd_dl guard_left gout first NL sha post_sha cf w rpcd_lost expected current_sid LOST rc sdir
 	trap '' HUP PIPE
 	lock_take 10
 	txn="$LOCK/$sid.txn"
@@ -2974,7 +3004,11 @@ cmd_confirm() {
 		fail confirm-incomplete 1 "$first"
 	fi
 	"$UBUS" call session destroy "{\"ubus_rpc_session\":\"$sid\"}" >/dev/null 2>&1 || :
-	rm -rf "$R/var/run/rpcd/uci-$sid"
+	# the folder rpcd kept the session's changes in is the one the helper
+	# recorded (rpcd d99f703); without a record there is no folder of ours
+	# to remove
+	sdir=$(rpcd_dir "$sid") || sdir=
+	[ -n "$sdir" ] && rm -rf "$sdir"
 	crash_point
 	printf '%s\n' "confirmed $sid" > "$R/tmp/newton/last"
 	crash_point
@@ -3244,9 +3278,18 @@ cmd_status() {
 # crash_point (test seam). KEEPS $LOCK/<SID>.health so the host's
 # post-rollback health check still has its snapshot (design 6.4).
 abort_clean() {
-	local sid="$1" how="$2" keep_last="${3-}" current_sid
+	local sid="$1" how="$2" keep_last="${3-}" current_sid sdir
 	"$UBUS" call session destroy "{\"ubus_rpc_session\":\"$sid\"}" >/dev/null 2>&1 || :
-	rm -rf "$R/var/run/rpcd/uci-$sid"
+	# the folder the helper recorded (rpcd d99f703); a transaction staged
+	# by an older Newton has no record, and then the folder it used is the
+	# one named after the session id
+	sdir=
+	if ! sdir=$(rpcd_dir "$sid"); then
+		sdir=	# the record is not one of rpcd's folders: use no folder at all
+	elif [ -z "$sdir" ]; then
+		sdir="$R/var/run/rpcd/uci-$sid"
+	fi
+	[ -n "$sdir" ] && rm -rf "$sdir"
 	crash_point
 	rm -rf "$LOCK/$sid.txn"
 	crash_point

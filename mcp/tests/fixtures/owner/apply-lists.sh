@@ -56,11 +56,29 @@ want 'firewall.cfg03dc81.network' 'wan wan6 wan2'
 absent 'firewall.labz.ntp'
 echo "NEWTON-CHECKED plan=$PLAN"
 SID=$(ubus call session create "{\"timeout\":$((WINDOW + 120))}" </dev/null | jsonfilter -e '@.ubus_rpc_session')
-printf '%s' "$SID" | grep -Eq '^[0-9a-f]{32}$' || die "could not open a session"
-ubus call session grant "{\"ubus_rpc_session\":\"$SID\",\"scope\":\"uci\",\"objects\":[[\"*\",\"read\"],[\"*\",\"write\"]]}" </dev/null >/dev/null || die "could not open a session"
-ubus call session grant "{\"ubus_rpc_session\":\"$SID\",\"scope\":\"ubus\",\"objects\":[[\"uci\",\"confirm\"]]}" </dev/null >/dev/null || die "could not open a session"
-D="/var/run/rpcd/uci-$SID"
-mkdir -p "$D" || die "no staging directory"
+drop_session() { printf '%s' "$SID" | grep -Eq '^[0-9a-f]{32}$' || return 0; ubus call session destroy "{\"ubus_rpc_session\":\"$SID\"}" </dev/null >/dev/null 2>&1; }
+lookup_fail() { drop_session; die "could not locate the rpcd session folder"; }
+printf '%s' "$SID" | grep -Eq '^[0-9a-f]{32}$' || { drop_session; die "could not open a session"; }
+ubus call session grant "{\"ubus_rpc_session\":\"$SID\",\"scope\":\"uci\",\"objects\":[[\"*\",\"read\"],[\"*\",\"write\"]]}" </dev/null >/dev/null || { drop_session; die "could not open a session"; }
+ubus call session grant "{\"ubus_rpc_session\":\"$SID\",\"scope\":\"ubus\",\"objects\":[[\"uci\",\"confirm\"]]}" </dev/null >/dev/null || { drop_session; die "could not open a session"; }
+SECTION=$(ubus call uci add "{\"config\":\"system\",\"type\":\"newton_probe\",\"ubus_rpc_session\":\"$SID\"}" </dev/null | jsonfilter -e '@.section')
+case "$SECTION" in
+  '' | *[!A-Za-z0-9_]*) lookup_fail ;;
+esac
+[ "${#SECTION}" -le 64 ] || lookup_fail
+NP=$(grep -Fxl "+system.$SECTION='newton_probe'" /var/run/rpcd/uci-*/system </dev/null 2>/dev/null)
+NP_N=$(printf '%s\n' "$NP" | grep -c .)
+[ "$NP_N" -eq 1 ] || lookup_fail
+NP_DIR=${NP%/*}
+NP_NAME=${NP_DIR##*/}
+NP_HEX=${NP_NAME#uci-}
+[ "$NP_HEX" != "$NP_NAME" ] || lookup_fail
+[ "${#NP_HEX}" -eq 32 ] || lookup_fail
+case "$NP_HEX" in *[!0-9a-f]*) lookup_fail ;; esac
+case "$NP_DIR" in /var/run/rpcd/*) ;; *) lookup_fail ;; esac
+ubus call uci revert "{\"config\":\"system\",\"ubus_rpc_session\":\"$SID\"}" </dev/null >/dev/null || lookup_fail
+if [ -s "$NP_DIR/system" ]; then lookup_fail; fi
+D="$NP_DIR"
 stage() { "$@" </dev/null >/dev/null 2>"$W/err" && [ ! -s "$W/err" ] || die "the router refused a change; nothing was applied"; }
 stage uci -P "$D" del_list 'firewall.cfg03dc81.network=wan6'
 stage uci -P "$D" add_list 'firewall.cfg03dc81.network=wan3'

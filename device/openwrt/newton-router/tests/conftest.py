@@ -232,6 +232,9 @@ class Router:
             '  read -r sid < "$root/control/next-sid"\n'
             '  printf "%s\\n" "$sid" > "$NEWTON_LOCK/sid"\n'
             '  printf "%s\\n" "$sid" >> "$root/control/sessions"\n'
+            # the helper records the folder rpcd keeps the session's changes
+            # in (rpcd d99f703); the stub records the old one
+            '  printf "/var/run/rpcd/uci-%s\\n" "$sid" > "$NEWTON_LOCK/$sid.dir"\n'
             '  [ ! -f "$root/control/stage-extra-line" ] || cat "$root/control/stage-extra-line"\n'
             '  printf "%s\\n" "$sid"\n'
             '  [ ! -f "$root/control/stage-trailing-line" ] || cat "$root/control/stage-trailing-line"\n'
@@ -549,6 +552,19 @@ class Router:
         uci.symlink_to(HERE / "fakes/uci")
         self.write("control/uci.json", b"{}")
 
+    def use_rpcd(self, mode="new"):
+        """The rpcd model: the uci fake is the session-folder fake.
+
+        control/rpcd-mode says which rpcd is in force: "old" names the
+        session's folder after the session id, "new" gives it a 32-hex
+        name of its own (the rpcd change d99f703)."""
+        uci = self.root / "bin/uci"
+        if uci.is_symlink() or uci.exists():
+            uci.unlink()
+        uci.symlink_to(HERE / "fakes/uci")
+        self.write("control/rpcd-mode", mode + "\n")
+        self.write("control/uci.json", b"{}")
+
     def set_zones(self, mgmt_interface="lan", mgmt_zone="lan", wan=("wan",)):
         """Write etc/newton/zones with one mgmt-interface, one mgmt-zone, one wan-zone per entry."""
         lines = [f"mgmt-interface {mgmt_interface}\n", f"mgmt-zone {mgmt_zone}\n"]
@@ -590,6 +606,8 @@ class Router:
         (txn / "stage-up").write_text("100\n")
         (txn / "boot").write_text("boot-one\n")
         (lock / "sid").write_text(sid + "\n")
+        # the helper records the folder rpcd keeps the session's changes in
+        (lock / f"{sid}.dir").write_text(f"/var/run/rpcd/uci-{sid}\n")
         sessions = self.root / "control/sessions"
         existing = sessions.read_text() if sessions.exists() else ""
         if sid not in existing.split():

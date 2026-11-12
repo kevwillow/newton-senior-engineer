@@ -1,11 +1,37 @@
 #!/usr/bin/python3
-"""uci fake: replays the staged `changes` lines and the staged/committed `show` views of every
-touched (config, section) from the JSON built by Scenario.build(). The root is taken from
-sys.argv[0] as the program's convention expects (`<root>/bin/uci`)."""
+"""uci fake: two models, chosen by the control file control/rpcd-mode.
+
+Leash model (no control/rpcd-mode): replays the staged `changes` lines and
+the staged/committed `show` views of every touched (config, section) from
+the JSON built by Scenario.build(). The root is taken from sys.argv[0] as
+the program's convention expects (`<root>/bin/uci`).
+
+rpcd model (control/rpcd-mode is "old" or "new"): the session folder model
+of rpcd. The rpcd change d99f703 stopped naming a session's folder after the
+session id: the folder is `uci-<32 hex>` and only rpcd knows it. The fake
+therefore works on the FOLDER the caller names with -P:
+
+  * `uci -P DIR batch` writes the deltas of the batch into DIR, one file
+    per config (`DIR/<config>`), one delta line per change:
+    `+<config>.<section>[.<option>]='<value>'`;
+  * `uci -P DIR changes [config]` prints those lines (only the lines of
+    <config> when a config is named);
+  * `uci -P DIR get <path>` and `uci -P DIR show <target>` read the same
+    deltas;
+  * the live view (no -P) reads <root>/etc/config.
+
+The folder itself is made by the ubus fake on `ubus call uci add` (the
+marker probe of the session-folder lookup): "old" names the folder after
+the session id, "new" gives it a random 32-hex name. Measured real bytes:
+the delta line of the probe was `+dhcp.cfg06aeb7='newton_probe'`.
+"""
+import hashlib
 import json
+import os
 import sys
 
 ctl = sys.argv[0].rsplit("/bin/", 1)[0] + "/control"
+root = os.path.dirname(ctl)
 args = sys.argv[1:]
 open(ctl + "/calls.log", "a").write("uci " + " ".join(args) + "\n")
 staged = False
@@ -18,56 +44,276 @@ if args[:1] == ["-P"]:
 if args[:1] == ["-q"]:
     quiet = True
     args = args[1:]
-data = json.load(open(ctl + "/uci.json"))
-if not args:
-    sys.exit(1)
-cmd = args[0]
-if cmd == "batch" and savedir is not None:
-    # check-staged's canary: keep the batch where the fake utpl can find it
-    open(savedir + "/batch", "w").write(sys.stdin.read())
-    sys.exit(0)
-if cmd == "changes":
-    if staged:
-        for l in data["changes"]:
-            print(l)
-    sys.exit(0)
-if cmd == "show":
-    target = args[1]
-    scope = "staged" if staged else "committed"
-    for fault in data.get("show_fail", []):
-        if fault["target"] == target and fault["scope"] == scope:
-            sys.stderr.write(fault["stderr"])
-            sys.exit(fault["rc"])
-    if "." not in target:
-        if not staged:
-            lines = data.get("full_firewall") if target == "firewall" else None
-            if lines is not None:
-                for l in lines:
-                    print(l)
-                sys.exit(0)
-        if not quiet:
-            sys.stderr.write("uci: Entry not found\n")
-        sys.exit(1)
-    lines = data["staged" if staged else "committed"].get(target)
-    if lines is None:
-        if not quiet:
-            sys.stderr.write("uci: Entry not found\n")
-        sys.exit(1)
-    for l in lines:
-        print(l)
-    sys.exit(0)
-if cmd == "get":
-    target = args[1]
-    lines = data["staged" if staged else "committed"].get(target.rsplit(".", 1)[0])
-    if lines is None:
-        if not quiet:
-            sys.stderr.write("uci: Entry not found\n")
-        sys.exit(1)
-    for l in lines:
-        if l.startswith(target + "="):
-            print(l.split("=", 1)[1].replace("'", ""))
-            sys.exit(0)
+
+
+def rpcd_mode():
+    """The rpcd model in force, or "" when the leash model is in force."""
+    path = ctl + "/rpcd-mode"
+    if not os.path.exists(path):
+        return ""
+    with open(path) as f:
+        return f.read().strip()
+
+
+def not_found():
     if not quiet:
         sys.stderr.write("uci: Entry not found\n")
     sys.exit(1)
-sys.exit(1)
+
+
+# ---- the rpcd model (the session folder) --------------------------------
+
+
+def delta_lines(folder, config=None):
+    """The delta lines of a session folder (of one config in it)."""
+    out = []
+    if not os.path.isdir(folder):
+        return out
+    for name in sorted(os.listdir(folder)):
+        if config is not None and name != config:
+            continue
+        path = os.path.join(folder, name)
+        if not os.path.isfile(path):
+            continue
+        with open(path) as f:
+            for line in f.read().splitlines():
+                if line:
+                    out.append(line)
+    return out
+
+
+def delta_value(line):
+    """The value of a delta line, without the quotes."""
+    body = line[1:] if line[:1] in "+-" else line
+    _path, _sep, value = body.partition("=")
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        value = value[1:-1]
+    return value
+
+
+def delta_path(line):
+    """The path of a delta line, without the op char."""
+    body = line[1:] if line[:1] in "+-" else line
+    return body.partition("=")[0]
+
+
+def batch(folder, text):
+    """Write the deltas of a uci batch into the session folder."""
+    bad = []
+    deltas = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split(None, 1)
+        kind = parts[0]
+        rest = parts[1] if len(parts) > 1 else ""
+        if kind == "set":
+            path, sep, value = rest.partition("=")
+            if not sep or not path:
+                bad.append(line)
+                continue
+            deltas.append((path, value))
+        elif kind == "add":
+            add = rest.split()
+            if len(add) != 2:
+                bad.append(line)
+                continue
+            config, stype = add
+            digest = hashlib.sha256((folder + config).encode()).hexdigest()
+            deltas.append((config + ".cfg" + digest[:6], stype))
+        elif kind in ("add_list", "del_list"):
+            path, sep, value = rest.partition("=")
+            if not sep or not path:
+                bad.append(line)
+                continue
+            deltas.append((path, value))
+        elif kind in ("delete", "rename", "reorder"):
+            deltas.append((rest, None))
+        else:
+            bad.append(line)
+    if bad:
+        sys.stderr.write("uci: unknown verb: " + bad[0] + "\n")
+        sys.exit(1)
+    if not os.path.isdir(folder):
+        os.makedirs(folder, exist_ok=True)
+    for path, value in deltas:
+        config = path.split(".", 1)[0]
+        if value is None:
+            line = "-" + path
+        else:
+            line = "+" + path + "='" + value + "'"
+        with open(os.path.join(folder, config), "a") as f:
+            f.write(line + "\n")
+    sys.exit(0)
+
+
+def staged_get(folder, path):
+    """The value of a path in the staged view, or None."""
+    for line in delta_lines(folder):
+        if line[:1] != "+":
+            continue
+        if delta_path(line) == path:
+            return delta_value(line)
+    return None
+
+
+def staged_show(folder, target):
+    """The staged view of a config.section, or None."""
+    config, _sep, section = target.partition(".")
+    lines = []
+    for line in delta_lines(folder, config):
+        path = delta_path(line)
+        parts = path.split(".")
+        if len(parts) == 2:
+            if parts[1] != section:
+                continue
+            lines.append("config %s '%s'" % (parts[1], delta_value(line)))
+        elif len(parts) == 3:
+            if parts[1] != section:
+                continue
+            lines.append("\toption %s '%s'" % (parts[2], delta_value(line)))
+    if not lines:
+        return None
+    return "\n".join(lines)
+
+
+def live_get(path):
+    """The value of a path in the committed config, or None."""
+    parts = path.split(".")
+    config = parts[0]
+    conf = os.path.join(root, "etc", "config", config)
+    if not os.path.isfile(conf):
+        return None
+    section = parts[1] if len(parts) > 1 else ""
+    option = parts[2] if len(parts) > 2 else ""
+    sections = []
+    current = None
+    with open(conf) as f:
+        for line in f.read().splitlines():
+            line = line.strip()
+            if line.startswith("config "):
+                current = {"name": "", "type": "", "options": {}}
+                rest = line[len("config "):].strip()
+                if rest.startswith("'"):
+                    current["type"] = rest.strip("'").split("'")[0]
+                    current["name"] = current["type"]
+                else:
+                    bits = rest.split(None, 1)
+                    current["name"] = bits[0]
+                    if len(bits) > 1:
+                        current["type"] = bits[1].strip("'")
+                sections.append(current)
+            elif line.startswith("option ") and current is not None:
+                bits = line[len("option "):].split(None, 1)
+                if len(bits) == 2:
+                    current["options"][bits[0]] = bits[1].strip("'")
+    wanted = None
+    for index, sec in enumerate(sections):
+        if section.startswith("@"):
+            stype = section[1:].split("[")[0]
+            if sec["type"] == stype:
+                wanted = sec
+                break
+        elif sec["name"] == section:
+            wanted = sec
+            break
+    if wanted is None:
+        return None
+    if option:
+        return wanted["options"].get(option)
+    return wanted["options"].get("name", wanted["type"])
+
+
+def run_rpcd():
+    """The rpcd model."""
+    if not args:
+        sys.exit(1)
+    cmd = args[0]
+    if cmd == "batch" and savedir is not None:
+        batch(savedir, sys.stdin.read())
+    if cmd == "changes":
+        if not staged:
+            sys.exit(0)
+        config = args[1] if len(args) > 1 else None
+        for line in delta_lines(savedir, config):
+            print(line)
+        sys.exit(0)
+    if cmd == "show":
+        target = args[1]
+        if not staged:
+            sys.exit(0)
+        text = staged_show(savedir, target)
+        if text is None:
+            not_found()
+        print(text)
+        sys.exit(0)
+    if cmd == "get":
+        target = args[1]
+        if staged:
+            value = staged_get(savedir, target)
+        else:
+            value = live_get(target)
+        if value is None:
+            not_found()
+        print(value)
+        sys.exit(0)
+    sys.exit(1)
+
+
+# ---- the leash model (the static staged view) ---------------------------
+
+
+def run_leash():
+    data = json.load(open(ctl + "/uci.json"))
+    if not args:
+        sys.exit(1)
+    cmd = args[0]
+    if cmd == "batch" and savedir is not None:
+        # check-staged's canary: keep the batch where the fake utpl can find it
+        open(savedir + "/batch", "w").write(sys.stdin.read())
+        sys.exit(0)
+    if cmd == "changes":
+        if staged:
+            for l in data["changes"]:
+                print(l)
+        sys.exit(0)
+    if cmd == "show":
+        target = args[1]
+        scope = "staged" if staged else "committed"
+        for fault in data.get("show_fail", []):
+            if fault["target"] == target and fault["scope"] == scope:
+                sys.stderr.write(fault["stderr"])
+                sys.exit(fault["rc"])
+        if "." not in target:
+            if not staged:
+                lines = data.get("full_firewall") if target == "firewall" else None
+                if lines is not None:
+                    for l in lines:
+                        print(l)
+                    sys.exit(0)
+            not_found()
+        lines = data["staged" if staged else "committed"].get(target)
+        if lines is None:
+            not_found()
+        for l in lines:
+            print(l)
+        sys.exit(0)
+    if cmd == "get":
+        target = args[1]
+        lines = data["staged" if staged else "committed"].get(target.rsplit(".", 1)[0])
+        if lines is None:
+            not_found()
+        for l in lines:
+            if l.startswith(target + "="):
+                print(l.split("=", 1)[1].replace("'", ""))
+                sys.exit(0)
+        not_found()
+    sys.exit(1)
+
+
+if rpcd_mode():
+    run_rpcd()
+else:
+    run_leash()

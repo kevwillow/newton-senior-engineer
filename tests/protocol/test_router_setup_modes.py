@@ -37,7 +37,7 @@ NO_INSTALL_SENTENCES = [
 
 INSTALLED_SENTENCES = [
     "Newton puts a program on the router: a small set of shell scripts "
-    "(6 files, about 210 KB), no packages and no compiled code.",
+    "(6 files, about 216 KB), no packages and no compiled code.",
     "Newton's key can run that program and nothing else, so the agent "
     "never gets a root shell.",
     "If a Newton change is still waiting for confirmation at boot, the "

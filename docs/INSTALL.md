@@ -123,7 +123,7 @@ no-install: Every change uses OpenWrt's own undo timer.
 no-install: Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays.
 no-install: Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval.
 no-install: Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run.
-installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 210 KB), no packages and no compiled code.
+installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 216 KB), no packages and no compiled code.
 installed: Newton's key can run that program and nothing else, so the agent never gets a root shell.
 installed: If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck.
 installed: More checks can run, and fewer changes need a script.
@@ -295,10 +295,10 @@ install with "nothing was changed", and the router is not touched:
 What Newton puts on your router
 
 Newton's executable code is a small set of POSIX shell scripts; it also writes the configuration and service entries listed below.
-No package is installed and nothing is compiled: about 210 KB of shell in 6 files.
+No package is installed and nothing is compiled: about 216 KB of shell in 6 files.
 
-  /usr/libexec/newton/newton-router     146 KB  the program Newton talks to
-  /usr/libexec/newton/newton-safe-apply   20 KB  the change helper
+  /usr/libexec/newton/newton-router     148 KB  the program Newton talks to
+  /usr/libexec/newton/newton-safe-apply   24 KB  the change helper
   /usr/libexec/newton-guard              31 KB  the rollback guard
   /etc/init.d/newton-guard               525 B  starts the guard at boot
   /usr/libexec/newton/newton-wan-health   11 KB  the dual-WAN health check

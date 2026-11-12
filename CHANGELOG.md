@@ -13,13 +13,26 @@ Two version numbers exist and are separate:
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-11-09
+
+### Fixed
+- Changes on OpenWrt 25.12.6 work again. Its rpcd keeps each session in a folder with a random name, so
+  Newton could not find the session it stages a change in, and every apply stopped safely before writing. The change
+  helper, the router program and the owner script now look the folder up, accept only a folder of the exact expected
+  form, and destroy the session if the lookup fails. Tested end to end on a GL-MT3000 running vanilla OpenWrt 25.12.6.
+
+### Added
+- `scripts/newton-rules`, the owner's tool for the network rules file (`add`, `remove`, `list`). This is the first part
+  of the 1.2 network rules: planning does not read the file yet, so a rule changes nothing in this release.
+
 ### Changed
+- The router program is version 1.3.1.
 - The public repository is renamed from `newton-network-engineer` to `newton-senior-engineer`, because Newton is
   growing past networks. GitHub redirects the old address; the clone commands, the security-report link and the
   install guide name the new one.
 - The roadmap has a new release order: 1.3 Windows and an Active Directory audit, 1.4 Active Directory changes, 1.5
-  Linux hosts, 1.6 FortiGate and more vendors, 1.7 a security engineer persona, passkey approvals in 1.x; firmware
-  upgrades and site files move to Later. The 1.2 plan renames "network promises" to "network rules" and plans to
+  Active Directory build mode, 1.6 Linux and Windows 11 hosts, 1.7 FortiGate and more vendors, 1.8 a security
+  engineer persona, passkey approvals in 1.x; firmware upgrades and site files move to Later. The 1.2 plan renames "network promises" to "network rules" and plans to
   re-check them on every change to the router they belong to, not only on changes that touch them.
 
 ## [1.1.2] - 2026-11-06
@@ -816,5 +829,6 @@ Early work on the safe apply path, in short:
   from a verified commit).
 - **Profiles:** Standard, Hardened and Lockdown tier files generated from `profiles/openwrt/manifest.toml`.
 
-[Unreleased]: https://github.com/kevwillow/newton-senior-engineer/compare/v1.1.2...HEAD
+[Unreleased]: https://github.com/kevwillow/newton-senior-engineer/compare/v1.1.3...HEAD
+[1.1.3]: https://github.com/kevwillow/newton-senior-engineer/releases/tag/v1.1.3
 [1.1.2]: https://github.com/kevwillow/newton-senior-engineer/releases/tag/v1.1.2

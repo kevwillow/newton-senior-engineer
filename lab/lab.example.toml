@@ -53,7 +53,7 @@ settle_cmd = "{ ubus call service list; ubus call network.interface dump | jsonf
 vmid = 9102
 host = "10.109.0.11"
 user = "root"
-snapshot = "baseline-newton-1-3-0"   # RD7 = A: pve_snapshot_name of the router program's version (see newton-router-setup lab-snapshot)
+snapshot = "baseline-newton-1-3-1"   # RD7 = A: pve_snapshot_name of the router program's version (see newton-router-setup lab-snapshot)
 settle_cmd = "{ ubus call service list; ubus call network.interface dump | jsonfilter -e '@.interface[*].interface' -e '@.interface[*].up'; } | md5sum"
 
 [devices.lab-client]

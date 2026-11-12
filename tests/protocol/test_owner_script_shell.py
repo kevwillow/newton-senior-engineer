@@ -38,6 +38,7 @@ and the dash run uses the stubs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -62,6 +63,19 @@ SESSION_ID = "0123456789abcdef0123456789abcdef"
 
 #: The private directory the template creates.
 WORK_PREFIX = "/tmp/newton-owner."
+
+#: The rpcd versions the stub ubus models: "old" names the session's
+#: folder after the session id, "new" gives it a 32-hex name of its own
+#: (the rpcd change d99f703).
+RPCD_MODES = ["old", "new"]
+
+
+def staging_dir(mode, sid=SESSION_ID):
+    """The folder rpcd keeps the session's changes in, per mode."""
+    if mode == "old":
+        return "/var/run/rpcd/uci-" + sid
+    digest = hashlib.md5(sid.encode()).hexdigest()
+    return "/var/run/rpcd/uci-" + digest[:32]
 
 
 def _busybox() -> str | None:
@@ -180,17 +194,88 @@ _line='ubus'
 for a in "$@"; do _line="$_line@TAB@$a"; done
 printf '%s\n' "$_line" >> "$NEWTON_STUB_LOG"
 printf 'ubus@TAB@%s\n' "$(readlink /proc/self/fd/0 2>/dev/null || echo '')" >> "$NEWTON_STDIN_LOG"
+
+# rpcd_dir_for SID: the folder rpcd keeps the session's changes in.
+# NEWTON_RPCD_MODE says which rpcd is in force: "old" names the folder
+# after the session id, "new" gives it a 32-hex name of its own (the
+# rpcd change d99f703). NEWTON_RPCD_BAD_NAME makes a folder whose name is
+# not one of rpcd's own.
+rpcd_dir_for() {
+  if [ "${NEWTON_RPCD_MODE:-new}" = old ]; then
+    printf '/var/run/rpcd/uci-%s' "$1"
+    return 0
+  fi
+  sum=$(printf '%s' "$1" | /usr/bin/busybox md5sum)
+  sum=${sum%% *}
+  printf '/var/run/rpcd/uci-%s' "$(printf '%s' "$sum" | sed 's/\(.\{32\}\).*/\1/')"
+}
+
+rpcd_sid() {
+  printf '%s' "$1" | sed -n 's/.*"ubus_rpc_session"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{32\}\)".*/\1/p'
+}
+
+# rpcd_probe_section SID: the name of the section the marker probe gets.
+# Libuci names an anonymous section from the index it got in the package
+# plus a hash of the type, so two sessions that add at the same index get
+# the SAME name: the name is never derived from the session id.
+rpcd_probe_section() {
+  count_file="$NEWTON_RPCD_STATE/adds-$1"
+  n=0
+  if [ -f "$count_file" ]; then n=$(cat "$count_file"); fi
+  printf '%s' "$(( n + 1 ))" > "$count_file"
+  sum=$(printf '%s' newton_probe | /usr/bin/busybox md5sum)
+  sum=${sum%% *}
+  printf 'cfg%02x%s' "$n" "$(printf '%s' "$sum" | sed 's/\(.\{4\}\).*/\1/')"
+}
+
 case "$2" in
   session)
     case "$3" in
       create) printf '{"ubus_rpc_session":"%s"}\n' "$NEWTON_SESSION_ID"; exit 0 ;;
-      grant) printf '{}\n'; exit 0 ;;
+      grant)
+        if [ -n "${NEWTON_GRANT_FAIL:-}" ]; then exit 1; fi
+        printf '{}\n'; exit 0 ;;
+      destroy)
+        # rpcd removes the session's folder when the session is destroyed
+        sid=$(rpcd_sid "$4")
+        [ -n "$sid" ] || exit 1
+        rm -rf "$(rpcd_dir_for "$sid")"
+        : > "$NEWTON_RPCD_STATE/destroyed-$sid"
+        exit 0 ;;
     esac ;;
   uci)
     case "$3" in
       apply)
         if [ -n "${NEWTON_APPLY_FAIL:-}" ]; then exit 1; fi
         printf '{}\n'; exit 0 ;;
+      add)
+        # the marker probe that names the session's folder
+        sid=$(rpcd_sid "$4")
+        [ -n "$sid" ] || exit 1
+        section=$(rpcd_probe_section "$sid")
+        dir=$(rpcd_dir_for "$sid")
+        [ -z "${NEWTON_RPCD_BAD_NAME:-}" ] || dir=/var/run/rpcd/uci-not-a-hash
+        mkdir -p "$dir" || exit 1
+        printf "+system.%s='newton_probe'\n" "$section" > "$dir/system"
+        # a stale session that still holds a probe of the same name: the
+        # marker is in two folders and the lookup has to refuse
+        stale="${NEWTON_RPCD_STALE:-}"
+        if [ -n "$stale" ] && [ "$stale" != "$sid" ] &&
+           [ ! -f "$NEWTON_RPCD_STATE/destroyed-$stale" ]; then
+          sdir=$(rpcd_dir_for "$stale")
+          mkdir -p "$sdir" || exit 1
+          printf "+system.%s='newton_probe'\n" "$section" > "$sdir/system"
+        fi
+        printf '{\n\t"section": "%s"\n}\n' "$section"
+        exit 0 ;;
+      revert)
+        # the probe is taken back out of the folder
+        sid=$(rpcd_sid "$4")
+        [ -n "$sid" ] || exit 1
+        dir=$(rpcd_dir_for "$sid")
+        [ -z "${NEWTON_RPCD_BAD_NAME:-}" ] || dir=/var/run/rpcd/uci-not-a-hash
+        [ -f "$dir/system" ] && : > "$dir/system"
+        exit 0 ;;
     esac ;;
 esac
 exit 0
@@ -202,7 +287,13 @@ _line='jsonfilter'
 for a in "$@"; do _line="$_line@TAB@$a"; done
 printf '%s\n' "$_line" >> "$NEWTON_STUB_LOG"
 printf 'jsonfilter@TAB@%s\n' "$(readlink /proc/self/fd/0 2>/dev/null || echo '')" >> "$NEWTON_STDIN_LOG"
-sed -n 's/.*"ubus_rpc_session"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{32\}\)".*/\1/p'
+case "$*" in
+  *'@.section'*)
+    # the name of the section the marker probe got
+    sed -n 's/.*"section"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' ;;
+  *)
+    sed -n 's/.*"ubus_rpc_session"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{32\}\)".*/\1/p' ;;
+esac
 '''
 
 _ID_STUB = r'''#!/bin/sh
@@ -282,10 +373,15 @@ class Sandbox:
         self.state = root / "uci-state.txt"
         self.canary = root / "canary"
         self.script = root / "script.sh"
+        # the state the stub rpcd keeps outside /var (which is a fresh
+        # tmpfs for every run): the add counter of every session and the
+        # sessions that were destroyed
+        self.rpcd_state = root / "rpcd-state"
         self._build()
 
     def _build(self):
         self.fake.mkdir(parents=True, exist_ok=True)
+        self.rpcd_state.mkdir(parents=True, exist_ok=True)
         shutil.copy2("/usr/bin/dash", self.fake / "sh")
         shutil.copy2(HOST_BUSYBOX, self.fake / "busybox")
         for applet in (
@@ -337,6 +433,7 @@ class Sandbox:
                 "NEWTON_STDIN_LOG": str(self.stdin_log),
                 "NEWTON_SCRIPT_PIPE_FILE": str(self.pipe_file),
                 "NEWTON_SESSION_ID": SESSION_ID,
+                "NEWTON_RPCD_STATE": str(self.rpcd_state),
             }
         )
         if env:
@@ -473,9 +570,15 @@ def test_there_is_exactly_one_apply_and_it_carries_the_session_and_the_window(
 
 
 @pytest.mark.parametrize("shell", SHELLS)
-def test_the_order_is_the_preconditions_then_the_stage_then_the_apply(sandbox, shell):
+@pytest.mark.parametrize("mode", RPCD_MODES)
+def test_the_order_is_the_preconditions_then_the_stage_then_the_apply(
+    sandbox, shell, mode
+):
     """The script checks, stages, and only then applies."""
-    run = sandbox.run((GOLDEN / "apply.sh").read_bytes(), shell=shell)
+    run = sandbox.run(
+        (GOLDEN / "apply.sh").read_bytes(), shell=shell,
+        env={"NEWTON_RPCD_MODE": mode},
+    )
     order = []
     for call in run.calls:
         if call[0] == "uci" and call[1] == "-q" and call[2] == "get":
@@ -490,17 +593,142 @@ def test_the_order_is_the_preconditions_then_the_stage_then_the_apply(sandbox, s
     assert gets == [
         ("uci", "-q", "get", "firewall.cfg0a1b2c.dest_port")
     ]
-    # the stage writes the new value into the staging directory
+    # the stage writes the new value into the staging directory, and that
+    # directory is the one rpcd keeps the session's changes in
     sets = [call for call in run.calls if call[1] == "-P" and call[3] == "set"]
     assert sets == [
         (
             "uci",
             "-P",
-            "/var/run/rpcd/uci-" + SESSION_ID,
+            staging_dir(mode),
             "set",
             "firewall.cfg0a1b2c.dest_port=2222",
         )
     ]
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("mode", RPCD_MODES)
+def test_the_script_finds_the_session_folder_of_both_rpcd_versions(
+    sandbox, shell, mode
+):
+    """The script finds the folder rpcd keeps the session's changes in
+    under both rpcd versions: the marker probe names it."""
+    run = sandbox.run(
+        (GOLDEN / "apply.sh").read_bytes(), shell=shell,
+        env={"NEWTON_RPCD_MODE": mode},
+    )
+    assert run.rc == 0, run.err
+    assert "NEWTON-APPLIED" in run.out
+    adds = [
+        call for call in run.calls
+        if call[0] == "ubus" and call[1:4] == ("call", "uci", "add")
+    ]
+    assert len(adds) == 1, run.calls
+    payload = json.loads(adds[0][4])
+    assert payload["config"] == "system"
+    assert payload["type"] == "newton_probe"
+    assert payload["ubus_rpc_session"] == SESSION_ID
+    # the probe is taken back out again before anything is staged
+    reverts = [
+        call for call in run.calls
+        if call[0] == "ubus" and call[1:4] == ("call", "uci", "revert")
+    ]
+    assert len(reverts) == 1, run.calls
+
+
+def test_the_script_stops_when_the_folder_name_is_not_one_of_rpcd_own(sandbox):
+    """A folder whose name is not one of rpcd's own is refused."""
+    run = sandbox.run(
+        (GOLDEN / "apply.sh").read_bytes(),
+        env={"NEWTON_RPCD_BAD_NAME": "1"},
+    )
+    assert run.rc == 1
+    assert "NEWTON-STOP: could not locate the rpcd session folder" in run.out
+    _no_apply(run)
+
+
+def test_the_script_destroys_its_session_when_the_lookup_fails(sandbox):
+    """A lookup that fails takes the session with it.
+
+    Nothing has been applied at that point, so the session is not needed;
+    leaving it behind would hold a grant on the router for nothing.
+    """
+    run = sandbox.run(
+        (GOLDEN / "apply.sh").read_bytes(),
+        env={"NEWTON_RPCD_BAD_NAME": "1"},
+    )
+    assert run.rc == 1
+    destroys = [
+        call
+        for call in run.calls
+        if call[0] == "ubus" and call[1:4] == ("call", "session", "destroy")
+    ]
+    assert len(destroys) == 1, run.calls
+    payload = json.loads(destroys[0][4])
+    assert payload == {"ubus_rpc_session": SESSION_ID}
+    _no_apply(run)
+
+
+def test_the_script_destroys_its_session_when_the_grant_fails(sandbox):
+    """A session the router will not grant is destroyed as well."""
+    run = sandbox.run(
+        (GOLDEN / "apply.sh").read_bytes(),
+        env={"NEWTON_GRANT_FAIL": "1"},
+    )
+    assert run.rc == 1
+    assert "NEWTON-STOP: could not open a session" in run.out
+    destroys = [
+        call
+        for call in run.calls
+        if call[0] == "ubus" and call[1:4] == ("call", "session", "destroy")
+    ]
+    assert len(destroys) == 1, run.calls
+    _no_apply(run)
+
+
+#: A session that is still alive and holds a probe of its own.
+STALE_SESSION = "aaaabbbbccccddddeeeeffff00001111"
+
+
+def test_a_stale_session_with_the_same_probe_makes_the_lookup_refuse(sandbox):
+    """Two sessions can hold the same probe name.
+
+    Libuci names an anonymous section from the index it got plus a hash of
+    the type, so the name is the same in every session that adds at the
+    same index.  The marker is then in two folders and the lookup refuses.
+    """
+    run = sandbox.run(
+        (GOLDEN / "apply.sh").read_bytes(),
+        env={"NEWTON_RPCD_STALE": STALE_SESSION},
+    )
+    assert run.rc == 1
+    assert "NEWTON-STOP: could not locate the rpcd session folder" in run.out
+    _no_apply(run)
+
+
+def test_the_lookup_works_again_once_the_stale_session_is_gone(sandbox):
+    """The stale session is destroyed: rpcd takes its folder with it, and
+    the next lookup finds the folder of the new session."""
+    run = sandbox.run(
+        (GOLDEN / "apply.sh").read_bytes(),
+        env={"NEWTON_RPCD_STALE": STALE_SESSION},
+    )
+    assert run.rc == 1
+
+    # the stale session is destroyed
+    sandbox.run(
+        '/usr/bin/ubus call session destroy \'{"ubus_rpc_session":"%s"}\'\n'
+        % STALE_SESSION
+    )
+
+    run = sandbox.run(
+        (GOLDEN / "apply.sh").read_bytes(),
+        env={"NEWTON_RPCD_STALE": STALE_SESSION},
+    )
+    assert run.rc == 0, run.err
+    assert "NEWTON-APPLIED" in run.out
+    assert len(run.applies()) == 1, run.calls
 
 
 #: What the router holds before each golden script runs.

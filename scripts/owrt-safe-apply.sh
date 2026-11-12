@@ -28,9 +28,23 @@
 # from a shell returns "Invalid argument"; it only works with a ubus_rpc_session.
 set -u
 
+# The helper is installed on the router as /usr/libexec/newton/newton-safe-apply.
+# On that path the environment is the router's own: NEWTON_RPCD_ROOT (the
+# test-root prefix) is dropped, the way newton-router drops it in production,
+# so only the test harness can set it.
+if [ "$0" = /usr/libexec/newton/newton-safe-apply ]; then
+	unset NEWTON_RPCD_ROOT
+fi
+
 SESSION_TIMEOUT=2700
 LOCK=${NEWTON_LOCK:-/tmp/owrt-safe-apply.lock}
 UPTIME_FILE=${NEWTON_UPTIME_FILE:-/proc/uptime}
+# The rpcd session folders. The rpcd change d99f703 stopped naming a session's
+# folder after the session id: the folder is now uci-<32 hex>, a random
+# value no ubus call returns. NEWTON_RPCD_ROOT is the test-root prefix
+# (empty on the router); the folder Newton records is always the canonical
+# /var/run/rpcd one.
+RPCD_ROOT=${NEWTON_RPCD_ROOT:-}
 die()   { echo "ERROR: $*" >&2; exit 1; }
 uptime_s() {
 	IFS=' ' read -r _up _ < "$UPTIME_FILE" || return 1
@@ -38,9 +52,73 @@ uptime_s() {
 	case "$_up" in ''|*[!0-9]*) return 1 ;; esac
 	printf '%s\n' "$_up"
 }
-dir()   { echo "/var/run/rpcd/uci-$1"; }
+# rpcd_dir SID: the canonical folder rpcd keeps a session's changes in.
+rpcd_dir() { echo "/var/run/rpcd/uci-$1"; }
+# rpcd_path CANONICAL: the folder as this host sees it.
+rpcd_path() { echo "$RPCD_ROOT$1"; }
+# valid_dir PATH: the path is one of rpcd's own session folders.  The WHOLE
+# path must be /var/run/rpcd/uci- and exactly 32 hex characters, and nothing
+# else: no "..", no extra component, no trailing slash.
+valid_dir() {
+	_vd_hex=${1#/var/run/rpcd/uci-}
+	[ "$_vd_hex" != "$1" ] || return 1
+	[ "${#_vd_hex}" -eq 32 ] || return 1
+	case "$_vd_hex" in *[!0-9a-f]*) return 1 ;; esac
+	return 0
+}
+# recorded_dir SID: the folder this transaction recorded, or nothing when it
+# has no record (a transaction staged by an older Newton). Returns 1 when the
+# record holds a path that is not one of rpcd's own folders: the caller must
+# then use no folder at all.
+recorded_dir() {
+	[ -f "$LOCK/$1.dir" ] || return 0
+	_rd=
+	IFS= read -r _rd 2>/dev/null < "$LOCK/$1.dir" || _rd=
+	[ -n "$_rd" ] || return 1
+	valid_dir "$_rd" || return 1
+	printf '%s\n' "$_rd"
+}
+# find_dir SID: the folder rpcd keeps this session's staged changes in.
+#
+# The folder is found with a marker: one probe section is added to the
+# session and taken back out again, and the one delta file that holds the
+# probe names the folder. Exactly one file may hold it, and the folder must
+# be one of rpcd's own. The probe never reaches /etc/config.
+find_dir() {
+	_fd_sid="$1"
+	_fd_reply=$(ubus call uci add "{\"config\":\"system\",\"type\":\"newton_probe\",\"ubus_rpc_session\":\"$_fd_sid\"}" 2>/dev/null) || return 1
+	_fd_section=$(printf '%s\n' "$_fd_reply" | jsonfilter -e '@.section' 2>/dev/null) || return 1
+	case "$_fd_section" in
+		'' | *[!A-Za-z0-9_]*) return 1 ;;
+	esac
+	[ "${#_fd_section}" -le 64 ] || return 1
+	_fd_hits=$(grep -Fxl "+system.$_fd_section='newton_probe'" "$RPCD_ROOT"/var/run/rpcd/uci-*/system 2>/dev/null) || :
+	_fd_count=$(printf '%s\n' "$_fd_hits" | grep -c .)
+	[ "$_fd_count" -eq 1 ] || return 1
+	_fd_dir=${_fd_hits%/*}
+	_fd_name=${_fd_dir##*/}
+	_fd_canon="/var/run/rpcd/$_fd_name"
+	# the folder is one of rpcd's own: the whole path is the pattern, and
+	# it is the one under the root this host sees
+	valid_dir "$_fd_canon" || return 1
+	[ "$_fd_dir" = "$RPCD_ROOT$_fd_canon" ] || return 1
+	ubus call uci revert "{\"config\":\"system\",\"ubus_rpc_session\":\"$_fd_sid\"}" >/dev/null 2>&1 || return 1
+	[ -s "$_fd_dir/system" ] && return 1
+	printf '%s\n' "$_fd_canon"
+}
 live()  { ubus call session list "{\"ubus_rpc_session\":\"$1\"}" >/dev/null 2>&1; }
-clean() { rm -rf "$(dir "$1")" "$LOCK/$1.applied" "$LOCK/$1.health"; [ "$(cat "$LOCK/sid" 2>/dev/null)" = "$1" ] && rm -rf "$LOCK"; :; }
+clean() {
+	_cd=
+	if ! _cd=$(recorded_dir "$1"); then
+		_cd=	# the record is not one of rpcd's folders: use no folder at all
+	elif [ -z "$_cd" ]; then
+		_cd=$(rpcd_dir "$1")	# an old transaction: the folder it used
+	fi
+	if [ -n "$_cd" ]; then rm -rf "$(rpcd_path "$_cd")"; fi
+	rm -rf "$LOCK/$1.applied" "$LOCK/$1.health"
+	rm -f "$LOCK/$1.dir"
+	[ "$(cat "$LOCK/sid" 2>/dev/null)" = "$1" ] && rm -rf "$LOCK"; :
+}
 drop()  { ubus call session destroy "{\"ubus_rpc_session\":\"$1\"}" >/dev/null 2>&1; clean "$1"; }
 valid_sid() { echo "$1" | grep -qE '^[0-9a-f]{32}$' || die "malformed session id"; }
 need_sid()  { [ -n "${1:-}" ] || die "missing session id"; valid_sid "$1"; live "$1" || die "session $1 not found (expired or destroyed)"; }
@@ -95,28 +173,43 @@ stage)
 	# only staging verbs; commit/import/revert/export would bypass the rollback
 	bad=$(printf '%s\n' "$BATCH" | grep -vE '^[[:space:]]*(#|$)' | grep -vE '^[[:space:]]*(set|add|add_list|del_list|delete|rename|reorder)[[:space:]]')
 	[ -z "$bad" ] || { rm -rf "$LOCK"; die "only set/add/add_list/del_list/delete/rename/reorder are allowed, got: $(printf '%s' "$bad" | head -1)"; }
-	before=$(md5sum /etc/config/* | md5sum)
+	config_dir=${NEWTON_CONFIG_DIR:-/etc/config}
+	before=$(md5sum "$config_dir"/* | md5sum)
 	SID=$(ubus call session create "{\"timeout\":$SESSION_TIMEOUT}" | jsonfilter -e '@.ubus_rpc_session') || { rm -rf "$LOCK"; die "session create failed"; }
 	echo "$SID" > "$LOCK/sid"
 	ubus call session grant "{\"ubus_rpc_session\":\"$SID\",\"scope\":\"uci\",\"objects\":[[\"*\",\"read\"],[\"*\",\"write\"]]}" >/dev/null || { drop "$SID"; die "grant failed"; }
-	mkdir -p "$(dir "$SID")"
+	# the folder rpcd keeps this session's changes in is found with a marker
+	# (rpcd d99f703): nothing is staged before it is known
+	SDIR=$(find_dir "$SID") || { drop "$SID"; die "could not locate the rpcd session folder"; }
+	# the record of the folder is what every later step reads: it must be
+	# written and read back, or the stage fails and nothing is staged
+	printf '%s\n' "$SDIR" > "$LOCK/$SID.dir" || { drop "$SID"; die "could not record the rpcd session folder"; }
+	_rd=
+	IFS= read -r _rd < "$LOCK/$SID.dir" 2>/dev/null || _rd=
+	[ "$_rd" = "$SDIR" ] || { drop "$SID"; die "could not record the rpcd session folder"; }
 	# uci batch exits 0 even when a line fails — the error appears only on stderr, so any stderr rejects the whole batch
 	# stdout (add prints the new section name) is discarded: the session id must be the only thing stage prints
-	printf '%s\n' "$BATCH" | uci -P "$(dir "$SID")" batch >/dev/null 2>"$LOCK/batch.err"; rc=$?
+	printf '%s\n' "$BATCH" | uci -P "$(rpcd_path "$SDIR")" batch >/dev/null 2>"$LOCK/batch.err"; rc=$?
 	if [ "$rc" -ne 0 ] || [ -s "$LOCK/batch.err" ]; then
 		msg=$(head -n 3 "$LOCK/batch.err")
 		drop "$SID"; die "uci batch rejected the changes (exit $rc), nothing staged: $msg"
 	fi
 	rm -f "$LOCK/batch.err"
-	[ "$(md5sum /etc/config/* | md5sum)" = "$before" ] || { drop "$SID"; die "/etc/config changed during staging — investigate before retrying"; }
-	[ -n "$(uci -P "$(dir "$SID")" changes)" ] || { drop "$SID"; die "no changes staged"; }
+	[ "$(md5sum "$config_dir"/* | md5sum)" = "$before" ] || { drop "$SID"; die "/etc/config changed during staging — investigate before retrying"; }
+	[ -n "$(uci -P "$(rpcd_path "$SDIR")" changes)" ] || { drop "$SID"; die "no changes staged"; }
 	echo "$SID"
 	;;
 diff)
-	need_sid "${1:-}"; uci -P "$(dir "$1")" changes
+	need_sid "${1:-}"
+	d=$(recorded_dir "$1") || die "could not locate the rpcd session folder"
+	[ -n "$d" ] || die "could not locate the rpcd session folder"
+	uci -P "$(rpcd_path "$d")" changes
 	;;
 named)
-	need_sid "${1:-}"; d=$(dir "$1")
+	need_sid "${1:-}"
+	d=$(recorded_dir "$1") || die "could not locate the rpcd session folder"
+	[ -n "$d" ] || die "could not locate the rpcd session folder"
+	d=$(rpcd_path "$d")
 	ch=$(uci -P "$d" changes firewall) || die "uci changes failed"
 	printf '%s\n' "$ch" | sed -n 's/^[-+@^]\{0,1\}firewall\.\([A-Za-z0-9_]*\).*/\1/p' | sort -u | while read -r s; do
 		t=$(uci -P "$d" -q get "firewall.$s") || t=$(uci -q get "firewall.$s")
@@ -142,8 +235,11 @@ check-staged)
 	# is not-checked, never pass. Measured on OpenWrt 25.12.5 only.
 	[ "$#" -eq 1 ] || die "check-staged takes one session id"
 	valid_sid "${1:-}"
-	d=$(dir "$1"); config_dir=${NEWTON_CONFIG_DIR:-/etc/config}
 	say() { printf 'fw4 %s\n' "$*"; exit 0; }
+	d=$(recorded_dir "$1") || say not-checked no-folder
+	[ -n "$d" ] || say not-checked no-folder
+	d=$(rpcd_path "$d")
+	config_dir=${NEWTON_CONFIG_DIR:-/etc/config}
 	live "$1" || say not-checked session-gone
 	ch=$(uci -P "$d" changes 2>/dev/null) || say not-checked changes-unreadable
 	[ -n "$ch" ] || say not-checked session-gone
