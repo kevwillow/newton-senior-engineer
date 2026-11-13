@@ -66,6 +66,9 @@ CYCLE_DN_TWO = f"CN=cycle-two,{OU_USERS}"
 OPS_GUID = "0a9619ff-8b86-d011-b42d-00c04fc964ff"
 OPS_SID = "S-1-5-21-1-2-3-1100"
 
+#: The GUID the fake gives BUILTIN Administrators (the fake's own id).
+BUILTIN_ADMINS_GUID = "5b9619ff-8b86-d011-b42d-00c04fc964ff"
+
 #: The administrator of the directory of the tests, as a real DC names it.
 ADMIN_SAM = "Administrator"
 ADMIN_GUID = "3f9619ff-8b86-d011-b42d-00c04fc964ff"
@@ -647,6 +650,44 @@ def _cases() -> list[dict[str, Any]]:
         "apply-risk-mismatch-high",
         ldap=_directory(),
         requests=[{"raw": _apply(risk="HIGH"), "stage": "write"}],
+    )
+    # BUILTIN Administrators: the fake holds it in every directory, as the
+    # lab DC measured it (SID S-1-5-32-544, outside the domain)
+    add(
+        "read-builtin-privileged-group",
+        ldap=_directory(),
+        requests=[
+            {
+                "raw": _read(
+                    "member-add",
+                    target={"group_sam": "administrators", "member_sam": MEMBER_SAM},
+                ),
+                "stage": "write",
+            }
+        ],
+    )
+    add(
+        "apply-builtin-privileged-group",
+        ldap=_directory(),
+        requests=[
+            {
+                "raw": _apply(
+                    "member-add",
+                    target={
+                        "group_guid": BUILTIN_ADMINS_GUID,
+                        "group_sid": "S-1-5-32-544",
+                        "group_sam": "administrators",
+                        "member_guid": MEMBER_GUID,
+                        "member_sid": MEMBER_SID,
+                        "member_sam": MEMBER_SAM,
+                    },
+                    before={"member": "absent"},
+                    after={"member": "present"},
+                    risk="HIGH",
+                ),
+                "stage": "write",
+            }
+        ],
     )
     add(
         "apply-privileged-target",
@@ -2183,6 +2224,39 @@ def test_the_apply_mode_refuses_a_privileged_group(
     answer = answers["apply-privileged-target"]
     assert answer["code"] == "privileged"
     assert "ldap:modify member" not in _calls(answer)
+
+
+def test_the_read_mode_names_a_builtin_group_privileged(
+    answers: dict[str, dict[str, Any]],
+) -> None:
+    """A member-add read of BUILTIN Administrators.
+
+    The read answers ok with the group's SID S-1-5-32-544 and privileged
+    true (the helper's BUILTIN list, not the RID table): that is what the
+    plan reads before it refuses the change as privileged.
+    """
+    answer = answers["read-builtin-privileged-group"]
+    assert answer["code"] == "ok"
+    response = answer["response"]
+    assert response["ids"]["group_sid"] == "S-1-5-32-544"
+    assert response["ids"]["group_sam"] == "administrators"
+    assert response["facts"]["group"]["privileged"] is True
+    assert response["facts"]["group"]["admin_count"] == 1
+    assert response["facts"]["member"]["privileged"] is False
+    assert response["live"] == {"member": "absent"}
+
+
+def test_the_apply_mode_never_writes_a_builtin_group(
+    answers: dict[str, dict[str, Any]],
+) -> None:
+    """A member-add to BUILTIN Administrators is refused before any write.
+
+    Its SID is outside the domain, so the request does not fit the contract
+    (schema); the plan refuses it as privileged before it gets that far.
+    """
+    answer = answers["apply-builtin-privileged-group"]
+    assert answer["code"] == "schema"
+    assert not [call for call in _calls(answer) if call.startswith("ldap:modify")]
 
 
 def test_the_apply_mode_refuses_a_privileged_write_account(

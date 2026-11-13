@@ -127,3 +127,50 @@ def test_the_old_record_rewrite_fails_against_the_honest_fake(
     assert measured["old_record_write_unauthorized"] is True
     assert measured["old_record_text"] == "old"
 
+
+
+def _measured_builtin_administrators() -> dict[str, list[str]]:
+    """BUILTIN Administrators as the lab DC answered it, read as the Administrator.
+
+    The attributes come from the measured document ``win-dc-admin-r3.json``:
+    the entry of the privileged-group query and the one of the ACL query
+    together carry the attributes a resolve read of the write helper asks for.
+    """
+    document = json.loads((AD_DIR / "fixtures" / "win-dc-admin-r3.json").read_text("utf-8"))
+    merged: dict[str, list[str]] = {}
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if str(node.get("dn", "")).startswith("CN=Administrators,CN=Builtin,"):
+                for key, value in dict(node.get("a", {})).items():
+                    merged.setdefault(str(key).lower(), list(value))
+                merged.setdefault("dn", [str(node["dn"])])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(document)
+    return merged
+
+
+def test_the_fake_holds_builtin_administrators_as_the_dc_measured_it(
+    measured: dict[str, object],
+) -> None:
+    """The BUILTIN Administrators group a resolve read of the helper sees.
+
+    Its SID (S-1-5-32-544) is outside the domain, so the helper names it
+    privileged from its BUILTIN list, not from the RID table.
+    """
+    real = _measured_builtin_administrators()
+    assert measured["builtin_found"] is True
+    fake = measured["builtin"]
+    assert isinstance(fake, dict)
+    assert fake["dn"] == real["dn"][0]
+    assert fake["objectsid"] == real["objectsid"][0]
+    assert fake["objectclass"] == real["objectclass"]
+    assert fake["samaccountname"] == real["samaccountname"]
+    assert fake["admincount"] == real["admincount"]
+    assert fake["grouptype"] == real["grouptype"]
+    assert fake["member"] == real["member"]

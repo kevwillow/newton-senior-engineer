@@ -596,3 +596,196 @@ def test_a_refused_abort_names_no_state() -> None:
 
     assert again["code"] == "conflict"
     assert again["state"] is None
+
+
+def _drops(mode: str, lab: harness.Lab, sent: list[str] | None = None,
+           code: str = "unavailable"):  # type: ignore[no-untyped-def]
+    """A send whose session fails for one mode, as the transport raises it."""
+    from newton_mcp.ad.write.transport import TransportError
+
+    def send(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        if sent is not None:
+            sent.append(str(request_body["mode"]))
+        if request_body["mode"] == mode:
+            raise TransportError(code, "the write helper did not answer")
+        return lab.send(target, request_body)  # type: ignore[arg-type]
+
+    return send
+
+
+def test_a_failed_session_at_the_apply_writes_a_receipt_and_says_what_is_known() -> None:
+    """The connection fails while the apply is sent.
+
+    Newton cannot tell whether the change reached the DC.  The apply
+    still writes a receipt and returns a result that names the state and
+    tells the owner to read the status; nothing else is sent.
+    """
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+    modes: list[str] = []
+
+    result = ad_apply.apply_change(
+        plan_id, send=_drops("apply", lab, modes), devices=lab.devices, timeout_s=0.0
+    )
+
+    assert result["result"] == "error"
+    assert result["state"] == ad_apply.STATE_APPLY_UNKNOWN
+    assert result["code"] == "unavailable"
+    assert "newton_ad_change_status" in str(result["message"])
+    assert "undo_at" in str(result["message"])
+    assert modes == ["apply"]
+    receipt = store.read_json(store.receipt_path(plan_id))
+    assert receipt["state"] == ad_apply.STATE_APPLY_UNKNOWN
+    assert ad_render.applied(result)["message"] == result["message"]
+
+
+def test_a_failed_session_at_the_confirm_writes_a_receipt_and_says_what_is_known() -> None:
+    """Every DC matched, then the connection fails while the confirm is sent."""
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+
+    result = ad_apply.apply_change(
+        plan_id, send=_drops("confirm", lab, code="error"), devices=lab.devices,
+        timeout_s=0.0,
+    )
+
+    assert result["result"] == "error"
+    assert result["state"] == ad_apply.STATE_CONFIRM_UNKNOWN
+    assert result["code"] == "error"
+    assert result["dcs"]["win-dc1"]["state"] == "matched"
+    assert "newton_ad_change_status" in str(result["message"])
+    assert "undo_at" in str(result["message"])
+    receipt = store.read_json(store.receipt_path(plan_id))
+    assert receipt["state"] == ad_apply.STATE_CONFIRM_UNKNOWN
+
+
+def test_a_failed_session_at_the_automatic_abort_gives_abort_failed() -> None:
+    """A DC lags, and the connection fails while the automatic abort is sent."""
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+    lab.lag()
+
+    result = ad_apply.apply_change(
+        plan_id, send=_drops("abort", lab), devices=lab.devices, timeout_s=0.0
+    )
+
+    assert result["result"] == "error"
+    assert result["state"] == ad_apply.STATE_ABORT_FAILED
+    assert result["code"] == "unavailable"
+    assert "newton_ad_change_status" in str(result["message"])
+    assert "undo_at" in str(result["message"])
+    receipt = store.read_json(store.receipt_path(plan_id))
+    assert receipt["state"] == ad_apply.STATE_ABORT_FAILED
+
+
+@pytest.mark.parametrize("answer", ["error", "conflict"])
+def test_an_automatic_abort_the_helper_refuses_gives_abort_failed(answer: str) -> None:
+    """The helper answers the automatic abort with error or conflict.
+
+    The undo did not run, so the result, the receipt and the rendered
+    answer say so with their own state instead of not_tested.
+    """
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+    lab.lag()
+
+    def send(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        if request_body["mode"] == "abort":
+            return {"v": 1, "code": answer}
+        return lab.send(target, request_body)  # type: ignore[arg-type]
+
+    result = ad_apply.apply_change(
+        plan_id, send=send, devices=lab.devices, timeout_s=0.0
+    )
+
+    assert result["state"] == ad_apply.STATE_ABORT_FAILED
+    assert result["code"] == answer
+    assert "newton_ad_change_status" in str(result["message"])
+    receipt = store.read_json(store.receipt_path(plan_id))
+    assert receipt["state"] == ad_apply.STATE_ABORT_FAILED
+    rendered = ad_render.applied(result)
+    assert rendered["state"] == ad_apply.STATE_ABORT_FAILED
+    assert rendered["message"] == result["message"]
+
+
+def test_a_failed_session_at_the_abort_tool_says_what_is_known() -> None:
+    """The owner's abort: the connection fails while it is sent."""
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+    assert _apply_now(lab, plan_id)["code"] == "ok"
+
+    result = ad_apply.abort_change(
+        plan_id, send=_drops("abort", lab), devices=lab.devices
+    )
+
+    assert result["result"] == "error"
+    assert result["code"] == "unavailable"
+    assert result["state"] is None
+    assert "newton_ad_change_status" in str(result["message"])
+    assert "undo_at" in str(result["message"])
+
+
+def test_a_failed_session_at_the_status_says_so() -> None:
+    """The status read: the connection fails while it is sent."""
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+
+    result = ad_apply.change_status(
+        plan_id, send=_drops("status", lab), devices=lab.devices
+    )
+
+    assert result["result"] == "error"
+    assert result["code"] == "unavailable"
+    assert result["state"] is None
+    assert isinstance(result["message"], str)
+
+
+def _unlock_lab() -> tuple[harness.Lab, str]:
+    lab = harness.Lab()
+    lab.add_user(uac=512, lockout=5)
+    return lab, _approved_plan(lab, "unlock", value=None)
+
+
+@pytest.mark.parametrize("mode", ["apply", "confirm"])
+def test_a_lost_session_on_an_unlock_promises_no_undo(mode: str) -> None:
+    """An unlock arms no undo, so a lost apply or confirm of one must not
+    tell the owner the DC will put the before-image back."""
+    lab, plan_id = _unlock_lab()
+
+    result = ad_apply.apply_change(
+        plan_id, send=_drops(mode, lab), devices=lab.devices, timeout_s=0.0
+    )
+
+    message = str(result["message"])
+    assert "newton_ad_change_status" in message
+    assert "undo_at" not in message
+    assert "before-image back" not in message
+    assert "no undo" in message
+    receipt = store.read_json(store.receipt_path(plan_id))
+    assert receipt["message"] == result["message"]
+
+
+def test_an_unlock_a_dc_has_not_shown_yet_is_not_aborted() -> None:
+    """A DC lags behind an unlock.  The unlock has nothing to abort, so
+    Newton sends no abort and says the unlock stays written."""
+    lab, plan_id = _unlock_lab()
+    lab.lag()
+    modes: list[str] = []
+
+    def send(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        modes.append(str(request_body["mode"]))
+        return lab.send(target, request_body)  # type: ignore[arg-type]
+
+    result = ad_apply.apply_change(
+        plan_id, send=send, devices=lab.devices, timeout_s=0.0
+    )
+
+    assert "abort" not in modes
+    assert result["state"] == ad_apply.STATE_NOT_TESTED
+    message = str(result["message"])
+    assert "no undo" in message
+    assert "undo_at" not in message
+    assert "newton_ad_change_status" in message
+    receipt = store.read_json(store.receipt_path(plan_id))
+    assert receipt["state"] == ad_apply.STATE_NOT_TESTED
+    assert ad_render.applied(result)["message"] == result["message"]

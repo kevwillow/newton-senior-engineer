@@ -858,3 +858,25 @@ def test_the_status_tool_reports_the_undo_deadline_and_conflicts(
     assert HOSTILE_DN not in json.dumps(
         {k: v for k, v in result.items() if k != "conflicts"}
     )
+
+
+def test_the_abort_tool_answers_when_the_session_to_the_dc_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transport failure is a result for the owner, not an internal error."""
+    from newton_mcp.ad.write.transport import TransportError
+
+    _inventory(tmp_path, monkeypatch)
+    plan_id = _planned(monkeypatch)
+
+    def send(target: Any, request: dict[str, Any]) -> dict[str, Any]:
+        raise TransportError("unavailable", "the write helper did not answer")
+
+    monkeypatch.setattr("newton_mcp.ad.write.transport.send", send)
+
+    result = server.newton_ad_abort_change(DOMAIN, plan_id)
+
+    assert result.get("error") != "internal server error"
+    assert result["result"] == "error"
+    assert result["code"]["text"].endswith("unavailable")
+    assert "newton_ad_change_status" in result["message"]

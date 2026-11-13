@@ -188,6 +188,25 @@ if ($mixed.Count -eq 1) {
     $result['mixed_case_sam'] = ''
 }
 
+# the BUILTIN Administrators group the fake holds in every directory, as
+# a resolve read of the helper sees it
+$builtin = @($fake.Search($domainDn, '(sAMAccountName=administrators)', 'sub', [string[]]@('objectSid', 'objectClass', 'sAMAccountName', 'adminCount', 'groupType', 'member', 'distinguishedName')))
+$result['builtin_found'] = ($builtin.Count -eq 1)
+if ($builtin.Count -eq 1) {
+    $attrs = $builtin[0]['attrs']
+    $result['builtin'] = @{
+        dn = [string]$builtin[0]['dn']
+        objectsid = [Convert]::ToBase64String([byte[]]$attrs['objectsid'])
+        objectclass = @($attrs['objectclass'])
+        samaccountname = @($attrs['samaccountname'])
+        admincount = @($attrs['admincount'])
+        grouptype = @($attrs['grouptype'])
+        member = @($attrs['member'])
+    }
+} else {
+    $result['builtin'] = $null
+}
+
 # the measured transaction-store ACL
 $fileRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('newton-win-write-fs-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $fileRoot -Force

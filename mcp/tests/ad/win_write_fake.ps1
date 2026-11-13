@@ -600,6 +600,40 @@ function New-NewtonFakeLdap {
         values = @{ 'objectclass' = @('top', 'organizationalUnit') }
     })
 
+    # BUILTIN Administrators, as the lab DC answered it to the Administrator
+    # (fixtures/win-dc-admin-r3.json): its SID is outside the domain, so the
+    # helper names it privileged from its BUILTIN list.  The GUID is the
+    # fake's own; the measured document does not carry one.
+    $fake.AddObject(@{
+        dn = 'CN=Administrators,CN=Builtin,' + $domainDn
+        guid = '5b9619ff-8b86-d011-b42d-00c04fc964ff'
+        sid = 'S-1-5-32-544'
+        sam = 'Administrators'
+        object_class = @('top', 'group')
+        admin_count = 1
+        member_of = @()
+        member = @(
+            'CN=Domain Admins,CN=Users,' + $domainDn
+            'CN=Enterprise Admins,CN=Users,' + $domainDn
+            'CN=Administrator,CN=Users,' + $domainDn
+        )
+        primary_group_id = $null
+        token_groups = @()
+        usn_changed = 1
+        delegated = $true
+        values = @{
+            'samaccountname' = @('Administrators')
+            'objectclass' = @('top', 'group')
+            'admincount' = @('1')
+            'grouptype' = @('-2147483643')
+            'member' = @(
+                'CN=Domain Admins,CN=Users,' + $domainDn
+                'CN=Enterprise Admins,CN=Users,' + $domainDn
+                'CN=Administrator,CN=Users,' + $domainDn
+            )
+        }
+    })
+
     # the objects of the case
     $caseObjects = @()
     if ($null -ne $Config['objects']) { $caseObjects = @($Config['objects']) }

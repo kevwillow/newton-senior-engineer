@@ -27,7 +27,8 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
-# The release scrub renames these into place in the public tree.
+# The release docs, in a tree that has them under docs/release/.  Where
+# such a file is absent, the doc on the right is the release doc.
 _RENAMED = {
     "docs/release/README-1.0.md": "README.md",
     "docs/release/ROADMAP-public.md": "docs/ROADMAP.md",
@@ -35,8 +36,8 @@ _RENAMED = {
 
 
 def _path(relative: str) -> Path:
-    """The path of a doc.  Without the release copy, the public tree holds
-    it under the name the release scrub gives it."""
+    """The path of a doc.  Where the docs/release/ file is absent, the doc
+    on the right of ``_RENAMED`` is the release doc."""
     path = REPO_ROOT / relative
     if relative in _RENAMED and not path.exists():
         return REPO_ROOT / _RENAMED[relative]
@@ -146,3 +147,51 @@ def test_the_two_roadmap_rows_are_the_same() -> None:
     assert _roadmap_row("docs/ROADMAP.md") == _roadmap_row(
         "docs/release/ROADMAP-public.md"
     )
+
+
+def _readme_ad_section() -> str:
+    text = _read("docs/release/README-1.0.md")
+    start = text.index("### Active Directory")
+    end = text.index("## How a change works", start)
+    return text[start:end]
+
+
+def _failure_docs() -> dict[str, str]:
+    tools = _tools()
+    return {
+        "SKILL.md": _skill_ad_changes(),
+        "CHANGELOG.md": _unreleased(),
+        "README AD section": _readme_ad_section(),
+        "apply tool": tools["newton_ad_apply_change"],
+        "abort tool": tools["newton_ad_abort_change"],
+    }
+
+
+@pytest.mark.parametrize("name", list(_failure_docs()))
+def test_the_docs_say_what_a_failed_connection_mid_apply_does(name: str) -> None:
+    """A session to the DC that fails mid-apply: the owner reads the status,
+    and the DC itself undoes a change that is not confirmed at undo_at."""
+    text = _failure_docs()[name]
+    assert "connection to a domain controller fails" in text, name
+    assert "newton_ad_change_status" in text, name
+    assert "undo_at" in text, name
+
+
+@pytest.mark.parametrize("name", ["SKILL.md", "CHANGELOG.md", "apply tool"])
+def test_the_docs_name_the_states_of_a_lost_step(name: str) -> None:
+    text = _failure_docs()[name]
+    for state in ("apply_unknown", "confirm_unknown", "abort_failed"):
+        assert state in text, (name, state)
+
+
+def test_the_readme_says_an_unlock_is_confirmed_once_written() -> None:
+    """The helpers confirm an unlock once it is written on the PDC."""
+    text = _readme_ad_section()
+    assert "as soon as every domain controller shows it" not in text
+    assert "confirmed as soon as it is written" in text
+
+
+@pytest.mark.parametrize("name", ["README AD section", "CHANGELOG.md"])
+def test_the_live_ad_runs_say_their_log_is_not_kept(name: str) -> None:
+    text = {"README AD section": _readme_ad_section(), "CHANGELOG.md": _unreleased()}[name]
+    assert "the log of those runs is not kept in this repository" in text, name

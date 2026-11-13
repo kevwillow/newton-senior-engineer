@@ -729,6 +729,13 @@ changes nothing. Explain each finding in plain words: what an attacker does with
 5. The undo is armed on the domain controller until Newton confirms, and `newton_ad_apply_change` confirms or aborts
    before it returns, so after a normal apply nothing is left to abort.
    `newton_ad_change_status(device, plan_id)` shows `armed`, `confirmed`, `undone`, `undo_failed` or `refused`.
+   If the connection to a domain controller fails mid-apply, the apply still writes its receipt and its result names
+   the step that was lost: `apply_unknown` (Newton does not know whether the change was written), `confirm_unknown`
+   (every DC showed it, and the confirm may not have arrived) or `abort_failed` (the apply's own abort did not run:
+   the DC refused it or it did not arrive; `restored` and `conflicts` are then unknown). Run
+   `newton_ad_change_status` and tell the owner what the DC holds: a change that is not confirmed is put back by the DC
+   itself at its `undo_at`, except an `unlock`, which has no undo and stays written. A connection lost while a DC is
+   read back counts as that DC not showing the change, so the change is aborted. Do not apply the plan again.
    `newton_ad_abort_change(device, plan_id)` works only on a change still armed (written and not yet confirmed: while Newton is still verifying it, or an apply cut off before its confirm):
    the DC runs the undo then; on any other change the abort is refused with `conflict`. The undo, from that abort or
    from the apply's own abort when a DC does not catch up, writes back only attributes still equal to the after-image

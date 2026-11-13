@@ -13,8 +13,8 @@ import newton_mcp.server as server
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILL_MD = REPO_ROOT / "SKILL.md"
 README_MD = REPO_ROOT / "README.md"
-# The public README.  The release scrub renames it to README.md in the
-# public tree, where the private README.md does not exist.
+# The release README, in a tree that has docs/release/README-1.0.md.
+# Where that file is absent, README.md is the release README.
 RELEASE_README = REPO_ROOT / "docs" / "release" / "README-1.0.md"
 PRIVATE_LAYOUT = RELEASE_README.exists()
 

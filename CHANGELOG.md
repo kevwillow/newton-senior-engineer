@@ -25,7 +25,12 @@ Two version numbers exist and are separate:
   `newton_ad_abort_change`, for account flags, encryption types, disable and enable, membership of non-privileged
   groups, the machine account quota, new users (created disabled), moves between OUs, and unlock. The undo is armed on
   the domain controller until Newton confirms; `newton_ad_apply_change` confirms or aborts before it returns, and when a
-  DC does not catch up its result says what the undo restored and which attributes it left as conflicts.
+  DC does not catch up its result says what the undo restored and which attributes it left as conflicts, or
+  `abort_failed` when that abort did not run. If the connection to a domain controller fails mid-apply, the receipt
+  is still written and the result names the lost step (`apply_unknown`, `confirm_unknown` or `abort_failed`) and
+  sends the owner to `newton_ad_change_status`; a change that is not confirmed is put back by the DC itself at its
+  `undo_at`, except an unlock, which has no undo and stays written. A connection lost while a DC is read back counts
+  as that DC not showing the change, so the change is aborted.
   `newton_ad_abort_change` works only on a change still armed (an apply cut off before its confirm). Once confirmed,
   Newton does not undo it: the owner plans the reverse change. An unlock has no undo and is written at once. The owner approves each change in their own terminal with
   `sudo -u newton /usr/local/bin/newton-approve ad-change <plan_id>`; the
@@ -36,8 +41,8 @@ Two version numbers exist and are separate:
   tested live in the lab on Windows Server 2025 and Samba 4.22 domain controllers. The second-DC setup
   (--domain-device), the printed ad_domain_guid and changes on a domain with two domain controllers were tested live
   on a two-DC Windows Server 2025 domain and a two-DC Samba domain: both DCs of a domain hold the same approval key,
-  every change is confirmed on both, and a withheld confirm rolls back on both. A move of the PDC role between domain
-  controllers was not tested live.
+  every change is confirmed on both, and a withheld confirm rolls back on both; the log of those runs is not kept in
+  this repository. A move of the PDC role between domain controllers was not tested live.
 - `SKILL.md` has an Active Directory section: the setup, the audit, the change flow and what Newton does not change.
 - An installed Newton has a new launcher, `/usr/local/bin/newton-ad-setup`, with its own sudoers rule (no
   `NOPASSWD`, `timestamp_timeout=0`): `sudo -u newton /usr/local/bin/newton-ad-setup approval-key <device>` records
