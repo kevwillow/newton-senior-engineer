@@ -51,6 +51,11 @@ TOOL_CALLS: dict[str, tuple] = {
     "newton_guided_audit": ("lab-r1",),
     "newton_list_getters": ("lab-r1",),
     "newton_get_state": ("lab-r1", "running_config"),
+    "newton_ad_audit": ("lab-r1",),
+    "newton_ad_plan_change": ("lab-r1", "uac-clear"),
+    "newton_ad_apply_change": ("lab-r1", "0" * 32),
+    "newton_ad_change_status": ("lab-r1", "0" * 32),
+    "newton_ad_abort_change": ("lab-r1", "0" * 32),
 }
 
 # The tools that take no device at all.
@@ -58,6 +63,7 @@ DEVICE_FREE_TOOLS = {
     "newton_list_devices",
     "newton_list_tiers",
     "newton_guided_recommend",
+    "newton_ad_list_checks",
 }
 
 # The tools that may work on a no-install device.  The read goes to

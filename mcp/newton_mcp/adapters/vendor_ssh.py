@@ -17,6 +17,12 @@ the CLI, so the script is read by the CLI (measured on 26.2R1.7).  It is
 allowed for the platforms whose login shell is the CLI and refused for
 the others, where the script would run in a shell of the device.
 
+A session for a platform whose sshd runs a forced command carries
+neither a remote command nor any input: the forced command on the far
+side is the whole session (the AD collectors take no input).  Such a
+session is refused before a process starts when it carries a remote
+command or input.
+
 The runner never raises for a device failure.  The result is always a
 ``vendor_change.RunOut`` whose status is one of ``ok``, ``timed_out``,
 ``auth_failed``, ``unreachable`` or ``output_cap``; ``RunnerRefused`` is
@@ -68,6 +74,18 @@ _REAP_S = 2.0
 # a session with no remote command would run the script in the login
 # shell of the device, which is a shell and not a CLI.
 CLI_SHELL_PLATFORMS = frozenset({"junos"})
+
+# The platforms whose sshd runs a forced command.  The session carries
+# no remote command and no input at all: the forced command on the far
+# side is the collector, and it takes no input (SPEC-1.3 section 7).
+# Anything else on such a platform is refused before a process starts.
+FORCED_COMMAND_PLATFORMS = frozenset({"ad-windows", "ad-samba"})
+
+# The platforms whose sshd runs a forced command that reads its request
+# on stdin (SPEC-1.4 section 1).  The session carries no remote command
+# either, and it does carry the request: the helper reads one JSON
+# object on stdin.
+FORCED_COMMAND_STDIN_PLATFORMS = frozenset({"ad-windows-write", "ad-samba-write"})
 
 
 def _has_forbidden_text(value: str) -> bool:
@@ -174,6 +192,10 @@ class SshSessionRunner:
         command runs the script on stdin in the login shell of the
         device: that is only done for a platform whose login shell is
         the CLI, or the script would run in a shell of the device.
+
+        A session for a platform whose sshd runs a forced command carries
+        neither a remote command nor input: the forced command on the far
+        side is the whole session.
         """
         target = self._target
         remote = spec.remote
@@ -186,8 +208,23 @@ class SshSessionRunner:
                 f"{target.name}: refused: the remote command contains a "
                 "line break or NUL"
             )
+        forced = target.platform in FORCED_COMMAND_PLATFORMS
+        forced_stdin = target.platform in FORCED_COMMAND_STDIN_PLATFORMS
+        if (forced or forced_stdin) and remote:
+            raise RunnerRefused(
+                f"{target.name}: refused: this platform runs a forced command "
+                "and takes no remote command"
+            )
+        if forced and spec.stdin:
+            raise RunnerRefused(
+                f"{target.name}: refused: this platform runs a forced command "
+                "and takes no input"
+            )
         argv = base_argv(target)
         if not remote:
+            if forced or forced_stdin:
+                argv.append(f"{target.user}@{target.host}")
+                return argv
             if target.platform not in CLI_SHELL_PLATFORMS:
                 raise RunnerRefused(
                     f"{target.name}: refused: the remote command is empty and "

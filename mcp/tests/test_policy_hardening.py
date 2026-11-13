@@ -510,7 +510,7 @@ def test_invalid_wan_zones_is_an_inventory_error():
 
 # ---- newton_wanhealth is a known package, not an unknown one ---------
 # The WAN-health package is installed by newton-router-setup and is enabled
-# through a normal Newton change. Before R9a the package name was missing
+# through a normal Newton change. Before the fix the package name was missing
 # from KNOWN_PACKAGES, so any change fired the unknown-package leash code
 # and the host policy added an "unknown-package: ..." reason. The package is
 # now known; an unknown-package reason must not fire for it, but a batch
@@ -519,7 +519,7 @@ def test_invalid_wan_zones_is_an_inventory_error():
 # unknown package name must still fire unknown-package so the test pin holds.
 
 
-def test_r9a_wanhealth_change_does_not_fire_unknown_package_on_lab():
+def test_wanhealth_change_does_not_fire_unknown_package_on_lab():
     diff = (
         "newton_wanhealth.main=settings\n"
         "newton_wanhealth.main.enabled='1'\n"
@@ -531,7 +531,7 @@ def test_r9a_wanhealth_change_does_not_fire_unknown_package_on_lab():
     assert not any(reason.startswith("unknown-package:") for reason in result["reasons"]), result
 
 
-def test_r9a_wanhealth_change_still_requires_approval_on_prod():
+def test_wanhealth_change_still_requires_approval_on_prod():
     diff = (
         "newton_wanhealth.main=settings\n"
         "newton_wanhealth.main.enabled='1'\n"
@@ -545,7 +545,7 @@ def test_r9a_wanhealth_change_still_requires_approval_on_prod():
     assert not any(reason.startswith("unknown-package:") for reason in result["reasons"]), result
 
 
-def test_r9a_truly_unknown_package_still_fires_unknown_package():
+def test_truly_unknown_package_still_fires_unknown_package():
     # A package that is NOT newton_wanhealth (and not in KNOWN_PACKAGES) must
     # still trip the unknown-package code; the reason is the whole point of
     # the unknown-package leash signal.
@@ -554,7 +554,7 @@ def test_r9a_truly_unknown_package_still_fires_unknown_package():
     assert any(reason.startswith("unknown-package:") for reason in result["reasons"]), result
 
 
-def test_r9a_wanhealth_mixed_with_risky_package_is_still_gated_by_risky_part():
+def test_wanhealth_mixed_with_risky_package_is_still_gated_by_risky_part():
     # The risk of a batch is the max of its parts. A change that adds a
     # newton_wanhealth line and a dropbear line must still require approval
     # because dropbear is a management config; the wanhealth part no longer

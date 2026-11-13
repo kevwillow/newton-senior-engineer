@@ -231,7 +231,7 @@ run by (`SKILL.md`, "Isolation check"):
 Do not run the repo's `scripts/newton-doctor` for this check; it honours the
 test seams and reports are not trusted (`SKILL.md`, "Isolation check").
 
-A client UI smoke test (the agent listing the seventeen tools, calling
+A client UI smoke test (the agent listing the twenty-three tools, calling
 `newton_list_devices`) is not documented in the repo.
 
 ## Not confirmed

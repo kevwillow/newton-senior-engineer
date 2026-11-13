@@ -140,6 +140,8 @@ DOCTOR_FILE=$ROOT/usr/local/bin/newton-doctor
 SETUP_FILE=$ROOT/usr/local/bin/newton-router-setup
 VANTAGE_SETUP_FILE=$ROOT/usr/local/bin/newton-vantage-setup
 ENROL_FILE=$ROOT/usr/local/bin/newton-enrol
+# The AD setup launcher reads the AD approval passphrase.
+AD_SETUP_FILE=$ROOT/usr/local/bin/newton-ad-setup
 SUDOERS_FILE=$ROOT/etc/sudoers.d/newton-mcp
 # The Claude Code managed-settings file: the guard that stops an agent
 # hook from answering Newton's approval dialog for the owner.
@@ -870,6 +872,7 @@ check_code_not_writable() {
 		"$SETUP_FILE"
 		"$VANTAGE_SETUP_FILE"
 		"$ENROL_FILE"
+		"$AD_SETUP_FILE"
 	)
 	local -a hits=()
 	for item in "${required[@]}"; do
@@ -882,6 +885,7 @@ check_code_not_writable() {
 	cw_walk "$SETUP_FILE"
 	cw_walk "$VANTAGE_SETUP_FILE"
 	cw_walk "$ENROL_FILE"
+	cw_walk "$AD_SETUP_FILE"
 	# The sudoers file is special: the agent normally cannot even traverse
 	# /etc/sudoers.d, so an unreadable or absent file is not a failure here;
 	# only a writable one (or chain) is.

@@ -2708,7 +2708,7 @@ cmd = "true"
 
 def test_resolve_vars_local_passes_lab_ssh_env():
     """resolve_vars for a local var command sets LAB_SSH_KEY and LAB_SSH_PROXY
-    in the subprocess env (packet: 'For device == local (probes, steps, posts,
+    in the subprocess env (the spec: 'For device == local (probes, steps, posts,
     vars), the subprocess environment must contain ...')."""
     lab = nl.load_lab(LAB_TOML)
     lab.var_defs["my_local_var"] = {"device": "local", "cmd": "echo hi"}

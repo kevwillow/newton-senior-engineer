@@ -30,12 +30,18 @@ DEVICE_TOOLS = {
     "newton_run_scan",
     "newton_get_state",
     "newton_list_getters",
+    "newton_ad_audit",
+    "newton_ad_plan_change",
+    "newton_ad_apply_change",
+    "newton_ad_change_status",
+    "newton_ad_abort_change",
 }
 
 NO_DEVICE_TOOLS = {
     "newton_list_devices",
     "newton_list_tiers",
     "newton_guided_recommend",
+    "newton_ad_list_checks",
 }
 
 TOOL_KWARGS: dict[str, dict[str, Any]] = {
@@ -61,6 +67,11 @@ TOOL_KWARGS: dict[str, dict[str, Any]] = {
     "newton_run_scan": {"device": "vy1", "request_id": "0" * 32},
     "newton_get_state": {"device": "vy1", "getter": "version"},
     "newton_list_getters": {"device": "vy1"},
+    "newton_ad_audit": {"device": "vy1"},
+    "newton_ad_plan_change": {"device": "vy1", "verb": "uac-clear"},
+    "newton_ad_apply_change": {"device": "vy1", "plan_id": "0" * 32},
+    "newton_ad_change_status": {"device": "vy1", "plan_id": "0" * 32},
+    "newton_ad_abort_change": {"device": "vy1", "plan_id": "0" * 32},
 }
 
 DEVICE_METHOD_TOOLS = {
@@ -77,6 +88,7 @@ DEVICE_METHOD_TOOLS = {
     "abort": "newton_abort_change",
     "get_state": "newton_get_state",
     "list_getters": "newton_list_getters",
+    "ad_audit": "newton_ad_audit",
 }
 
 
@@ -253,14 +265,25 @@ def test_mv1_3_03_openwrt_capabilities_and_device_lookup_are_unchanged(
 ) -> None:
     """OpenWrt still exposes every current tool and resolves quasar."""
     assert registry.capabilities("openwrt").tools == server.TOOL_NAMES - {
-        "newton_get_state", "newton_list_getters"
+        "newton_get_state",
+        "newton_list_getters",
+        "newton_ad_audit",
+        "newton_ad_list_checks",
+        "newton_ad_plan_change",
+        "newton_ad_apply_change",
+        "newton_ad_change_status",
+        "newton_ad_abort_change",
     }
 
     service = server.NewtonService()
     openwrt_tools = DEVICE_TOOLS & registry.capabilities("openwrt").tools
     for tool in openwrt_tools:
         assert service.device_for(tool, "quasar") is capability_lab.devices["quasar"]
-    for tool in ("newton_get_state", "newton_list_getters"):
+    for tool in (
+        "newton_get_state",
+        "newton_list_getters",
+        "newton_ad_audit",
+    ):
         with pytest.raises(NewtonError):
             service.device_for(tool, "quasar")
 
@@ -366,13 +389,17 @@ def test_mv1_3_06_registry_declares_experimental_read_only_platforms() -> None:
     """
     expected_platforms = {
         "openwrt", "routeros", "vyos", "junos", "eos", "iosxe", "fortios",
+        "ad-windows", "ad-samba", "ad-windows-write", "ad-samba-write",
     }
     assert registry.PLATFORMS == expected_platforms
     with pytest.raises(registry.UnknownPlatform):
         registry.capabilities("bad")
     assert issubclass(registry.UnknownPlatform, ValueError)
 
-    for platform in expected_platforms - {"openwrt", "vyos", "routeros", "junos"}:
+    for platform in expected_platforms - {
+        "openwrt", "vyos", "routeros", "junos", "ad-windows", "ad-samba",
+        "ad-windows-write", "ad-samba-write",
+    }:
         caps = registry.capabilities(platform)
         assert caps.tier == "T0-exp"
         assert caps.writes is False
@@ -392,6 +419,13 @@ def test_mv1_3_06_registry_declares_experimental_read_only_platforms() -> None:
             "newton_abort_change",
         }
     )
+
+    for platform in ("ad-windows-write", "ad-samba-write"):
+        caps = registry.capabilities(platform)
+        assert caps.tier == "T1"
+        assert caps.writes is True
+        assert caps.native_revert == "undo timer on the DC"
+        assert caps.tools == frozenset({"newton_list_devices"}) | base.AD_WRITE_TOOLS
 
     routeros = registry.capabilities("routeros")
     assert routeros.tier == "T2"
@@ -415,6 +449,48 @@ def test_mv1_3_06_registry_declares_experimental_read_only_platforms() -> None:
     openwrt = registry.capabilities("openwrt")
     assert openwrt.writes is True
     assert openwrt.tier == "T1"
+
+
+def test_mv1_3_13_the_ad_platforms_are_read_only_with_the_ad_tools() -> None:
+    """The AD platforms serve the AD tools and nothing else.
+
+    Their collector runs as a forced command over ssh and the audit is
+    read-only, so there is no write and no device-side revert.  The
+    tool set is the device listing and the two AD tools: no getters,
+    no router tools, no writes.
+    """
+    expected = frozenset(
+        {"newton_list_devices", "newton_ad_audit", "newton_ad_list_checks"}
+    )
+    assert registry.AD_PLATFORMS == frozenset({"ad-windows", "ad-samba"})
+    for platform in sorted(registry.AD_PLATFORMS):
+        caps = registry.capabilities(platform)
+        assert caps.tier == "T0-exp"
+        assert caps.writes is False
+        assert caps.native_revert is None
+        assert caps.tools == expected
+        assert platform not in registry.VENDOR_WRITE_PLATFORMS
+        assert caps.tools & base.READ_ONLY_TOOLS == frozenset(
+            {"newton_list_devices"}
+        )
+
+
+def test_mv1_3_14_the_ad_tools_are_read_only_tools() -> None:
+    """The AD tools may sit in a read-only capability, and only there."""
+    assert base.AD_READ_ONLY_TOOLS == frozenset(
+        {"newton_ad_audit", "newton_ad_list_checks"}
+    )
+    for platform in ("eos", "iosxe", "fortios"):
+        assert base.AD_READ_ONLY_TOOLS & registry.capabilities(platform).tools == (
+            frozenset()
+        )
+    with pytest.raises(ValueError):
+        base.Capabilities(
+            tier="T0-exp",
+            writes=False,
+            native_revert=None,
+            tools=frozenset({"newton_apply_change"}),
+        )
 
 
 def test_mv1_3_07_capabilities_invariant_and_immutability() -> None:

@@ -1,0 +1,3007 @@
+#!/usr/bin/python3 -I
+"""The Samba Active Directory write helper for Newton (SPEC-1.4-REQUEST).
+
+The helper runs on the Samba domain controller as root.  It is the write
+half of the 1.4 contract: the read half is the collector, and this one
+changes the directory under a signed approval and puts the change back
+when the approval never comes.
+
+It is a standalone script: it imports nothing of Newton, so it can be
+installed on a DC that knows nothing about the Newton machine.  It reads
+one JSON request on stdin, at most 64 KiB, and writes one JSON object on
+stdout.  It exits 0 whatever the outcome; a non-zero exit means the
+helper itself crashed.
+
+The only other way in is the undo, ``--undo <txid>``, and it is refused
+when ``SUDO_USER`` is set: the undo runs from the timer of systemd, never
+through the SSH channel of the write login.
+
+The three files of section 8 are read before anything else happens: the
+key of the approval, the name of the domain device and the keytab of the write
+account.  Each one is opened without following a link and each one is
+checked with ``fstat`` on the descriptor of the open file: the file must
+be a regular file of root, with the mode the spec names.  The install is
+checked the way the 1.3 collector checks its own: the file of the helper,
+the three files of the configuration and every directory of the install,
+up to the root of the filesystem, must be owned by root and must not be
+writable by their group or by the others.  The check runs before the
+samba bindings are imported.
+
+The write account is never used with a password: the helper takes a
+ticket from the keytab of the DC with ``kinit -k`` into a private
+credential cache under ``/run/newton-ad``, and it binds over LDAP with
+that cache.  The credentials are the measured ones of section 9: the
+realm, the workgroup, the kerberos state and the named cache.  The
+guess of the credentials is never called: it would leave the principal
+as root and the bind would fail.
+
+The directory is read through the samba bindings and never through
+``ldbsearch``: the LDIF that ``ldbsearch`` writes rewrites SIDs and
+security descriptors as text.  The bind is the measured one of section 9:
+``SamDB(url="ldap://<fqdn>", credentials=..., lp=...)``, where the fqdn
+is the netbios name of the host and the realm, both lowercased.
+
+Every write is the measured atomic modify: one message with two elements,
+the first deleting the exact old value and the second adding the new one.
+The name of the object is in the message, the way the bindings take it.
+A stale old value raises 16 (a conflict), a write outside the delegation
+raises 50 (a denial) and a missing object raises 32.
+
+The privileged set is the one of section 5.  It is walked here and not
+with the matching rule ``1.2.840.113556.1.4.1941``, which is unmeasured
+on Samba: a breadth first walk of the ``memberOf`` values with a visited
+set and a depth cap of 32.  The primary group of an object is one of its
+memberships and it is included.
+
+The risk of the request is derived again here, from the live object, and
+a request whose risk is not the one the helper derives is refused with
+``risk_mismatch``: the owner approves the level the helper sees.
+
+The transaction store is ``/var/lib/newton-ad/tx``.  Every mode but
+``read`` holds an exclusive lock on it for the whole run, and the
+start-up sweep takes the same lock: every run undoes the armed records
+whose deadline has passed.  The sweep never confirms anything.
+
+The secret of a user-create is in the request and in nothing else: it is
+in no record, in no answer and in no line of the log.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import hmac
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from contextlib import contextmanager
+from typing import Any, Iterator, Mapping, Sequence
+
+
+# ---- the install (section 8) ------------------------------------------------
+
+#: The directory the helper is installed in.
+SBIN_DIR = "/usr/local/sbin"
+
+#: The name of the helper.
+HELPER_NAME = "newton-ad-samba-write"
+
+#: The directory the three files of the configuration live in.
+CONFIG_DIR = "/etc/newton-ad"
+
+#: The names of the three files of the configuration.
+KEY_NAME = "approval.key"
+DEVICE_NAME = "device.txt"
+KEYTAB_NAME = "ops.keytab"
+
+#: The directory the transaction store lives in.
+TX_DIR = "/var/lib/newton-ad/tx"
+
+#: The directory the credential caches of the helper live in.
+RUN_DIR = "/run/newton-ad"
+
+#: The mode of the directory of the credential caches.
+RUN_DIR_MODE = 0o700
+
+#: The name of the lock of the transaction store.
+LOCK_NAME = ".lock"
+
+#: The directory the walk of the parents of the install stops at.
+INSTALL_ROOT = "/"
+
+#: The uid that must own the install.
+INSTALL_OWNER_UID = 0
+
+#: The local account that logs in and may use the helper.
+LOGIN_NAME = "newton-ops-ssh"
+
+#: The domain account the helper binds as.
+WRITE_ACCOUNT = "newton-ops"
+
+
+# ---- the limits -------------------------------------------------------------
+
+#: The biggest request the helper reads (section 1).
+MAX_REQUEST_BYTES = 64 * 1024
+
+#: The deepest the walk of the privileged groups goes (section 5).
+MAX_WALK_DEPTH = 32
+
+#: The seconds a command of the helper may take.
+COMMAND_TIMEOUT_S = 30
+
+
+# ---- the rules of the request (sections 2, 3 and 4) -------------------------
+
+#: The modes of the contract.
+MODES = ("apply", "confirm", "abort", "status", "read")
+
+#: The verbs of section 3.
+VERBS = (
+    "uac-clear",
+    "disable",
+    "enable",
+    "enc-types",
+    "unlock",
+    "member-add",
+    "member-remove",
+    "maq",
+    "user-create",
+    "move",
+)
+
+#: The userAccountControl bits a uac-clear may clear (section 3).
+UAC_CLEAR_BITS = (4194304, 32, 128, 524288, 65536)
+
+#: The ACCOUNTDISABLE bit.
+ACCOUNTDISABLE = 2
+
+#: The SERVER_TRUST_ACCOUNT bit.
+SERVER_TRUST_ACCOUNT = 0x2000
+
+#: The PARTIAL_SECRETS_ACCOUNT bit.
+PARTIAL_SECRETS_ACCOUNT = 0x4000000
+
+#: Protected identity constants: krbtgt and inter-domain trust accounts.
+KRBTGT_RID = 502
+KRBTGT_SAM = "krbtgt"
+RODC_KRBTGT_PREFIX = "krbtgt_"
+INTERDOMAIN_TRUST_ACCOUNT = 0x800
+
+#: The TRUSTED_FOR_DELEGATION bit.
+TRUSTED_FOR_DELEGATION = 524288
+
+#: The bits of msDS-SupportedEncryptionTypes below 64 (section 3).
+ENC_TYPE_LOW_MASK = 63
+
+#: The DES bits of msDS-SupportedEncryptionTypes (section 3).
+ENC_TYPE_DES_MASK = 3
+
+#: The approval window is at most this wide (section 2).
+APPROVAL_WINDOW_S = 1800
+
+#: The undo window of an apply (section 2).
+WINDOW_MIN_S = 120
+WINDOW_MAX_S = 1800
+
+#: The window of an unlock: no undo is armed, so it is the unused floor.
+UNLOCK_WINDOW_S = 120
+
+#: The secret of a user-create: 16..128 printable ASCII (0x21..0x7e).
+SECRET_MIN = 16
+SECRET_MAX = 128
+
+DEVICE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+TXID_RE = re.compile(r"^[0-9a-f]{32}$")
+TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
+RISK_RE = re.compile(r"^(LOW|MED|HIGH)$")
+GUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+SID_RE = re.compile(r"^S-1-5-21-[0-9]{1,10}-[0-9]{1,10}-[0-9]{1,10}-[0-9]{1,10}$")
+SAM_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,19}$")
+COMPUTER_SAM_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,19}\$$")
+INT_RE = re.compile(r"^(0|[1-9][0-9]*)$")
+EPOCH_RE = re.compile(r"^[0-9]{10}$")
+HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+
+#: The fields every request carries.
+_COMMON_FIELDS = frozenset({"v", "mode", "device"})
+
+#: The fields of each mode (section 2).
+_MODE_FIELDS: dict[str, frozenset[str]] = {
+    "apply": _COMMON_FIELDS
+    | frozenset(
+        {
+            "txid",
+            "verb",
+            "target",
+            "before",
+            "after",
+            "window",
+            "risk",
+            "nbf",
+            "exp",
+            "token",
+            "secret",
+        }
+    ),
+    "confirm": _COMMON_FIELDS | frozenset({"txid"}),
+    "abort": _COMMON_FIELDS | frozenset({"txid"}),
+    "status": _COMMON_FIELDS | frozenset({"txid"}),
+    "read": _COMMON_FIELDS | frozenset({"verb", "target"}),
+}
+
+#: The target keys of each verb and the kind of every value.
+_TARGET_KEYS: dict[str, dict[str, str]] = {
+    "uac-clear": {"guid": "guid", "sid": "sid", "sam": "sam", "bit": "int"},
+    "disable": {"guid": "guid", "sid": "sid", "sam": "sam"},
+    "enable": {"guid": "guid", "sid": "sid", "sam": "sam"},
+    "enc-types": {"guid": "guid", "sid": "sid", "sam": "sam"},
+    "unlock": {"guid": "guid", "sid": "sid", "sam": "sam"},
+    "member-add": {
+        "group_guid": "guid",
+        "group_sid": "sid",
+        "group_sam": "sam",
+        "member_guid": "guid",
+        "member_sid": "sid",
+        "member_sam": "sam",
+    },
+    "member-remove": {
+        "group_guid": "guid",
+        "group_sid": "sid",
+        "group_sam": "sam",
+        "member_guid": "guid",
+        "member_sid": "sid",
+        "member_sam": "sam",
+    },
+    "maq": {"guid": "guid"},
+    "user-create": {"parent_guid": "guid", "sam": "sam"},
+    "move": {"guid": "guid", "sid": "sid", "sam": "sam"},
+}
+
+#: The target a read may use when it only knows the name (section 6).
+_READ_TARGET_KEYS: dict[str, dict[str, str]] = {
+    "uac-clear": {"sam": "sam"},
+    "disable": {"sam": "sam"},
+    "enable": {"sam": "sam"},
+    "enc-types": {"sam": "sam"},
+    "unlock": {"sam": "sam"},
+    "member-add": {"group_sam": "sam", "member_sam": "sam"},
+    "member-remove": {"group_sam": "sam", "member_sam": "sam"},
+    "maq": {"guid": "guid"},
+    "user-create": {"parent_guid": "guid", "sam": "sam"},
+    "move": {"sam": "sam"},
+}
+
+#: The before- and after-image keys of each verb and the kind of every value.
+_VALUE_KEYS: dict[str, dict[str, str]] = {
+    "uac-clear": {"uac": "int"},
+    "disable": {"uac": "int"},
+    "enable": {"uac": "int"},
+    "enc-types": {"etypes": "int_or_absent"},
+    "unlock": {"lockout": "int"},
+    "member-add": {"member": "present_absent"},
+    "member-remove": {"member": "present_absent"},
+    "maq": {"maq": "int"},
+    "user-create": {"object": "present_absent"},
+    "move": {"parent": "guid"},
+}
+
+#: The privileged RIDs of section 5: the domain groups of a forest.
+PRIVILEGED_RIDS = (498, 512, 516, 518, 519, 520, 521, 525, 526, 527)
+
+#: The privileged groups of BUILTIN of section 5.
+PRIVILEGED_BUILTIN = (
+    "S-1-5-32-544",
+    "S-1-5-32-548",
+    "S-1-5-32-549",
+    "S-1-5-32-550",
+    "S-1-5-32-551",
+    "S-1-5-32-552",
+)
+
+#: The name of the attribute of the account control.
+UAC_ATTRIBUTE = "userAccountControl"
+
+#: The name of the attribute of the encryption types.
+ETYPES_ATTRIBUTE = "msDS-SupportedEncryptionTypes"
+
+#: The name of the attribute of the lockout time.
+LOCKOUT_ATTRIBUTE = "lockoutTime"
+
+#: The name of the attribute of the membership.
+MEMBER_ATTRIBUTE = "member"
+
+#: The name of the attribute of the quota of the machine accounts.
+MAQ_ATTRIBUTE = "ms-DS-MachineAccountQuota"
+
+
+class Refused(Exception):
+    """The request is refused with one of the codes of the contract.
+
+    The code is the word the helper answers with; the message is for the
+    log and never carries a value of the request.  The extra fields are
+    the ones the answer holds beside the code: a conflict carries the
+    live values of the target.
+    """
+
+    def __init__(self, code: str, message: str = "", extra: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message or code)
+        self.code = code
+        self.message = message or code
+        self.extra: dict[str, Any] = dict(extra or {})
+
+
+class NotFound(Exception):
+    """The object of the target is not there."""
+
+
+def _is_int(value: Any) -> bool:
+    """True for an int that is not a bool."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """The object hook: one key once, and never two keys that differ only in case."""
+    seen: dict[str, Any] = {}
+    lowered: set[str] = set()
+    for key, value in pairs:
+        if not isinstance(key, str):
+            raise Refused("schema", "an object key is not text")
+        if key in seen:
+            raise Refused("schema", "the request holds a duplicate key")
+        if key.lower() in lowered:
+            raise Refused("schema", "the request holds two keys that differ only in case")
+        seen[key] = value
+        lowered.add(key.lower())
+    return seen
+
+
+def _parse_int(text: str) -> int:
+    """The int hook: the raw text of the number must have the int form."""
+    if INT_RE.fullmatch(text) is None:
+        raise Refused("schema", "an integer is not written in the required form")
+    return int(text)
+
+
+def _parse_float(text: str) -> Any:
+    """A number with a fraction or an exponent is never an int."""
+    raise Refused("schema", "a number with a fraction or an exponent is not allowed")
+
+
+def _parse_constant(name: str) -> Any:
+    """NaN and Infinity are not numbers of the contract."""
+    raise Refused("schema", "a constant is not allowed")
+
+
+def _check_sam(value: Any) -> None:
+    """A sam is a user's or a computer's."""
+    if not isinstance(value, str):
+        raise Refused("schema", "a sam is not text")
+    if SAM_RE.fullmatch(value) is None and COMPUTER_SAM_RE.fullmatch(value) is None:
+        raise Refused("schema", "a sam is outside its pattern")
+
+
+def _check_value(kind: str, value: Any) -> None:
+    """Check one value against the kind its key carries."""
+    if kind == "int":
+        if not _is_int(value):
+            raise Refused("schema", "an integer is not an integer")
+    elif kind == "int_or_absent":
+        if value != "absent" and not _is_int(value):
+            raise Refused("schema", "a value is neither an integer nor absent")
+    elif kind == "present_absent":
+        if value not in ("present", "absent"):
+            raise Refused("schema", "a value is neither present nor absent")
+    elif kind == "guid":
+        if not isinstance(value, str) or GUID_RE.fullmatch(value) is None:
+            raise Refused("schema", "a guid is outside its pattern")
+    elif kind == "sid":
+        if not isinstance(value, str) or SID_RE.fullmatch(value) is None:
+            raise Refused("schema", "a sid is outside its pattern")
+    elif kind == "sam":
+        _check_sam(value)
+    else:  # pragma: no cover - a kind this module does not know
+        raise Refused("schema", "an unknown kind of value")
+
+
+def _check_keys(values: Any, kinds: Mapping[str, str]) -> None:
+    """Check the keys of an object and every value in it."""
+    if not isinstance(values, dict):
+        raise Refused("schema", "an object is not an object")
+    if set(values) != set(kinds):
+        raise Refused("schema", "the object does not hold exactly the keys of its verb")
+    for key, value in values.items():
+        _check_value(kinds[key], value)
+
+
+def _check_target(verb: str, target: Any, *, reading: bool) -> None:
+    """Check the target of an apply or of a read."""
+    if not isinstance(target, dict):
+        raise Refused("schema", "a target is not an object")
+    if reading and set(target) == set(_READ_TARGET_KEYS[verb]):
+        _check_keys(target, _READ_TARGET_KEYS[verb])
+        return
+    _check_keys(target, _TARGET_KEYS[verb])
+
+
+def _check_common(request: Mapping[str, Any]) -> None:
+    """The fields every request carries."""
+    if not _is_int(request.get("v")) or request["v"] != 1:
+        raise Refused("schema", "the version is not 1")
+    mode = request.get("mode")
+    if not isinstance(mode, str) or mode not in _MODE_FIELDS:
+        raise Refused("schema", "the mode is not one of the modes")
+    device = request.get("device")
+    if not isinstance(device, str) or DEVICE_RE.fullmatch(device) is None:
+        raise Refused("schema", "the device is outside its pattern")
+
+
+def _check_txid(request: Mapping[str, Any]) -> None:
+    """The transaction id."""
+    txid = request.get("txid")
+    if not isinstance(txid, str) or TXID_RE.fullmatch(txid) is None:
+        raise Refused("schema", "the txid is outside its pattern")
+
+
+def _check_window(request: Mapping[str, Any], verb: str) -> None:
+    """The undo window."""
+    window = request.get("window")
+    if not _is_int(window):
+        raise Refused("schema", "the window is not an integer")
+    if not WINDOW_MIN_S <= window <= WINDOW_MAX_S:
+        raise Refused("schema", "the window is outside its range")
+    if verb == "unlock" and window != UNLOCK_WINDOW_S:
+        raise Refused("schema", "the window of an unlock is 120")
+
+
+def _check_approval_window(request: Mapping[str, Any]) -> None:
+    """The approval window: ten digits, moving forward, at most 1800 seconds."""
+    nbf = request.get("nbf")
+    exp = request.get("exp")
+    for name, value in (("nbf", nbf), ("exp", exp)):
+        if not _is_int(value):
+            raise Refused("schema", f"the approval {name} is not an integer")
+        if EPOCH_RE.fullmatch(str(value)) is None:
+            raise Refused("schema", f"the approval {name} is not ten digits")
+    assert _is_int(nbf) and _is_int(exp)
+    if nbf >= exp:
+        raise Refused("schema", "the approval window does not move forward")
+    if exp - nbf > APPROVAL_WINDOW_S:
+        raise Refused("schema", "the approval window is wider than 1800 seconds")
+
+
+def _check_secret(request: Mapping[str, Any], verb: str) -> None:
+    """The secret of a user-create."""
+    if "secret" not in request:
+        return
+    if verb != "user-create":
+        raise Refused("schema", "only a user-create carries a secret")
+    secret = request.get("secret")
+    if not isinstance(secret, str):
+        raise Refused("schema", "the secret is not text")
+    if not SECRET_MIN <= len(secret) <= SECRET_MAX:
+        raise Refused("schema", "the secret is outside its length")
+    if any(not 0x21 <= ord(character) <= 0x7E for character in secret):
+        raise Refused("schema", "the secret holds a character outside 0x21..0x7e")
+
+
+def _check_risk(request: Mapping[str, Any]) -> None:
+    """The risk level the owner approved (section 4)."""
+    risk = request.get("risk")
+    if not isinstance(risk, str) or RISK_RE.fullmatch(risk) is None:
+        raise Refused("schema", "the risk is not one of LOW, MED or HIGH")
+
+
+def parse_request(raw: bytes) -> dict[str, Any]:
+    """Parse one request and check every schema rule of the contract.
+
+    The raw text is checked for a duplicate key, for two keys that differ
+    only in case and for the int form of every number; then every field,
+    every type and every pattern of the mode is checked.
+
+    Raises ``Refused`` with the code ``schema`` when the request does
+    not fit the contract.
+    """
+    if not isinstance(raw, (bytes, bytearray)):
+        raise Refused("schema", "the request is not bytes")
+    if len(raw) > MAX_REQUEST_BYTES:
+        raise Refused("schema", "the request is bigger than 64 KiB")
+    try:
+        text = bytes(raw).decode("utf-8")
+    except UnicodeDecodeError:
+        raise Refused("schema", "the request is not UTF-8") from None
+    try:
+        value = json.loads(
+            text,
+            object_pairs_hook=_pairs,
+            parse_int=_parse_int,
+            parse_float=_parse_float,
+            parse_constant=_parse_constant,
+        )
+    except Refused:
+        raise
+    except (json.JSONDecodeError, ValueError):
+        raise Refused("schema", "the request is not one JSON object") from None
+    if not isinstance(value, dict):
+        raise Refused("schema", "the request is not one JSON object")
+
+    _check_common(value)
+    mode = value["mode"]
+    allowed = _MODE_FIELDS[mode]
+    for key in value:
+        if key not in allowed:
+            raise Refused("schema", "the request holds a field the mode does not have")
+    for key in allowed:
+        if key == "secret":
+            continue
+        if key not in value:
+            raise Refused("schema", "the request is missing a field of its mode")
+
+    if mode in ("apply", "read"):
+        verb = value.get("verb")
+        if not isinstance(verb, str) or verb not in _TARGET_KEYS:
+            raise Refused("schema", "the verb is not one of the verbs")
+        _check_target(verb, value.get("target"), reading=(mode == "read"))
+    if mode == "apply":
+        _check_txid(value)
+        _check_window(value, value["verb"])
+        _check_approval_window(value)
+        _check_risk(value)
+        token = value.get("token")
+        if not isinstance(token, str) or TOKEN_RE.fullmatch(token) is None:
+            raise Refused("schema", "the token is outside its pattern")
+        _check_keys(value.get("before"), _VALUE_KEYS[value["verb"]])
+        _check_keys(value.get("after"), _VALUE_KEYS[value["verb"]])
+        _check_secret(value, value["verb"])
+    elif mode in ("confirm", "abort", "status"):
+        _check_txid(value)
+    return value
+
+
+def check_verb_rules(req: Mapping[str, Any]) -> None:
+    """Apply the per-verb rules of section 3 to one request.
+
+    Only the rules the request itself can answer are checked here: the
+    rules that need the live object (a DC account, a privileged group,
+    the location of a parent) are the helper's, because it reads the
+    object at the moment of the write.
+
+    Raises ``Refused`` with the code ``denied`` when a rule of the table
+    is broken.
+    """
+    verb = req.get("verb")
+    if not isinstance(verb, str) or verb not in _TARGET_KEYS:
+        raise Refused("denied", "the verb is not one of the verbs")
+    target = req.get("target")
+    before = req.get("before")
+    after = req.get("after")
+    if (
+        not isinstance(target, dict)
+        or not isinstance(before, dict)
+        or not isinstance(after, dict)
+    ):
+        raise Refused("denied", "the request does not hold the images of its verb")
+
+    if verb == "uac-clear":
+        bit = target.get("bit")
+        if not _is_int(bit) or bit not in UAC_CLEAR_BITS:
+            raise Refused("denied", "the bit is not one of the bits of the table")
+        if not _is_int(before.get("uac")) or not _is_int(after.get("uac")):
+            raise Refused("denied", "the images do not hold the userAccountControl")
+        if before["uac"] & bit == 0:
+            raise Refused("denied", "the bit is not set in the before-image")
+        if after["uac"] != before["uac"] & ~bit:
+            raise Refused("denied", "the after-image is not the before-image without the bit")
+    elif verb == "disable":
+        if not _is_int(before.get("uac")) or not _is_int(after.get("uac")):
+            raise Refused("denied", "the images do not hold the userAccountControl")
+        if before["uac"] & ACCOUNTDISABLE != 0:
+            raise Refused("denied", "the account is already disabled")
+        if after["uac"] != before["uac"] | ACCOUNTDISABLE:
+            raise Refused("denied", "the after-image is not the before-image with the bit")
+        if _rid_of(target.get("sid")) == 500:
+            raise Refused("denied", "the administrator is never disabled")
+    elif verb == "enable":
+        if not _is_int(before.get("uac")) or not _is_int(after.get("uac")):
+            raise Refused("denied", "the images do not hold the userAccountControl")
+        if before["uac"] & ACCOUNTDISABLE == 0:
+            raise Refused("denied", "the account is not disabled")
+        if after["uac"] != before["uac"] & ~ACCOUNTDISABLE:
+            raise Refused("denied", "the after-image is not the before-image without the bit")
+    elif verb == "enc-types":
+        before_types = _as_int(before.get("etypes"))
+        after_types = _as_int(after.get("etypes"))
+        if after_types & ENC_TYPE_DES_MASK != 0:
+            raise Refused("denied", "DES is never enabled")
+        if (after_types & ~ENC_TYPE_LOW_MASK) != (before_types & ~ENC_TYPE_LOW_MASK):
+            raise Refused("denied", "the bits above 63 may not change")
+        if after_types == before_types:
+            raise Refused("denied", "the encryption types do not change")
+    elif verb == "unlock":
+        if not _is_int(before.get("lockout")) or not _is_int(after.get("lockout")):
+            raise Refused("denied", "the images do not hold the lockout time")
+        if before["lockout"] <= 0:
+            raise Refused("denied", "the account is not locked out")
+        if after["lockout"] != 0:
+            raise Refused("denied", "the after-image of an unlock is zero")
+    elif verb == "member-add":
+        if before.get("member") != "absent" or after.get("member") != "present":
+            raise Refused("denied", "a member-add goes from absent to present")
+    elif verb == "member-remove":
+        if before.get("member") != "present" or after.get("member") != "absent":
+            raise Refused("denied", "a member-remove goes from present to absent")
+    elif verb == "maq":
+        if not _is_int(after.get("maq")):
+            raise Refused("denied", "the quota is not an integer")
+        if not 0 <= after["maq"] <= 1000:
+            raise Refused("denied", "the quota is outside 0..1000")
+    elif verb == "user-create":
+        if before.get("object") != "absent" or after.get("object") != "present":
+            raise Refused("denied", "a user-create goes from absent to present")
+    elif verb == "move":
+        # The shape of the parent is a schema rule; where the parent sits
+        # is the helper's, because it reads the object at the moment of
+        # the write.
+        pass
+
+
+def _as_int(value: Any) -> int:
+    """The value of an image field that may be absent (which counts as 0)."""
+    if value == "absent":
+        return 0
+    if _is_int(value):
+        return value
+    raise Refused("denied", "the image does not hold the value of its verb")
+
+
+def _rid_of(sid: Any) -> int | None:
+    """The RID of a SID, or None when the SID does not carry one."""
+    if not isinstance(sid, str):
+        return None
+    tail = sid.rsplit("-", 1)[-1]
+    if not tail.isdigit():
+        return None
+    return int(tail)
+
+
+def _canonical_value(value: Any) -> str:
+    """The canonical text of one value."""
+    if isinstance(value, bool):
+        raise Refused("schema", "a boolean has no canonical form")
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return value
+    raise Refused("schema", "a value has no canonical form")
+
+
+def _canonical_pairs(values: Any) -> str:
+    """The canonical text of an object: the pairs, sorted, joined with commas."""
+    if values is None:
+        return ""
+    if not isinstance(values, dict):
+        raise Refused("schema", "an object has no canonical form")
+    parts = []
+    for key in sorted(values):
+        if not isinstance(key, str):
+            raise Refused("schema", "an object key is not text")
+        parts.append(f"{key}={_canonical_value(values[key])}")
+    return ",".join(parts)
+
+
+def canonical_bytes(req: Mapping[str, Any]) -> bytes:
+    """The canonical bytes of one request (SPEC-1.4-REQUEST section 4).
+
+    The eleven lines of the spec, each ending in a newline, in ASCII
+    only.  The secret never appears: its line holds the sha256 of its
+    ASCII bytes, or a dash when there is no secret.  The risk is in the
+    bytes, so the owner approves the level they were shown.
+    """
+    for field in ("device", "txid", "verb"):
+        value = req.get(field)
+        if not isinstance(value, str):
+            raise Refused("schema", "the request does not hold the fields of a request")
+    risk = req.get("risk")
+    if not isinstance(risk, str) or RISK_RE.fullmatch(risk) is None:
+        raise Refused("schema", "the request does not hold a risk level")
+    secret = req.get("secret")
+    if secret is None:
+        secret_line = "-"
+    else:
+        if not isinstance(secret, str):
+            raise Refused("schema", "the secret is not text")
+        secret_line = hashlib.sha256(secret.encode("ascii")).hexdigest()
+    window = req.get("window")
+    window_line = "" if window is None else _canonical_value(window)
+    lines = [
+        "newton-ad-request-v1",
+        f"device={req['device']}",
+        f"txid={req['txid']}",
+        f"verb={req['verb']}",
+        f"target={_canonical_pairs(req.get('target'))}",
+        f"before={_canonical_pairs(req.get('before'))}",
+        f"after={_canonical_pairs(req.get('after'))}",
+        f"window={window_line}",
+        f"risk={risk}",
+        f"secret={secret_line}",
+        "helper=1",
+    ]
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def digest(req: Mapping[str, Any]) -> str:
+    """The digest of one request: the sha256 of its canonical bytes."""
+    return hashlib.sha256(canonical_bytes(req)).hexdigest()
+
+
+def token(k_hex: str, digest_hex: str, nbf: int, exp: int) -> str:
+    """The approval token of one request.
+
+    HMAC-SHA256(K bytes, "newton-approval-v2\\n" + digest + "\\n" + nbf +
+    "\\n" + exp + "\\n"), 64 lowercase hex.  It is the token of the router
+    flow, byte for byte.
+    """
+    if not isinstance(k_hex, str) or HEX64_RE.fullmatch(k_hex) is None:
+        raise Refused("schema", "the key is not 64 lowercase hexadecimal characters")
+    if not isinstance(digest_hex, str) or HEX64_RE.fullmatch(digest_hex) is None:
+        raise Refused("schema", "the digest is not 64 lowercase hexadecimal characters")
+    return hmac.new(
+        bytes.fromhex(k_hex),
+        (
+            "newton-approval-v2\n"
+            + digest_hex
+            + "\n"
+            + str(int(nbf))
+            + "\n"
+            + str(int(exp))
+            + "\n"
+        ).encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+# ---- the install (section 8) ------------------------------------------------
+
+
+def helper_path() -> str:
+    """The path of the installed helper."""
+    return os.path.join(SBIN_DIR, HELPER_NAME)
+
+
+def key_path() -> str:
+    """The path of the key of the approval."""
+    return os.path.join(CONFIG_DIR, KEY_NAME)
+
+
+def device_path() -> str:
+    """The path of the name of the device."""
+    return os.path.join(CONFIG_DIR, DEVICE_NAME)
+
+
+def keytab_path() -> str:
+    """The path of the keytab of the write account."""
+    return os.path.join(CONFIG_DIR, KEYTAB_NAME)
+
+
+def lock_path() -> str:
+    """The path of the lock of the transaction store."""
+    return os.path.join(TX_DIR, LOCK_NAME)
+
+
+def record_path(txid: str) -> str:
+    """The path of the record of one transaction."""
+    if not isinstance(txid, str) or TXID_RE.fullmatch(txid) is None:
+        raise Refused("schema", "the txid is outside its pattern")
+    return os.path.join(TX_DIR, f"{txid}.json")
+
+
+def _lstat(path: str):
+    """The information about a path, without following a link."""
+    try:
+        return os.lstat(path)
+    except OSError:
+        return None
+
+
+def _is_safe(info: Any) -> bool:
+    """True when the owner of the file owns it and it is not writable by
+    its group or by the others."""
+    if info.st_uid != INSTALL_OWNER_UID:
+        return False
+    return not (info.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+
+
+def install_files() -> list[str]:
+    """The files of the install that the helper checks."""
+    return [helper_path(), key_path(), device_path(), keytab_path()]
+
+
+def install_directories() -> list[str]:
+    """The directories of the install and every parent of them.
+
+    The walk stops at ``INSTALL_ROOT``, which is the root of the
+    filesystem on a real host.
+    """
+    found: list[str] = []
+    for path in (SBIN_DIR, CONFIG_DIR, TX_DIR):
+        current = os.path.abspath(path)
+        while True:
+            if current not in found:
+                found.append(current)
+            if current == INSTALL_ROOT:
+                break
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+    return found
+
+
+def install_problem() -> str:
+    """The reason the install is not safe, or an empty string."""
+    for path in install_files():
+        info = _lstat(path)
+        if info is None or not stat.S_ISREG(info.st_mode):
+            return "the helper is not installed"
+        if not _is_safe(info):
+            return "the install is not safe"
+    for path in install_directories():
+        info = _lstat(path)
+        if info is None or not stat.S_ISDIR(info.st_mode):
+            return "the install is not safe"
+        if not _is_safe(info):
+            return "the install is not safe"
+    return ""
+
+
+def read_installed_file(path: str, mode: int) -> bytes:
+    """The bytes of a file of the configuration.
+
+    The file is opened without following a link and it is checked with
+    ``fstat`` on the descriptor of the open file: it must be a regular
+    file of root with the mode the spec names.
+    """
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise Refused("unavailable", "a file of the install is not a regular file")
+        if info.st_uid != INSTALL_OWNER_UID:
+            raise Refused("unavailable", "a file of the install is not of root")
+        if stat.S_IMODE(info.st_mode) != mode:
+            raise Refused("unavailable", "a file of the install has the wrong mode")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
+    return b"".join(chunks)
+
+
+def read_key() -> str:
+    """The key of the approval: 64 lowercase hexadecimal characters."""
+    raw = read_installed_file(key_path(), 0o600).decode("utf-8", "replace").strip()
+    if HEX64_RE.fullmatch(raw) is None:
+        raise Refused("unavailable", "the key of the approval is not 64 hexadecimal characters")
+    return raw
+
+
+def read_device() -> str:
+    """The name of the device that stands for the domain, the same on every DC of the domain."""
+    raw = read_installed_file(device_path(), 0o644).decode("utf-8", "replace").strip()
+    if DEVICE_RE.fullmatch(raw) is None:
+        raise Refused("unavailable", "the name of the device is outside its pattern")
+    return raw
+
+
+def read_identity() -> bytes:
+    """The keytab of the write account.
+
+    The identity of the helper is a keytab and not a password: the file
+    is opened without following a link and it is checked with ``fstat``
+    on the descriptor of the open file, the same way the other files of
+    the configuration are checked.  It must be a regular file of root
+    with the mode 0600.
+    """
+    return read_installed_file(keytab_path(), 0o600)
+
+
+# ---- the directory ----------------------------------------------------------
+
+
+def _escape_binary(raw: bytes) -> str:
+    """The escaped form of a binary value, the way a filter carries it."""
+    return "".join("\\%02x" % byte for byte in raw)
+
+
+def _sid_binary(text: str) -> bytes:
+    """The binary form of a SID."""
+    parts = text.split("-")
+    if len(parts) < 3:
+        raise ValueError("the sid is not a sid")
+    revision = int(parts[1])
+    authority = int(parts[2])
+    sub_authorities = [int(part) for part in parts[3:]]
+    out = bytearray([revision, len(sub_authorities)])
+    out += authority.to_bytes(6, "big")
+    for number in sub_authorities:
+        out += number.to_bytes(4, "little")
+    return bytes(out)
+
+
+def split_dn(dn: str) -> list[str]:
+    """The components of a distinguished name."""
+    parts: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in dn:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            current.append(char)
+            escaped = True
+            continue
+        if char == ",":
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    parts.append("".join(current))
+    return parts
+
+
+def parent_dn(dn: str) -> str:
+    """The name of the parent of an object."""
+    parts = split_dn(dn)
+    if len(parts) < 2:
+        return ""
+    return ",".join(parts[1:])
+
+
+def _inside(dn: str, container: str) -> bool:
+    """True when the name sits in the container or is the container."""
+    if not container:
+        return False
+    lowered = dn.lower()
+    other = container.lower()
+    return lowered == other or lowered.endswith("," + other)
+
+
+class Directory:
+    """The directory of this DC, through the samba bindings."""
+
+    def __init__(self, db: Any, ldb: Any, lp: Any) -> None:
+        self.db = db
+        self.ldb = ldb
+        self.lp = lp
+
+    # -- the searches -----------------------------------------------------
+
+    def search(
+        self,
+        base: str,
+        scope: int,
+        expression: str,
+        attrs: Sequence[str],
+    ) -> list[Any]:
+        """One search of the directory."""
+        try:
+            return list(
+                self.db.search(
+                    base=base,
+                    scope=scope,
+                    expression=expression,
+                    attrs=list(attrs),
+                    controls=[],
+                )
+            )
+        except TypeError:
+            return list(
+                self.db.search(
+                    base=base,
+                    scope=scope,
+                    expressions=expression,
+                    attrs=list(attrs),
+                    controls=[],
+                )
+            )
+
+    def one(
+        self,
+        base: str,
+        scope: int,
+        expression: str,
+        attrs: Sequence[str],
+    ) -> Any | None:
+        """The first result of one search, or None."""
+        found = self.search(base, scope, expression, attrs)
+        return found[0] if found else None
+
+    def domain_dn(self) -> str:
+        """The name of the head of the domain."""
+        return str(self.db.domain_dn())
+
+    def domain_sid(self) -> str:
+        """The SID of the domain."""
+        return str(self.db.get_domain_sid())
+
+    def domain_dns_name(self) -> str:
+        """The DNS name of the domain."""
+        return str(self.db.domain_dns_name())
+
+    def by_dn(self, dn: str, attrs: Sequence[str]) -> Any | None:
+        """The object with that name."""
+        return self.one(dn, self.ldb.SCOPE_BASE, "(objectClass=*)", attrs)
+
+    def by_guid(self, guid: str, attrs: Sequence[str]) -> Any | None:
+        """The object with that guid."""
+        raw = uuid.UUID(guid).bytes_le
+        return self.one(
+            self.domain_dn(),
+            self.ldb.SCOPE_SUBTREE,
+            "(objectGUID=%s)" % _escape_binary(raw),
+            attrs,
+        )
+
+    def by_sam(self, sam: str, attrs: Sequence[str]) -> list[Any]:
+        """The objects with that name."""
+        return self.search(
+            self.domain_dn(),
+            self.ldb.SCOPE_SUBTREE,
+            "(sAMAccountName=%s)" % sam,
+            attrs,
+        )
+
+    def by_sid(self, sid: str, attrs: Sequence[str]) -> Any | None:
+        """The object with that SID."""
+        raw = _sid_binary(sid)
+        return self.one(
+            self.domain_dn(),
+            self.ldb.SCOPE_SUBTREE,
+            "(objectSid=%s)" % _escape_binary(raw),
+            attrs,
+        )
+
+    # -- the values -------------------------------------------------------
+
+    def values(self, message: Any, name: str) -> list[bytes]:
+        """The raw values of one attribute of a result."""
+        try:
+            element = message[name]
+        except (KeyError, LookupError):
+            return []
+        try:
+            return [bytes(one) for one in element]
+        except TypeError:
+            return [bytes(one) for one in element.values]
+
+    def text(self, message: Any, name: str) -> str | None:
+        """The text of the first value of one attribute."""
+        values = self.values(message, name)
+        if not values:
+            return None
+        return values[0].decode("utf-8", "replace")
+
+    def integer(self, message: Any, name: str) -> int | None:
+        """The number of the first value of one attribute."""
+        text = self.text(message, name)
+        if text is None:
+            return None
+        try:
+            return int(text.strip())
+        except ValueError:
+            return None
+
+    def sid_text(self, raw: bytes) -> str:
+        """The text form of a binary SID."""
+        from samba.dcerpc import security
+        from samba.ndr import ndr_unpack
+
+        return str(ndr_unpack(security.dom_sid, raw))
+
+    def sid(self, message: Any) -> str | None:
+        """The SID of an object."""
+        values = self.values(message, "objectSid")
+        if not values:
+            return None
+        try:
+            return self.sid_text(values[0])
+        except Exception:
+            return None
+
+    def guid(self, message: Any) -> str | None:
+        """The guid of an object."""
+        values = self.values(message, "objectGUID")
+        if not values:
+            return None
+        try:
+            return str(uuid.UUID(bytes_le=values[0]))
+        except ValueError:
+            return None
+
+    def classes(self, message: Any) -> list[str]:
+        """The classes of an object."""
+        return [one.decode("utf-8", "replace") for one in self.values(message, "objectClass")]
+
+    def member_of(self, message: Any) -> list[str]:
+        """The groups an object is a member of."""
+        return [one.decode("utf-8", "replace") for one in self.values(message, "memberOf")]
+
+    def members(self, message: Any) -> list[str]:
+        """The members of a group."""
+        return [one.decode("utf-8", "replace") for one in self.values(message, MEMBER_ATTRIBUTE)]
+
+    def dn_of(self, message: Any) -> str:
+        """The name of an object."""
+        return str(message.dn)
+
+    # -- the domain -------------------------------------------------------
+
+    def ntds_settings_dn(self) -> str:
+        """The name of the NTDS Settings object of this DC.
+
+        The rootDSE answers it in its ``dsServiceName``: the object is
+        under the container of the servers of the configuration, and not
+        under the computer account of the DC (measured on Samba
+        4.22.11, 2026-11-09).
+        """
+        root = self.root_dse()
+        if root is None:
+            return ""
+        return self.text(root, "dsServiceName") or ""
+
+    def root_dse(self) -> Any | None:
+        """The rootDSE of this DC: the empty base, read base-scoped."""
+        return self.one("", self.ldb.SCOPE_BASE, "(objectClass=*)", _ROOT_ATTRS)
+
+    def domain_controllers_dn(self) -> str:
+        """The name of the container of the domain controllers.
+
+        The container is an organizational unit, so it is found with the
+        one-level search for ``(ou=Domain Controllers)`` under the head
+        of the domain (measured on Samba 4.22.11, 2026-11-09).
+        """
+        found = self.search(
+            self.domain_dn(),
+            self.ldb.SCOPE_ONELEVEL,
+            "(ou=Domain Controllers)",
+            _DC_ATTRS,
+        )
+        return self.dn_of(found[0]) if found else ""
+
+    def holds_pdc_role(self) -> bool:
+        """True when this DC holds the PDC emulator role.
+
+        The head of the domain names the owner of the role: it must be
+        the NTDS Settings object of this DC, the one the rootDSE of this
+        DC answers in its ``dsServiceName``.  The two names are compared
+        without their case.
+        """
+        head = self.by_dn(self.domain_dn(), _DOMAIN_ATTRS)
+        if head is None:
+            return False
+        owner = self.text(head, "fSMORoleOwner")
+        if owner is None:
+            return False
+        mine = self.ntds_settings_dn()
+        if not mine:
+            return False
+        return owner.strip().lower() == mine.strip().lower()
+
+
+#: The attributes the helper reads of an account.
+#:
+#: The ``tokenGroups`` are not in this list: the directory only gives
+#: them in a base search on one name, the way
+#: ``write_account_is_privileged`` reads them.  A search that asks for
+#: them anywhere else is refused by the server.
+_ACCOUNT_ATTRS = (
+    "objectGUID",
+    "objectSid",
+    "sAMAccountName",
+    "objectClass",
+    "userAccountControl",
+    "adminCount",
+    "primaryGroupID",
+    "memberOf",
+    "member",
+    "lockoutTime",
+    "msDS-SupportedEncryptionTypes",
+    "uSNChanged",
+)
+
+#: The attributes the helper reads of a group.
+_GROUP_ATTRS = (
+    "objectGUID",
+    "objectSid",
+    "sAMAccountName",
+    "objectClass",
+    "adminCount",
+    "primaryGroupID",
+    "memberOf",
+    "member",
+)
+
+#: The attributes the helper reads of the head of the domain.
+_DOMAIN_ATTRS = (
+    "objectGUID",
+    "objectSid",
+    "objectClass",
+    "fSMORoleOwner",
+    "ms-DS-MachineAccountQuota",
+    "adminCount",
+    "uSNChanged",
+)
+
+#: The attributes the helper reads of the rootDSE.
+_ROOT_ATTRS = ("dsServiceName", "serverName")
+
+#: The attributes the helper reads of a domain controller.
+_DC_ATTRS = ("objectGUID", "objectSid", "sAMAccountName", "objectClass", "userAccountControl")
+
+
+# ---- the privileged set (section 5) ----------------------------------------
+
+
+def sid_is_privileged(sid: Any) -> bool:
+    """True when the SID is one of the privileged ones of section 5.
+
+    A SID of BUILTIN is privileged when it is one of the groups of the
+    list.  A SID of a domain is privileged when it ends in one of the
+    RIDs of the list, under any ``S-1-5-21-a-b-c`` prefix: that covers
+    every domain of the forest and it over-approximates on purpose.
+    """
+    if not isinstance(sid, str):
+        return False
+    if sid in PRIVILEGED_BUILTIN:
+        return True
+    parts = sid.split("-")
+    if len(parts) != 8:
+        return False
+    if parts[0] != "S" or parts[1] != "1" or parts[2] != "5" or parts[3] != "21":
+        return False
+    tail = parts[7]
+    if not tail.isdigit():
+        return False
+    return int(tail) in PRIVILEGED_RIDS
+
+
+def group_chain_privileged(directory: Directory, message: Any) -> bool:
+    """True when a group of the ``memberOf`` chain is privileged.
+
+    The chain is walked breadth first, with a visited set and a depth
+    cap, so a cycle in the directory ends the walk.  The walk fails
+    closed: a name of the chain that cannot be read, and a chain that
+    reaches the cap, count as privileged.
+    """
+    frontier = directory.member_of(message)
+    visited: set[str] = set()
+    depth = 0
+    while frontier:
+        if depth >= MAX_WALK_DEPTH:
+            # The cap of the walk is reached: the chain may hold a
+            # privileged group that was never seen.
+            return True
+        depth += 1
+        following: list[str] = []
+        for dn in frontier:
+            key = dn.strip().lower()
+            if key in visited:
+                continue
+            visited.add(key)
+            group = directory.by_dn(dn, _GROUP_ATTRS)
+            if group is None:
+                # A name of the chain that cannot be read: the walk
+                # fails closed.
+                return True
+            if sid_is_privileged(directory.sid(group)):
+                return True
+            following.extend(directory.member_of(group))
+        frontier = following
+    return False
+
+
+def object_is_privileged(directory: Directory, message: Any) -> bool:
+    """True when the object is privileged (section 5).
+
+    An object is privileged when its own SID is privileged, when one of
+    the groups of its ``memberOf`` chain is, when its primary group is,
+    or when its ``adminCount`` is 1.  The walk fails closed: a primary
+    group that cannot be read counts as privileged.
+    """
+    if directory.integer(message, "adminCount") == 1:
+        return True
+    if sid_is_privileged(directory.sid(message)):
+        return True
+    primary = directory.integer(message, "primaryGroupID")
+    if primary is not None:
+        primary_sid = f"{directory.domain_sid()}-{primary}"
+        if sid_is_privileged(primary_sid):
+            return True
+        group = directory.by_sid(primary_sid, _GROUP_ATTRS)
+        if group is None:
+            return True
+        if group_chain_privileged(directory, group):
+            return True
+    return group_chain_privileged(directory, message)
+
+
+def is_dc_account(uac: int | None) -> bool:
+    """True when the account control names a domain controller account."""
+    if uac is None:
+        return False
+    return bool(uac & (SERVER_TRUST_ACCOUNT | PARTIAL_SECRETS_ACCOUNT))
+
+
+# ---- the facts and the risk (sections 4 and 6) ------------------------------
+
+
+def facts_of(directory: Directory, message: Any, pdc: bool) -> dict[str, Any]:
+    """The facts of one object of the target (section 6)."""
+    return {
+        "admin_count": directory.integer(message, "adminCount") or 0,
+        "dc_account": is_dc_account(directory.integer(message, "userAccountControl")),
+        "privileged": object_is_privileged(directory, message),
+        "object_class": directory.classes(message),
+        "pdc": pdc,
+    }
+
+
+def derive_risk(verb: str, facts: Mapping[str, Any]) -> str:
+    """The risk the helper derives itself (section 4).
+
+    HIGH when any object of the target is privileged, has an
+    ``adminCount`` of 1 or is a DC account; otherwise LOW for an unlock,
+    otherwise MED.
+    """
+    for one in facts.values():
+        if not isinstance(one, dict):
+            continue
+        if one.get("privileged") is True:
+            return "HIGH"
+        if one.get("admin_count") == 1:
+            return "HIGH"
+        if one.get("dc_account") is True:
+            return "HIGH"
+    if verb == "unlock":
+        return "LOW"
+    return "MED"
+
+
+# ---- the target of a request ------------------------------------------------
+
+
+def _one_object(
+    directory: Directory,
+    target: Mapping[str, Any],
+    prefix: str,
+    reading: bool,
+    attrs: Sequence[str],
+) -> Any:
+    """The object of a target: by its guid, or by its name for a read.
+
+    The object is found by its guid and refused unless its objectSid is
+    the SID of the target and its sAMAccountName is the name of it, both
+    compared without their case.
+    """
+    guid = target.get(prefix + "guid")
+    if isinstance(guid, str):
+        message = directory.by_guid(guid, attrs)
+        if message is None:
+            raise NotFound(guid)
+        sid = target.get(prefix + "sid")
+        if isinstance(sid, str):
+            live = directory.sid(message)
+            if live is None or live.lower() != sid.lower():
+                raise NotFound(guid)
+        sam = target.get(prefix + "sam")
+        if isinstance(sam, str):
+            live = directory.text(message, "sAMAccountName")
+            if live is None or live.lower() != sam.lower():
+                raise NotFound(guid)
+        return message
+    if not reading:
+        raise NotFound("the target has no guid")
+    sam = target.get(prefix + "sam")
+    if not isinstance(sam, str):
+        raise NotFound("the target has no name")
+    found = directory.by_sam(sam, attrs)
+    if len(found) != 1:
+        raise NotFound(sam)
+    return found[0]
+
+
+def _name_taken(directory: Directory, sam: str) -> bool:
+    """True when the domain holds an object with that name or that UPN."""
+    if directory.by_sam(sam, _ACCOUNT_ATTRS):
+        return True
+    upn = "%s@%s" % (sam, directory.domain_dns_name())
+    found = directory.search(
+        directory.domain_dn(),
+        directory.ldb.SCOPE_SUBTREE,
+        "(userPrincipalName=%s)" % upn,
+        _ACCOUNT_ATTRS,
+    )
+    return bool(found)
+
+
+def _lower_sam(value: Any) -> Any:
+    """The name of an account, lowercased.
+
+    The directory holds the name as it was written (``Administrator``),
+    but the request schema only accepts a lowercase name and the
+    contract compares the names without their case: the ids of an
+    answer therefore carry the name in lowercase.
+    """
+    if isinstance(value, str):
+        return value.lower()
+    return value
+
+
+def resolve(
+    directory: Directory,
+    verb: str,
+    target: Mapping[str, Any],
+    reading: bool,
+    pdc: bool,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """The ids, the live values and the facts of a target."""
+    if verb in ("member-add", "member-remove"):
+        group = _one_object(directory, target, "group_", reading, _GROUP_ATTRS)
+        member = _one_object(directory, target, "member_", reading, _ACCOUNT_ATTRS)
+        ids = {
+            "group_guid": directory.guid(group),
+            "group_sid": directory.sid(group),
+            "group_sam": _lower_sam(directory.text(group, "sAMAccountName")),
+            "member_guid": directory.guid(member),
+            "member_sid": directory.sid(member),
+            "member_sam": _lower_sam(directory.text(member, "sAMAccountName")),
+        }
+        member_dn = directory.dn_of(member)
+        live = {
+            "member": "present" if member_dn in directory.members(group) else "absent"
+        }
+        facts = {
+            "group": facts_of(directory, group, pdc),
+            "member": facts_of(directory, member, pdc),
+        }
+        return ids, live, facts
+
+    if verb == "user-create":
+        parent = _one_object(directory, target, "parent_", reading, _GROUP_ATTRS)
+        sam = target.get("sam")
+        if not isinstance(sam, str):
+            raise NotFound("the target has no name")
+        ids = {"parent_guid": directory.guid(parent), "sam": _lower_sam(sam)}
+        live = {"object": "present" if _name_taken(directory, sam) else "absent"}
+        facts = {"target": facts_of(directory, parent, pdc)}
+        return ids, live, facts
+
+    if verb == "maq":
+        head = directory.by_dn(directory.domain_dn(), _DOMAIN_ATTRS)
+        if head is None:
+            raise NotFound("the head of the domain")
+        guid = directory.guid(head)
+        wanted = target.get("guid")
+        if isinstance(wanted, str) and (guid is None or wanted.lower() != guid.lower()):
+            raise NotFound(wanted)
+        ids = {"guid": guid}
+        quota = directory.integer(head, MAQ_ATTRIBUTE)
+        live = {"maq": 0 if quota is None else quota}
+        facts = {"target": facts_of(directory, head, pdc)}
+        return ids, live, facts
+
+    message = _one_object(directory, target, "", reading, _ACCOUNT_ATTRS)
+    ids = {
+        "guid": directory.guid(message),
+        "sid": directory.sid(message),
+        "sam": _lower_sam(directory.text(message, "sAMAccountName")),
+    }
+    facts = {"target": facts_of(directory, message, pdc)}
+    if verb in ("uac-clear", "disable", "enable"):
+        control = directory.integer(message, UAC_ATTRIBUTE)
+        live = {"uac": 0 if control is None else control}
+    elif verb == "enc-types":
+        types = directory.integer(message, ETYPES_ATTRIBUTE)
+        live = {"etypes": "absent" if types is None else types}
+    elif verb == "unlock":
+        lockout = directory.integer(message, LOCKOUT_ATTRIBUTE)
+        live = {"lockout": 0 if lockout is None else lockout}
+    elif verb == "move":
+        parent = directory.by_dn(parent_dn(directory.dn_of(message)), _GROUP_ATTRS)
+        live = {"parent": directory.guid(parent) if parent is not None else None}
+    else:  # pragma: no cover - a verb this module does not know
+        raise NotFound(verb)
+    return ids, live, facts
+
+
+# ---- the rules that need the live object (section 3) -----------------------
+
+
+#: The verbs whose target is one account.
+ACCOUNT_VERBS = (
+    "uac-clear",
+    "disable",
+    "enable",
+    "enc-types",
+    "unlock",
+    "move",
+)
+
+#: The verbs that may be run on a privileged account (section 5).
+PRIVILEGED_ALLOWED_VERBS = ("uac-clear", "enc-types", "unlock")
+
+
+def live_verb_refusal(
+    directory: Directory,
+    request: Mapping[str, Any],
+    facts: Mapping[str, Any],
+) -> str:
+    """The rules of section 3 that the live object answers.
+
+    The answer is the code of the refusal, or an empty string when the
+    request may go on.
+    """
+    verb = request.get("verb")
+    target = request.get("target")
+    if not isinstance(target, dict):
+        return "denied"
+    if verb in ACCOUNT_VERBS:
+        one = facts.get("target")
+        if not isinstance(one, dict):
+            return "denied"
+        # A privileged account is only touched by uac-clear, enc-types
+        # and unlock; every other verb is refused (section 5).
+        if one.get("privileged") is True and verb not in PRIVILEGED_ALLOWED_VERBS:
+            return "privileged"
+        classes = {str(item).lower() for item in one.get("object_class") or []}
+        if verb == "uac-clear":
+            if target.get("bit") == TRUSTED_FOR_DELEGATION and one.get("dc_account"):
+                return "denied"
+        elif verb == "disable":
+            if one.get("dc_account"):
+                return "denied"
+            if not ({"user", "computer"} & classes):
+                return "denied"
+            if _rid_of(target.get("sid")) == 500:
+                return "denied"
+        elif verb == "enable":
+            if not ({"user", "computer"} & classes):
+                return "denied"
+        elif verb == "move":
+            if one.get("dc_account"):
+                return "denied"
+    if verb in ("member-add", "member-remove"):
+        # Section 5 refuses a privileged group; the member of the group
+        # is not a refusal, it only raises the risk of the change.
+        one = facts.get("group")
+        if isinstance(one, dict) and one.get("privileged") is True:
+            return "privileged"
+    if verb == "maq":
+        one = facts.get("target")
+        classes = {str(item).lower() for item in (one or {}).get("object_class") or []}
+        if "domaindns" not in classes:
+            return "denied"
+    return ""
+
+
+def move_parents_ok(
+    directory: Directory,
+    message: Any,
+    after: Mapping[str, Any],
+) -> str:
+    """The rules of the ``move`` verb that need the two parents.
+
+    The new parent must be an organizational unit or a container, and
+    neither the old nor the new parent may be the container of the
+    domain controllers or sit in it.  The container of the domain
+    controllers must be there: the check never fails open.
+    """
+    old_parent = parent_dn(directory.dn_of(message))
+    wanted = after.get("parent")
+    if not isinstance(wanted, str):
+        return "denied"
+    new_parent = directory.by_guid(wanted, _GROUP_ATTRS)
+    if new_parent is None:
+        return "denied"
+    classes = {item.lower() for item in directory.classes(new_parent)}
+    if not ({"organizationalunit", "container"} & classes):
+        return "denied"
+    controllers = directory.domain_controllers_dn()
+    if not controllers:
+        return "unavailable"
+    if _inside(old_parent, controllers):
+        return "denied"
+    if _inside(directory.dn_of(new_parent), controllers):
+        return "denied"
+    return ""
+
+
+# ---- the transaction store (section 7) --------------------------------------
+
+
+class StoreLock:
+    """The exclusive lock of the transaction store."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.descriptor: int | None = None
+
+    def acquire(self) -> None:
+        """Take the lock and wait for it."""
+        descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self.descriptor = descriptor
+
+    def release(self) -> None:
+        """Give the lock back."""
+        descriptor = self.descriptor
+        if descriptor is None:
+            return
+        self.descriptor = None
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+    def __enter__(self) -> "StoreLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.release()
+
+
+def write_record(path: str, record: Mapping[str, Any]) -> None:
+    """Write the record of one transaction, atomically."""
+    descriptor, temporary = tempfile.mkstemp(prefix=".record-", dir=os.path.dirname(path))
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(record, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    fsync_directory(os.path.dirname(path))
+
+
+def fsync_directory(path: str) -> None:
+    """The name of a file is on the disk, and not only in the directory.
+
+    The bytes of a record are on the disk when its own flush is done,
+    but the name of the record lives in the directory, and a power cut
+    loses a name that is not on the disk.  The directory is flushed
+    after every write of a record.
+    """
+    if not path:
+        path = "."
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def create_record(path: str, record: Mapping[str, Any]) -> None:
+    """Create the record of one transaction, exclusively.
+
+    The bytes of the record and the name of the file are on the disk
+    before the write the record guards: a record that is in the buffer
+    of the process is a record that a power cut loses, and the undo of
+    a change that was never recorded cannot run.
+    """
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(record, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    fsync_directory(os.path.dirname(path))
+
+
+def read_record(path: str) -> dict[str, Any] | None:
+    """The record of one transaction, or None."""
+    try:
+        with open(path, "rb") as handle:
+            value = json.loads(handle.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    return value
+
+
+def record_files() -> list[str]:
+    """The names of the records of the store."""
+    try:
+        names = os.listdir(TX_DIR)
+    except OSError:
+        return []
+    return sorted(name for name in names if name.endswith(".json"))
+
+
+# ---- the commands (section 7) ----------------------------------------------
+
+
+def run_command(argv: Sequence[str]) -> subprocess.CompletedProcess:
+    """Run one command with an argv list, never through a shell."""
+    return subprocess.run(
+        list(argv),
+        check=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=COMMAND_TIMEOUT_S,
+    )
+
+
+def undo_unit(txid: str) -> str:
+    """The name of the unit of the undo of one transaction."""
+    return f"newton-ad-undo-{txid}"
+
+
+def arm_undo(txid: str, window: int) -> None:
+    """Arm the undo of one transaction.
+
+    The undo is armed before the write: a timer that is not armed means
+    no write at all.  A ``systemd-run`` that fails or that does not
+    answer in time is an ``unavailable``.
+    """
+    try:
+        done = run_command(
+            [
+                "systemd-run",
+                f"--unit={undo_unit(txid)}",
+                f"--on-active={int(window)}s",
+                helper_path(),
+                "--undo",
+                txid,
+            ]
+        )
+    except subprocess.TimeoutExpired:
+        raise Refused("unavailable", "the timer of the undo did not answer") from None
+    if done.returncode != 0:
+        raise Refused("unavailable", "the timer of the undo was refused")
+
+
+def disarm_undo(txid: str) -> bool:
+    """Cancel the timer of the undo of one transaction.
+
+    A timer that is not cancelled is harmless: the undo of the timer
+    only acts on a record that is still armed.  The answer is True when
+    the timer is cancelled, and False when the cancel failed.
+    """
+    try:
+        done = run_command(["systemctl", "stop", f"{undo_unit(txid)}.timer"])
+    except subprocess.TimeoutExpired:
+        return False
+    return done.returncode == 0
+
+
+# ---- the undo (section 7) ---------------------------------------------------
+
+
+def undo_values(
+    directory: Directory,
+    request: Mapping[str, Any],
+) -> tuple[str, bytes | None, bytes | None] | None:
+    """The attribute of the undo, the value to delete and the value to add.
+
+    The answer is ``None`` when the verb has no undo at all: an unlock
+    arms nothing, so there is nothing to put back.  The move of an
+    object is not an attribute: it is undone by a rename, and it has
+    its own path.
+    """
+    verb = request.get("verb")
+    before = request.get("before")
+    after = request.get("after")
+    target = request.get("target")
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return None
+    if verb in ("uac-clear", "disable", "enable"):
+        return (
+            UAC_ATTRIBUTE,
+            str(after.get("uac")).encode("ascii"),
+            str(before.get("uac")).encode("ascii"),
+        )
+    if verb == "enc-types":
+        old = after.get("etypes")
+        new = before.get("etypes")
+        return (
+            ETYPES_ATTRIBUTE,
+            None if old == "absent" else str(old).encode("ascii"),
+            None if new == "absent" else str(new).encode("ascii"),
+        )
+    if verb == "unlock":
+        return None
+    if verb == "member-add":
+        if not isinstance(target, dict):
+            return None
+        return (MEMBER_ATTRIBUTE, _member_dn(directory, target.get("member_guid")), None)
+    if verb == "member-remove":
+        if not isinstance(target, dict):
+            return None
+        return (MEMBER_ATTRIBUTE, None, _member_dn(directory, target.get("member_guid")))
+    if verb == "maq":
+        return (
+            MAQ_ATTRIBUTE,
+            str(after.get("maq")).encode("ascii"),
+            str(before.get("maq")).encode("ascii"),
+        )
+    return None
+
+
+def _member_dn(directory: Directory, guid: Any) -> bytes | None:
+    """The name of the member of a group."""
+    if not isinstance(guid, str):
+        return None
+    message = directory.by_guid(guid, _ACCOUNT_ATTRS)
+    if message is None:
+        return None
+    return directory.dn_of(message).encode("utf-8")
+
+
+def _modify(
+    directory: Directory,
+    dn: str,
+    attribute: str,
+    delete_value: bytes | None,
+    add_value: bytes | None,
+) -> None:
+    """One modify: the measured delete-old/add-new message.
+
+    The name of the object is in the message itself, the way the
+    bindings take it: the real ``modify`` takes the message and not a
+    name beside it.  A value that is not there raises ``LdbError`` 16,
+    the way the server answers a stale old value.
+    """
+    ldb = directory.ldb
+    message = ldb.Message()
+    index = 0
+    if delete_value is not None:
+        message[str(index)] = ldb.MessageElement(delete_value, ldb.FLAG_MOD_DELETE, attribute)
+        index += 1
+    if add_value is not None:
+        message[str(index)] = ldb.MessageElement(add_value, ldb.FLAG_MOD_ADD, attribute)
+        index += 1
+    message.dn = ldb.Dn(directory.db, dn)
+    directory.db.modify(message)
+
+
+def error_code(ldb: Any, name: str, measured: int) -> int:
+    """The value of an error code of the ldb.
+
+    The name is asked for with getattr and never as an attribute of the
+    module, so a binding that does not carry it does not break the
+    helper.  The value measured on the lab DC is the fallback.
+    """
+    value = getattr(ldb, name, None)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return measured
+
+
+def ldb_code(exc: Any) -> int | None:
+    """The number of the error of the ldb, when it carries one."""
+    arguments = getattr(exc, "args", ())
+    if arguments and isinstance(arguments[0], int) and not isinstance(arguments[0], bool):
+        return arguments[0]
+    return None
+
+
+def map_ldb_error(exc: Any, ldb: Any) -> str:
+    """The code of the contract for one error of the ldb.
+
+    16 and 20 are a conflict, 50 is a denial, 32 is a missing object and
+    every other code is an error.
+    """
+    code = ldb_code(exc)
+    if code == error_code(ldb, "ERR_NO_SUCH_ATTRIBUTE", 16):
+        return "conflict"
+    if code == error_code(ldb, "ERR_ATTRIBUTE_OR_VALUE_EXISTS", 20):
+        return "conflict"
+    if code == error_code(ldb, "ERR_INSUFFICIENT_ACCESS_RIGHTS", 50):
+        return "denied"
+    if code == error_code(ldb, "ERR_NO_SUCH_OBJECT", 32):
+        return "not_found"
+    return "error"
+
+
+def _live_value(
+    directory: Directory,
+    verb: str,
+    dn: str,
+) -> bytes | None:
+    """The live value of the attribute the undo writes, or None."""
+    attribute = {
+        "uac-clear": UAC_ATTRIBUTE,
+        "disable": UAC_ATTRIBUTE,
+        "enable": UAC_ATTRIBUTE,
+        "enc-types": ETYPES_ATTRIBUTE,
+        "maq": MAQ_ATTRIBUTE,
+    }.get(verb)
+    if attribute is None:
+        return None
+    message = directory.by_dn(dn, (attribute,))
+    if message is None:
+        return None
+    values = directory.values(message, attribute)
+    return values[0] if values else None
+
+
+def _account_dn(directory: Directory, target: Mapping[str, Any]) -> str | None:
+    """The name of the account of a target."""
+    guid = target.get("guid")
+    if not isinstance(guid, str):
+        return None
+    message = directory.by_guid(guid, _ACCOUNT_ATTRS)
+    return directory.dn_of(message) if message is not None else None
+
+
+def _group_dn(directory: Directory, target: Mapping[str, Any]) -> str | None:
+    """The name of the group of a target."""
+    guid = target.get("group_guid")
+    if not isinstance(guid, str):
+        return None
+    message = directory.by_guid(guid, _GROUP_ATTRS)
+    return directory.dn_of(message) if message is not None else None
+
+
+def _account_message(directory: Directory, target: Mapping[str, Any]) -> Any | None:
+    """The object of a target, by its guid."""
+    guid = target.get("guid")
+    if not isinstance(guid, str):
+        return None
+    return directory.by_guid(guid, _ACCOUNT_ATTRS)
+
+
+def _conflict_name(directory: Directory, verb: str, request: Mapping[str, Any]) -> str:
+    """The name of the object the undo did not write."""
+    target = request.get("target")
+    if not isinstance(target, dict):
+        return ""
+    guid = target.get("guid")
+    if isinstance(guid, str):
+        return guid
+    return str(target.get("sam", ""))
+
+
+def undo_attribute(directory: Directory, record: Mapping[str, Any]) -> tuple[bool, list[str]]:
+    """The undo of every verb but a user-create."""
+    request = record.get("request")
+    if not isinstance(request, dict):
+        return False, []
+    verb = request.get("verb")
+    conflicts: list[str] = []
+
+    if verb == "move":
+        return _undo_move(directory, record, conflicts)
+
+    if verb in ("member-add", "member-remove"):
+        return _undo_member(directory, request, conflicts)
+
+    values = undo_values(directory, request)
+    if values is None:
+        return True, []
+    attribute, delete_value, add_value = values
+    if delete_value is None and add_value is None:
+        return True, []
+
+    target = request.get("target")
+    if not isinstance(target, dict):
+        return False, []
+    if verb == "maq":
+        dn = directory.domain_dn()
+    else:
+        dn = _account_dn(directory, target)
+    if dn is None:
+        return False, []
+
+    live = _live_value(directory, str(verb), dn)
+    if live == delete_value:
+        # The after value is still there: the modify puts the before
+        # value back, and the server refuses it when somebody else moved
+        # the value on in the meantime.
+        pass
+    elif add_value is None and live is None:
+        # There was no value and there is none: nothing to restore.
+        return True, conflicts
+    elif live == add_value:
+        # The before value is already there: nothing to restore.
+        return True, conflicts
+    else:
+        # Somebody else changed the value: the attribute is left alone.
+        conflicts.append(_conflict_name(directory, str(verb), request))
+        return False, conflicts
+    try:
+        _modify(directory, dn, attribute, delete_value, add_value)
+    except directory.ldb.LdbError as exc:
+        if map_ldb_error(exc, directory.ldb) == "conflict":
+            conflicts.append(_conflict_name(directory, str(verb), request))
+            return False, conflicts
+        return False, conflicts
+    return True, conflicts
+
+
+def _undo_member(
+    directory: Directory,
+    request: Mapping[str, Any],
+    conflicts: list[str],
+) -> tuple[bool, list[str]]:
+    """The undo of a membership: the member goes out of the group, or in.
+
+    The undo writes only when the membership still is the one the apply
+    made: a member that is already out of the group is not put back in,
+    and a member that is already in it is not taken out again.
+    """
+    target = request.get("target")
+    if not isinstance(target, dict):
+        return False, conflicts
+    dn = _group_dn(directory, target)
+    if dn is None:
+        return False, conflicts
+    group = directory.by_dn(dn, _GROUP_ATTRS)
+    if group is None:
+        return False, conflicts
+    member = _member_dn(directory, target.get("member_guid"))
+    if member is None:
+        return False, conflicts
+    present = member.decode("utf-8", "replace") in directory.members(group)
+    try:
+        if request.get("verb") == "member-add":
+            if not present:
+                return True, conflicts
+            _modify(directory, dn, MEMBER_ATTRIBUTE, member, None)
+        else:
+            if present:
+                return True, conflicts
+            _modify(directory, dn, MEMBER_ATTRIBUTE, None, member)
+    except directory.ldb.LdbError as exc:
+        if map_ldb_error(exc, directory.ldb) == "conflict":
+            conflicts.append(str(target.get("member_guid", "")))
+            return False, conflicts
+        return False, conflicts
+    return True, conflicts
+
+
+def _undo_move(
+    directory: Directory,
+    record: Mapping[str, Any],
+    conflicts: list[str],
+) -> tuple[bool, list[str]]:
+    """The undo of a move: the object goes back to its old parent.
+
+    The object is read by its guid first: it is renamed back only when
+    it still sits in the parent the apply moved it to.  Otherwise a
+    conflict is recorded and the object is left where it is.
+    """
+    request = record.get("request")
+    if not isinstance(request, dict):
+        return False, conflicts
+    target = request.get("target")
+    before = request.get("before")
+    after = request.get("after")
+    if not isinstance(target, dict) or not isinstance(before, dict):
+        return False, conflicts
+    if not isinstance(after, dict):
+        return False, conflicts
+    guid = target.get("guid")
+    if not isinstance(guid, str):
+        return False, conflicts
+    message = directory.by_guid(guid, _ACCOUNT_ATTRS)
+    if message is None:
+        return False, conflicts
+    current_dn = directory.dn_of(message)
+    old_parent = before.get("parent")
+    if not isinstance(old_parent, str):
+        return False, conflicts
+    parent = directory.by_guid(old_parent, _GROUP_ATTRS)
+    if parent is None:
+        return False, conflicts
+    old_dn = split_dn(current_dn)[0] + "," + directory.dn_of(parent)
+    if current_dn.lower() == old_dn.lower():
+        return True, conflicts
+    wanted = after.get("parent")
+    current_parent = directory.by_dn(parent_dn(current_dn), _GROUP_ATTRS)
+    if current_parent is None or not isinstance(wanted, str):
+        conflicts.append(guid)
+        return False, conflicts
+    if (directory.guid(current_parent) or "").lower() != wanted.lower():
+        # The object moved on: it is not renamed back.
+        conflicts.append(guid)
+        return False, conflicts
+    try:
+        directory.db.rename(current_dn, old_dn)
+    except directory.ldb.LdbError as exc:
+        if ldb_code(exc) == error_code(directory.ldb, "ERR_NO_SUCH_OBJECT", 32):
+            conflicts.append(guid)
+            return False, conflicts
+        return False, conflicts
+    return True, conflicts
+
+
+def undo_user_create(directory: Directory, record: Mapping[str, Any]) -> tuple[bool, list[str]]:
+    """The undo of a user-create: the object is deleted, and only then.
+
+    The object is deleted when it is still disabled, when its uSNChanged
+    is the one the record holds and when it has no members and no group
+    of its own.  Otherwise a conflict is recorded and the object stays.
+    """
+    created = record.get("created")
+    if not isinstance(created, str):
+        return False, []
+    message = directory.by_guid(created, _ACCOUNT_ATTRS)
+    if message is None:
+        return True, []
+    control = directory.integer(message, UAC_ATTRIBUTE)
+    if control is None or not control & ACCOUNTDISABLE:
+        return False, [created]
+    if directory.text(message, "uSNChanged") != record.get("created_usnchanged"):
+        return False, [created]
+    if directory.members(message) or directory.member_of(message):
+        return False, [created]
+    try:
+        directory.db.delete(directory.dn_of(message))
+    except directory.ldb.LdbError:
+        return False, [created]
+    return True, []
+
+
+def run_undo(directory: Directory, record: dict[str, Any], path: str) -> tuple[bool, list[str]]:
+    """The undo of one transaction, and the state it leaves behind.
+
+    The state is ``undone`` only when the undo restored its value.  An
+    undo that did not restore it, whether it met a conflict or an
+    error, leaves the record in ``undo_failed``: a transaction is never
+    reported as undone when it was not.
+    """
+    conflicts = [str(one) for one in (record.get("conflicts") or [])]
+    verb = (record.get("request") or {}).get("verb")
+    if verb == "user-create":
+        restored, more = undo_user_create(directory, record)
+    else:
+        restored, more = undo_attribute(directory, record)
+    conflicts.extend(more)
+    record["restored"] = restored
+    record["conflicts"] = conflicts
+    record["state"] = "undone" if restored else "undo_failed"
+    write_record(path, record)
+    return restored, conflicts
+
+
+def sweep(now: int, skip: str | None = None) -> None:
+    """Undo every armed record whose deadline has passed.
+
+    The sweep never confirms anything: a record it did not undo stays
+    armed.
+    """
+    for name in record_files():
+        if skip is not None and name == f"{skip}.json":
+            continue
+        path = os.path.join(TX_DIR, name)
+        record = read_record(path)
+        if record is None:
+            continue
+        if record.get("state") != "armed":
+            continue
+        undo_at = record.get("undo_at")
+        if not isinstance(undo_at, int) or isinstance(undo_at, bool):
+            continue
+        if undo_at > now:
+            continue
+        try:
+            directory = bind()
+        except Exception:
+            continue
+        run_undo(directory, record, path)
+
+
+# ---- the bind (section 9) ---------------------------------------------------
+
+
+def ticket_directory() -> str:
+    """The directory the credential caches of the helper live in.
+
+    The directory is created when it is not there; it must be a
+    directory of root with the mode 0700, so that a ticket of the
+    write account is never readable by anybody else.
+    """
+    path = RUN_DIR
+    info = _lstat(path)
+    if info is None:
+        try:
+            os.mkdir(path, RUN_DIR_MODE)
+            os.chmod(path, RUN_DIR_MODE)
+        except OSError:
+            raise Refused(
+                "unavailable", "the directory of the tickets cannot be created"
+            ) from None
+        info = _lstat(path)
+    if info is None or not stat.S_ISDIR(info.st_mode):
+        raise Refused("unavailable", "the directory of the tickets is not a directory")
+    if info.st_uid != INSTALL_OWNER_UID:
+        raise Refused("unavailable", "the directory of the tickets is not of root")
+    if stat.S_IMODE(info.st_mode) != RUN_DIR_MODE:
+        raise Refused("unavailable", "the directory of the tickets has the wrong mode")
+    return path
+
+
+@contextmanager
+def credential_cache(realm: str) -> Iterator[str]:
+    """The credential cache of the write account, and the ticket in it.
+
+    The ticket is taken with ``kinit -k`` from the keytab of the DC,
+    with an argv list and never through a shell.  The cache is a fresh
+    file of mode 0600 in the root-only directory of the tickets, and it
+    is removed when the bind is done.
+    """
+    read_identity()
+    directory = ticket_directory()
+    descriptor, path = tempfile.mkstemp(prefix="ccache-", dir=directory)
+    try:
+        os.fchmod(descriptor, 0o600)
+    finally:
+        os.close(descriptor)
+    try:
+        try:
+            done = run_command(
+                [
+                    "kinit",
+                    "-k",
+                    "-t",
+                    keytab_path(),
+                    "-c",
+                    "FILE:%s" % path,
+                    "%s@%s" % (WRITE_ACCOUNT, realm),
+                ]
+            )
+        except subprocess.TimeoutExpired:
+            raise Refused(
+                "unavailable", "the ticket of the write account did not answer"
+            ) from None
+        except OSError:
+            raise Refused(
+                "unavailable", "the ticket of the write account cannot be taken"
+            ) from None
+        if done.returncode != 0:
+            raise Refused(
+                "unavailable", "the ticket of the write account cannot be taken"
+            )
+        yield path
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def bind() -> Directory:
+    """Bind to the directory of this DC, as the write account.
+
+    The bind is the measured one of section 9: the url is the fqdn of
+    this host and the credentials are the ones of a ticket of the
+    keytab of the DC.  The realm, the workgroup, the kerberos state and
+    the named cache are set as they were measured; ``guess`` is never
+    called, because it would leave the principal as root and the bind
+    would fail.
+    """
+    import ldb
+    from samba.credentials import Credentials, MUST_USE_KERBEROS, SPECIFIED
+    from samba.param import LoadParm
+    from samba.samdb import SamDB
+
+    lp = LoadParm()
+    lp.load_default()
+    try:
+        netbios = str(lp.get("netbios name"))
+        realm = str(lp.get("realm"))
+        workgroup = lp.get("workgroup")
+    except KeyError:
+        raise Refused("error", "the loadparm does not hold the name of the host") from None
+    fqdn = f"{netbios}.{realm}".lower()
+    with credential_cache(realm) as ccache:
+        credentials = Credentials()
+        credentials.set_realm(lp.get("realm"))
+        credentials.set_domain(workgroup)
+        credentials.set_kerberos_state(MUST_USE_KERBEROS)
+        credentials.set_named_ccache("FILE:%s" % ccache, SPECIFIED, lp)
+        db = SamDB(url=f"ldap://{fqdn}", credentials=credentials, lp=lp)
+    return Directory(db, ldb, lp)
+
+
+# ---- the modes (section 6) --------------------------------------------------
+
+
+def current_time() -> float:
+    """The clock of the DC."""
+    return time.time()
+
+
+def _log(message: str) -> None:
+    """One line of the log of the helper.
+
+    The line never holds a value of the request and never holds the
+    secret.
+    """
+    print(f"newton-ad-samba-write: {message}", file=sys.stderr)
+
+
+def do_read(request: Mapping[str, Any]) -> dict[str, Any]:
+    """The read mode: what this DC sees (section 6)."""
+    directory = bind()
+    pdc = directory.holds_pdc_role()
+    try:
+        ids, live, facts = resolve(directory, str(request["verb"]), request["target"], True, pdc)
+    except NotFound:
+        return {"v": 1, "code": "not_found"}
+    return {"v": 1, "code": "ok", "live": live, "ids": ids, "facts": facts}
+
+
+def _write_account(directory: Directory) -> Any:
+    """The one directory object of the account the helper writes as."""
+    found = directory.by_sam(WRITE_ACCOUNT, _ACCOUNT_ATTRS)
+    if len(found) != 1:
+        raise Refused("error", "the write account is not in the directory")
+    return found[0]
+
+
+def target_is_write_account(
+    directory: Directory, ids: Mapping[str, Any]
+) -> bool:
+    """True when any resolved target object has the write account's SID."""
+    write_sid = directory.sid(_write_account(directory))
+    if not write_sid:
+        raise Refused("error", "the write account has no SID")
+    return any(
+        isinstance(ids.get(name), str) and ids[name] == write_sid
+        for name in ("sid", "group_sid", "member_sid")
+    )
+
+
+def target_is_krbtgt_or_trust(
+    directory: Directory, ids: Mapping[str, Any]
+) -> bool:
+    """True for RID 502, krbtgt names and INTERDOMAIN_TRUST_ACCOUNT."""
+    for prefix in ("", "group_", "member_"):
+        sam = ids.get(prefix + "sam")
+        if isinstance(sam, str):
+            lowered = sam.lower()
+            if lowered == KRBTGT_SAM or lowered.startswith(RODC_KRBTGT_PREFIX):
+                return True
+        sid = ids.get(prefix + "sid")
+        if isinstance(sid, str) and _rid_of(sid) == KRBTGT_RID:
+            return True
+        guid = ids.get(prefix + "guid")
+        if not isinstance(guid, str):
+            continue
+        message = directory.by_guid(guid, _ACCOUNT_ATTRS)
+        if message is None:
+            return True
+        control = directory.integer(message, UAC_ATTRIBUTE)
+        if control is not None and control & INTERDOMAIN_TRUST_ACCOUNT:
+            return True
+    return False
+
+
+def write_account_is_privileged(directory: Directory) -> bool:
+    """True when the write account is in a privileged group.
+
+    The tokenGroups of the account are transitive: they hold every group
+    the account is a member of, directly or not.  They are read
+    base-scoped on the account itself.  The check fails closed: no
+    token group at all, an empty list, and a value that is not a SID
+    all count as a privileged account.
+    """
+    dn = directory.dn_of(_write_account(directory))
+    message = directory.by_dn(dn, ("tokenGroups",))
+    if message is None:
+        return True
+    values = directory.values(message, "tokenGroups")
+    if not values:
+        return True
+    for raw in values:
+        try:
+            sid = directory.sid_text(raw)
+        except Exception:
+            return True
+        if sid_is_privileged(sid):
+            return True
+    return False
+
+
+def write_after(directory: Directory, request: Mapping[str, Any]) -> str | None:
+    """The write of the after-image (step 6 of section 6).
+
+    A user-create answers the name of the object it made.  The name is
+    computed before the add: a parent that cannot be read back after the
+    add still leaves the owner of the transaction with the name of the
+    object to look for.
+    """
+    verb = str(request["verb"])
+    target = request["target"]
+    before = request["before"]
+    after = request["after"]
+
+    if verb == "user-create":
+        parent = directory.by_guid(str(target["parent_guid"]), _GROUP_ATTRS)
+        if parent is None:
+            raise Refused("not_found", "the parent of the new object is not there")
+        sam = str(target["sam"])
+        secret = request.get("secret")
+        if not isinstance(secret, str):
+            raise Refused("schema", "the user-create carries no secret")
+        dn = f"CN={sam},{directory.dn_of(parent)}"
+        directory.db.add(
+            {
+                "dn": dn,
+                "objectClass": "user",
+                "cn": sam,
+                "sAMAccountName": sam,
+                "userPrincipalName": f"{sam}@{directory.domain_dns_name()}",
+                "userAccountControl": "514",
+                "unicodePwd": ('"' + secret + '"').encode("utf-16-le"),
+            }
+        )
+        return dn
+
+    if verb in ("member-add", "member-remove"):
+        dn = _group_dn(directory, target)
+        if dn is None:
+            raise Refused("not_found", "the group is not there")
+        member = _member_dn(directory, target.get("member_guid"))
+        if member is None:
+            raise Refused("not_found", "the member is not there")
+        if verb == "member-add":
+            _modify(directory, dn, MEMBER_ATTRIBUTE, None, member)
+        else:
+            _modify(directory, dn, MEMBER_ATTRIBUTE, member, None)
+        return None
+
+    if verb == "maq":
+        _modify(
+            directory,
+            directory.domain_dn(),
+            MAQ_ATTRIBUTE,
+            str(before["maq"]).encode("ascii"),
+            str(after["maq"]).encode("ascii"),
+        )
+        return None
+
+    if verb == "move":
+        message = _account_message(directory, target)
+        if message is None:
+            raise Refused("not_found", "the target is not there")
+        current_dn = directory.dn_of(message)
+        parent = directory.by_guid(str(after["parent"]), _GROUP_ATTRS)
+        if parent is None:
+            raise Refused("not_found", "the new parent is not there")
+        new_dn = split_dn(current_dn)[0] + "," + directory.dn_of(parent)
+        try:
+            # The move of an object is a rename of it: a modify of the
+            # distinguished name answers 53 (measured on Samba 4.22.11,
+            # 2026-11-09).
+            directory.db.rename(current_dn, new_dn)
+        except directory.ldb.LdbError as exc:
+            if ldb_code(exc) == error_code(
+                directory.ldb, "ERR_NO_SUCH_OBJECT", 32
+            ):
+                raise Refused("conflict", "the object to move is not there") from None
+            raise
+        return None
+
+    dn = _account_dn(directory, target)
+    if dn is None:
+        raise Refused("not_found", "the target is not there")
+    if verb in ("uac-clear", "disable", "enable"):
+        _modify(
+            directory,
+            dn,
+            UAC_ATTRIBUTE,
+            str(before["uac"]).encode("ascii"),
+            str(after["uac"]).encode("ascii"),
+        )
+    elif verb == "enc-types":
+        old = before["etypes"]
+        new = after["etypes"]
+        _modify(
+            directory,
+            dn,
+            ETYPES_ATTRIBUTE,
+            None if old == "absent" else str(old).encode("ascii"),
+            None if new == "absent" else str(new).encode("ascii"),
+        )
+    elif verb == "unlock":
+        _modify(
+            directory,
+            dn,
+            LOCKOUT_ATTRIBUTE,
+            str(before["lockout"]).encode("ascii"),
+            str(after["lockout"]).encode("ascii"),
+        )
+    return None
+
+
+def read_back(
+    directory: Directory,
+    request: Mapping[str, Any],
+    created: str | None,
+) -> dict[str, Any]:
+    """The live values of the target after the write (step 7)."""
+    verb = str(request["verb"])
+    target = request["target"]
+    if verb == "user-create":
+        return {"object": "present" if created else "absent"}
+    if verb in ("member-add", "member-remove"):
+        group = directory.by_guid(str(target["group_guid"]), _GROUP_ATTRS)
+        member = directory.by_guid(str(target["member_guid"]), _ACCOUNT_ATTRS)
+        if group is None or member is None:
+            return {}
+        present = directory.dn_of(member) in directory.members(group)
+        return {"member": "present" if present else "absent"}
+    if verb == "maq":
+        head = directory.by_dn(directory.domain_dn(), _DOMAIN_ATTRS)
+        quota = directory.integer(head, MAQ_ATTRIBUTE) if head is not None else None
+        return {"maq": 0 if quota is None else quota}
+    message = _account_message(directory, target)
+    if message is None:
+        return {}
+    if verb in ("uac-clear", "disable", "enable"):
+        control = directory.integer(message, UAC_ATTRIBUTE)
+        return {"uac": 0 if control is None else control}
+    if verb == "enc-types":
+        types = directory.integer(message, ETYPES_ATTRIBUTE)
+        return {"etypes": "absent" if types is None else types}
+    if verb == "unlock":
+        lockout = directory.integer(message, LOCKOUT_ATTRIBUTE)
+        return {"lockout": 0 if lockout is None else lockout}
+    if verb == "move":
+        parent = directory.by_dn(parent_dn(directory.dn_of(message)), _GROUP_ATTRS)
+        return {"parent": directory.guid(parent) if parent is not None else None}
+    return {}
+
+
+def user_create_dn(directory: Directory, request: Mapping[str, Any]) -> str | None:
+    """The exact DN passed to the successful user add.
+
+    The answer is None when the parent of the new object cannot be read
+    back: the name of the object is then unknown.
+    """
+    target = request["target"]
+    parent = directory.by_guid(str(target["parent_guid"]), _GROUP_ATTRS)
+    if parent is None:
+        return None
+    return f"CN={target['sam']},{directory.dn_of(parent)}"
+
+
+def read_created(
+    directory: Directory,
+    request: Mapping[str, Any],
+) -> tuple[str | None, str | None]:
+    """The guid and the uSNChanged of the object a user-create made."""
+    dn = user_create_dn(directory, request)
+    if dn is None:
+        return None, None
+    message = directory.by_dn(dn, _ACCOUNT_ATTRS)
+    if message is None:
+        return None, None
+    return directory.guid(message), directory.text(message, "uSNChanged")
+
+
+def _settle(
+    record: dict[str, Any],
+    path: str,
+    directory: Directory,
+    written: bool,
+) -> None:
+    """The final state of a record whose run did not finish.
+
+    Nothing was written: the record is refused.  A write happened: the
+    undo runs at once, and the record says whether it restored its
+    value.
+    """
+    if written:
+        try:
+            run_undo(directory, record, path)
+            return
+        except Exception:
+            record["state"] = "undo_failed"
+            write_record(path, record)
+            return
+    record["state"] = "refused"
+    write_record(path, record)
+
+
+def do_apply(request: Mapping[str, Any], now: int) -> dict[str, Any]:
+    """The apply mode: the steps of section 6.
+
+    The order of the checks is the one of the steps of ``apply``
+    (SPEC-1.4-REQUEST section 6, "Modes and responses"): the rules of
+    the schema, then the token, then the expiry, then the replay, then
+    the rules of the verb, then the role of this DC, and only then the
+    rest; the order of the token, the expiry and the replay inside it
+    is the one of section 4, "The digest and the token".  An unsigned
+    request learns nothing beyond the schema and the token.
+    """
+    verb = str(request["verb"])
+    if verb == "user-create" and not isinstance(request.get("secret"), str):
+        # The secret is part of the schema of a user-create: it is
+        # checked before the record is created and before the timer is
+        # armed.
+        raise Refused("schema", "the user-create carries no secret")
+
+    key = read_key()
+    expected = token(key, digest(request), int(request["nbf"]), int(request["exp"]))
+    if not hmac.compare_digest(expected, str(request["token"])):
+        raise Refused("bad_token", "the token does not match the key")
+    if not int(request["nbf"]) - 60 <= now <= int(request["exp"]):
+        raise Refused("expired", "the approval is outside the window")
+
+    txid = str(request["txid"])
+    path = record_path(txid)
+    if os.path.exists(path):
+        raise Refused("replay", "the record of the transaction is already there")
+
+    check_verb_rules(request)
+
+    directory = bind()
+    pdc = directory.holds_pdc_role()
+    if not pdc:
+        raise Refused("not_pdc", "this dc does not hold the pdc emulator role")
+
+    record: dict[str, Any] = {
+        "v": 1,
+        "txid": txid,
+        "request": {
+            key: value for key, value in request.items() if key not in ("secret", "token")
+        },
+        "state": "armed",
+        "undo_at": now + int(request["window"]),
+        "restored": False,
+        "conflicts": [],
+        "created": None,
+        "created_usnchanged": None,
+    }
+    try:
+        create_record(path, record)
+    except FileExistsError:
+        raise Refused("replay", "the record of the transaction is already there") from None
+
+    written = False
+    settled = False
+    created_dn: str | None = None
+    try:
+        try:
+            ids, live, facts = resolve(directory, verb, request["target"], False, pdc)
+        except NotFound:
+            raise Refused("not_found", "the target is not there") from None
+
+        if target_is_write_account(directory, ids):
+            raise Refused("denied", "the write account is never a target or member")
+        if target_is_krbtgt_or_trust(directory, ids):
+            raise Refused("denied", "krbtgt and trust accounts are never written")
+
+        refusal = live_verb_refusal(directory, request, facts)
+        if refusal:
+            raise Refused(refusal, "the verb does not fit the live object")
+
+        if verb == "move":
+            message = _account_message(directory, request["target"])
+            if message is None:
+                raise Refused("not_found", "the target is not there")
+            refusal = move_parents_ok(directory, message, request["after"])
+            if refusal:
+                raise Refused(refusal, "the parent of the move is refused")
+
+        if write_account_is_privileged(directory):
+            raise Refused("privileged", "the write account is in a privileged group")
+
+        derived = derive_risk(verb, facts)
+        if derived != request["risk"]:
+            raise Refused(
+                "risk_mismatch", "the risk of the request is not the derived one"
+            )
+
+        if live != request["before"]:
+            raise Refused(
+                "conflict",
+                "the live value is not the before-image",
+                {"live": live},
+            )
+
+        if verb != "unlock":
+            arm_undo(txid, int(request["window"]))
+
+        try:
+            created_dn = write_after(directory, request)
+        except directory.ldb.LdbError as exc:
+            code = map_ldb_error(exc, directory.ldb)
+            disarm_undo(txid)
+            if code == "conflict":
+                raise Refused("conflict", "the old value was stale") from None
+            try:
+                run_undo(directory, record, path)
+            except Exception:
+                record["state"] = "undo_failed"
+                write_record(path, record)
+            settled = True
+            raise Refused(code, "the write failed") from None
+        written = True
+
+        created: str | None = None
+        if verb == "user-create":
+            created, usn = read_created(directory, request)
+            if not created or not usn:
+                # The name of the object the add made is the one the
+                # write computed before the add: the parent that cannot
+                # be read back does not take it away.
+                dn = created_dn
+                restored = False
+                conflicts: list[str] = []
+                if dn is not None:
+                    try:
+                        directory.db.delete(dn)
+                        restored = True
+                    except Exception:
+                        conflicts.append(dn)
+                record["restored"] = restored
+                record["conflicts"] = conflicts
+                record["state"] = "undone" if restored else "undo_failed"
+                # The record is written before the timer is cancelled: a
+                # record that cannot be written leaves the undo armed.
+                write_record(path, record)
+                disarm_undo(txid)
+                settled = True
+                raise Refused("error", "the undo facts of the new user are missing")
+            record["created"] = created
+            record["created_usnchanged"] = usn
+        if verb == "unlock":
+            # An unlock arms no undo (section 3): nothing can put it back,
+            # so the transaction is confirmed and the sweep leaves it alone.
+            record["state"] = "confirmed"
+        after_live = read_back(directory, request, created)
+        write_record(path, record)
+        settled = True
+        answer: dict[str, Any] = {
+            "v": 1,
+            "code": "ok",
+            "live": after_live,
+            "undo_at": record["undo_at"],
+        }
+        if created is not None:
+            answer["created"] = created
+        return answer
+    except Refused:
+        if not settled:
+            # Nothing was written: the record is refused, never armed.
+            # A write that happened is put back at once.
+            _settle(record, path, directory, written)
+        raise
+    except Exception:
+        if not settled:
+            _settle(record, path, directory, written)
+        raise
+
+
+def do_confirm(request: Mapping[str, Any]) -> dict[str, Any]:
+    """The confirm mode (section 6).
+
+    The confirmation is recorded before the timer of the undo is
+    cancelled: a confirmation that is not recorded leaves the undo
+    armed, and the undo puts the change back.  The cancel comes after
+    the record, and a cancel that fails does not change the answer: the
+    timer that fires anyway finds a confirmed record and does nothing.
+    """
+    txid = str(request["txid"])
+    path = record_path(txid)
+    record = read_record(path)
+    if record is None:
+        raise Refused("not_found", "there is no record of the transaction")
+    if record.get("state") in ("undone", "undo_failed", "refused"):
+        raise Refused("conflict", "the transaction is not armed")
+    stored = record.get("request")
+    if not isinstance(stored, dict):
+        raise Refused("error", "the record of the transaction is not usable")
+    directory = bind()
+    pdc = directory.holds_pdc_role()
+    try:
+        _ids, live, facts = resolve(
+            directory, str(stored["verb"]), stored["target"], False, pdc
+        )
+    except NotFound:
+        raise Refused("conflict", "the target is not there") from None
+    if live != stored.get("after"):
+        raise Refused("conflict", "the target does not show the after-image")
+    record["state"] = "confirmed"
+    try:
+        write_record(path, record)
+    except Exception:
+        # The confirmation is not recorded: the timer stays armed and it
+        # puts the change back.
+        raise Refused("error", "the confirmation could not be recorded") from None
+    if not disarm_undo(txid):
+        print(
+            "the timer of the undo was not cancelled; it will find a"
+            " confirmed record and do nothing",
+            file=sys.stderr,
+        )
+    return {"v": 1, "code": "ok"}
+
+
+def do_abort(request: Mapping[str, Any]) -> dict[str, Any]:
+    """The abort mode: the undo runs at once (section 6).
+
+    Only an armed transaction may be aborted: a transaction that is
+    confirmed, refused or already undone changes nothing.
+    """
+    txid = str(request["txid"])
+    path = record_path(txid)
+    record = read_record(path)
+    if record is None:
+        raise Refused("not_found", "there is no record of the transaction")
+    if record.get("state") != "armed":
+        raise Refused("conflict", "the transaction is not armed")
+    directory = bind()
+    restored, conflicts = run_undo(directory, record, path)
+    disarm_undo(txid)
+    return {"v": 1, "code": "ok", "restored": restored, "conflicts": conflicts}
+
+
+def do_status(request: Mapping[str, Any]) -> dict[str, Any]:
+    """The status mode (section 6)."""
+    txid = str(request["txid"])
+    record = read_record(record_path(txid))
+    if record is None:
+        raise Refused("not_found", "there is no record of the transaction")
+    return {
+        "v": 1,
+        "code": "ok",
+        "state": record.get("state"),
+        "undo_at": record.get("undo_at"),
+        "restored": record.get("restored"),
+        "conflicts": list(record.get("conflicts") or []),
+    }
+
+
+def do_undo(txid: str, now: int) -> dict[str, Any]:
+    """The undo of one transaction, from the timer."""
+    path = record_path(txid)
+    record = read_record(path)
+    if record is None:
+        raise Refused("not_found", "there is no record of the transaction")
+    if record.get("state") != "armed":
+        return {
+            "v": 1,
+            "code": "ok",
+            "restored": False,
+            "conflicts": list(record.get("conflicts") or []),
+        }
+    directory = bind()
+    restored, conflicts = run_undo(directory, record, path)
+    return {"v": 1, "code": "ok", "restored": restored, "conflicts": conflicts}
+
+
+# ---- the entry point --------------------------------------------------------
+
+
+def _stdin_path(stdin: bytes, env: Mapping[str, str]) -> dict[str, Any]:
+    """The way in over stdin (section 1)."""
+    if env.get("SUDO_USER") != LOGIN_NAME:
+        raise Refused("denied", "the login is not the write login")
+    problem = install_problem()
+    if problem:
+        raise Refused("unavailable", problem)
+    if len(stdin) > MAX_REQUEST_BYTES:
+        raise Refused("schema", "the request is bigger than 64 KiB")
+    request = parse_request(stdin)
+    if request["device"] != read_device():
+        raise Refused("schema", "the request names another device")
+    mode = str(request["mode"])
+
+    lock = StoreLock(lock_path())
+    lock.acquire()
+    try:
+        # The clock is read once the lock is held: the deadline of the
+        # undo and the expiry of the approval are the same moment.
+        now = int(current_time())
+        sweep(now)
+        if mode == "read":
+            lock.release()
+            return do_read(request)
+        if mode == "apply":
+            return do_apply(request, now)
+        if mode == "confirm":
+            return do_confirm(request)
+        if mode == "abort":
+            return do_abort(request)
+        return do_status(request)
+    finally:
+        lock.release()
+
+
+def _undo_path(argv: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
+    """The way in for the undo (section 1)."""
+    if env.get("SUDO_USER"):
+        raise Refused("denied", "the undo never runs through the ssh channel")
+    if len(argv) != 2 or argv[0] != "--undo":
+        raise Refused("schema", "the helper takes no other argument")
+    txid = str(argv[1])
+    if TXID_RE.fullmatch(txid) is None:
+        raise Refused("schema", "the txid is outside its pattern")
+    problem = install_problem()
+    if problem:
+        raise Refused("unavailable", problem)
+    with StoreLock(lock_path()):
+        # The clock is read once the lock is held.
+        now = int(current_time())
+        sweep(now, skip=txid)
+        return do_undo(txid, now)
+
+
+def handle(
+    argv: Sequence[str],
+    stdin: bytes,
+    env: Mapping[str, str],
+) -> dict[str, Any]:
+    """Answer one request, whatever it is.
+
+    The answer is the document of section 6 and the helper never raises:
+    a crash is a refusal with the code ``error``.
+    """
+    try:
+        if argv:
+            return _undo_path(argv, env)
+        return _stdin_path(stdin, env)
+    except Refused as exc:
+        _log(f"refused {exc.code}")
+        answer: dict[str, Any] = {"v": 1, "code": exc.code}
+        answer.update(exc.extra)
+        return answer
+    except Exception:
+        _log("error")
+        return {"v": 1, "code": "error"}
+
+
+def main() -> int:
+    """The entry point of the helper."""
+    try:
+        # one byte more than the limit: the request is too big then
+        stdin = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
+    except Exception:
+        stdin = b""
+    answer = handle(sys.argv[1:], stdin, os.environ)
+    sys.stdout.write(json.dumps(answer, sort_keys=True, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -120,6 +120,7 @@ def test_install_check_uses_fake_root_without_writing(tmp_path):
         "/usr/local/bin/newton-router-setup",
         "/usr/local/bin/newton-vantage-setup",
         "/usr/local/bin/newton-enrol",
+        "/usr/local/bin/newton-ad-setup",
         "/etc/sudoers.d/newton-mcp",
     ):
         assert path in result.stdout
@@ -141,6 +142,8 @@ EXPECTED_SUDOERS_LINES = [
     "Defaults!/usr/local/bin/newton-vantage-setup timestamp_timeout=0",
     "agent ALL=(newton) /usr/local/bin/newton-enrol",
     "Defaults!/usr/local/bin/newton-enrol timestamp_timeout=0",
+    "agent ALL=(newton) /usr/local/bin/newton-ad-setup",
+    "Defaults!/usr/local/bin/newton-ad-setup timestamp_timeout=0",
 ]
 
 
@@ -165,6 +168,7 @@ def test_install_sudoers_user_lines_keep_nopasswd_only_for_mcp(tmp_path):
         EXPECTED_SUDOERS_LINES[3],
         EXPECTED_SUDOERS_LINES[5],
         EXPECTED_SUDOERS_LINES[7],
+        EXPECTED_SUDOERS_LINES[9],
     ]
     assert not any(
         "NOPASSWD" in line and "newton-approve" in line for line in lines
@@ -178,6 +182,9 @@ def test_install_sudoers_user_lines_keep_nopasswd_only_for_mcp(tmp_path):
     assert not any(
         "NOPASSWD" in line and "newton-enrol" in line for line in lines
     )
+    assert not any(
+        "NOPASSWD" in line and "newton-ad-setup" in line for line in lines
+    )
 
 
 def test_install_check_sudoers_lines_pass_visudo(tmp_path):
@@ -186,7 +193,7 @@ def test_install_check_sudoers_lines_pass_visudo(tmp_path):
         pytest.skip("/usr/sbin/visudo is not installed")
     lines = check_listing(tmp_path)
     start = lines.index(SUDOERS_HEADER)
-    sudoers_lines = lines[start + 1 : start + 10]
+    sudoers_lines = lines[start + 1 : start + 1 + len(EXPECTED_SUDOERS_LINES)]
     assert sudoers_lines == EXPECTED_SUDOERS_LINES
     sudoers_file = tmp_path / "newton-mcp.sudoers"
     sudoers_file.write_text("\n".join(sudoers_lines) + "\n")
@@ -1835,6 +1842,7 @@ def doctor_env(tmp_path):
     setup = fake_root / "usr/local/bin/newton-router-setup"
     vantage_setup = fake_root / "usr/local/bin/newton-vantage-setup"
     enrol = fake_root / "usr/local/bin/newton-enrol"
+    ad_setup = fake_root / "usr/local/bin/newton-ad-setup"
     sudoers = fake_root / "etc/sudoers.d/newton-mcp"
     managed_settings = fake_root / "etc/claude-code/managed-settings.json"
     bindir = tmp_path / "bin"
@@ -1859,6 +1867,7 @@ def doctor_env(tmp_path):
         (setup, "#!/bin/sh\n"),
         (vantage_setup, "#!/bin/sh\n"),
         (enrol, "#!/bin/sh\n"),
+        (ad_setup, "#!/bin/sh\n"),
     ):
         path.write_text(text)
         path.chmod(0o555)
@@ -1991,6 +2000,7 @@ esac
         "setup": setup,
         "vantage_setup": vantage_setup,
         "enrol": enrol,
+        "ad_setup": ad_setup,
         "sudoers": sudoers,
         "managed_settings": managed_settings,
         "venv": venv,
@@ -2511,7 +2521,7 @@ def test_doctor_flags_agent_owned_item_f7(doctor_env):
 
 @pytest.mark.parametrize(
     "key",
-    ["approve", "doctor_file", "sudoers", "setup", "vantage_setup", "enrol"],
+    ["approve", "doctor_file", "sudoers", "setup", "vantage_setup", "enrol", "ad_setup"],
 )
 def test_doctor_flags_writable_installed_files_f7(doctor_env, key):
     path = doctor_env[key]
@@ -2544,6 +2554,7 @@ def test_doctor_flags_missing_approve_launcher_f7(doctor_env):
         pytest.param("setup", id="router-setup"),
         pytest.param("vantage_setup", id="vantage-setup"),
         pytest.param("enrol", id="enrol"),
+        pytest.param("ad_setup", id="ad-setup"),
     ],
 )
 def test_doctor_flags_missing_enrol_launcher_f7(doctor_env, key):

@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from .base import READ_ONLY_TOOLS, TIER_EXPERIMENTAL, Capabilities
+from .base import (
+    AD_READ_ONLY_TOOLS,
+    AD_WRITE_TOOLS,
+    READ_ONLY_TOOLS,
+    TIER_EXPERIMENTAL,
+    Capabilities,
+)
 
 
 OPENWRT_TOOLS = frozenset(
@@ -47,6 +53,25 @@ VENDOR_WRITE_TOOLS = READ_ONLY_TOOLS | VENDOR_WRITE_TOOL_NAMES
 # the platform may write, the device may not.
 VENDOR_WRITE_PLATFORMS = frozenset({"vyos", "routeros", "junos"})
 
+# The Active Directory platforms (SPEC-1.3 section 9).  Their collector
+# runs as a forced command over ssh and the audit they serve is
+# read-only: no write, no device-side revert.
+AD_PLATFORMS = frozenset({"ad-windows", "ad-samba"})
+
+# The platforms of the Active Directory write entries (SPEC-1.4).  A
+# write entry runs the write helper as a forced command and the undo of
+# the change is armed on the DC before the write, so the device-side
+# revert is the undo timer of the helper.
+AD_WRITE_PLATFORMS = frozenset({"ad-windows-write", "ad-samba-write"})
+
+# The tools an AD device may use: the device listing and the two AD
+# tools.  No getters, no router tools, no writes.
+AD_TOOLS = frozenset({"newton_list_devices"}) | AD_READ_ONLY_TOOLS
+
+# The tools a write entry may use: the device listing and the four AD
+# write tools.
+AD_WRITE_PLATFORM_TOOLS = frozenset({"newton_list_devices"}) | AD_WRITE_TOOLS
+
 PLATFORMS = frozenset(
     {
         "openwrt",
@@ -56,6 +81,10 @@ PLATFORMS = frozenset(
         "eos",
         "iosxe",
         "fortios",
+        "ad-windows",
+        "ad-samba",
+        "ad-windows-write",
+        "ad-samba-write",
     }
 )
 
@@ -71,6 +100,16 @@ _CAPABILITIES: dict[str, Capabilities] = {
     "eos": Capabilities(TIER_EXPERIMENTAL, False, None, READ_ONLY_TOOLS),
     "iosxe": Capabilities(TIER_EXPERIMENTAL, False, None, READ_ONLY_TOOLS),
     "fortios": Capabilities(TIER_EXPERIMENTAL, False, None, READ_ONLY_TOOLS),
+    # The AD platforms are read-only: the audit reads a collector
+    # document and the forced command on the far side is the whole
+    # session, so there is nothing to revert.
+    "ad-windows": Capabilities(TIER_EXPERIMENTAL, False, None, AD_TOOLS),
+    "ad-samba": Capabilities(TIER_EXPERIMENTAL, False, None, AD_TOOLS),
+    # A write entry runs the write helper as a forced command.  The undo
+    # of the change is armed on the DC before the write, so the revert is
+    # the undo timer of the helper.
+    "ad-windows-write": Capabilities("T1", True, "undo timer on the DC", AD_WRITE_PLATFORM_TOOLS),
+    "ad-samba-write": Capabilities("T1", True, "undo timer on the DC", AD_WRITE_PLATFORM_TOOLS),
 }
 
 

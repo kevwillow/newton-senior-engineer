@@ -824,6 +824,12 @@ def test_wifi_adds_no_tool_name():
         "newton_run_scan",
         "newton_get_state",
         "newton_list_getters",
+        "newton_ad_audit",
+        "newton_ad_list_checks",
+        "newton_ad_plan_change",
+        "newton_ad_apply_change",
+        "newton_ad_change_status",
+        "newton_ad_abort_change",
     }
 
 

@@ -46,6 +46,12 @@ from . import touched as _touched
 from . import undo_plan as _undo_plan
 from . import wifiscan as _wifiscan
 from . import vendor_flow
+from .ad import tools as _ad_tools
+from .ad.setupgen import DOMAIN_RE as AD_DNS_DOMAIN_RE
+from .ad.write import apply as _ad_apply
+from .ad.write import plan as _ad_write
+from .ad.write import render as _ad_render
+from .ad.write.errors import WriteError as _AdWriteError
 from .adapters import registry
 from .adapters import getters as _getters
 from .adapters import platform_redact as _platform_redact
@@ -59,6 +65,7 @@ from .adapters.ssh_cli import (
     SshCliRunner,
     USER_RE,
     shape_of,
+    user_grammar,
 )
 from .plan import compute_plan_hash
 from .policy import classify, parse_section_fact_line
@@ -83,6 +90,12 @@ TOOL_NAMES = {
     "newton_run_scan",
     "newton_get_state",
     "newton_list_getters",
+    "newton_ad_audit",
+    "newton_ad_list_checks",
+    "newton_ad_plan_change",
+    "newton_ad_apply_change",
+    "newton_ad_change_status",
+    "newton_ad_abort_change",
 }
 
 # The tools that answer for a no-install device (ADR-021 point 1).  The read
@@ -168,6 +181,11 @@ FORBIDDEN_READ = set(";&|`$<>(){}\\\n\r")
 PROG = "/usr/libexec/newton/newton-router"
 # triage #3/#26: the only device names that may be looked up or logged.
 DEVICE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+# The objectGUID of the domain head, as the inventory of a write entry
+# holds it (SPEC-1.4, the maq plan).
+AD_GUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 # A token the router's request filter (design 3.2) accepts unquoted.
 READ_TOKEN_RE = re.compile(r"^[A-Za-z0-9._:/@+[\]-]+$")
 # setup's inventory rules (scripts/newton-router-setup load_inventory).
@@ -248,6 +266,14 @@ class Device:
     experimental_readonly: bool = False
     vendor_write: bool = False                # a non-OpenWrt device may write
     lab: bool = False
+    # An AD write entry (SPEC-1.4) names its domain with ``ad_domain``:
+    # the device that stands for the domain.  ``ad_domain_guid`` is the
+    # objectGUID of the domain head, which the maq plan needs, and
+    # ``ad_dns_domain`` is the DNS name of the domain, which the setup
+    # prints in the entry.
+    ad_domain: str | None = None
+    ad_domain_guid: str | None = None
+    ad_dns_domain: str | None = None
     # (ADR-021 point 1) the access mode of an OpenWrt device.
     # "installed" is today's mode (Newton's program on the router) and
     # the default, so an inventory without the field keeps working
@@ -400,7 +426,7 @@ def load_inventory() -> dict[str, Device]:
         # ssh read the destination as an option.
         if HOST_RE.fullmatch(host) is None:
             raise NewtonError(f"device {name}: host fails the hostname grammar")
-        if USER_RE.fullmatch(user) is None:
+        if user_grammar(platform).fullmatch(user) is None:
             raise NewtonError(f"device {name}: user fails the username grammar")
         auth = raw.get("auth", "key")
         if auth not in {"key", "password"}:
@@ -495,7 +521,12 @@ def load_inventory() -> dict[str, Device]:
                     f"device {name}: vendor_write is not available yet for "
                     f"platform {platform}"
                 )
-            if not wants_write and not wants_readonly:
+            if (
+                not wants_write
+                and not wants_readonly
+                and platform not in registry.AD_PLATFORMS
+                and platform not in registry.AD_WRITE_PLATFORMS
+            ):
                 raise NewtonError(
                     f"device {name}: platform {platform} is experimental and "
                     "read-only; set experimental_readonly = true, or set "
@@ -545,8 +576,69 @@ def load_inventory() -> dict[str, Device]:
                     raise NewtonError(
                         f"device {name}: vendor_write requires key_file"
                     )
-            experimental_readonly = wants_readonly
+            experimental_readonly = (
+                wants_readonly or platform in registry.AD_PLATFORMS
+            )
             vendor_write = wants_write
+            if platform in registry.AD_WRITE_PLATFORMS:
+                # An AD write entry writes by its platform: the helper runs
+                # as a forced command and the undo is armed on the DC.
+                # It is never a read-only device and it never carries the
+                # vendor write flag.
+                if wants_write or wants_readonly:
+                    raise NewtonError(
+                        f"device {name}: an AD write device writes by its "
+                        "platform; do not set vendor_write or "
+                        "experimental_readonly"
+                    )
+                if auth != "key":
+                    raise NewtonError(
+                        f"device {name}: an AD write device requires auth = 'key'"
+                    )
+                if key_file is None:
+                    raise NewtonError(
+                        f"device {name}: an AD write device requires key_file"
+                    )
+        # (SPEC-1.4 section 7) the write entries name their domain.
+        ad_domain: str | None = None
+        ad_domain_guid: str | None = None
+        ad_dns_domain: str | None = None
+        if platform in registry.AD_WRITE_PLATFORMS:
+            raw_domain = raw.get("ad_domain")
+            if not isinstance(raw_domain, str) or not DEVICE_NAME_RE.fullmatch(raw_domain):
+                raise NewtonError(
+                    f"device {name}: ad_domain is required for an AD write device"
+                )
+            ad_domain = raw_domain
+            raw_guid = raw.get("ad_domain_guid")
+            if raw_guid is not None:
+                if not isinstance(raw_guid, str) or AD_GUID_RE.fullmatch(raw_guid) is None:
+                    raise NewtonError(
+                        f"device {name}: ad_domain_guid must be a guid"
+                    )
+                ad_domain_guid = raw_guid
+            raw_dns = raw.get("domain")
+            if raw_dns is None:
+                # The DNS name of the domain is what tells the entries of
+                # two domains apart, and the setup prints it: an entry
+                # without it is refused.
+                raise NewtonError(
+                    f"device {name}: domain (the DNS name of the AD domain, "
+                    "which the setup prints) is required for an AD write device"
+                )
+            if (
+                not isinstance(raw_dns, str)
+                or AD_DNS_DOMAIN_RE.fullmatch(raw_dns) is None
+            ):
+                raise NewtonError(
+                    f"device {name}: domain must be the DNS name of the "
+                    "AD domain"
+                )
+            ad_dns_domain = raw_dns
+        elif "ad_domain" in raw or "ad_domain_guid" in raw:
+            raise NewtonError(
+                f"device {name}: ad_domain is only for AD write devices"
+            )
         # (ADR-021 point 1) the access mode.  Only an OpenWrt
         # device has one, and only a no-install device needs the rpcd
         # credentials and the pinned certificate.
@@ -614,11 +706,102 @@ def load_inventory() -> dict[str, Device]:
             key_file=key_file, known_hosts=known_hosts, wan_zones=wan_zones,
             experimental_readonly=experimental_readonly,
             vendor_write=vendor_write, lab=lab,
+            ad_domain=ad_domain, ad_domain_guid=ad_domain_guid,
+            ad_dns_domain=ad_dns_domain,
             access=access, rpcd_password_file=rpcd_password_file,
             https_spki=https_spki, https_host=https_host,
             https_port=https_port,
             installed_offer=installed_offer,
         )
+    # (SPEC-1.4 section 7) the write entries of one domain name the
+    # device that stands for it, and that device names itself.
+    for name, device in devices.items():
+        if device.platform not in registry.AD_WRITE_PLATFORMS:
+            continue
+        domain = devices.get(device.ad_domain or "")
+        if domain is None or domain.platform not in registry.AD_WRITE_PLATFORMS:
+            raise NewtonError(
+                f"device {name}: ad_domain must name an AD write device"
+            )
+        if domain.ad_domain != domain.name:
+            raise NewtonError(
+                f"device {name}: ad_domain must name the device of the domain"
+            )
+        # The DNS name of the entry is the DNS name of the domain it
+        # belongs to: an entry that carries the name of another domain
+        # may not join this one, or a controller of that other domain
+        # would answer for it.
+        if (
+            device.ad_dns_domain
+            and domain.ad_dns_domain
+            and device.ad_dns_domain.lower() != domain.ad_dns_domain.lower()
+        ):
+            raise NewtonError(
+                f"device {name}: domain {device.ad_dns_domain} is not the "
+                f"domain of {domain.name} ({domain.ad_dns_domain})"
+            )
+        # The guid of the entry is the guid of the head of the domain it
+        # names: every DC of a domain prints the objectGUID of that
+        # head, and it is the same on every DC of the domain.  An entry
+        # that carries the guid of another domain would answer for a
+        # domain it does not belong to.
+        if (
+            device.ad_domain_guid
+            and domain.ad_domain_guid
+            and device.ad_domain_guid != domain.ad_domain_guid
+        ):
+            raise NewtonError(
+                f"device {name}: ad_domain_guid {device.ad_domain_guid} is "
+                f"not the guid of the domain of {domain.name} "
+                f"({domain.ad_domain_guid})"
+            )
+    # (SPEC-1.4 section 1) ``device`` names the domain and every DC of
+    # the domain holds the same approval key, so one domain has ONE
+    # device that stands for it.  The setup of every other DC names the
+    # domain device with --domain-device; a second DC that names itself
+    # is a second device standing for the same domain, and every write
+    # of that domain would depend on which one answered.  The DNS name
+    # of the domain is what tells the two entries apart from two honest
+    # one-DC domains.  A DNS name is not case sensitive, so the name is
+    # folded before it is looked up.
+    standing: dict[str, list[str]] = {}
+    for name, device in devices.items():
+        if device.platform not in registry.AD_WRITE_PLATFORMS:
+            continue
+        if device.ad_domain != name or not device.ad_dns_domain:
+            continue
+        key = device.ad_dns_domain.lower()
+        others = standing.setdefault(key, [])
+        for other in others:
+            # Two one-DC domains of different forests may answer to the
+            # same DNS name.  Every DC of a domain prints the
+            # objectGUID of the head of that domain, so two entries
+            # with different guids are two domains and the inventory
+            # loads; two entries with the same guid are two devices of
+            # one domain, and the second one is refused.
+            other_device = devices[other]
+            if (
+                other_device.ad_domain_guid
+                and device.ad_domain_guid
+                and other_device.ad_domain_guid != device.ad_domain_guid
+            ):
+                continue
+            message = (
+                f"devices {other} and {name}: two AD write devices stand "
+                f"for the domain {device.ad_dns_domain}; run the setup of "
+                f"{name} with --domain-device naming {other}"
+            )
+            if not (other_device.ad_domain_guid and device.ad_domain_guid):
+                # Without the guid of the head of the domain the two
+                # entries may be two honest one-DC domains of two
+                # forests: the owner tells them apart with the guid
+                # their setups printed.
+                message += (
+                    "; if they are two domains, give both entries the "
+                    "ad_domain_guid their setups printed"
+                )
+            raise NewtonError(message)
+        others.append(name)
     return devices
 
 
@@ -1013,9 +1196,13 @@ class NewtonService:
                         "tools": sorted(caps.tools),
                     },
                     # A non-OpenWrt device says whether IT may write; the
-                    # OpenWrt entry keeps exactly the keys it had.
+                    # OpenWrt entry keeps exactly the keys it had.  An AD
+                    # write entry writes by its platform.
                     **(
-                        {"writes": device.vendor_write}
+                        {
+                            "writes": device.vendor_write
+                            or device.platform in registry.AD_WRITE_PLATFORMS
+                        }
                         if device.platform != "openwrt"
                         else {}
                     ),
@@ -1178,6 +1365,71 @@ class NewtonService:
             )
         except Exception:
             return False
+
+    def ad_audit(
+        self,
+        device_name: str,
+        checks: list[str] | None = None,
+    ) -> dict[str, Any]:
+        device = self.device_for("newton_ad_audit", device_name)
+        return _ad_tools.audit(device, checks)
+
+    def ad_list_checks(self) -> dict[str, Any]:
+        return _ad_tools.list_checks()
+
+    def ad_plan_change(
+        self,
+        device: str,
+        verb: str,
+        sam_names: list[str] | None = None,
+        value: int | str | None = None,
+    ) -> dict[str, Any]:
+        """Plan one change in one domain (SPEC-1.4)."""
+        self.device_for("newton_ad_plan_change", device)
+        try:
+            planned = _ad_write.plan_change(
+                device,
+                verb,
+                sam_names,
+                value,
+                devices=self.devices,
+            )
+        except _AdWriteError as exc:
+            raise NewtonError(str(exc)) from None
+        return _ad_render.plan(planned)
+
+    def ad_apply_change(self, device: str, plan_id: str) -> dict[str, Any]:
+        """Apply one approved change and verify it on every DC with a write entry."""
+        self.device_for("newton_ad_apply_change", device)
+        try:
+            result = _ad_apply.apply_change(
+                plan_id, domain=device, devices=self.devices
+            )
+        except _AdWriteError as exc:
+            raise NewtonError(str(exc)) from None
+        return _ad_render.applied(result)
+
+    def ad_change_status(self, device: str, plan_id: str) -> dict[str, Any]:
+        """The state of one change, as the domain controller holds it."""
+        self.device_for("newton_ad_change_status", device)
+        try:
+            result = _ad_apply.change_status(
+                plan_id, domain=device, devices=self.devices
+            )
+        except _AdWriteError as exc:
+            raise NewtonError(str(exc)) from None
+        return _ad_render.applied(result)
+
+    def ad_abort_change(self, device: str, plan_id: str) -> dict[str, Any]:
+        """Abort one change: the domain controller puts the before-image back."""
+        self.device_for("newton_ad_abort_change", device)
+        try:
+            result = _ad_apply.abort_change(
+                plan_id, domain=device, devices=self.devices
+            )
+        except _AdWriteError as exc:
+            raise NewtonError(str(exc)) from None
+        return _ad_render.applied(result)
 
     def list_getters(self, device_name: str) -> dict[str, Any]:
         device = self.device_for("newton_list_getters", device_name)
@@ -3655,6 +3907,142 @@ def newton_guided_audit(device: str) -> dict[str, Any]:
 def newton_list_getters(device: str) -> dict[str, Any]:
     return call_tool(
         "newton_list_getters", device, lambda s: s.list_getters(device)
+    )
+
+
+@mcp.tool(description=_envelope_docstring(
+    "Run the read-only Active Directory audit on one AD device (platform "
+    "ad-windows or ad-samba). The collector document is fetched over ssh "
+    "with the forced command of the platform and is validated against the "
+    "collector contract before a single check runs; the collector reads "
+    "the directory first, and a privileged key is then refused before any "
+    "check runs. `checks` is an optional list of check "
+    "ids (newton_ad_list_checks lists them); without it every check of the "
+    "catalogue runs. The report holds the counts and the result of every "
+    "check; every directory string in it is inside an untrusted-device-data "
+    "envelope (see server description). This tool changes nothing."
+))
+def newton_ad_audit(
+    device: str,
+    checks: list[str] | None = None,
+) -> dict[str, Any]:
+    return call_tool(
+        "newton_ad_audit", device, lambda s: s.ad_audit(device, checks)
+    )
+
+
+@mcp.tool(description=_envelope_docstring(
+    "List the checks of the read-only Active Directory audit: id, title, "
+    "severity and the platforms each check runs on, plus the checks the "
+    "spec defers to the change release. No device contact."
+))
+def newton_ad_list_checks() -> dict[str, Any]:
+    return call_tool(
+        "newton_ad_list_checks", "-", lambda s: s.ad_list_checks()
+    )
+
+
+@mcp.tool(description=_envelope_docstring(
+    "Plan one Active Directory change in one domain (SPEC-1.4). The device "
+    "is the write entry that stands for the domain: the DCs of that domain "
+    "name it in their `ad_domain`. `verb` is one of "
+    "uac-clear, disable, enable, enc-types, unlock, member-add, "
+    "member-remove, maq, user-create or move. `sam_names` holds the "
+    "sAMAccountNames of the target: one for an account, two for a "
+    "membership (the group first), none for maq. `value` holds the int or "
+    "the guid the verb needs: the bit of a uac-clear (4194304, 32, 128 "
+    "or 65536; 524288 is refused, as it needs SeEnableDelegationPrivilege), "
+    "the encryption types of enc-types, the quota of "
+    "maq, the new parent of a move and the parent of a user-create. "
+    "The undo window of a plan is 600 s; an unlock arms no undo and is "
+    "confirmed once written (its window field is fixed at 120). "
+    "The plan lists in `dcs` the DCs the apply will read back: only the "
+    "DCs of the domain with a write entry in the inventory. A DC without "
+    "a write entry is never read, and `warning` says so. "
+    "Nothing else is accepted: a filter, a DN and free text are refused "
+    "before anything is read. The plan is written under the state "
+    "directory with mode 0600 and the owner approves it out of band with "
+    "`sudo -u newton /usr/local/bin/newton-approve ad-change <plan_id>`; "
+    "this tool never approves "
+    "anything. Every string the directory gave is inside an "
+    "untrusted-device-data envelope."
+))
+def newton_ad_plan_change(
+    device: str,
+    verb: str,
+    sam_names: list[str] | None = None,
+    value: int | str | None = None,
+) -> dict[str, Any]:
+    return call_tool(
+        "newton_ad_plan_change",
+        device,
+        lambda s: s.ad_plan_change(device, verb, sam_names, value),
+    )
+
+
+@mcp.tool(description=_envelope_docstring(
+    "Apply one approved Active Directory change and verify it on every DC "
+    "of its domain with a write entry in the inventory (SPEC-1.4). A DC of "
+    "the domain without a write entry is never read. The device is the "
+    "write entry that stands "
+    "for the domain. The plan must be approved already: the "
+    "approval comes from "
+    "`sudo -u newton /usr/local/bin/newton-approve ad-change <plan_id>`, "
+    "never from "
+    "this server. The change is applied on the domain controller, the "
+    "target is read back from each of those DCs over a fresh session, and "
+    "the confirm is sent only when each of them shows the after-image. A DC that "
+    "does not catch up in time is NOT TESTED and the change is aborted "
+    "instead; the result then carries restored and the conflicts of the "
+    "undo. The undo is armed on the domain controller until Newton "
+    "confirms, and the apply confirms or aborts before it returns. Once "
+    "confirmed, Newton does not undo a change: the owner plans the reverse "
+    "change. An unlock has no undo and is written at once. The receipt is written under the state directory and never "
+    "holds the password of a user-create. Every string the directory gave "
+    "is inside an untrusted-device-data envelope."
+))
+def newton_ad_apply_change(device: str, plan_id: str) -> dict[str, Any]:
+    return call_tool(
+        "newton_ad_apply_change",
+        device,
+        lambda s: s.ad_apply_change(device, plan_id),
+    )
+
+
+@mcp.tool(description=_envelope_docstring(
+    "The state of one Active Directory change, as the domain controller "
+    "holds it: armed, confirmed, undone, undo_failed or refused, with the "
+    "undo deadline and the conflicts of the undo. Every string the "
+    "directory gave is inside an untrusted-device-data envelope."
+))
+def newton_ad_change_status(device: str, plan_id: str) -> dict[str, Any]:
+    return call_tool(
+        "newton_ad_change_status",
+        device,
+        lambda s: s.ad_change_status(device, plan_id),
+    )
+
+
+@mcp.tool(description=_envelope_docstring(
+    "Abort one Active Directory change. This works only on a change still "
+    "armed: written and not yet confirmed, which covers the window while "
+    "Newton is still verifying it and an apply cut off before its confirm. "
+    "The apply confirms or aborts before it returns, so after a normal apply "
+    "the abort is refused with conflict; when the domain controller reports "
+    "the change confirmed, the answer carries a message saying how to "
+    "reverse it with a new plan of the opposite change. Once confirmed, "
+    "Newton does not undo a change. On a change still armed the domain "
+    "controller runs the undo, which writes only the attributes whose live "
+    "value still equals the after-image; the others are left alone and "
+    "reported as conflicts. An unlock has no undo and is written at once, "
+    "so its abort is refused. Every string the directory "
+    "gave is inside an untrusted-device-data envelope."
+))
+def newton_ad_abort_change(device: str, plan_id: str) -> dict[str, Any]:
+    return call_tool(
+        "newton_ad_abort_change",
+        device,
+        lambda s: s.ad_abort_change(device, plan_id),
     )
 
 

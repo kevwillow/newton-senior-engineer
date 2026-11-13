@@ -285,7 +285,7 @@ def test_mv1_6_01_tool_names_schemas_and_live_tool_list() -> None:
     import asyncio
     from mcp.shared.memory import create_connected_server_and_client_session
 
-    assert len(server.TOOL_NAMES) == 17
+    assert len(server.TOOL_NAMES) == 23
     assert {"newton_get_state", "newton_list_getters"} <= server.TOOL_NAMES
 
     async def listed():

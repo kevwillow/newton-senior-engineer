@@ -104,7 +104,7 @@ def test_perform_install_is_shared_by_both_modes():
         # the visudo -cf call -- only in perform_install
         '"$VISUDO" -cf "$sudoers_tmp"',
         # bootstrap-only sudoers printf template -- unique to perform_install
-        "printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \"$SUDOERS_MCP_LINE\"",
+        "printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \"$SUDOERS_MCP_LINE\"",
     ]
     for marker in bootstrap_markers:
         assert marker in perform_install_body, \
@@ -137,6 +137,7 @@ export APPROVE_LAUNCHER="$T/bin/newton-approve"
 export SETUP_LAUNCHER="$T/bin/newton-router-setup"
 export VANTAGE_SETUP_LAUNCHER="$T/bin/newton-vantage-setup"
 export ENROL_LAUNCHER="$T/bin/newton-enrol"
+export AD_SETUP_LAUNCHER="$T/bin/newton-ad-setup"
 export DOCTOR_LAUNCHER="$T/bin/newton-doctor"
 export SUDOERS="$T/sudoers.d/newton-mcp"
 export MANAGED_SETTINGS="$T/etc/claude-code/managed-settings.json"
@@ -151,6 +152,8 @@ SUDOERS_VANTAGE_SETUP_LINE="alice ALL=(newton) /usr/local/bin/newton-vantage-set
 SUDOERS_VANTAGE_SETUP_DEFAULTS_LINE="Defaults!/usr/local/bin/newton-vantage-setup timestamp_timeout=0"
 SUDOERS_ENROL_LINE="alice ALL=(newton) /usr/local/bin/newton-enrol"
 SUDOERS_ENROL_DEFAULTS_LINE="Defaults!/usr/local/bin/newton-enrol timestamp_timeout=0"
+SUDOERS_AD_SETUP_LINE="alice ALL=(newton) /usr/local/bin/newton-ad-setup"
+SUDOERS_AD_SETUP_DEFAULTS_LINE="Defaults!/usr/local/bin/newton-ad-setup timestamp_timeout=0"
 invoking_user=alice
 SNAP="$T/snap"
 mkdir -p "$T/work" "$T/bin" "$T/home" "$T/sudoers.d"
@@ -235,6 +238,7 @@ def test_perform_install_writes_everything(tmp_path):
         tmp_path / "bin/newton-router-setup",
         tmp_path / "bin/newton-vantage-setup",
         tmp_path / "bin/newton-enrol",
+        tmp_path / "bin/newton-ad-setup",
         tmp_path / "bin/newton-doctor",
     ]:
         assert launcher.exists(), f"missing launcher {launcher}"
@@ -250,8 +254,8 @@ def test_perform_install_writes_everything(tmp_path):
     sudoers = tmp_path / "sudoers.d/newton-mcp"
     assert sudoers.exists(), f"missing sudoers file {sudoers}"
     lines = sudoers.read_text().splitlines()
-    assert len(lines) == 9, \
-        f"sudoers.d/newton-mcp should have exactly 9 lines, got {len(lines)}: {lines!r}"
+    assert len(lines) == 11, \
+        f"sudoers.d/newton-mcp should have exactly 11 lines, got {len(lines)}: {lines!r}"
     assert " NOPASSWD: " in lines[0], \
         f"first sudoers line (mcp) must contain NOPASSWD: {lines[0]!r}"
     for ln in lines[1:]:
@@ -259,6 +263,8 @@ def test_perform_install_writes_everything(tmp_path):
             f"only the first sudoers line may contain NOPASSWD: {ln!r}"
     assert "alice ALL=(newton) /usr/local/bin/newton-enrol" in lines
     assert "Defaults!/usr/local/bin/newton-enrol timestamp_timeout=0" in lines
+    assert "alice ALL=(newton) /usr/local/bin/newton-ad-setup" in lines
+    assert "Defaults!/usr/local/bin/newton-ad-setup timestamp_timeout=0" in lines
 
     visudo_log = tmp_path / "visudo-log"
     assert visudo_log.exists(), "visudo stub was not called"

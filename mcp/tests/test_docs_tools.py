@@ -13,9 +13,29 @@ import newton_mcp.server as server
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILL_MD = REPO_ROOT / "SKILL.md"
 README_MD = REPO_ROOT / "README.md"
+# The public README.  The release scrub renames it to README.md in the
+# public tree, where the private README.md does not exist.
+RELEASE_README = REPO_ROOT / "docs" / "release" / "README-1.0.md"
+PRIVATE_LAYOUT = RELEASE_README.exists()
 
 
 _BACKTICKED_NAME = re.compile(r"`(newton_[A-Za-z0-9_]+)`")
+
+# The tools the server has and SKILL.md does not name yet.  The newton-ad
+# part of SKILL.md is written by the maintainer, not with the code
+# (SPEC-1.3 section 9), so the two AD tools are the exception until
+# that text lands.  The four AD write tools (SPEC-1.4) are in the same
+# case.  Every other tool must be in the table.
+SKILL_TEXT_PENDING = frozenset(
+    {
+        "newton_ad_audit",
+        "newton_ad_list_checks",
+        "newton_ad_plan_change",
+        "newton_ad_apply_change",
+        "newton_ad_change_status",
+        "newton_ad_abort_change",
+    }
+)
 
 
 def _mcp_tool_table_names(skill_text: str) -> set[str]:
@@ -60,58 +80,95 @@ def _section_headings(skill_text: str) -> list[tuple[str, int]]:
         if line.startswith("## "):
             headings.append((line[3:].strip(), lineno))
     return headings
-
-
 def test_skill_table_matches_tool_names() -> None:
-    """SKILL.md MCP tool table lists every TOOL_NAMES entry."""
+    """SKILL.md MCP tool table lists every TOOL_NAMES entry.
+
+    The two AD tools are the exception while their SKILL.md text is
+    pending (see SKILL_TEXT_PENDING).
+    """
     skill_text = SKILL_MD.read_text(encoding="utf-8")
     table_names = _mcp_tool_table_names(skill_text)
-    expected = set(server.TOOL_NAMES)
+    expected = set(server.TOOL_NAMES) - SKILL_TEXT_PENDING
     missing = expected - table_names
     assert not missing, (
         f"SKILL.md MCP tool table is missing tools {sorted(missing)}"
     )
-    extra = table_names - expected
+    extra = table_names - set(server.TOOL_NAMES)
     assert not extra, (
         f"SKILL.md MCP tool table has tools that are not in TOOL_NAMES: "
         f"{sorted(extra)}"
     )
 
 
+def _release_readme() -> Path:
+    return RELEASE_README if PRIVATE_LAYOUT else README_MD
+
+
+AD_TOOL_NAMES = frozenset(name for name in server.TOOL_NAMES if name.startswith("newton_ad_"))
+
+
+def test_the_release_readme_counts_the_released_tools_and_the_ones_on_main() -> None:
+    """The public README names the seventeen released tools on its feature
+    line, the six AD tools of the main branch elsewhere, and both counts on
+    its layout line."""
+    text = _release_readme().read_text(encoding="utf-8")
+    released = server.TOOL_NAMES - AD_TOOL_NAMES
+    assert len(released) == 17 and len(AD_TOOL_NAMES) == 6
+    feature = [
+        line
+        for line in text.splitlines()
+        if "newton_list_devices" in line and "newton_read" in line
+    ]
+    assert feature, "the release README has no feature line listing newton tools"
+    assert "seventeen tools" in feature[0]
+    for name in sorted(released):
+        assert name in feature[0], f"the feature line does not list {name}"
+    for name in sorted(AD_TOOL_NAMES):
+        assert f"`{name}`" in text, f"the release README does not name {name}"
+    layout = [line for line in text.splitlines() if line.startswith("mcp/newton_mcp/ ")]
+    assert layout and "(seventeen tools in 1.1.3, twenty-three on main)" in layout[0]
+
+
+@pytest.mark.skipif(
+    not PRIVATE_LAYOUT,
+    reason="README.md is the release README in the public tree; the test above covers it",
+)
 def test_readme_counts_and_tools() -> None:
-    """README lists seventeen tools and every tool name."""
+    """README lists twenty-three tools and every tool name."""
     readme_text = README_MD.read_text(encoding="utf-8")
     # The word "eleven tools" must not appear anywhere.
     assert "eleven tools" not in readme_text, (
         "README.md still says 'eleven tools' after the tool count grew"
     )
 
-    # The MCP server feature line mentions 'seventeen tools' and every tool name.
+    # The MCP server feature line mentions 'twenty-three tools' and every tool name.
     feature_lines = [
-        line for line in readme_text.splitlines()
+        line
+        for line in readme_text.splitlines()
         if "newton_list_devices" in line and "newton_read" in line
     ]
     assert feature_lines, "README.md has no feature line listing newton tools"
     feature_line = feature_lines[0]
-    assert "seventeen tools" in feature_line, (
-        f"Feature line does not say 'seventeen tools': {feature_line[:120]!r}"
+    assert "twenty-three tools" in feature_line, (
+        f"Feature line does not say 'twenty-three tools': {feature_line[:120]!r}"
     )
     for tool_name in sorted(server.TOOL_NAMES):
         assert tool_name in feature_line, (
             f"Feature line does not list {tool_name}"
         )
 
-    # The repository-layout line for mcp/newton_mcp/ says "(seventeen tools)".
+    # The repository-layout line for mcp/newton_mcp/ says "(twenty-three tools)".
     layout_lines = [
-        line for line in readme_text.splitlines()
+        line
+        for line in readme_text.splitlines()
         if line.startswith("mcp/newton_mcp/")
     ]
     assert layout_lines, (
         "README.md has no repository-layout line for mcp/newton_mcp/"
     )
     layout_line = layout_lines[0]
-    assert "(seventeen tools)" in layout_line, (
-        f"Layout line does not say '(seventeen tools)': {layout_line!r}"
+    assert "(twenty-three tools)" in layout_line, (
+        f"Layout line does not say '(twenty-three tools)': {layout_line!r}"
     )
 
 
@@ -155,3 +212,23 @@ def test_skill_experimental_section() -> None:
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q", "-p", "no:cacheprovider"]))
+
+
+SETUP_CLIENTS_MD = REPO_ROOT / "docs" / "SETUP-CLIENTS.md"
+
+_NUMBER_WORD_TOOLS = re.compile(
+    r"\b((?:twenty|thirty)(?:-(?:one|two|three|four|five|six|seven|eight|nine))?"
+    r"|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen"
+    r"|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)\s+tools\b",
+    re.IGNORECASE,
+)
+
+
+def test_setup_clients_tool_count_matches_the_server() -> None:
+    """docs/SETUP-CLIENTS.md names no tool count but the server's own."""
+    assert len(server.TOOL_NAMES) == 23
+    text = SETUP_CLIENTS_MD.read_text(encoding="utf-8")
+    counts = {match.group(1).lower() for match in _NUMBER_WORD_TOOLS.finditer(text)}
+    assert counts <= {"twenty-three"}, (
+        f"docs/SETUP-CLIENTS.md says {sorted(counts)} tools; the server has twenty-three"
+    )

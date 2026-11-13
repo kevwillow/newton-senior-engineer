@@ -42,6 +42,14 @@ STATUSES = ("ok", "empty", "device_error", "auth_failed", "timed_out", "unreacha
 # patterns.
 HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.:-]{0,252}$")
 USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}$")
+# The AD platforms log in with a user principal name.  The ssh client
+# refuses the ``domain\user`` form (measured on the Windows DC), so the
+# inventory holds ``newton-audit@win.newton.test`` and ssh splits the
+# destination at its last ``@``.  The Samba collector logs in with a
+# plain user name, so both forms are accepted here.
+AD_USER_RE = re.compile(
+    r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}(@[A-Za-z0-9][A-Za-z0-9.-]{0,251})?$"
+)
 # the old private names stay as aliases so nothing else breaks
 _HOST_RE = HOST_RE
 _USER_RE = USER_RE
@@ -135,6 +143,17 @@ def _check_platform(target: SshTarget) -> None:
         _refuse(name, "OpenWrt must use its existing transport")
 
 
+def user_grammar(platform: str) -> re.Pattern[str]:
+    """The user grammar of one platform.
+
+    The AD platforms log in with a user principal name; every other
+    platform logs in with a plain user name.
+    """
+    if platform in registry.AD_PLATFORMS or platform in registry.AD_WRITE_PLATFORMS:
+        return AD_USER_RE
+    return USER_RE
+
+
 def base_argv(target: SshTarget) -> list[str]:
     """Build the locked OpenSSH options for a target.
 
@@ -153,7 +172,7 @@ def base_argv(target: SshTarget) -> list[str]:
         _refuse(name, "known_hosts must be an existing regular file")
     if type(target.host) is not str or HOST_RE.fullmatch(target.host) is None:
         _refuse(name, "host fails the hostname grammar")
-    if type(target.user) is not str or USER_RE.fullmatch(target.user) is None:
+    if type(target.user) is not str or user_grammar(target.platform).fullmatch(target.user) is None:
         _refuse(name, "user fails the username grammar")
     if type(target.port) is not int or isinstance(target.port, bool):
         _refuse(name, "port must be an integer from 1 through 65535")

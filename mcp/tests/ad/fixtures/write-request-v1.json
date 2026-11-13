@@ -1,0 +1,24 @@
+{
+  "after": {
+    "uac": 66048
+  },
+  "before": {
+    "uac": 4260352
+  },
+  "device": "lab-win",
+  "exp": 1800000600,
+  "mode": "apply",
+  "nbf": 1800000000,
+  "risk": "MED",
+  "target": {
+    "bit": 4194304,
+    "guid": "6f9619ff-8b86-d011-b42d-00c04fc964ff",
+    "sam": "seed-asrep",
+    "sid": "S-1-5-21-1-2-3-1105"
+  },
+  "token": "4988fd323ce3f0435bcd686224afb568a968280a723ff938e1e8861e7ab243f5",
+  "txid": "0123456789abcdef0123456789abcdef",
+  "v": 1,
+  "verb": "uac-clear",
+  "window": 600
+}

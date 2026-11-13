@@ -109,7 +109,7 @@ skip it.
 An existing file is never overwritten; the installer prints the one line to add instead. The approval passphrase
 comes in step 7. The install creates the `newton` account and group (home `/var/lib/newton`, no login shell), which
 holds the router keys; the code under `/opt/newton`; the launchers `/usr/local/bin/newton-mcp`, `newton-approve`,
-`newton-router-setup`, `newton-enrol` and `newton-doctor`; the sudoers rules in `/etc/sudoers.d/newton-mcp`; and
+`newton-router-setup`, `newton-enrol`, `newton-ad-setup` and `newton-doctor`; the sudoers rules in `/etc/sudoers.d/newton-mcp`; and
 the bootstrap `/usr/local/sbin/newton-bootstrap`.
 
 Near its end the install prints these lines. The two access modes are for the router, and step 7e picks one:
@@ -432,6 +432,85 @@ restore command; read step 7e before you run it. It refuses while the router is 
 
 There is no uninstaller for the install on this machine: the installer, the bootstrap and the doctor have no remove
 action. Everything they created stays until you remove it yourself.
+
+## 10. Add an Active Directory domain controller
+
+The Active Directory audit and changes are on the main branch, not yet released. `SKILL.md` ("Active Directory",
+"Setup") says what each setup script does on the domain controller and the rules for a domain with more than one DC.
+This step gives the commands on the Newton host. Every command runs in your own terminal, one at a time. This guide
+uses `dc1` for the audit entry, `dc1-ops` for the write entry, `ad.example.com` for the domain and `192.0.2.21` for
+the controller; replace them with your own. A domain with more than one DC repeats 10a to 10e for each DC.
+
+**10a.** Make the audit key and the write key. The `newton` account holds them, as it holds the router key of 7c:
+
+```sh
+sudo -u newton mkdir -p -m 700 /var/lib/newton/.ssh
+sudo -u newton ssh-keygen -t ed25519 -N '' -f /var/lib/newton/.ssh/dc1-audit
+sudo -u newton ssh-keygen -t ed25519 -N '' -f /var/lib/newton/.ssh/dc1-ops
+```
+Your own account cannot read `/var/lib/newton/.ssh`, so copy the two public keys into your current directory. A
+public key is not a secret:
+
+```sh
+sudo -u newton cat /var/lib/newton/.ssh/dc1-audit.pub > dc1-audit.pub
+sudo -u newton cat /var/lib/newton/.ssh/dc1-ops.pub > dc1-ops.pub
+```
+
+**10b.** Print the two setup scripts, as yourself, from the same directory. For a Samba DC:
+
+```sh
+/opt/newton/scripts/newton-ad-setup samba --domain ad.example.com --pubkey dc1-audit.pub --device dc1 --host 192.0.2.21 > dc1-audit-setup.sh
+/opt/newton/scripts/newton-ad-setup write samba --domain ad.example.com --pubkey dc1-ops.pub --device dc1-ops --host 192.0.2.21 --ou 'OU=Staff,DC=ad,DC=example,DC=com' > dc1-ops-setup.sh
+```
+For a Windows DC, put `windows` in place of `samba` and save the scripts as `.ps1` files. Give `--ou` once per
+location you want Newton to change. On every DC but the PDC emulator, add `--domain-device` and the write entry name of
+the PDC emulator to the write command. The audit script alone is enough for the audit; skip the write script if you
+want no changes.
+
+**10c.** Read each script, copy it to the DC and run it there: a Samba script as root, a Windows script as a Domain
+Admin (the write script in a session with network credentials, see `SKILL.md`). Each script ends with an inventory
+entry. Keep it for 10e.
+
+**10d.** Pin the host key of the DC. Newton checks it strictly and never learns it on its own:
+
+```sh
+ssh-keyscan -t ed25519 192.0.2.21 | sudo -u newton tee /var/lib/newton/.ssh/dc1.known_hosts >/dev/null
+sudo -u newton ssh-keygen -lf /var/lib/newton/.ssh/dc1.known_hosts
+```
+Compare the fingerprint with the one the DC itself shows: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on a
+Samba DC, `ssh-keygen -lf C:\ProgramData\ssh\ssh_host_ed25519_key.pub` on a Windows DC. If they differ, stop and
+remove the file. The address you scan must be the `host` of the entry.
+
+**10e.** Add the entries. Paste each printed entry into a file in your current directory, `dc1.toml` and
+`dc1-ops.toml`: copy from its `[devices.<name>]` line to the last `key = "value"` line, and stop at the blank line;
+the sentences printed after it are notes, not TOML. Then replace its two placeholder lines (`key_file` and `known_hosts`) with the real paths. In the audit
+entry:
+
+```toml
+key_file = "/var/lib/newton/.ssh/dc1-audit"
+known_hosts = "/var/lib/newton/.ssh/dc1.known_hosts"
+```
+In the write entry:
+
+```toml
+key_file = "/var/lib/newton/.ssh/dc1-ops"
+known_hosts = "/var/lib/newton/.ssh/dc1.known_hosts"
+```
+Then append both to the inventory, which the `newton` account owns, as in 7b:
+
+```sh
+sudo -u newton tee -a /var/lib/newton/devices.toml < dc1.toml >/dev/null
+sudo -u newton tee -a /var/lib/newton/devices.toml < dc1-ops.toml >/dev/null
+sudo -u newton chmod 600 /var/lib/newton/devices.toml
+```
+
+**10f.** For changes only, once per domain: record the approval key of the entry that stands for the domain (the PDC
+emulator's write entry). Type the passphrase you typed on every DC of the domain, twice:
+
+```sh
+sudo -u newton /usr/local/bin/newton-ad-setup approval-key dc1-ops
+```
+The fingerprint it prints must equal the one each DC printed.
 
 ## If something goes wrong
 

@@ -87,9 +87,9 @@ def _plan_output(diff="dhcp.skilltest='host'"):
 # ---- tool list (TOOL_NAMES, names, in-memory SDK list) ---------------------
 
 
-def test_tool_names_has_exactly_seventeen_names_and_lists_the_read_tools():
+def test_tool_names_has_exactly_nineteen_names_and_lists_the_read_tools():
     """TOOL_NAMES is the canonical source of truth for the MCP surface."""
-    assert len(server.TOOL_NAMES) == 17
+    assert len(server.TOOL_NAMES) == 23
     assert "newton_list_tiers" in server.TOOL_NAMES
     assert "newton_plan_tier" in server.TOOL_NAMES
     assert "newton_guided_recommend" in server.TOOL_NAMES
@@ -98,6 +98,8 @@ def test_tool_names_has_exactly_seventeen_names_and_lists_the_read_tools():
     assert "newton_get_state" in server.TOOL_NAMES
     assert "newton_plan_scan" in server.TOOL_NAMES
     assert "newton_run_scan" in server.TOOL_NAMES
+    assert "newton_ad_audit" in server.TOOL_NAMES
+    assert "newton_ad_list_checks" in server.TOOL_NAMES
 
 
 def test_tool_names_never_named_approve_profile_or_break_glass():

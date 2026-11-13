@@ -13,6 +13,45 @@ Two version numbers exist and are separate:
 
 ## [Unreleased]
 
+### Added
+- An Active Directory audit for Windows Server AD and Samba AD domains: `newton_ad_list_checks` and
+  `newton_ad_audit`, 48 read-only checks (privileged groups, Kerberos and password policy, risky account flags,
+  delegation, LDAP signing and NTLM, stale accounts). Newton reads through a key-only SSH login of an ordinary account
+  that runs one fixed command (on Samba that command runs the read-only collector as root through sudo, with no
+  arguments); `scripts/newton-ad-setup windows|samba` prints the script the owner runs on each domain controller. On an
+  installed Newton, `docs/INSTALL.md` step 10 gives the commands for the keys, the pinned host key and the inventory
+  entries. The audit changes nothing.
+- Active Directory changes: `newton_ad_plan_change`, `newton_ad_apply_change`, `newton_ad_change_status` and
+  `newton_ad_abort_change`, for account flags, encryption types, disable and enable, membership of non-privileged
+  groups, the machine account quota, new users (created disabled), moves between OUs, and unlock. The undo is armed on
+  the domain controller until Newton confirms; `newton_ad_apply_change` confirms or aborts before it returns, and when a
+  DC does not catch up its result says what the undo restored and which attributes it left as conflicts.
+  `newton_ad_abort_change` works only on a change still armed (an apply cut off before its confirm). Once confirmed,
+  Newton does not undo it: the owner plans the reverse change. An unlock has no undo and is written at once. The owner approves each change in their own terminal with
+  `sudo -u newton /usr/local/bin/newton-approve ad-change <plan_id>`; the
+  domain controller checks that approval itself and arms its undo before it writes, and Newton confirms a change only
+  when every domain controller with a write entry in the inventory shows it. Newton does not list the DCs of the
+  directory, so a DC without a write entry is never read; each plan lists the DCs it will check and says so. `scripts/newton-ad-setup write windows|samba` sets up the `newton-ops`
+  account, which is never in a privileged group and holds only the rights these changes need. The write helpers were
+  tested live in the lab on Windows Server 2025 and Samba 4.22 domain controllers. The second-DC setup
+  (--domain-device), the printed ad_domain_guid and changes on a domain with two domain controllers were tested live
+  on a two-DC Windows Server 2025 domain and a two-DC Samba domain: both DCs of a domain hold the same approval key,
+  every change is confirmed on both, and a withheld confirm rolls back on both. A move of the PDC role between domain
+  controllers was not tested live.
+- `SKILL.md` has an Active Directory section: the setup, the audit, the change flow and what Newton does not change.
+- An installed Newton has a new launcher, `/usr/local/bin/newton-ad-setup`, with its own sudoers rule (no
+  `NOPASSWD`, `timestamp_timeout=0`): `sudo -u newton /usr/local/bin/newton-ad-setup approval-key <device>` records
+  the AD approval fingerprint in the newton user's state directory, where `newton-approve` reads it. It takes
+  `approval-key` and one device name, nothing else. The `newton-approve` launcher takes `ad-change <plan_id>` as well
+  as a lone plan id, and `newton-doctor` checks the new launcher like the others.
+
+### Known limits
+- Changes work only while the PDC emulator's own write entry is in the inventory and names the device that stands
+  for the domain; if the PDC role moves to a controller without a write entry, every change is refused until the
+  inventory follows it.
+- Newton does not change privileged groups, delete objects, reset passwords, reset krbtgt, or change trusts,
+  functional levels or Group Policy, and there is no owner-script tool for Active Directory yet.
+
 ## [1.1.3] - 2026-11-09
 
 ### Fixed

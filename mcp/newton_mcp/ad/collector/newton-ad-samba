@@ -1,0 +1,1684 @@
+#!/usr/bin/python3 -I
+"""The Samba Active Directory collector for Newton (SPEC-1.3 section 7).
+
+The collector runs on the Samba domain controller as root, through
+``sudo -n /usr/local/sbin/newton-ad-samba``, takes no input at all and
+prints one JSON document on stdout.  It is the Samba half of the
+collector pair: the Windows half is ``collector.ps1`` and the two produce
+the same shape of document.
+
+The collector runs only the query set it is installed with.  It never
+takes a filter, a base or an attribute from anybody, and it reads the
+directory through the Samba python bindings and never through
+``ldbsearch``, because the LDIF that ``ldbsearch`` writes rewrites SIDs
+and security descriptors as text.
+
+The install is checked before anything else happens: the three files
+of the install, the two directories that hold them and every parent of
+those directories up to the root must be owned by root and must not be
+writable by their group or by the others.  The check runs before the
+samba bindings are imported, and the two files of the query set are
+opened without following a link.
+
+The SYSVOL is walked by the collector itself, never with ``os.walk``:
+the base is opened without following a link, every folder is opened
+relative to the descriptor of its parent and every file is opened
+relative to the descriptor of its folder, so no path string is ever
+opened below the base and a name that is swapped for a link between
+the listing and the open is never followed.  A symlink and a special
+file are never walked into and never read, and a file is opened without
+following a link and without waiting for a writer.  The path that the
+document carries is built from the fixed names of the spec, so that the
+name of a file of the SYSVOL never reaches the document.
+
+The identity of the document is the domain account ``newton-audit``:
+its ``objectSid`` and its ``tokenGroups`` are read from the directory.
+The account that logs in is the local account ``newton-ssh``, and
+``SUDO_USER`` has to be exactly that one: anything else, or no
+``SUDO_USER`` at all, is refused with exit 1.
+
+Exit codes (SPEC-1.3 section 7):
+
+* 0 when a document was produced, even when some queries failed;
+* 2 on a forbidden-list refusal, an unsafe install or an argument;
+* 1 when no document can be produced.
+"""
+
+from __future__ import annotations
+
+import base64
+import codecs
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+import time
+import xml.etree.ElementTree as ElementTree
+
+
+# ---- the install (SPEC-1.3 section 7) ---------------------------------------
+
+# The directory the helper lives in and the directory the two files it
+# runs live in.  Both of them, and the three files, must be owned by
+# root and must not be writable by their group or by others.
+SBIN_DIR = "/usr/local/sbin"
+LIB_DIR = "/usr/local/lib/newton-ad"
+COLLECTOR_NAME = "newton-ad-samba"
+
+# The uid that must own the install.
+INSTALL_OWNER_UID = 0
+
+# The directory the walk of the parents of the install stops at.  It is
+# the root of the filesystem on a real host.
+INSTALL_ROOT = "/"
+
+# The flag that opens a file without following a link.  It is not on
+# every platform, and the collector runs on Linux only.
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+# ---- the limits (SPEC-1.3 section 7) ----------------------------------------
+
+COLLECTOR_VERSION = "1.3.0"
+
+# The largest number of bytes the rows of the document may take.
+BYTE_LIMIT = 8 * 1024 * 1024
+
+# The seconds the whole run may take.  When they pass, every remaining
+# query and every remaining file is ``truncated`` with ``time_limit``.
+DEADLINE_SECONDS = 300
+
+# The number of rows one page of a search holds.
+PAGE_SIZE = 500
+
+# The seconds one query may take.
+SERVER_TIME_LIMIT_SECONDS = 30
+
+# The largest number of bytes one file of the SYSVOL may hold.  A file
+# that is bigger is refused and never parsed.
+MAX_FILE_BYTES = 4 * 1024 * 1024
+
+
+# ---- the settings (SPEC-1.3 section 7) --------------------------------------
+
+# The fixed list of the settings of the collector host.  The key of an
+# item is the name of the parameter and the source is the loadparm.
+SETTINGS = (
+    "ldap server require strong auth",
+    "ntlm auth",
+    "server signing",
+    "server min protocol",
+    "kerberos encryption types",
+    "allow nt4 crypto",
+    "reject md5 clients",
+    "server schannel",
+    "tls enabled",
+)
+
+
+# ---- the fixed names --------------------------------------------------------
+
+# The local unix account that logs in and the domain account the
+# identity of the document is read from.  They are two accounts and
+# not one: a Samba DC with "passwd: files winbind" resolves the domain
+# account locally already (measured on the lab DC on 2026-11-08),
+# "getent passwd newton-audit" answers
+# "NEWTONLAB\newton-audit:*:3000022:100::/home/NEWTONLAB/newton-audit:/bin/false"
+# and "useradd newton-audit" fails with "user 'newton-audit' already
+# exists".  The shell of the domain account is /bin/false, so it is
+# never the account of a login, and the local account carries another
+# name.
+LOGIN_NAME = "newton-ssh"
+AUDIT_NAME = "newton-audit"
+
+# The name of a GPO folder: a GUID in braces.  A folder that is not one
+# is skipped and counted.
+GUID_RE = re.compile(r"^\{[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}$")
+
+# The name of the security descriptor of an object.  A query that asks
+# for one asks for it by name: real ldb returns only the attributes a
+# search names, so the control alone does not bring the descriptor
+# (measured on the lab DC on 2026-11-08).
+DESCRIPTOR_NAME = "nTSecurityDescriptor"
+
+# The folders of a GPO that hold the preferences of the machine and of
+# the user.  Samba provisions them in upper case (measured on the lab
+# DC on 2026-11-08: "MACHINE" and "USER") and Windows in mixed case,
+# so the folder is looked up whatever its case is and the path that is
+# reported is the one of the spec.
+GPO_SCOPES = ("Machine", "User")
+PREFERENCES_DIR = "Preferences"
+
+# The seven file names a GPO holds, and the folder each of them sits
+# in.  The name of a file of the SYSVOL is not trusted, so the path
+# that the document carries is built from this table and from nothing
+# else.  The name is matched without its case and emitted in the
+# spelling of this table.
+GPO_FILES = {
+    "groups.xml": ("Groups", "Groups.xml"),
+    "services.xml": ("Services", "Services.xml"),
+    "scheduledtasks.xml": ("ScheduledTasks", "ScheduledTasks.xml"),
+    "datasources.xml": ("DataSources", "DataSources.xml"),
+    "drives.xml": ("Drives", "Drives.xml"),
+    "printers.xml": ("Printers", "Printers.xml"),
+    "registry.xml": ("Registry", "Registry.xml"),
+}
+
+# The name that any other file of the SYSVOL is reported under.
+OTHER_FILE_NAME = "other.xml"
+
+# The refusal messages.  None of them carries any text of the directory
+# and none of them carries the text of an exception.
+FAIL_ARGUMENTS = "newton-ad collector: the collector takes no arguments"
+FAIL_MISSING_FILES = "newton-ad collector: the collector files are missing"
+FAIL_UNREADABLE_FILES = "newton-ad collector: the collector files are unreadable"
+FAIL_UNSAFE_INSTALL = "newton-ad collector: the install is not safe"
+FAIL_FORBIDDEN_ATTRIBUTE = (
+    "newton-ad collector: the query set requests a forbidden attribute"
+)
+FAIL_FORBIDDEN_FILTER = (
+    "newton-ad collector: the query set filter names a forbidden attribute"
+)
+FAIL_NO_BINDINGS = "newton-ad collector: the samba bindings are not installed"
+FAIL_NO_DIRECTORY = "newton-ad collector: the directory did not answer"
+FAIL_NO_DOMAIN_SID = "newton-ad collector: the domain sid is unknown"
+FAIL_NO_IDENTITY = "newton-ad collector: the audit account was not found"
+
+
+class IdentityError(Exception):
+    """The identity of the audit account could not be read."""
+
+
+class UnsafeInstall(Exception):
+    """A file of the install is not safe to read."""
+
+
+def _fail(code: int, message: str) -> int:
+    """Print a refusal on stderr and return the exit code."""
+    print(message, file=sys.stderr)
+    return code
+
+
+# ---- the install ------------------------------------------------------------
+
+
+def _install_paths() -> list[str]:
+    """The files of the install that the collector checks."""
+    return [
+        os.path.join(SBIN_DIR, COLLECTOR_NAME),
+        os.path.join(LIB_DIR, "queries.json"),
+        os.path.join(LIB_DIR, "forbidden.json"),
+    ]
+
+
+def _install_directories() -> list[str]:
+    """The two directories of the install and every parent of them.
+
+    The walk stops at ``INSTALL_ROOT``, which is the root of the
+    filesystem on a real host: the directory that holds the helper, the
+    directory that holds the two files it runs, and every directory
+    between them and the root.
+    """
+    found: list[str] = []
+    for path in (SBIN_DIR, LIB_DIR):
+        current = os.path.abspath(path)
+        while True:
+            if current not in found:
+                found.append(current)
+            if current == INSTALL_ROOT:
+                break
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+    return found
+
+
+def _lstat(path: str):
+    """The information about a path, without following a link."""
+    try:
+        return os.lstat(path)
+    except OSError:
+        return None
+
+
+def _is_safe(info) -> bool:
+    """True when the install owner owns the file and it is not writable
+    by its group or by the others."""
+    if info.st_uid != INSTALL_OWNER_UID:
+        return False
+    return not (info.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+
+
+def _install_is_safe() -> bool:
+    """True when the install is safe.
+
+    Every file of the install must be a regular file that the install
+    owner owns and that neither its group nor the others may write.
+    Every directory of it, and every parent of those directories up to
+    the root, must be a directory with the same two properties.
+    """
+    for path in _install_paths():
+        info = _lstat(path)
+        if info is None or not stat.S_ISREG(info.st_mode):
+            return False
+        if not _is_safe(info):
+            return False
+    for path in _install_directories():
+        info = _lstat(path)
+        if info is None or not stat.S_ISDIR(info.st_mode):
+            return False
+        if not _is_safe(info):
+            return False
+    return True
+
+
+def _read_installed_json(path: str) -> tuple[bytes, object]:
+    """The bytes of an installed file and the document they hold.
+
+    The file is opened without following a link, and the check of the
+    install runs on the descriptor of the open file and not on the path
+    of it.
+    """
+    handle = os.open(path, os.O_RDONLY | NOFOLLOW)
+    try:
+        info = os.fstat(handle)
+        if not stat.S_ISREG(info.st_mode) or not _is_safe(info):
+            raise UnsafeInstall(path)
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(handle, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        raw = b"".join(chunks)
+    finally:
+        os.close(handle)
+    return raw, json.loads(raw.decode("utf-8"))
+
+
+# ---- the query set ----------------------------------------------------------
+
+
+def _filter_attributes(text: str) -> set[str]:
+    """The attribute names on the left of the comparison terms of a filter.
+
+    The scanner is a small one, not an LDAP parser: it finds the name
+    of every term and nothing else.  A value that looks like a name
+    (``cn=BCKUPKEY*``) is not one, because no operator follows it.
+    """
+    names: set[str] = set()
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char in "()&|! ":
+            index += 1
+            continue
+        start = index
+        while index < length and (
+            text[index].isalnum() or text[index] in "-_"
+        ):
+            index += 1
+        if index == start:
+            index += 1
+            continue
+        name = text[start:index]
+        while index < length and text[index] == " ":
+            index += 1
+        operator = ""
+        if text[index : index + 2] in (">=", "<=", "~="):
+            operator = text[index : index + 2]
+            index += 2
+        elif index < length and text[index] == "=":
+            operator = "="
+            index += 1
+        if operator:
+            names.add(name.lower())
+    return names
+
+
+def _forbidden_problem(query: dict, forbidden: set[str]) -> str:
+    """The way the query set breaks the forbidden list, if it does.
+
+    A presence-only query may name a forbidden attribute on the left of
+    a filter term: it tests that the attribute is there and asks for
+    nothing else.
+    """
+    for name in list(query.get("attrs", [])) + list(query.get("binary", [])):
+        if str(name).lower() in forbidden:
+            return "attribute"
+    if not bool(query.get("presence_only", False)):
+        for name in _filter_attributes(str(query.get("filter", ""))):
+            if name in forbidden:
+                return "filter"
+    return ""
+
+
+def _expand(template: str, context: dict) -> str:
+    """A base or a filter, with the naming contexts of the DC in it."""
+    text = str(template)
+    for placeholder, name in (
+        ("{domain}", "domain_dn"),
+        ("{config}", "config_dn"),
+        ("{schema}", "schema_dn"),
+    ):
+        text = text.replace(placeholder, str(context.get(name, "")))
+    return text
+
+
+# ---- the values -------------------------------------------------------------
+
+
+def _as_bytes(value) -> bytes:
+    """The raw bytes of one value of a result."""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    return bytes(value)
+
+
+def _element_values(element) -> list[bytes]:
+    """The raw bytes of the values of one attribute of a result."""
+    try:
+        return [_as_bytes(value) for value in element]
+    except TypeError:
+        return [_as_bytes(value) for value in element.values]
+
+
+def _attribute(message, name: str):
+    """One attribute of a result, or None when the result has none."""
+    try:
+        return message[name]
+    except (KeyError, LookupError):
+        return None
+
+
+def _encode_value(raw: bytes, is_binary: bool) -> str:
+    """The text of one value of the document.
+
+    A binary attribute and the security descriptor are the base64 of
+    the raw bytes.  Every other value is the bytes as text: a value
+    that is not text raises, and the query that brought it is an error.
+    """
+    if is_binary:
+        return base64.b64encode(raw).decode("ascii")
+    return raw.decode("utf-8")
+
+
+def _build_row(message, attrs: list[str], binary: set[str], want_sd: bool) -> dict:
+    """One row of a query result.
+
+    Only the attributes the query asked for are in the row, so a row
+    never carries an attribute the directory did not have to give.
+    """
+    values: dict[str, list[str]] = {}
+    for name in attrs:
+        if name == "dn":
+            # The keys of a result hold "dn": it is the name of the
+            # object, not an attribute of it.
+            continue
+        if want_sd and name.lower() == DESCRIPTOR_NAME.lower():
+            # The descriptor is added below, as the base64 of its bytes.
+            continue
+        element = _attribute(message, name)
+        if element is None:
+            continue
+        is_binary = (
+            name.lower() in binary or name.lower() == DESCRIPTOR_NAME.lower()
+        )
+        encoded = [
+            _encode_value(raw, is_binary) for raw in _element_values(element)
+        ]
+        if encoded:
+            values[name] = encoded
+    if want_sd:
+        element = _attribute(message, DESCRIPTOR_NAME)
+        if element is not None:
+            encoded = [
+                _encode_value(raw, True) for raw in _element_values(element)
+            ]
+            if encoded:
+                values[DESCRIPTOR_NAME] = encoded
+    return {"dn": str(message.dn), "a": values}
+
+
+# ---- the errors -------------------------------------------------------------
+
+
+# The error codes of the ldb, as measured on the lab DC (Samba
+# 4.22.11), and the status and the error code of the document that
+# each one has.  The name of every one of them is looked up with
+# getattr, so a binding that does not carry the name does not break the
+# collector, and the measured value is the fallback.  There is no
+# ERR_ACCESS_DENIED, no ERR_INSUFFICIENT_ACCESS and no ERR_AUTH_ERROR.
+ERROR_CODES = {
+    "ERR_NO_SUCH_OBJECT": (32, "unavailable", "no_such_object"),
+    "ERR_INSUFFICIENT_ACCESS_RIGHTS": (50, "denied", "access_denied"),
+    "ERR_TIME_LIMIT_EXCEEDED": (3, "truncated", "time_limit"),
+    "ERR_SIZE_LIMIT_EXCEEDED": (4, "truncated", "size_limit"),
+    "ERR_BUSY": (51, "unavailable", "server_down"),
+    "ERR_UNAVAILABLE": (52, "unavailable", "server_down"),
+}
+
+
+def _error_code(ldb, name: str, measured: int) -> int:
+    """The value of an error code of the ldb.
+
+    The name is asked for with getattr and never as an attribute of the
+    module, so a binding that does not carry it does not break the
+    collector.  The value measured on the lab DC is the fallback.
+    """
+    value = getattr(ldb, name, None)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return measured
+
+
+def _status_for_error(exc, ldb) -> tuple[str, str]:
+    """The status and the error code of a failed query.
+
+    The codes are the ones of the lab DC: a missing object is
+    ``unavailable``, an access error is ``denied``, a limit of the
+    server is ``truncated`` and a server that is busy or gone is
+    ``unavailable``.  Every other error is ``error``.  The text of the
+    exception is never part of the answer.
+    """
+    code = None
+    arguments = getattr(exc, "args", ())
+    if arguments and isinstance(arguments[0], int) and not isinstance(
+        arguments[0], bool
+    ):
+        code = arguments[0]
+    for name, (measured, status, error_code) in ERROR_CODES.items():
+        if code == _error_code(ldb, name, measured):
+            return status, error_code
+    return "error", "other"
+
+
+# ---- the searches -----------------------------------------------------------
+
+
+class _Run:
+    """The state of one run: the deadline and the byte budget."""
+
+    def __init__(self, deadline: float, started: float) -> None:
+        self.deadline = deadline
+        self.started = started
+        self.byte_total = 0
+
+    def expired(self) -> bool:
+        """True when the deadline of the run has passed."""
+        return time.monotonic() > self.deadline
+
+    def elapsed_ms(self) -> int:
+        """The milliseconds the run has taken."""
+        return int((time.monotonic() - self.started) * 1000)
+
+
+def _search(db, base, scope, expression, attrs, controls):
+    """One search of the directory.
+
+    The bindings name the filter of a search ``expression``; the older
+    ones name it ``expressions`` and take a list of them.  The collector
+    tries the first name and falls back to the second.
+
+    The paging control asks the server for the rows a page at a time.
+    A server that answers one page and stops would hide the rows
+    behind it, so the caller asks again without the control when the
+    answer holds exactly one page.
+    """
+    try:
+        return db.search(
+            base=base,
+            scope=scope,
+            expression=expression,
+            attrs=attrs,
+            controls=controls,
+        )
+    except TypeError:
+        return db.search(
+            base=base,
+            scope=scope,
+            expressions=expression,
+            attrs=attrs,
+            controls=controls,
+        )
+
+
+def _search_attrs(attrs: list[str], want_sd: bool) -> list[str]:
+    """The attributes one search asks for.
+
+    A query that wants the security descriptor of its objects asks for
+    the descriptor by name: the real ldb returns only the attributes a
+    search names, so the control ``sd_flags:1:5`` does not bring it
+    (measured on the lab DC on 2026-11-08: the rows of the domain head
+    and of the AdminSDHolder carried no descriptor).  An attribute the
+    query already asks for is not asked for twice.
+    """
+    names = list(attrs)
+    if not want_sd:
+        return names
+    if any(name.lower() == DESCRIPTOR_NAME.lower() for name in names):
+        return names
+    return names + [DESCRIPTOR_NAME]
+
+
+def _run_query(db, ldb, query: dict, context: dict, run: _Run) -> dict:
+    """Run one query of the set and return its block of the document."""
+    base = _expand(query.get("base", ""), context)
+    scope_name = str(query.get("scope", "base"))
+    expression = _expand(query.get("filter", "(objectClass=*)"), context)
+    attrs = [str(name) for name in query.get("attrs", [])]
+    binary = {str(name).lower() for name in query.get("binary", [])}
+    limit = int(query.get("limit", 1000))
+    want_sd = bool(query.get("sd", False))
+    if "{" in base or "}" in base or scope_name not in ("base", "sub"):
+        return {"status": "error", "error_code": "other", "rows": []}
+
+    scope = ldb.SCOPE_BASE if scope_name == "base" else ldb.SCOPE_SUBTREE
+    controls = ["sd_flags:1:5"] if want_sd else []
+    paging = ["paged_results:1:%d" % PAGE_SIZE]
+    search_attrs = _search_attrs(attrs, want_sd)
+
+    started = time.monotonic()
+    messages = None
+    try:
+        messages = _search(db, base, scope, expression, search_attrs, controls + paging)
+    except ldb.LdbError:
+        messages = None
+    except Exception:
+        return {"status": "error", "error_code": "other", "rows": []}
+    if messages is None:
+        try:
+            messages = _search(db, base, scope, expression, search_attrs, controls)
+        except ldb.LdbError as exc:
+            status, code = _status_for_error(exc, ldb)
+            return {"status": status, "error_code": code, "rows": []}
+        except Exception:
+            return {"status": "error", "error_code": "other", "rows": []}
+    if len(messages) == PAGE_SIZE and limit > PAGE_SIZE:
+        # The answer holds exactly one page: the server may have sent
+        # one page only.  Ask again without the paging control, so no
+        # row of the query is lost.
+        try:
+            messages = _search(db, base, scope, expression, search_attrs, controls)
+        except ldb.LdbError as exc:
+            status, code = _status_for_error(exc, ldb)
+            return {"status": status, "error_code": code, "rows": []}
+        except Exception:
+            return {"status": "error", "error_code": "other", "rows": []}
+
+    rows: list[dict] = []
+    status = "ok"
+    error_code = ""
+    for index, message in enumerate(messages):
+        if len(rows) >= limit:
+            status = "truncated"
+            error_code = "size_limit"
+            break
+        if index % PAGE_SIZE == 0:
+            if run.expired():
+                status = "truncated"
+                error_code = "time_limit"
+                break
+            if time.monotonic() - started > SERVER_TIME_LIMIT_SECONDS:
+                status = "truncated"
+                error_code = "time_limit"
+                break
+        try:
+            row = _build_row(message, attrs, binary, want_sd)
+        except (UnicodeDecodeError, TypeError, ValueError):
+            return {"status": "error", "error_code": "other", "rows": []}
+        size = len(json.dumps(row, separators=(",", ":")).encode("utf-8"))
+        if run.byte_total + size > BYTE_LIMIT:
+            status = "truncated"
+            error_code = "byte_limit"
+            break
+        run.byte_total += size
+        rows.append(row)
+    if status == "ok" and time.monotonic() - started > SERVER_TIME_LIMIT_SECONDS:
+        status = "truncated"
+        error_code = "time_limit"
+    return {"status": status, "error_code": error_code, "rows": rows}
+
+
+def _collect_queries(db, ldb, queries, context: dict, run: _Run) -> dict:
+    """Run every query of the set."""
+    results: dict[str, dict] = {}
+    for query in queries:
+        query_id = str(query.get("id", ""))
+        if run.expired():
+            results[query_id] = {
+                "status": "truncated",
+                "error_code": "time_limit",
+                "rows": [],
+            }
+            continue
+        results[query_id] = _run_query(db, ldb, query, context, run)
+    return results
+
+
+# ---- the identity -----------------------------------------------------------
+
+
+def _escape(ldb, value: str) -> str:
+    """The value of a filter, escaped the way ldb escapes it.
+
+    ``ldb.binary_encode`` returns text and not bytes (measured on Samba
+    4.22.11: ``ldb.binary_encode("a*b(")`` is the str ``"a\\2Ab\\28"``),
+    so the text is taken as it is.
+    """
+    raw = ldb.binary_encode(value)
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8")
+    return str(raw)
+
+
+def _sid_to_string(raw: bytes) -> str:
+    """The text form of a binary SID."""
+    from samba.dcerpc import security
+    from samba.ndr import ndr_unpack
+
+    try:
+        return str(ndr_unpack(security.dom_sid, raw))
+    except Exception:
+        return str(security.dom_sid(raw))
+
+
+def _collect_identity(db, ldb, context: dict, sudo_user: str) -> dict:
+    """The identity of the account the collector runs for.
+
+    The account that logs in is the local one: ``SUDO_USER`` has to be
+    exactly the login account, and anything else is refused.  The
+    identity of the document is the domain account of the audit, looked
+    up by its name, and its SID and its token groups come from the
+    directory.
+    """
+    if sudo_user != LOGIN_NAME:
+        raise IdentityError("the sudo user is not the login account")
+    expression = "(sAMAccountName=%s)" % _escape(ldb, AUDIT_NAME)
+    try:
+        found = _search(
+            db,
+            context["domain_dn"],
+            ldb.SCOPE_SUBTREE,
+            expression,
+            ["objectSid"],
+            [],
+        )
+    except ldb.LdbError as exc:
+        raise IdentityError("the account could not be read") from exc
+    except Exception as exc:
+        raise IdentityError("the account could not be read") from exc
+    if not found:
+        raise IdentityError("the account was not found")
+    element = _attribute(found[0], "objectSid")
+    if element is None:
+        raise IdentityError("the account has no sid")
+    raws = _element_values(element)
+    if not raws:
+        raise IdentityError("the account has no sid")
+    try:
+        sid = _sid_to_string(raws[0])
+    except Exception as exc:
+        raise IdentityError("the sid of the account could not be read") from exc
+    dn = str(found[0].dn)
+    try:
+        groups = _search(
+            db,
+            dn,
+            ldb.SCOPE_BASE,
+            "(objectClass=*)",
+            ["tokenGroups"],
+            [],
+        )
+    except ldb.LdbError as exc:
+        raise IdentityError("the token groups could not be read") from exc
+    except Exception as exc:
+        raise IdentityError("the token groups could not be read") from exc
+    token_sids: list[str] = []
+    if groups:
+        element = _attribute(groups[0], "tokenGroups")
+        if element is not None:
+            for raw in _element_values(element):
+                try:
+                    token_sids.append(_sid_to_string(raw))
+                except Exception as exc:
+                    raise IdentityError(
+                        "a token group sid could not be read"
+                    ) from exc
+    if not token_sids:
+        raise IdentityError("the account has no token groups")
+    return {"user": AUDIT_NAME, "sid": sid, "token_group_sids": token_sids}
+
+
+# ---- the settings -----------------------------------------------------------
+
+
+def _setting_value(value) -> tuple[str, str]:
+    """The status and the value of one setting of the host.
+
+    A boolean is TRUE or FALSE, a list is its values with single
+    spaces between them, and a parameter that the loadparm does not
+    hold is ``unavailable``.
+    """
+    if value is None:
+        return "unavailable", ""
+    if isinstance(value, bool):
+        return "ok", "TRUE" if value else "FALSE"
+    if isinstance(value, (list, tuple)):
+        return "ok", " ".join(str(one) for one in value)
+    return "ok", str(value)
+
+
+def _collect_settings(lp, is_dc: bool) -> dict:
+    """The fixed list of the settings of the collector host.
+
+    A parameter the loadparm does not hold is reported as
+    ``unavailable``: the real binding raises a ``KeyError`` for a name
+    it does not know, and the collector never lets that stop the run.
+    """
+    if not is_dc:
+        return {"status": "not_collected", "error_code": "not_a_dc", "items": []}
+    items = []
+    for name in SETTINGS:
+        try:
+            value = lp.get(name)
+        except KeyError:
+            status, value = "unavailable", ""
+        else:
+            status, value = _setting_value(value)
+        items.append(
+            {"source": "loadparm", "key": name, "status": status, "value": value}
+        )
+    return {"status": "ok", "error_code": "", "items": items}
+
+
+# ---- the SYSVOL -------------------------------------------------------------
+
+
+def _policies_path(lp, realm: str) -> str | None:
+    """The path of the Policies folder of the realm.
+
+    The base of the SYSVOL is the share of the loadparm: the second
+    argument of ``get`` is the name of a share and not a default value
+    (measured on the lab DC: ``lp.get("path", "sysvol")`` is the path
+    of the sysvol share).  A base that is None or that is not an
+    absolute path is refused, so that nothing is ever read relative to
+    the working directory.
+    """
+    base = lp.get("path", "sysvol")
+    if not isinstance(base, str) or not os.path.isabs(base):
+        return None
+    return os.path.join(base, realm.lower(), "Policies")
+
+
+# The kinds of an entry of a directory.  A symlink is neither a
+# directory nor a file: it is never walked into and never read.
+KIND_DIRECTORY = "dir"
+KIND_FILE = "file"
+KIND_SPECIAL = "special"
+
+# The answers of the reader of a file of the SYSVOL.
+FILE_OK = "ok"
+FILE_SPECIAL = "special"
+FILE_REFUSED = "refused"
+
+# The limits of the walk.  A directory holds more entries than this,
+# or the walk is deeper than this, and the rest is counted in
+# ``skipped_special``: the walk is bounded, and what it did not read
+# is never reported as read.
+MAX_ENTRIES_PER_DIRECTORY = 10000
+MAX_DEPTH = 8
+
+# The folders of a GPO that hold the template of the policy of the
+# domain.  They are looked up without their case.
+GPTTMPL_FOLDERS = ("Machine", "Microsoft", "Windows NT", "SecEdit")
+
+# The name of the template of a GPO.
+GPTTMPL_FILE = "GptTmpl.inf"
+
+# The sections of a template that the collector reads.
+GPTTMPL_SECTIONS = ("System Access", "Kerberos Policy")
+
+# The keys of a template that the checks of Newton read.  A key that is
+# not in this list is never emitted: a file of the SYSVOL is not data
+# Newton reads, and it may hold text that is meant for a model.
+GPTTMPL_KEYS = frozenset(
+    {
+        # AD-A-34: the Kerberos policy of the GPO.
+        "MaxTicketAge",
+        "MaxServiceAge",
+        "MaxRenewAge",
+        "MaxClockSkew",
+        # AD-A-36 and AD-A-37: the settings of the LDAP service.
+        "LDAPServerIntegrity",
+        "LdapEnforceChannelBinding",
+        # AD-A-38: the NTLM restrictions of the collector host.
+        "LmCompatibilityLevel",
+        "NoLMHash",
+        "RestrictAnonymous",
+        "RestrictSendingNTLMTraffic",
+        "RestrictReceivingNTLMTraffic",
+        "RestrictNTLMInDomain",
+        "FullSecureChannelProtection",
+        "VulnerableChannelAllowList",
+    }
+)
+
+# The value of a key of a template is a number, and nothing else.
+GPTTMPL_VALUE_RE = re.compile(r"^-?[0-9]{1,10}$")
+
+
+class _Counters:
+    """The counters of one part of the scan of the SYSVOL.
+
+    ``skipped_special`` counts the entries that were never read: a
+    symlink, a named pipe, a socket, a device, an entry past a cap and
+    a folder that could not be opened.  ``parse_refused`` counts the
+    files that were read and could not be used.
+    """
+
+    def __init__(self) -> None:
+        self.skipped_special = 0
+        self.parse_refused = 0
+
+
+def _open_base(path: str) -> int | None:
+    """The descriptor of the base of the walk, or None.
+
+    The base is opened without following a link and it must be a
+    directory.  Nothing below the base is ever opened by its path:
+    every name is opened relative to the descriptor of its directory.
+    """
+    try:
+        return os.open(path, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
+    except OSError:
+        return None
+
+
+def _open_directory(parent_fd: int, name: str) -> int | None:
+    """The descriptor of a directory of a directory, or None.
+
+    The name is opened relative to the descriptor of the parent, so a
+    name that was swapped for a link between the listing and the open
+    is refused: the link is never followed.
+    """
+    try:
+        return os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+    except OSError:
+        return None
+
+
+def _open_file(parent_fd: int, name: str) -> int | None:
+    """The descriptor of a regular file of a directory, or None.
+
+    The file is opened without following a link and without waiting for
+    a writer, and it must be a regular file.  A symlink, a named pipe
+    and a directory are therefore never read.
+    """
+    try:
+        handle = os.open(
+            name,
+            os.O_RDONLY | NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=parent_fd,
+        )
+    except OSError:
+        return None
+    try:
+        info = os.fstat(handle)
+        if not stat.S_ISREG(info.st_mode):
+            os.close(handle)
+            return None
+    except OSError:
+        os.close(handle)
+        return None
+    return handle
+
+
+def _read_child_file(parent_fd: int, name: str) -> tuple[str, bytes | None]:
+    """The bytes of a file of a directory.
+
+    The answer is ``(FILE_OK, the bytes)`` for a file that was read,
+    ``(FILE_SPECIAL, None)`` for an entry that is not a regular file,
+    and ``(FILE_REFUSED, None)`` for a file that could not be read.
+
+    The file is opened by descriptor, relative to the directory, with
+    ``O_NOFOLLOW`` and ``O_NONBLOCK``, and it must be a regular file of
+    at most four mebibytes.  The descriptor is closed in every case.
+    """
+    handle = _open_file(parent_fd, name)
+    if handle is None:
+        return (FILE_SPECIAL, None)
+    try:
+        info = os.fstat(handle)
+        if info.st_size > MAX_FILE_BYTES:
+            return (FILE_REFUSED, None)
+        limit = MAX_FILE_BYTES + 1
+        chunks: list[bytes] = []
+        total = 0
+        while total < limit:
+            chunk = os.read(handle, min(65536, limit - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > MAX_FILE_BYTES:
+            return (FILE_REFUSED, None)
+        return (FILE_OK, b"".join(chunks))
+    except OSError:
+        return (FILE_REFUSED, None)
+    finally:
+        os.close(handle)
+
+
+def _scandir(dir_fd: int) -> list[tuple[str, str]]:
+    """The entries of a directory, by descriptor.
+
+    The answer is a list of (name, kind).  The listing never follows a
+    link: an entry that is a symlink is neither a directory nor a
+    file, and it is never walked into and never read.
+    """
+    entries: list[tuple[str, str]] = []
+    try:
+        with os.scandir(dir_fd) as handle:
+            for entry in handle:
+                kind = KIND_SPECIAL
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        kind = KIND_DIRECTORY
+                    elif entry.is_file(follow_symlinks=False):
+                        kind = KIND_FILE
+                except OSError:
+                    kind = KIND_SPECIAL
+                entries.append((entry.name, kind))
+    except OSError:
+        return []
+    return entries
+
+
+def _list_dir(dir_fd: int, counters: _Counters) -> list[tuple[str, str]]:
+    """The entries of a directory, and the count of the special ones.
+
+    An entry that is neither a directory nor a regular file is a
+    symlink, a named pipe, a socket or a device: it is never walked
+    into and never read, and it is counted once.
+
+    A directory holds more entries than the cap of the walk, and the
+    entries past the cap are not read: they are counted as skipped.
+    """
+    entries = _scandir(dir_fd)
+    for _name, kind in entries:
+        if kind == KIND_SPECIAL:
+            counters.skipped_special += 1
+    if len(entries) > MAX_ENTRIES_PER_DIRECTORY:
+        counters.skipped_special += len(entries) - MAX_ENTRIES_PER_DIRECTORY
+        entries = entries[:MAX_ENTRIES_PER_DIRECTORY]
+    return entries
+
+
+def _folder_named(entries: list[tuple[str, str]], name: str) -> list[str]:
+    """Every folder with that name among the entries of a directory.
+
+    Samba provisions the folders of a GPO in upper case and Windows in
+    mixed case, and a host may hold two of them: every match is walked,
+    and the names are sorted, so that the walk is the same on every
+    host.  A symlink is never a folder here: it is skipped and counted.
+    """
+    found = [
+        entry_name
+        for entry_name, kind in entries
+        if kind == KIND_DIRECTORY and entry_name.lower() == name.lower()
+    ]
+    return sorted(found)
+
+
+def _decode(raw: bytes) -> str | None:
+    """The text of a file of the SYSVOL.
+
+    A byte order mark picks the encoding: UTF-8, UTF-16 little endian
+    or UTF-16 big endian.  A file without one is read as UTF-8 with the
+    replacement characters, so that a file of another encoding is read
+    and not thrown away.
+    """
+    if raw.startswith(codecs.BOM_UTF8):
+        try:
+            return raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return None
+    if raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(codecs.BOM_UTF16_BE):
+        try:
+            return raw.decode("utf-16")
+        except UnicodeDecodeError:
+            return None
+    return raw.decode("utf-8", "replace")
+
+
+def _local_name(tag) -> str:
+    """The name of an element, without its namespace."""
+    text = str(tag)
+    if text.startswith("{"):
+        return text.split("}", 1)[-1]
+    return text
+
+
+def _canonical_name(file_name: str) -> str:
+    """The fixed name of a file of the SYSVOL, or an empty string.
+
+    A file that is not one of the seven of the table has no fixed name,
+    and the rules that name a file (the autologon rule of the
+    Registry.xml) are not applied to it.
+    """
+    entry = GPO_FILES.get(file_name.lower())
+    if entry is None:
+        return ""
+    return entry[1]
+
+
+def _gpp_path(scope: str, file_name: str) -> str:
+    """The path of a file of the SYSVOL in the document.
+
+    The path carries only the fixed names of the spec: the scope, the
+    folder of the preferences, the folder of the file and the name of
+    the file.  A file that is not one of the seven is reported as
+    "other.xml", so that the name of a file of the SYSVOL never
+    reaches the document.
+    """
+    entry = GPO_FILES.get(file_name.lower())
+    if entry is None:
+        return "%s/%s/%s" % (scope, PREFERENCES_DIR, OTHER_FILE_NAME)
+    kind, canonical = entry
+    return "%s/%s/%s/%s" % (scope, PREFERENCES_DIR, kind, canonical)
+
+
+def _measure_preferences(text: str, file_name: str) -> tuple[int, int] | None:
+    """The number of cpassword elements and of autologon entries.
+
+    The file is parsed with the standard library, which reads no DTD
+    and expands no entity.  A file that does not parse is refused.
+    """
+    try:
+        root = ElementTree.fromstring(text)
+    except ElementTree.ParseError:
+        return None
+    cpassword = 0
+    autologon = 0
+    for element in root.iter():
+        if element.get("cpassword"):
+            cpassword += 1
+        if (
+            file_name == "Registry.xml"
+            and _local_name(element.tag) == "Properties"
+            and element.get("name") in ("DefaultPassword", "AutoAdminLogon")
+        ):
+            autologon += 1
+    return cpassword, autologon
+
+
+def _read_preferences(
+    dir_fd: int,
+    scope: str,
+    gpo: str,
+    counters: _Counters,
+    run: _Run,
+    depth: int = 1,
+) -> tuple[list[dict], bool]:
+    """The items of the preferences of one scope of one GPO.
+
+    The directory is walked by descriptor: every folder is opened
+    relative to the descriptor of its parent and every file is opened
+    relative to the descriptor of its folder.  The second number of the
+    answer is True when the deadline of the run passed before every
+    file was read.
+    """
+    items: list[dict] = []
+    if depth > MAX_DEPTH:
+        # The walk is deeper than the cap: what is below is not read.
+        counters.skipped_special += 1
+        return items, False
+    entries = _list_dir(dir_fd, counters)
+    for name, kind in entries:
+        if run.expired():
+            return items, True
+        if kind == KIND_DIRECTORY:
+            child = _open_directory(dir_fd, name)
+            if child is None:
+                counters.skipped_special += 1
+                continue
+            try:
+                more, truncated = _read_preferences(
+                    child, scope, gpo, counters, run, depth + 1
+                )
+            finally:
+                os.close(child)
+            items.extend(more)
+            if truncated:
+                return items, True
+            continue
+        if kind == KIND_SPECIAL:
+            continue
+        if not name.lower().endswith(".xml"):
+            continue
+        state, raw = _read_child_file(dir_fd, name)
+        if state == FILE_SPECIAL:
+            counters.skipped_special += 1
+            continue
+        if state == FILE_REFUSED or raw is None:
+            counters.parse_refused += 1
+            continue
+        text = _decode(raw)
+        if text is None:
+            counters.parse_refused += 1
+            continue
+        if "<!DOCTYPE" in text or "<!ENTITY" in text:
+            counters.parse_refused += 1
+            continue
+        counts = _measure_preferences(text, _canonical_name(name))
+        if counts is None:
+            counters.parse_refused += 1
+            continue
+        relative = _gpp_path(scope, name)
+        if counts[0] > 0:
+            items.append(
+                {
+                    "gpo": gpo,
+                    "path": relative,
+                    "kind": "cpassword",
+                    "count": counts[0],
+                }
+            )
+        if counts[1] > 0:
+            items.append(
+                {
+                    "gpo": gpo,
+                    "path": relative,
+                    "kind": "autologon",
+                    "count": counts[1],
+                }
+            )
+    return items, False
+
+
+def _gpttmpl_entries(text: str) -> list[tuple[str, str, str | None]]:
+    """The keys of a template that the checks read, and their values.
+
+    A key that is not in ``GPTTMPL_KEYS`` is dropped and never counted:
+    the template of a stock domain controller holds ten keys of the
+    [System Access] section and one of the [Kerberos Policy] section
+    that no check of Newton reads, and a key that is not read is not a
+    refusal.  A key that is read and whose value is not a number has the
+    value None.
+
+    The template of a Windows domain controller holds a [Registry
+    Values] section that names the settings of a Windows registry.  A
+    Samba host has no registry, so the section is not read and the two
+    sections that hold the policy of the domain are.
+    """
+    entries: list[tuple[str, str, str | None]] = []
+    section = ""
+    for line in text.splitlines():
+        trimmed = line.strip()
+        if not trimmed:
+            continue
+        if trimmed.startswith("[") and trimmed.endswith("]"):
+            section = trimmed[1:-1].strip()
+            continue
+        if section not in GPTTMPL_SECTIONS:
+            continue
+        position = trimmed.find("=")
+        if position < 1:
+            continue
+        key = trimmed[:position].strip()
+        value = trimmed[position + 1 :].strip()
+        if not key or key not in GPTTMPL_KEYS:
+            continue
+        if not GPTTMPL_VALUE_RE.match(value):
+            entries.append((section, key, None))
+            continue
+        entries.append((section, key, value))
+    return entries
+
+
+def _read_gpttmpl(
+    gpo: str, templates: str | list[str], counters: _Counters
+) -> list[dict]:
+    """The settings of the template of a GPO that the checks read.
+
+    ``templates`` is the text of one template or the texts of every
+    case variant of the folders that hold it: a host may hold more
+    than one of them.
+
+    Only the keys of ``GPTTMPL_KEYS`` are emitted, and only when their
+    value is a number.  A key that is read and whose value is not a
+    number is counted in ``parse_refused`` and never emitted: a
+    template is a file of the SYSVOL, and its text is not data Newton
+    reads.
+
+    Two variants that hold a key with the same value emit it once.  Two
+    variants that hold a key with different values do not agree: the
+    value of the GPO is unknown, so neither value is emitted and the
+    disagreement is counted once.
+    """
+    texts = [templates] if isinstance(templates, str) else list(templates)
+    seen: dict[tuple[str, str], list[str | None]] = {}
+    order: list[tuple[str, str]] = []
+    for text in texts:
+        for section, key, value in _gpttmpl_entries(text):
+            name = (section, key)
+            if name not in seen:
+                seen[name] = []
+                order.append(name)
+            seen[name].append(value)
+    items: list[dict] = []
+    for section, key in order:
+        values = seen[(section, key)]
+        if len(set(values)) > 1:
+            # The variants do not agree on the value: neither of them
+            # is the value of the GPO.
+            counters.parse_refused += 1
+            continue
+        value = values[0]
+        if value is None:
+            counters.parse_refused += 1
+            continue
+        items.append({"gpo": gpo, "section": section, "key": key, "value": value})
+    return items
+
+
+def _read_template(
+    dir_fd: int, names: tuple[str, ...], counters: _Counters
+) -> list[bytes]:
+    """The bytes of the templates of a GPO, one for every case variant.
+
+    The folders of the template are looked up without their case and
+    every one of them is walked, the way the walk of the preferences
+    walks every case variant of the folder of a scope.  The folders are
+    opened by descriptor, so a folder that was swapped for a link
+    between the listing and the open is never followed.
+    """
+    if not names:
+        return []
+    entries = _list_dir(dir_fd, counters)
+    matches = _folder_named(entries, names[0])
+    if not matches:
+        return []
+    found: list[bytes] = []
+    for match in matches:
+        child = _open_directory(dir_fd, match)
+        if child is None:
+            counters.skipped_special += 1
+            continue
+        try:
+            if len(names) > 1:
+                found.extend(_read_template(child, names[1:], counters))
+                continue
+            state, raw = _read_child_file(child, GPTTMPL_FILE)
+            if state == FILE_SPECIAL:
+                counters.skipped_special += 1
+                continue
+            if state == FILE_REFUSED or raw is None:
+                counters.parse_refused += 1
+                continue
+            found.append(raw)
+        finally:
+            os.close(child)
+    return found
+
+
+def _scan_gpo(
+    gpo_fd: int,
+    gpo: str,
+    counters: _Counters,
+    run: _Run,
+) -> tuple[list[dict], bool]:
+    """The items of the preferences of one GPO.
+
+    Every case variant of the folder of a scope is walked.  The second
+    number of the answer is True when the deadline of the run passed
+    before every file was read.
+    """
+    items: list[dict] = []
+    entries = _list_dir(gpo_fd, counters)
+    for scope in GPO_SCOPES:
+        for scope_name in _folder_named(entries, scope):
+            scope_fd = _open_directory(gpo_fd, scope_name)
+            if scope_fd is None:
+                counters.skipped_special += 1
+                continue
+            try:
+                scope_entries = _list_dir(scope_fd, counters)
+                for preferences_name in _folder_named(scope_entries, PREFERENCES_DIR):
+                    preferences_fd = _open_directory(scope_fd, preferences_name)
+                    if preferences_fd is None:
+                        counters.skipped_special += 1
+                        continue
+                    try:
+                        more, truncated = _read_preferences(
+                            preferences_fd, scope, gpo, counters, run
+                        )
+                    finally:
+                        os.close(preferences_fd)
+                    items.extend(more)
+                    if truncated:
+                        return items, True
+            finally:
+                os.close(scope_fd)
+    return items, False
+
+
+def _add_items(run: _Run, items: list[dict]) -> int:
+    """The number of items that fit in the byte budget of the document.
+
+    The items of the files count against the budget as the rows of the
+    queries do: the document of the collector never grows without a
+    limit.
+    """
+    accepted = 0
+    for item in items:
+        size = len(json.dumps(item, separators=(",", ":")).encode("utf-8"))
+        if run.byte_total + size > BYTE_LIMIT:
+            break
+        run.byte_total += size
+        accepted += 1
+    return accepted
+
+
+def _collect_files(lp, realm: str, run: _Run) -> dict:
+    """The scan of the SYSVOL of the collector host.
+
+    The walk is the collector's own and it is done by descriptor: the
+    base is opened without following a link, every folder is opened
+    relative to the descriptor of its parent, and every file is opened
+    relative to the descriptor of its folder.  No path string is ever
+    opened below the base, so a name that is swapped for a link
+    between the listing and the open is never followed.
+    """
+    gpp_counters = _Counters()
+    gpt_counters = _Counters()
+    empty_gpp = {
+        "status": "unavailable",
+        "error_code": "no_such_object",
+        "items": [],
+        "skipped_nonguid": 0,
+        "parse_refused": 0,
+        "skipped_special": 0,
+    }
+    empty_gpt = {
+        "status": "unavailable",
+        "error_code": "no_such_object",
+        "items": [],
+        "parse_refused": 0,
+        "skipped_special": 0,
+    }
+    truncated_gpp = {
+        "status": "truncated",
+        "error_code": "time_limit",
+        "items": [],
+        "skipped_nonguid": 0,
+        "parse_refused": 0,
+        "skipped_special": 0,
+    }
+    truncated_gpt = {
+        "status": "truncated",
+        "error_code": "time_limit",
+        "items": [],
+        "parse_refused": 0,
+        "skipped_special": 0,
+    }
+    if run.expired():
+        # The deadline of the run has passed: the files are truncated,
+        # like every query that is left.
+        return {"gpp": truncated_gpp, "gpttmpl": truncated_gpt}
+    policies = _policies_path(lp, realm)
+    if policies is None:
+        return {"gpp": empty_gpp, "gpttmpl": empty_gpt}
+    base_fd = _open_base(policies)
+    if base_fd is None:
+        return {"gpp": empty_gpp, "gpttmpl": empty_gpt}
+
+    gpp_items: list[dict] = []
+    gpt_items: list[dict] = []
+    skipped = 0
+    gpp_status = "ok"
+    gpp_error = ""
+    gpt_status = "ok"
+    gpt_error = ""
+    try:
+        for name, kind in _list_dir(base_fd, gpp_counters):
+            if kind == KIND_SPECIAL:
+                continue
+            if kind != KIND_DIRECTORY:
+                continue
+            if not GUID_RE.match(name):
+                skipped += 1
+                continue
+            if run.expired():
+                gpp_status = "truncated"
+                gpp_error = "time_limit"
+                gpt_status = "truncated"
+                gpt_error = "time_limit"
+                break
+            gpo_fd = _open_directory(base_fd, name)
+            if gpo_fd is None:
+                # The folder was swapped for a link between the
+                # listing and the open: it is never followed.
+                gpp_counters.skipped_special += 1
+                continue
+            try:
+                items, truncated = _scan_gpo(gpo_fd, name, gpp_counters, run)
+                gpp_items.extend(items)
+                if truncated:
+                    gpp_status = "truncated"
+                    gpp_error = "time_limit"
+                    gpt_status = "truncated"
+                    gpt_error = "time_limit"
+                    break
+                if run.expired():
+                    gpp_status = "truncated"
+                    gpp_error = "time_limit"
+                    gpt_status = "truncated"
+                    gpt_error = "time_limit"
+                    break
+                raw = _read_template(gpo_fd, GPTTMPL_FOLDERS, gpt_counters)
+            finally:
+                os.close(gpo_fd)
+            if not raw:
+                continue
+            texts: list[str] = []
+            for one in raw:
+                text = _decode(one)
+                if text is None:
+                    gpt_counters.parse_refused += 1
+                    continue
+                texts.append(text)
+            if not texts:
+                continue
+            gpt_items.extend(_read_gpttmpl(name, texts, gpt_counters))
+    finally:
+        os.close(base_fd)
+
+    accepted = _add_items(run, gpp_items)
+    if accepted < len(gpp_items):
+        gpp_items = gpp_items[:accepted]
+        gpp_status = "truncated"
+        gpp_error = "byte_limit"
+    accepted = _add_items(run, gpt_items)
+    if accepted < len(gpt_items):
+        gpt_items = gpt_items[:accepted]
+        gpt_status = "truncated"
+        gpt_error = "byte_limit"
+
+    return {
+        "gpp": {
+            "status": gpp_status,
+            "error_code": gpp_error,
+            "items": gpp_items,
+            "skipped_nonguid": skipped,
+            "parse_refused": gpp_counters.parse_refused,
+            "skipped_special": gpp_counters.skipped_special,
+        },
+        "gpttmpl": {
+            "status": gpt_status,
+            "error_code": gpt_error,
+            "items": gpt_items,
+            "parse_refused": gpt_counters.parse_refused,
+            "skipped_special": gpt_counters.skipped_special,
+        },
+    }
+
+
+# ---- the run ----------------------------------------------------------------
+
+
+def _bindings():
+    """The samba bindings the collector reads the directory with."""
+    import ldb
+    from samba.auth import system_session
+    from samba.param import LoadParm
+    from samba.samdb import SamDB
+
+    return ldb, LoadParm, SamDB, system_session
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the collector and print the document."""
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments:
+        return _fail(2, FAIL_ARGUMENTS)
+
+    paths = _install_paths()
+    for path in paths:
+        if _lstat(path) is None:
+            return _fail(1, FAIL_MISSING_FILES)
+    if not _install_is_safe():
+        return _fail(2, FAIL_UNSAFE_INSTALL)
+
+    try:
+        queries_raw, queries_document = _read_installed_json(
+            os.path.join(LIB_DIR, "queries.json")
+        )
+        _forbidden_raw, forbidden_document = _read_installed_json(
+            os.path.join(LIB_DIR, "forbidden.json")
+        )
+    except UnsafeInstall:
+        return _fail(2, FAIL_UNSAFE_INSTALL)
+    except OSError:
+        return _fail(1, FAIL_MISSING_FILES)
+    except ValueError:
+        return _fail(1, FAIL_UNREADABLE_FILES)
+
+    if not isinstance(queries_document, dict) or not isinstance(
+        forbidden_document, list
+    ):
+        return _fail(1, FAIL_UNREADABLE_FILES)
+    queries = queries_document.get("queries")
+    if not isinstance(queries, list) or not queries:
+        return _fail(1, FAIL_UNREADABLE_FILES)
+    forbidden = {str(name).lower() for name in forbidden_document}
+    for query in queries:
+        if not isinstance(query, dict):
+            return _fail(1, FAIL_UNREADABLE_FILES)
+        problem = _forbidden_problem(query, forbidden)
+        if problem == "attribute":
+            return _fail(2, FAIL_FORBIDDEN_ATTRIBUTE)
+        if problem == "filter":
+            return _fail(2, FAIL_FORBIDDEN_FILTER)
+
+    try:
+        ldb, LoadParm, SamDB, system_session = _bindings()
+    except ImportError:
+        return _fail(1, FAIL_NO_BINDINGS)
+
+    lp = LoadParm()
+    lp.load_default()
+    # The loadparm raises a KeyError for a parameter it does not hold:
+    # a host that does not say what it is collects no settings.
+    try:
+        is_dc = lp.get("server role") == "active directory domain controller"
+    except KeyError:
+        is_dc = False
+
+    try:
+        db = SamDB(
+            url=lp.private_path("sam.ldb"),
+            session_info=system_session(),
+            lp=lp,
+        )
+    except Exception:
+        return _fail(1, FAIL_NO_DIRECTORY)
+    try:
+        domain_dn = str(db.domain_dn())
+        config_dn = str(db.get_config_basedn())
+        schema_dn = str(db.get_schema_basedn())
+        domain_sid = str(db.get_domain_sid())
+        dns_name = str(db.domain_dns_name())
+    except Exception:
+        return _fail(1, FAIL_NO_DIRECTORY)
+    if not domain_dn or not config_dn or not schema_dn:
+        return _fail(1, FAIL_NO_DIRECTORY)
+    if not domain_sid:
+        return _fail(1, FAIL_NO_DOMAIN_SID)
+
+    started_at = time.time()
+    now = time.monotonic()
+    run = _Run(now + DEADLINE_SECONDS, now)
+    context = {
+        "domain_dn": domain_dn,
+        "config_dn": config_dn,
+        "schema_dn": schema_dn,
+    }
+
+    query_results = _collect_queries(db, ldb, queries, context, run)
+    # The realm is asked for without a default: the second argument of
+    # the get of the loadparm is the name of a share and not a default
+    # value (measured on the lab DC).  The DNS name of the DC is the
+    # fallback, and a loadparm that does not hold a realm raises a
+    # KeyError.
+    try:
+        realm = str(lp.get("realm") or "").strip()
+    except KeyError:
+        realm = ""
+    realm = realm or dns_name
+    files = _collect_files(lp, realm, run)
+    settings = _collect_settings(lp, is_dc)
+    try:
+        identity = _collect_identity(
+            db, ldb, context, os.environ.get("SUDO_USER", "")
+        )
+    except IdentityError:
+        return _fail(1, FAIL_NO_IDENTITY)
+
+    document = {
+        "v": 1,
+        "collector": "samba",
+        "collector_version": COLLECTOR_VERSION,
+        "querysetsha": hashlib.sha256(queries_raw).hexdigest(),
+        "is_dc": bool(is_dc),
+        "domain": {
+            "dns": dns_name,
+            "domain_dn": domain_dn,
+            "config_dn": config_dn,
+            "schema_dn": schema_dn,
+            "domain_sid": domain_sid,
+        },
+        "identity": identity,
+        "started": time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(started_at)),
+        "elapsed_ms": run.elapsed_ms(),
+        "queries": query_results,
+        "files": files,
+        "settings": settings,
+    }
+    sys.stdout.write(json.dumps(document, separators=(",", ":")) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

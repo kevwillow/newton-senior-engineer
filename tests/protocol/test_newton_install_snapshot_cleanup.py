@@ -94,6 +94,7 @@ APPROVE_LAUNCHER=/work/bin/newton-approve
 SETUP_LAUNCHER=/work/bin/newton-router-setup
 VANTAGE_SETUP_LAUNCHER=/work/bin/newton-vantage-setup
 ENROL_LAUNCHER=/work/bin/newton-enrol
+AD_SETUP_LAUNCHER=/work/bin/newton-ad-setup
 DOCTOR_LAUNCHER=/work/bin/newton-doctor
 SUDOERS=/work/sudoers.d/newton-mcp
 MANAGED_SETTINGS=/work/etc/claude-code/managed-settings.json
@@ -108,6 +109,8 @@ SUDOERS_VANTAGE_SETUP_LINE="alice ALL=(newton) /usr/local/bin/newton-vantage-set
 SUDOERS_VANTAGE_SETUP_DEFAULTS_LINE="Defaults!/usr/local/bin/newton-vantage-setup timestamp_timeout=0"
 SUDOERS_ENROL_LINE="alice ALL=(newton) /usr/local/bin/newton-enrol"
 SUDOERS_ENROL_DEFAULTS_LINE="Defaults!/usr/local/bin/newton-enrol timestamp_timeout=0"
+SUDOERS_AD_SETUP_LINE="alice ALL=(newton) /usr/local/bin/newton-ad-setup"
+SUDOERS_AD_SETUP_DEFAULTS_LINE="Defaults!/usr/local/bin/newton-ad-setup timestamp_timeout=0"
 invoking_user=alice
 VISUDO=/work/bin/visudo-stub
 
@@ -258,6 +261,7 @@ EXPECTED_TEMPS = {
     "setup_launcher_tmp",
     "vantage_setup_launcher_tmp",
     "enrol_launcher_tmp",
+    "ad_setup_launcher_tmp",
     "sudoers_tmp",
     "doctor_tmp",
     "managed_settings_tmp",
@@ -386,6 +390,7 @@ APPROVE_LAUNCHER="$T/bin/newton-approve"
 SETUP_LAUNCHER="$T/bin/newton-router-setup"
 VANTAGE_SETUP_LAUNCHER="$T/bin/newton-vantage-setup"
 ENROL_LAUNCHER="$T/bin/newton-enrol"
+AD_SETUP_LAUNCHER="$T/bin/newton-ad-setup"
 DOCTOR_LAUNCHER="$T/bin/newton-doctor"
 SUDOERS="$T/sudoers.d/newton-mcp"
 MANAGED_SETTINGS="$T/etc/claude-code/managed-settings.json"
@@ -400,6 +405,8 @@ SUDOERS_VANTAGE_SETUP_LINE="alice ALL=(newton) /usr/local/bin/newton-vantage-set
 SUDOERS_VANTAGE_SETUP_DEFAULTS_LINE="Defaults!/usr/local/bin/newton-vantage-setup timestamp_timeout=0"
 SUDOERS_ENROL_LINE="alice ALL=(newton) /usr/local/bin/newton-enrol"
 SUDOERS_ENROL_DEFAULTS_LINE="Defaults!/usr/local/bin/newton-enrol timestamp_timeout=0"
+SUDOERS_AD_SETUP_LINE="alice ALL=(newton) /usr/local/bin/newton-ad-setup"
+SUDOERS_AD_SETUP_DEFAULTS_LINE="Defaults!/usr/local/bin/newton-ad-setup timestamp_timeout=0"
 invoking_user=alice
 VISUDO="$T/bin/visudo-stub"
 

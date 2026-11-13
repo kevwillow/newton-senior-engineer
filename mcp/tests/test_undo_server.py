@@ -323,7 +323,7 @@ def test_un01_receipt_names_the_original_change(
 
 
 def test_un01_tool_is_registered_for_openwrt_only() -> None:
-    assert len(server.TOOL_NAMES) == 17
+    assert len(server.TOOL_NAMES) == 23
     assert "newton_plan_undo" in server.TOOL_NAMES
     assert "newton_plan_undo" in server.registry.capabilities("openwrt").tools
     for platform in ("routeros", "vyos", "junos", "eos", "iosxe", "fortios"):

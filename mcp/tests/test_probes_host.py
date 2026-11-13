@@ -525,7 +525,7 @@ def test_newton_read_has_no_probe_verb():
 def test_no_tool_is_named_probe_or_takes_a_check():
     assert "probe" not in server.TOOL_NAMES
     assert "newton_probe" not in server.TOOL_NAMES
-    assert len(server.TOOL_NAMES) == 17
+    assert len(server.TOOL_NAMES) == 23
 
 
 # ---- R2 review: bounded input, iterative _spec_ok, manifest cap ---------------

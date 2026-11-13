@@ -93,6 +93,7 @@ approve_launcher_tmp=
 setup_launcher_tmp=
 vantage_setup_launcher_tmp=
 enrol_launcher_tmp=
+ad_setup_launcher_tmp=
 sudoers_tmp=
 doctor_tmp=
 # The two temporaries of the plain mode's bootstrap install and
@@ -179,7 +180,7 @@ cleanup() {
 	if [[ -n ${WORK:-} ]]; then
 		rm -rf -- "$WORK"
 	fi
-	for path in "$launcher_tmp" "$approve_launcher_tmp" "$setup_launcher_tmp" "$vantage_setup_launcher_tmp" "$enrol_launcher_tmp" "$sudoers_tmp" "$doctor_tmp" "$managed_settings_tmp" "$bootstrap_tmp" "$bootstrap_source_tmp"; do
+	for path in "$launcher_tmp" "$approve_launcher_tmp" "$setup_launcher_tmp" "$vantage_setup_launcher_tmp" "$enrol_launcher_tmp" "$ad_setup_launcher_tmp" "$sudoers_tmp" "$doctor_tmp" "$managed_settings_tmp" "$bootstrap_tmp" "$bootstrap_source_tmp"; do
 		[[ -n $path ]] || continue
 		rm -f -- "$path"
 	done
@@ -982,6 +983,7 @@ perform_install() {
 	setup_launcher_tmp=$(mktemp "${SETUP_LAUNCHER}.new.XXXXXX")
 	vantage_setup_launcher_tmp=$(mktemp "${VANTAGE_SETUP_LAUNCHER}.new.XXXXXX")
 	enrol_launcher_tmp=$(mktemp "${ENROL_LAUNCHER}.new.XXXXXX")
+	ad_setup_launcher_tmp=$(mktemp "${AD_SETUP_LAUNCHER}.new.XXXXXX")
 	sudoers_tmp=$(mktemp "${SUDOERS}.new.XXXXXX")
 
 	cat >"$launcher_tmp" <<'EOF'
@@ -1015,13 +1017,22 @@ EOF
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 1 ] || [ "${#1}" -ne 32 ]; then
-	echo "newton-approve: exactly one 32-hex plan id is required" >&2
+# One 32-hex plan id, or the word ad-change and one 32-hex plan id.
+if [ "$#" -eq 2 ] && [ "$1" = ad-change ]; then
+	plan_id=$2
+elif [ "$#" -eq 1 ]; then
+	plan_id=$1
+else
+	echo "newton-approve: one 32-hex plan id, or ad-change and one 32-hex plan id, is required" >&2
 	exit 2
 fi
-case $1 in
+if [ "${#plan_id}" -ne 32 ]; then
+	echo "newton-approve: one 32-hex plan id, or ad-change and one 32-hex plan id, is required" >&2
+	exit 2
+fi
+case $plan_id in
 	*[!0-9a-f]*)
-		echo "newton-approve: exactly one 32-hex plan id is required" >&2
+		echo "newton-approve: one 32-hex plan id, or ad-change and one 32-hex plan id, is required" >&2
 		exit 2
 		;;
 esac
@@ -1046,7 +1057,7 @@ exec /usr/bin/env -i \
 	HOME=/var/lib/newton \
 	PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
 	SUDO_USER="$sudo_user" \
-	/opt/newton/venv/bin/newton-approve "$1"
+	/opt/newton/venv/bin/newton-approve "$@"
 EOF
 	install -o root -g root -m 0755 "$approve_launcher_tmp" "$APPROVE_LAUNCHER"
 
@@ -1139,11 +1150,53 @@ exec /usr/bin/env -i \
 EOF
 	install -o root -g root -m 0755 "$enrol_launcher_tmp" "$ENROL_LAUNCHER"
 
+	# The AD approval key: it records the fingerprint in the newton
+	# user's state directory, the one newton-approve reads.  It takes
+	# approval-key and one device name, nothing else; the audit and write
+	# scripts are printed by the owner's own /opt/newton/scripts/newton-ad-setup.
+	cat >"$ad_setup_launcher_tmp" <<'EOF'
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 2 ] || [ "$1" != approval-key ] || [ "${#2}" -gt 32 ]; then
+	echo "newton-ad-setup: approval-key and one device name are required" >&2
+	exit 2
+fi
+case $2 in
+	''|[!a-z]*|*[!a-z0-9-]*)
+		echo "newton-ad-setup: approval-key and one device name are required" >&2
+		exit 2
+		;;
+esac
+expected_uid=$(/usr/bin/id -u newton) || exit 1
+if [ "$(/usr/bin/id -u)" != "$expected_uid" ]; then
+	echo "newton-ad-setup: must run as user newton" >&2
+	exit 1
+fi
+sudo_user=${SUDO_USER:-}
+case $sudo_user in
+	''|root|[!A-Za-z_]*|*[!A-Za-z0-9_.-]*)
+		echo "newton-ad-setup: sudo must provide a valid non-root SUDO_USER" >&2
+		exit 1
+		;;
+esac
+
+cd /
+exec /usr/bin/env -i \
+	NEWTON_HOME=/opt/newton \
+	NEWTON_STATE_DIR=/var/lib/newton/state \
+	HOME=/var/lib/newton \
+	PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+	SUDO_USER="$sudo_user" \
+	/opt/newton/venv/bin/python -I -m newton_mcp.ad.setupgen_write approval-key "$2"
+EOF
+	install -o root -g root -m 0755 "$ad_setup_launcher_tmp" "$AD_SETUP_LAUNCHER"
+
 	doctor_tmp=$(mktemp "${DOCTOR_LAUNCHER}.new.XXXXXX")
 	render_installed_doctor "$SNAP/scripts/newton-doctor" "$doctor_tmp"
 	install -o root -g root -m 0755 "$doctor_tmp" "$DOCTOR_LAUNCHER"
 
-	printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$SUDOERS_MCP_LINE" "$SUDOERS_APPROVE_LINE" "$SUDOERS_APPROVE_DEFAULTS_LINE" "$SUDOERS_SETUP_LINE" "$SUDOERS_SETUP_DEFAULTS_LINE" "$SUDOERS_VANTAGE_SETUP_LINE" "$SUDOERS_VANTAGE_SETUP_DEFAULTS_LINE" "$SUDOERS_ENROL_LINE" "$SUDOERS_ENROL_DEFAULTS_LINE" >"$sudoers_tmp"
+	printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$SUDOERS_MCP_LINE" "$SUDOERS_APPROVE_LINE" "$SUDOERS_APPROVE_DEFAULTS_LINE" "$SUDOERS_SETUP_LINE" "$SUDOERS_SETUP_DEFAULTS_LINE" "$SUDOERS_VANTAGE_SETUP_LINE" "$SUDOERS_VANTAGE_SETUP_DEFAULTS_LINE" "$SUDOERS_ENROL_LINE" "$SUDOERS_ENROL_DEFAULTS_LINE" "$SUDOERS_AD_SETUP_LINE" "$SUDOERS_AD_SETUP_DEFAULTS_LINE" >"$sudoers_tmp"
 	chown root:root "$sudoers_tmp"
 	chmod 0440 "$sudoers_tmp"
 	"$VISUDO" -cf "$sudoers_tmp" >/dev/null
@@ -1465,6 +1518,7 @@ main() {
 	SETUP_LAUNCHER=/usr/local/bin/newton-router-setup
 	VANTAGE_SETUP_LAUNCHER=/usr/local/bin/newton-vantage-setup
 	ENROL_LAUNCHER=/usr/local/bin/newton-enrol
+	AD_SETUP_LAUNCHER=/usr/local/bin/newton-ad-setup
 	DOCTOR_LAUNCHER=/usr/local/bin/newton-doctor
 	SUDOERS=/etc/sudoers.d/newton-mcp
 	MANAGED_SETTINGS=/etc/claude-code/managed-settings.json
@@ -1487,6 +1541,8 @@ main() {
 	SUDOERS_VANTAGE_SETUP_DEFAULTS_LINE="Defaults!$VANTAGE_SETUP_LAUNCHER timestamp_timeout=0"
 	SUDOERS_ENROL_LINE="$invoking_user ALL=($SYSTEM_USER) $ENROL_LAUNCHER"
 	SUDOERS_ENROL_DEFAULTS_LINE="Defaults!$ENROL_LAUNCHER timestamp_timeout=0"
+	SUDOERS_AD_SETUP_LINE="$invoking_user ALL=($SYSTEM_USER) $AD_SETUP_LAUNCHER"
+	SUDOERS_AD_SETUP_DEFAULTS_LINE="Defaults!$AD_SETUP_LAUNCHER timestamp_timeout=0"
 
 	# --from-snapshot skips our own snapshot, identity block
 	# and prompt (the bootstrap did all of that); it only checks the
@@ -1512,10 +1568,11 @@ Would ensure system user: $SYSTEM_USER (home $NEWTON_HOME, mode 0700; shell /usr
 Would install root-owned code: $CODE_ROOT/{scripts,mcp,device,profiles,SKILL.md}
 Would create/update virtual environment: $CODE_ROOT/venv
 Would install launcher: $LAUNCHER (root:root 0755; clean environment; newton user only; no arguments)
-Would install launcher: $APPROVE_LAUNCHER (root:root 0755; clean environment; newton user only; one 32-hex argument)
+Would install launcher: $APPROVE_LAUNCHER (root:root 0755; clean environment; newton user only; one 32-hex argument, or ad-change and one 32-hex argument)
 Would install launcher: $SETUP_LAUNCHER (root:root 0755; clean environment; newton user only; arguments passed through to newton-router-setup)
 Would install launcher: $VANTAGE_SETUP_LAUNCHER (root:root 0755; clean environment; newton user only; arguments passed through to newton-vantage-setup)
 Would install launcher: $ENROL_LAUNCHER (root:root 0755; clean environment; newton user only; arguments passed through to newton-enrol)
+Would install launcher: $AD_SETUP_LAUNCHER (root:root 0755; clean environment; newton user only; approval-key and one device name)
 Would install: $DOCTOR_LAUNCHER (root:root 0755; test seams disabled)
 Would validate and install sudoers rules: $SUDOERS (root:root 0440)
 $SUDOERS_MCP_LINE
@@ -1527,6 +1584,8 @@ $SUDOERS_VANTAGE_SETUP_LINE
 $SUDOERS_VANTAGE_SETUP_DEFAULTS_LINE
 $SUDOERS_ENROL_LINE
 $SUDOERS_ENROL_DEFAULTS_LINE
+$SUDOERS_AD_SETUP_LINE
+$SUDOERS_AD_SETUP_DEFAULTS_LINE
 Would ask whether to set Claude Code's managed settings: $MANAGED_SETTINGS (root:root 0644; allowManagedHooksOnly; default: no; a file that is already there is never overwritten)
 $MANAGED_SETTINGS_NOTE
 Would create credential state directory: $NEWTON_HOME/state (newton:newton 0700)

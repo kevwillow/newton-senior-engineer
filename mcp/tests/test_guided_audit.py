@@ -299,7 +299,7 @@ def test_tool_registration_schema_list_and_audit_log_are_pinned(
     responses["netstat -tulpn"] = (0, device_text, "")
     _fake_ssh(monkeypatch, responses)
 
-    assert len(server.TOOL_NAMES) == 17
+    assert len(server.TOOL_NAMES) == 23
     assert "newton_guided_audit" in server.TOOL_NAMES
 
     from mcp.shared.memory import create_connected_server_and_client_session

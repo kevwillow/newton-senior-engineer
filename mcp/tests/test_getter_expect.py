@@ -318,8 +318,20 @@ def test_expect_never_changes_status(
 
 
 def test_registry_platforms_cover_the_six_vendors() -> None:
-    """the six vendor files tested here are all the non-openwrt platforms."""
-    assert set(registry.PLATFORMS) - {"openwrt"} == set(PLATFORMS)
+    """the six vendor files tested here are all the getter platforms.
+
+    The AD platforms are in the registry too, but they have no getter
+    grammar at all: their collector is the forced command of the ssh
+    session.
+    """
+    assert set(registry.PLATFORMS) - {
+        "openwrt",
+        "ad-windows",
+        "ad-samba",
+        "ad-windows-write",
+        "ad-samba-write",
+    } == set(PLATFORMS)
+    assert registry.AD_PLATFORMS == frozenset({"ad-windows", "ad-samba"})
 
 
 @pytest.mark.parametrize(

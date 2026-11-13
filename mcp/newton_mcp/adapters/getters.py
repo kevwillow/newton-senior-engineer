@@ -133,6 +133,13 @@ _PARAM_PROBES = (
     "x" * 65,
 )
 _SHOW_HEAD_PLATFORMS = frozenset({"junos", "eos", "iosxe", "vyos"})
+# The platforms with no getter grammar at all.  OpenWrt has its own
+# transport and its own program, the AD platforms have the collector and
+# the AD write platforms have the write helper: their forced command is
+# the whole session, so a getter command has nothing to run on them.
+_NO_GETTER_GRAMMAR_PLATFORMS = frozenset(
+    {"openwrt"}
+) | registry.AD_PLATFORMS | registry.AD_WRITE_PLATFORMS
 _ROUTEROS_PRINT_AFTER = frozenset({"detail", "terse", "without-paging", "brief"})
 _ROUTEROS_EXPORT_AFTER = frozenset({"terse", "verbose", "compact", "hide-sensitive"})
 _ROW_ALLOWED_KEYS = frozenset(
@@ -253,7 +260,7 @@ def check_command(platform: str, command: str) -> None:
     if (
         type(platform) is not str
         or platform not in registry.PLATFORMS
-        or platform == "openwrt"
+        or platform in _NO_GETTER_GRAMMAR_PLATFORMS
     ):
         _refuse(platform if type(platform) is str else "unknown", "platform has no getter grammar")
     if type(command) is not str or not _command_text_is_valid(command):

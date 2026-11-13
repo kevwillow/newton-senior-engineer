@@ -990,6 +990,16 @@ def _lock_remaining(device: str) -> int:
         return 0
 
 
+def _record_failure(device: str) -> int:
+    """Record one wrong answer; return the seconds of the lockout."""
+    from . import approval_proof
+
+    try:
+        return approval_proof.record_failure(device)
+    except Exception:
+        return 0
+
+
 def _locked_text(remaining: int) -> str:
     """The refusal of a locked device."""
     import math
@@ -1160,8 +1170,218 @@ def approve_plan(
     return True, ""
 
 
+def _ad_high_reasons(facts: Any) -> list[str]:
+    """The reasons a change of a domain is HIGH, in the words of the flow."""
+    reasons: list[str] = []
+    if not isinstance(facts, dict):
+        return reasons
+    for one in facts.values():
+        if not isinstance(one, dict):
+            continue
+        if one.get("privileged") is True:
+            reasons.append("the target is a privileged object")
+        if one.get("admin_count") == 1:
+            reasons.append("the target has an adminCount of 1")
+        if one.get("dc_account") is True:
+            reasons.append("the target is a domain controller account")
+    return reasons
+
+
+def _print_ad_plan(plan: dict[str, Any]) -> None:
+    """Show every field of an AD plan to the owner.
+
+    Every name the directory gave is masked and sanitised: it is data,
+    never text the terminal may act on.  The password of a new account
+    is not shown here: ``_print_ad_password`` prints it once the approval
+    exists.
+    """
+    device = str(plan.get("device", ""))
+    print(f"Plan: {_sanitize_terminal_value(plan.get('plan_id', ''))}")
+    print(f"Domain: {_sanitize_terminal_value(device)}")
+    print(f"Verb: {_sanitize_terminal_value(plan.get('verb', ''))}")
+    target = plan.get("target")
+    if isinstance(target, dict):
+        print("Target:")
+        for key in sorted(target):
+            value = target[key]
+            shown = _masked(value) if isinstance(value, str) else _sanitize_terminal_value(value)
+            print(f"  - {key}: {shown}")
+    for label in ("before", "after"):
+        values = plan.get(label)
+        if isinstance(values, dict):
+            shown = ", ".join(
+                f"{key}={_masked(value) if isinstance(value, str) else _sanitize_terminal_value(value)}"
+                for key, value in sorted(values.items())
+            )
+            print(f"{label.capitalize()}: {shown}")
+    print(f"Risk: {_sanitize_terminal_value(plan.get('risk', ''))}")
+    print(f"Window: {_sanitize_terminal_value(plan.get('window', ''))}s")
+
+
+def _print_ad_password(plan: dict[str, Any], first: bool) -> None:
+    """The password of a new account, printed at the first approval only.
+
+    It is printed with the sanitiser alone, never with the redactor: a
+    redactor that rewrote part of it would show the owner a password
+    that is not the one the account gets.  A later approval of the same
+    plan never prints it again, and the apply drops it from the plan
+    record once it has been sent to the DC.
+    """
+    secret = plan.get("secret")
+    if not isinstance(secret, str) or not secret:
+        return
+    if not first:
+        print(
+            "The password of the new account was shown at the first approval "
+            "of this plan and is not shown again."
+        )
+        return
+    print(
+        "Password of the new account (shown once, at the first approval; "
+        "Newton drops it from the plan record once the apply has sent it):"
+    )
+    print(f"  {_sanitize_terminal_value(secret)}")
+
+
+def approve_ad_change(
+    plan_id: str,
+    *,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    """The interactive approval of one Active Directory change.
+
+    The plan is shown in full and the canonical bytes are built here,
+    through ``request.canonical_bytes`` of the write package: the digest
+    in the plan file is never read, because the agent can write that
+    file.  The token is minted over the digest this function computed.
+
+    The terminal checks, the lockout and the sanitising are the ones of
+    the router flow.
+    """
+    from .ad.write import request as _ad_request
+
+    if not isinstance(plan_id, str) or PLAN_ID_RE.fullmatch(plan_id) is None:
+        return False, "plan id must be 32 lowercase hexadecimal characters"
+    path = state_dir() / "ad-plans" / f"{plan_id}.json"
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False, "plan record not found or invalid"
+    if not isinstance(plan, dict) or plan.get("plan_id") != plan_id:
+        return False, "plan record not found or invalid"
+    device = plan.get("device")
+    if not isinstance(device, str) or DEVICE_NAME_RE.fullmatch(device) is None:
+        return False, "plan record not found or invalid"
+    try:
+        canonical = _ad_request.canonical_bytes(plan)
+    except (_ad_request.RequestRefused, KeyError, TypeError, ValueError):
+        return False, "plan record does not hold the fields of a request"
+    digest = hashlib.sha256(canonical).hexdigest()
+
+    _print_ad_plan(plan)
+    if str(plan.get("risk", "")) == "HIGH":
+        print(f"NEWTON  HIGH RISK  APPROVAL  {_sanitize_terminal_value(device)}  plan {plan_id[:8]}")
+        print("WHY THIS IS HIGH RISK")
+        for reason in _ad_high_reasons(plan.get("facts")):
+            print(f"  - {_sanitize_terminal_value(reason)}")
+
+    expected = f"approve {plan_id[:8]}"
+    print(f"Type {expected!r} to approve: ", end="", flush=True)
+    confirmation = sys.stdin.readline().rstrip("\r\n")
+    if confirmation != expected:
+        return False, "confirmation did not match; approval not created"
+
+    remaining = _lock_remaining(device)
+    if remaining > 0:
+        return False, _locked_text(remaining)
+
+    try:
+        passphrase = _getpass(
+            f"approval passphrase for {_sanitize_terminal_value(device)}: "
+        )
+    except (EOFError, KeyboardInterrupt, OSError):
+        return False, "approval passphrase could not be read; approval not created"
+    if not passphrase:
+        return False, "approval passphrase must not be empty; approval not created"
+    try:
+        passphrase_bytes = passphrase.encode("utf-8")
+        k_hex = derive_k(passphrase_bytes, device)
+        fingerprint = approval_fingerprint(k_hex)
+    except ValueError as exc:
+        del passphrase
+        return False, f"{exc}; approval not created"
+    del passphrase, passphrase_bytes
+    status = check_approval_fingerprint(
+        state_dir() / "approval-fp" / device, fingerprint
+    )
+    del fingerprint
+    if status == APPROVAL_FP_MISMATCH:
+        del k_hex
+        return False, _wrong_text(_record_failure(device))
+    if status == APPROVAL_FP_MISSING:
+        del k_hex
+        return False, (
+            f"no approval fingerprint on record for {_sanitize_terminal_value(device)}; "
+            "run sudo -u newton /usr/local/bin/newton-ad-setup approval-key "
+            f"{_sanitize_terminal_value(device)} on the Newton host first "
+            "(from a source tree: scripts/newton-ad-setup approval-key "
+            f"{_sanitize_terminal_value(device)}); approval not created"
+        )
+
+    created = datetime.now(timezone.utc) if now is None else now
+    not_before = int(created.timestamp())
+    not_after = not_before + 1800
+    try:
+        minted = _ad_request.token(k_hex, digest, not_before, not_after)
+    except ValueError as exc:
+        del k_hex
+        return False, f"{exc}; approval not created"
+    del k_hex
+    approval = {
+        "plan_id": plan_id,
+        "device": device,
+        "digest": digest,
+        "nbf": not_before,
+        "exp": not_after,
+        "token": minted,
+        "created_at": created.isoformat(),
+        "approved_by": os.environ.get("SUDO_USER", ""),
+    }
+    approval_file = state_dir() / "ad-plans" / f"{plan_id}.approval.json"
+    first = not approval_file.exists()
+    try:
+        _atomic_write(approval_file, approval)
+    except OSError as exc:
+        return False, f"could not write approval: {exc}"
+    print(f"Approved plan {plan_id} for 30 minutes.")
+    _print_ad_password(plan, first)
+    return True, ""
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
+    if args and args[0] == "ad-change":
+        if len(args) != 2:
+            print(
+                "usage: newton-approve ad-change <32-hex-plan-id>",
+                file=sys.stderr,
+            )
+            return 2
+        plan_id = args[1]
+        if not PLAN_ID_RE.fullmatch(plan_id):
+            print(
+                "newton-approve: plan id must be 32 lowercase hexadecimal characters",
+                file=sys.stderr,
+            )
+            return 2
+        if not sys.stdin.isatty():
+            print("newton-approve: stdin must be an interactive terminal", file=sys.stderr)
+            return 1
+        ok, refusal = approve_ad_change(plan_id)
+        if not ok:
+            print(f"newton-approve: {refusal}", file=sys.stderr)
+            return 1
+        return 0
     if len(args) != 1:
         print("usage: newton-approve <32-hex-plan-or-scan-request-id>", file=sys.stderr)
         return 2

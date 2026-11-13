@@ -418,7 +418,7 @@ def test_the_command_the_no_answer_prints_is_one_the_owner_can_run(setup_env):
 
 def test_the_yes_says_the_plain_key_must_be_made_first(setup_env):
     """A no-install setup makes no plain key, and swap-key needs one: the
-    printed steps say to make it first (Sol review 2, finding 1)."""
+    printed steps say to make it first."""
     env = setup_env
     prepare_router(env)
     r = run_noinstall_with_offer(env, answer="yes")

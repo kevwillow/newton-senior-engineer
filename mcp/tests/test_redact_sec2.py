@@ -58,7 +58,7 @@ SESSION = "0123456789abcdef0123456789abcdef"
         pytest.param(f'{{"sid": "{SESSION}"}}', (SESSION,), id="sid-json"),
     ],
 )
-def test_s3_secret_name_spellings_and_headers_are_redacted(text, needles):
+def test_secret_name_spellings_and_headers_are_redacted(text, needles):
     out = redact.redact_text(text, KEY)
     for needle in needles:
         assert needle not in out, f"{needle!r} leaked: {out!r}"
@@ -75,11 +75,11 @@ def test_s3_secret_name_spellings_and_headers_are_redacted(text, needles):
     ],
     ids=["colon", "json", "dotted", "file"],
 )
-def test_s3_network_names_are_not_secret(text):
+def test_network_names_are_not_secret(text):
     assert redact.redact_text(text, KEY) == text
 
 
-def test_s3_secret_name_predicates_normalize_hyphens_and_case():
+def test_secret_name_predicates_normalize_hyphens_and_case():
     for name in ("private-key", "WPA-PSK", "pre-shared-key", "SAE-Password"):
         assert redact._is_catalog_secret_name(name)
         assert redact._looks_like_secret_option(name)
@@ -101,11 +101,11 @@ def test_s3_secret_name_predicates_normalize_hyphens_and_case():
         pytest.param("x.y.sid='abc'", id="p1-uci-option"),
     ],
 )
-def test_p1_sid_name_value_forms_are_not_secret(text):
+def test_sid_name_value_forms_are_not_secret(text):
     assert redact.redact_text(text, KEY) == text
 
 
-def test_p1_sid_status_survives_redact_value_envelope():
+def test_sid_status_survives_redact_value_envelope():
     status = (
         "pending sid=0123456789abcdef0123456789abcdef "
         "guard=armed rpcd=ok config=ok boot=1a2b"
@@ -142,7 +142,7 @@ def test_p1_sid_status_survives_redact_value_envelope():
         ),
     ],
 )
-def test_s4_unquoted_midline_secret_value_runs_to_line_end(text, needles, preserved):
+def test_unquoted_midline_secret_value_runs_to_line_end(text, needles, preserved):
     out = redact.redact_text(text, KEY)
     for needle in needles:
         assert needle not in out, f"{needle!r} leaked: {out!r}"
@@ -150,7 +150,7 @@ def test_s4_unquoted_midline_secret_value_runs_to_line_end(text, needles, preser
     assert PLACEHOLDER.search(out)
 
 
-def test_s4_line_endings_and_trailing_spaces_are_preserved():
+def test_line_endings_and_trailing_spaces_are_preserved():
     text = "daemon: key=Super Secret  \r\nssid=Home\r\n"
     out = redact.redact_text(text, KEY)
     assert "Super" not in out and "Secret" not in out
@@ -182,7 +182,7 @@ def test_s4_line_endings_and_trailing_spaces_are_preserved():
         "no-ubusauth",
     ],
 )
-def test_p3_catalog_allow_names_are_not_secret_options(text):
+def test_catalog_allow_names_are_not_secret_options(text):
     assert redact.redact_text(text, KEY) == text
 
 
@@ -194,7 +194,7 @@ def test_p3_catalog_allow_names_are_not_secret_options(text):
     ],
     ids=["auth-secret", "auth"],
 )
-def test_p3_real_auth_options_remain_secret(text, needle):
+def test_real_auth_options_remain_secret(text, needle):
     out = redact.redact_text(text, KEY)
     assert needle not in out
     assert PLACEHOLDER.search(out)
@@ -221,7 +221,7 @@ def test_p3_real_auth_options_remain_secret(text, needle):
         "contains-auth",
     ],
 )
-def test_s5_catalog_gaps_are_redacted(text, needle):
+def test_catalog_gaps_are_redacted(text, needle):
     out = redact.redact_text(text, KEY)
     assert needle not in out, f"{needle!r} leaked: {out!r}"
     assert PLACEHOLDER.search(out)

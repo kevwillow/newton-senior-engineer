@@ -1,0 +1,43 @@
+#!/bin/sh
+# newton-ad-setup -- print the owner's setup script for an AD host.
+#
+# usage:
+#   newton-ad-setup windows --domain DNS --pubkey FILE --device NAME --host HOST
+#   newton-ad-setup samba  --domain DNS --pubkey FILE --device NAME --host HOST
+#   newton-ad-setup write windows --domain DNS --pubkey FILE --device NAME --host HOST --ou DN [--domain-device NAME]
+#   newton-ad-setup write samba  --domain DNS --pubkey FILE --device NAME --host HOST --ou DN [--domain-device NAME]
+#   newton-ad-setup approval-key NAME
+#
+# The script is printed on stdout and never run by this tool: the owner
+# reads it and runs it as a Domain Admin on the domain controller.  The
+# windows build is a PowerShell script, the samba build a bash script.
+#
+# exit codes: 0 the script was printed, 2 the arguments or the public key
+# were refused.
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(dirname -- "$SCRIPT_DIR")
+
+if [ -n "${NEWTON_PYTHON:-}" ]; then
+	PYTHON="$NEWTON_PYTHON"
+elif [ -x "$ROOT/mcp/.venv/bin/python" ]; then
+	PYTHON="$ROOT/mcp/.venv/bin/python"
+elif [ -x "$ROOT/venv/bin/python" ]; then
+	# the installed code root: /opt/newton/venv
+	PYTHON="$ROOT/venv/bin/python"
+else
+	PYTHON=python3
+fi
+
+PYTHONPATH="$ROOT/mcp${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+
+# The write path of 1.4 has its own commands, and its own module.
+case "${1:-}" in
+write|approval-key)
+	exec "$PYTHON" -m newton_mcp.ad.setupgen_write "$@"
+	;;
+esac
+
+exec "$PYTHON" -m newton_mcp.ad.setupgen "$@"

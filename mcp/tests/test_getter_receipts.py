@@ -346,19 +346,19 @@ EXTRA_GOOD_VERSIONS = ["23.4R1", "21.4R3-S5.4", "17.9.4a", "7.16rc2", "1.4.0", "
 
 
 @pytest.mark.parametrize("value", EXTRA_GOOD_VERSIONS)
-def test_r2_b1_release_shapes_are_kept(value: str) -> None:
+def test_release_shapes_are_kept(value: str) -> None:
     """common vendor release shapes still pass the allow-list."""
     assert receipts.sanitize_version(value) == value
 
 
 @pytest.mark.parametrize("value", GOOD_VERSIONS)
-def test_r1_b1_real_versions_are_kept(value: str) -> None:
+def test_real_versions_are_kept(value: str) -> None:
     """all six real or synthetic versions pass."""
     assert receipts.sanitize_version(value) == value
 
 
 @pytest.mark.parametrize("value", BAD_VERSIONS)
-def test_r1_b1_hosts_addresses_and_words_are_refused(value: str) -> None:
+def test_hosts_addresses_and_words_are_refused(value: str) -> None:
     """hostnames, FQDNs, IPv4, MAC-shaped tokens never pass as a version."""
     assert receipts.sanitize_version(value) == "unknown"
 
@@ -373,11 +373,11 @@ def test_r1_b1_hosts_addresses_and_words_are_refused(value: str) -> None:
         ("vyos", "Version: VyOS aa-bb-cc-dd-ee-ff\n"),
     ],
 )
-def test_r1_b1_extract_refuses_report_examples(platform: str, body: str) -> None:
+def test_extract_refuses_report_examples(platform: str, body: str) -> None:
     assert receipts.extract_version(platform, body) == "unknown"
 
 
-def test_r1_b1_record_and_summarise_refuse_forged_host_os(rig) -> None:
+def test_record_and_summarise_refuse_forged_host_os(rig) -> None:
     """record() writes unknown, and a forged line with a host is not shown."""
     assert receipts.record(rig["state"], "junos", "interfaces", "ok", "matched", "myrouter.lan")
     assert lines(rig["file"])[-1]["os"] == "unknown"
@@ -389,7 +389,7 @@ def test_r1_b1_record_and_summarise_refuse_forged_host_os(rig) -> None:
     assert list(got) == ["unknown"]
 
 
-def test_r1_b2_deeply_nested_line_does_not_crash_summarise(rig) -> None:
+def test_deeply_nested_line_does_not_crash_summarise(rig) -> None:
     """RecursionError-sized line is skipped; later good lines count."""
     rig["state"].mkdir(parents=True, exist_ok=True)
     rig["file"].write_text("[" * 200000 + "\n", encoding="utf-8")
@@ -400,7 +400,7 @@ def test_r1_b2_deeply_nested_line_does_not_crash_summarise(rig) -> None:
     assert listed["result"] == "ok"
 
 
-def test_r1_b2_overlong_line_is_skipped_before_parse(rig) -> None:
+def test_overlong_line_is_skipped_before_parse(rig) -> None:
     good = {"v": 1, "date": "2026-10-18", "platform": "junos", "os": "1.0",
             "getter": "interfaces", "status": "ok", "shape": "matched"}
     rig["state"].mkdir(parents=True, exist_ok=True)
@@ -409,7 +409,7 @@ def test_r1_b2_overlong_line_is_skipped_before_parse(rig) -> None:
     assert receipts.summarise(rig["state"], "junos")["interfaces"]["by_os"]["1.0"]["matched"] == 1
 
 
-def test_r1_b2_any_exception_per_line_is_contained(rig, monkeypatch) -> None:
+def test_any_exception_per_line_is_contained(rig, monkeypatch) -> None:
     rig["state"].mkdir(parents=True, exist_ok=True)
     rig["file"].write_text("{}\n{}\n", encoding="utf-8")
 
@@ -420,7 +420,7 @@ def test_r1_b2_any_exception_per_line_is_contained(rig, monkeypatch) -> None:
     assert receipts.summarise(rig["state"], "junos") == {}
 
 
-def test_r1_b2_list_getters_survives_summarise_failure(rig, monkeypatch) -> None:
+def test_list_getters_survives_summarise_failure(rig, monkeypatch) -> None:
     """a broken receipts layer yields an error note, not a failed tool."""
     def boom(*_a: Any, **_k: Any) -> Any:
         raise RuntimeError("broken")
@@ -452,7 +452,7 @@ def svc(rig, monkeypatch):
     return go
 
 
-def test_r1_b3_only_ok_and_matched_version_teaches(svc) -> None:
+def test_only_ok_and_matched_version_teaches(svc) -> None:
     d = _dev()
     assert svc(d, "version", "ok", "mismatch", "Junos: 23.4R1\n") == "unknown"
     assert svc(d, "interfaces", "ok", "matched") == "unknown"
@@ -472,14 +472,14 @@ def test_r1_b3_only_ok_and_matched_version_teaches(svc) -> None:
         ("ok", "matched", "no version line\n"),
     ],
 )
-def test_r1_b3_any_other_version_run_clears(svc, status, shape, stdout) -> None:
+def test_any_other_version_run_clears(svc, status, shape, stdout) -> None:
     d = _dev()
     assert svc(d, "version", "ok", "matched", "Junos: 23.4R1\n") == "23.4R1"
     svc(d, "version", status, shape, stdout)
     assert svc(d, "interfaces", "ok", "matched") == "unknown"
 
 
-def test_r1_b3_repointed_name_drops_the_value(svc) -> None:
+def test_repointed_name_drops_the_value(svc) -> None:
     assert svc(_dev(), "version", "ok", "matched", "Junos: 23.4R1\n") == "23.4R1"
     assert svc(_dev(host="other"), "interfaces", "ok", "matched") == "unknown"
     assert svc(_dev(platform="vyos"), "interfaces", "ok", "matched") == "unknown"
@@ -487,7 +487,7 @@ def test_r1_b3_repointed_name_drops_the_value(svc) -> None:
     assert svc(_dev(name="d2"), "interfaces", "ok", "matched") == "unknown"
 
 
-def test_r1_b3_learned_value_expires_after_15_minutes(svc) -> None:
+def test_learned_value_expires_after_15_minutes(svc) -> None:
     d = _dev()
     svc(d, "version", "ok", "matched", "Junos: 23.4R1\n")
     svc.clock[0] += 15 * 60 - 1
@@ -496,7 +496,7 @@ def test_r1_b3_learned_value_expires_after_15_minutes(svc) -> None:
     assert svc(d, "interfaces", "ok", "matched") == "unknown"
 
 
-def test_r2_n1_version_run_while_off_still_clears(svc, monkeypatch) -> None:
+def test_version_run_while_off_still_clears(svc, monkeypatch) -> None:
     """a failed version run with receipts off still drops the learned value."""
     d = _dev()
     assert svc(d, "version", "ok", "matched", "Junos: 23.4R1\n") == "23.4R1"
@@ -506,14 +506,14 @@ def test_r2_n1_version_run_while_off_still_clears(svc, monkeypatch) -> None:
     assert svc(d, "interfaces", "ok", "matched") == "unknown"
 
 
-def test_r1_b3_skill_documents_the_window() -> None:
+def test_skill_documents_the_window() -> None:
     skill = (Path(__file__).resolve().parents[2] / "SKILL.md").read_text(encoding="utf-8")
     assert "last 15 minutes" in skill
 
 
 # --- N1..N4
 
-def test_r1_n1_fifo_receipt_file_does_not_hang(rig) -> None:
+def test_fifo_receipt_file_does_not_hang(rig) -> None:
     """a planted FIFO is refused at once by record and summarise."""
     import time
     rig["state"].mkdir(parents=True, exist_ok=True)
@@ -525,7 +525,7 @@ def test_r1_n1_fifo_receipt_file_does_not_hang(rig) -> None:
     assert time.monotonic() - t0 < 3
 
 
-def test_r1_n1_fifo_lock_file_does_not_hang(rig) -> None:
+def test_fifo_lock_file_does_not_hang(rig) -> None:
     import time
     rig["state"].mkdir(parents=True, exist_ok=True)
     os.mkfifo(rig["state"] / receipts.LOCK_FILE)
@@ -534,7 +534,7 @@ def test_r1_n1_fifo_lock_file_does_not_hang(rig) -> None:
     assert time.monotonic() - t0 < 3
 
 
-def test_r1_n1_fifo_rotated_file_does_not_hang_rotation(rig, monkeypatch) -> None:
+def test_fifo_rotated_file_does_not_hang_rotation(rig, monkeypatch) -> None:
     import time
     monkeypatch.setattr(receipts, "MAX_BYTES", 300)
     for _ in range(3):
@@ -549,7 +549,7 @@ def test_r1_n1_fifo_rotated_file_does_not_hang_rotation(rig, monkeypatch) -> Non
     assert time.monotonic() - t0 < 3
 
 
-def test_r1_n2_existing_loose_modes_are_tightened(rig) -> None:
+def test_existing_loose_modes_are_tightened(rig) -> None:
     """pre-existing 0644 receipt, lock and rotated files become 0600."""
     rig["state"].mkdir(parents=True, exist_ok=True)
     for name in (receipts.RECEIPT_FILE, receipts.LOCK_FILE):
@@ -561,7 +561,7 @@ def test_r1_n2_existing_loose_modes_are_tightened(rig) -> None:
         assert stat.S_IMODE((rig["state"] / name).stat().st_mode) == 0o600
 
 
-def test_r1_n2_rotated_copy_is_0600_even_from_a_loose_file(rig, monkeypatch) -> None:
+def test_rotated_copy_is_0600_even_from_a_loose_file(rig, monkeypatch) -> None:
     monkeypatch.setattr(receipts, "MAX_BYTES", 300)
     rig["state"].mkdir(parents=True, exist_ok=True)
     rig["file"].write_text("x" * 290 + "\n", encoding="utf-8")
@@ -571,7 +571,7 @@ def test_r1_n2_rotated_copy_is_0600_even_from_a_loose_file(rig, monkeypatch) -> 
     assert old.exists() and stat.S_IMODE(old.stat().st_mode) == 0o600
 
 
-def test_r1_n3_short_writes_are_completed(rig, monkeypatch) -> None:
+def test_short_writes_are_completed(rig, monkeypatch) -> None:
     """os.write returning short counts still lands the whole line."""
     real = os.write
 
@@ -584,13 +584,13 @@ def test_r1_n3_short_writes_are_completed(rig, monkeypatch) -> None:
     assert len(lines(rig["file"])) == 1
 
 
-def test_r1_n3_zero_progress_write_fails_cleanly(rig, monkeypatch) -> None:
+def test_zero_progress_write_fails_cleanly(rig, monkeypatch) -> None:
     monkeypatch.setattr(receipts.os, "write", lambda fd, data: 0)
     assert receipts.record(rig["state"], "junos", "interfaces", "ok", "matched", "1.0") is False
 
 
 @pytest.mark.parametrize("v", [True, 1.0, "1", None, [1]])
-def test_r1_n4_v_must_be_the_int_one(rig, v: Any) -> None:
+def test_a_receipt_whose_v_is_not_the_int_one_is_skipped(rig, v: Any) -> None:
     good = {"v": 1, "date": "2026-10-18", "platform": "junos", "os": "1.0",
             "getter": "interfaces", "status": "ok", "shape": "matched"}
     rig["state"].mkdir(parents=True, exist_ok=True)
@@ -602,7 +602,7 @@ def test_r1_n4_v_must_be_the_int_one(rig, v: Any) -> None:
 
 # --- mutants that survived r0
 
-def test_r1_n5_flock_serialises_processes(rig, tmp_path: Path) -> None:
+def test_flock_serialises_processes(rig, tmp_path: Path) -> None:
     """a real second process blocks on the held lock, then proceeds."""
     import subprocess
     import sys
@@ -628,7 +628,7 @@ def test_r1_n5_flock_serialises_processes(rig, tmp_path: Path) -> None:
     assert len(lines(rig["file"])) == 1
 
 
-def test_r1_n5_many_processes_lose_no_line(rig) -> None:
+def test_many_processes_lose_no_line(rig) -> None:
     import subprocess
     import sys
 
@@ -642,18 +642,18 @@ def test_r1_n5_many_processes_lose_no_line(rig) -> None:
     assert len(lines(rig["file"])) == 300
 
 
-def test_r1_n5_os_cap_is_exactly_eight() -> None:
+def test_os_cap_is_exactly_eight() -> None:
     assert receipts.MAX_OS_SHOWN == 8
 
 
-def test_r1_n5_valid_rejects_bad_getter_and_accepts_good(rig) -> None:
+def test_valid_rejects_bad_getter_and_accepts_good(rig) -> None:
     good = {"v": 1, "date": "2026-10-18", "platform": "junos", "os": "unknown",
             "getter": "interfaces", "status": "ok", "shape": "matched"}
     assert receipts._valid(json.dumps(good), "junos") == good
     assert receipts._valid(json.dumps({**good, "getter": "nosuch"}), "junos") is None
 
 
-def test_r1_n5_open_regular_refuses_non_regular(tmp_path: Path) -> None:
+def test_open_regular_refuses_non_regular(tmp_path: Path) -> None:
     with pytest.raises(OSError):
         receipts._open_regular(tmp_path, os.O_RDONLY)
     if Path("/dev/null").exists():
@@ -662,7 +662,7 @@ def test_r1_n5_open_regular_refuses_non_regular(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("word", ["0", "off", "false", "no", "OFF", " False "])
-def test_r1_n5_enabled_words(monkeypatch, word: str) -> None:
+def test_only_the_on_words_enable_the_receipts(monkeypatch, word: str) -> None:
     monkeypatch.setenv("NEWTON_FIELD_RECEIPTS", word)
     assert receipts.enabled() is False
     for on in ("1", "on", "yes", "true", ""):
@@ -676,18 +676,18 @@ def test_r1_n5_enabled_words(monkeypatch, word: str) -> None:
      ("junos", "interfaces", "ok", "bogus"), ("junos", "interfaces", "OK\n", "matched"),
      ("junos", "interfaces", "", "matched")],
 )
-def test_r1_n5_record_validates_every_field(rig, args) -> None:
+def test_record_validates_every_field(rig, args) -> None:
     assert receipts.record(rig["state"], args[0], args[1], args[2], args[3], "1.0") is False
     assert not rig["file"].exists()
 
 
-def test_r1_n5_record_swallows_oserror(tmp_path: Path) -> None:
+def test_record_swallows_oserror(tmp_path: Path) -> None:
     blocker = tmp_path / "file"
     blocker.write_text("x", encoding="utf-8")
     assert receipts.record(blocker / "sub", "junos", "interfaces", "ok", "matched", "1.0") is False
 
 
-def test_r1_n5_server_wrapper_swallows_exceptions(rig, monkeypatch) -> None:
+def test_server_wrapper_swallows_exceptions(rig, monkeypatch) -> None:
     """The wrapper's own except Exception: record() itself raising must not escape."""
     def boom(*_a: Any, **_k: Any) -> bool:
         raise RuntimeError("x")

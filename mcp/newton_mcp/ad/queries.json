@@ -1,0 +1,434 @@
+{
+  "v": 1,
+  "queries": [
+    {
+      "id": "domain_head",
+      "base": "{domain}",
+      "scope": "base",
+      "filter": "(objectClass=*)",
+      "attrs": [
+        "objectSid",
+        "ms-DS-MachineAccountQuota",
+        "msDS-Behavior-Version",
+        "minPwdLength",
+        "pwdHistoryLength",
+        "maxPwdAge",
+        "minPwdAge",
+        "pwdProperties",
+        "lockoutThreshold",
+        "lockoutDuration",
+        "lockOutObservationWindow",
+        "gPLink",
+        "fSMORoleOwner",
+        "distinguishedName"
+      ],
+      "binary": [
+        "objectSid"
+      ],
+      "ranged": [],
+      "sd": true,
+      "limit": 1,
+      "presence_only": false
+    },
+    {
+      "id": "users",
+      "base": "{domain}",
+      "scope": "sub",
+      "filter": "(&(objectCategory=person)(objectClass=user))",
+      "attrs": [
+        "sAMAccountName",
+        "objectSid",
+        "userAccountControl",
+        "pwdLastSet",
+        "lastLogonTimestamp",
+        "servicePrincipalName",
+        "adminCount",
+        "primaryGroupID",
+        "msDS-SupportedEncryptionTypes",
+        "accountExpires",
+        "sIDHistory",
+        "whenCreated",
+        "distinguishedName"
+      ],
+      "binary": [
+        "objectSid",
+        "sIDHistory"
+      ],
+      "ranged": [],
+      "sd": false,
+      "limit": 50000,
+      "presence_only": false
+    },
+    {
+      "id": "computers",
+      "base": "{domain}",
+      "scope": "sub",
+      "filter": "(objectCategory=computer)",
+      "attrs": [
+        "sAMAccountName",
+        "objectSid",
+        "userAccountControl",
+        "pwdLastSet",
+        "lastLogonTimestamp",
+        "servicePrincipalName",
+        "primaryGroupID",
+        "msDS-AllowedToDelegateTo",
+        "msDS-AllowedToActOnBehalfOfOtherIdentity",
+        "msDS-SupportedEncryptionTypes",
+        "sIDHistory",
+        "whenCreated",
+        "operatingSystem",
+        "operatingSystemVersion",
+        "ms-Mcs-AdmPwdExpirationTime",
+        "msLAPS-PasswordExpirationTime",
+        "distinguishedName"
+      ],
+      "binary": [
+        "objectSid",
+        "sIDHistory",
+        "msDS-AllowedToActOnBehalfOfOtherIdentity"
+      ],
+      "ranged": [],
+      "sd": false,
+      "limit": 50000,
+      "presence_only": false
+    },
+    {
+      "id": "groups",
+      "base": "{domain}",
+      "scope": "sub",
+      "filter": "(objectClass=group)",
+      "attrs": [
+        "sAMAccountName",
+        "objectSid",
+        "member",
+        "groupType",
+        "adminCount",
+        "sIDHistory",
+        "distinguishedName"
+      ],
+      "binary": [
+        "objectSid",
+        "sIDHistory"
+      ],
+      "ranged": [
+        "member"
+      ],
+      "sd": false,
+      "limit": 50000,
+      "presence_only": false
+    },
+    {
+      "id": "fsps",
+      "base": "CN=ForeignSecurityPrincipals,{domain}",
+      "scope": "sub",
+      "filter": "(objectClass=foreignSecurityPrincipal)",
+      "attrs": [
+        "objectSid",
+        "distinguishedName"
+      ],
+      "binary": [
+        "objectSid"
+      ],
+      "ranged": [],
+      "sd": false,
+      "limit": 20000,
+      "presence_only": false
+    },
+    {
+      "id": "gmsa",
+      "base": "{domain}",
+      "scope": "sub",
+      "filter": "(objectClass=msDS-GroupManagedServiceAccount)",
+      "attrs": [
+        "sAMAccountName",
+        "objectSid",
+        "pwdLastSet",
+        "servicePrincipalName",
+        "msDS-ManagedPasswordInterval",
+        "msDS-GroupMSAMembership",
+        "distinguishedName"
+      ],
+      "binary": [
+        "objectSid",
+        "msDS-GroupMSAMembership"
+      ],
+      "ranged": [],
+      "sd": false,
+      "limit": 5000,
+      "presence_only": false
+    },
+    {
+      "id": "kds_root_keys",
+      "base": "CN=Master Root Keys,CN=Group Key Distribution Service,CN=Services,{config}",
+      "scope": "sub",
+      "filter": "(objectClass=msKds-ProvRootKey)",
+      "attrs": [
+        "msKds-CreateTime",
+        "msKds-UseStartTime",
+        "msKds-Version",
+        "distinguishedName"
+      ],
+      "binary": [],
+      "ranged": [],
+      "sd": false,
+      "limit": 100,
+      "presence_only": false
+    },
+    {
+      "id": "psos",
+      "base": "CN=Password Settings Container,CN=System,{domain}",
+      "scope": "sub",
+      "filter": "(objectClass=msDS-PasswordSettings)",
+      "attrs": [
+        "msDS-PasswordSettingsPrecedence",
+        "msDS-MinimumPasswordLength",
+        "msDS-PasswordComplexityEnabled",
+        "msDS-PasswordReversibleEncryptionEnabled",
+        "msDS-PasswordHistoryLength",
+        "msDS-LockoutThreshold",
+        "msDS-MaximumPasswordAge",
+        "msDS-PSOAppliesTo",
+        "distinguishedName"
+      ],
+      "binary": [],
+      "ranged": [],
+      "sd": false,
+      "limit": 1000,
+      "presence_only": false
+    },
+    {
+      "id": "dir_service",
+      "base": "CN=Directory Service,CN=Windows NT,CN=Services,{config}",
+      "scope": "base",
+      "filter": "(objectClass=*)",
+      "attrs": [
+        "dSHeuristics",
+        "tombstoneLifetime",
+        "distinguishedName"
+      ],
+      "binary": [],
+      "ranged": [],
+      "sd": false,
+      "limit": 1,
+      "presence_only": false
+    },
+    {
+      "id": "optional_features",
+      "base": "CN=Optional Features,CN=Directory Service,CN=Windows NT,CN=Services,{config}",
+      "scope": "sub",
+      "filter": "(objectClass=msDS-OptionalFeature)",
+      "attrs": [
+        "msDS-OptionalFeatureGUID",
+        "msDS-EnabledFeatureBL",
+        "distinguishedName"
+      ],
+      "binary": [
+        "msDS-OptionalFeatureGUID"
+      ],
+      "ranged": [],
+      "sd": false,
+      "limit": 100,
+      "presence_only": false
+    },
+    {
+      "id": "partitions",
+      "base": "CN=Partitions,{config}",
+      "scope": "base",
+      "filter": "(objectClass=*)",
+      "attrs": [
+        "msDS-Behavior-Version",
+        "distinguishedName"
+      ],
+      "binary": [],
+      "ranged": [],
+      "sd": false,
+      "limit": 1,
+      "presence_only": false
+    },
+    {
+      "id": "schema_head",
+      "base": "{schema}",
+      "scope": "base",
+      "filter": "(objectClass=*)",
+      "attrs": [
+        "objectVersion",
+        "distinguishedName"
+      ],
+      "binary": [],
+      "ranged": [],
+      "sd": false,
+      "limit": 1,
+      "presence_only": false
+    },
+    {
+      "id": "schema_laps",
+      "base": "{schema}",
+      "scope": "sub",
+      "filter": "(|(lDAPDisplayName=ms-Mcs-AdmPwd)(lDAPDisplayName=msLAPS-Password)(lDAPDisplayName=msLAPS-EncryptedPassword))",
+      "attrs": [
+        "lDAPDisplayName",
+        "distinguishedName"
+      ],
+      "binary": [],
+      "ranged": [],
+      "sd": false,
+      "limit": 10,
+      "presence_only": false
+    },
+    {
+      "id": "trusts",
+      "base": "CN=System,{domain}",
+      "scope": "sub",
+      "filter": "(objectClass=trustedDomain)",
+      "attrs": [
+        "trustPartner",
+        "trustDirection",
+        "trustType",
+        "trustAttributes",
+        "msDS-SupportedEncryptionTypes",
+        "securityIdentifier",
+        "distinguishedName"
+      ],
+      "binary": [
+        "securityIdentifier"
+      ],
+      "ranged": [],
+      "sd": false,
+      "limit": 1000,
+      "presence_only": false
+    },
+    {
+      "id": "adminsdholder",
+      "base": "CN=AdminSDHolder,CN=System,{domain}",
+      "scope": "base",
+      "filter": "(objectClass=*)",
+      "attrs": [
+        "distinguishedName"
+      ],
+      "binary": [],
+      "ranged": [],
+      "sd": true,
+      "limit": 1,
+      "presence_only": false
+    },
+    {
+      "id": "protected_sds",
+      "base": "{domain}",
+      "scope": "sub",
+      "filter": "(|(adminCount=1)(primaryGroupID=516)(primaryGroupID=521))",
+      "attrs": [
+        "objectSid",
+        "objectClass",
+        "distinguishedName"
+      ],
+      "binary": [
+        "objectSid"
+      ],
+      "ranged": [],
+      "sd": true,
+      "limit": 5000,
+      "presence_only": false
+    },
+    {
+      "id": "dc_ou",
+      "base": "OU=Domain Controllers,{domain}",
+      "scope": "base",
+      "filter": "(objectClass=*)",
+      "attrs": [
+        "distinguishedName"
+      ],
+      "binary": [],
+      "ranged": [],
+      "sd": true,
+      "limit": 1,
+      "presence_only": false
+    },
+    {
+      "id": "gpos",
+      "base": "CN=Policies,CN=System,{domain}",
+      "scope": "sub",
+      "filter": "(objectClass=groupPolicyContainer)",
+      "attrs": [
+        "displayName",
+        "objectGUID",
+        "gPCFileSysPath",
+        "versionNumber",
+        "flags",
+        "distinguishedName"
+      ],
+      "binary": [
+        "objectGUID"
+      ],
+      "ranged": [],
+      "sd": true,
+      "limit": 5000,
+      "presence_only": false
+    },
+    {
+      "id": "ous",
+      "base": "{domain}",
+      "scope": "sub",
+      "filter": "(objectClass=organizationalUnit)",
+      "attrs": [
+        "gPLink",
+        "gPOptions",
+        "distinguishedName"
+      ],
+      "binary": [],
+      "ranged": [],
+      "sd": false,
+      "limit": 20000,
+      "presence_only": false
+    },
+    {
+      "id": "dpapi_backup",
+      "base": "CN=System,{domain}",
+      "scope": "sub",
+      "filter": "(&(objectClass=secret)(cn=BCKUPKEY*))",
+      "attrs": [
+        "cn",
+        "distinguishedName"
+      ],
+      "binary": [],
+      "ranged": [],
+      "sd": true,
+      "limit": 20,
+      "presence_only": false
+    },
+    {
+      "id": "pw_attr_presence",
+      "base": "{domain}",
+      "scope": "sub",
+      "filter": "(|(userPassword=*)(unixUserPassword=*)(msSFU30Password=*))",
+      "attrs": [
+        "objectSid",
+        "distinguishedName"
+      ],
+      "binary": [
+        "objectSid"
+      ],
+      "ranged": [],
+      "sd": false,
+      "limit": 5000,
+      "presence_only": true
+    },
+    {
+      "id": "keycred_presence",
+      "base": "{domain}",
+      "scope": "sub",
+      "filter": "(msDS-KeyCredentialLink=*)",
+      "attrs": [
+        "objectSid",
+        "distinguishedName"
+      ],
+      "binary": [
+        "objectSid"
+      ],
+      "ranged": [],
+      "sd": false,
+      "limit": 5000,
+      "presence_only": true
+    }
+  ]
+}

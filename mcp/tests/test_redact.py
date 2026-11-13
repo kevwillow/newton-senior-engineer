@@ -1157,7 +1157,7 @@ def _resolve_only(configured, monkeypatch, current_value):
     return svc._resolve_placeholders
 
 
-def test_r5_accepts_unquoted_exact_placeholder(configured, monkeypatch):
+def test_accepts_unquoted_exact_placeholder(configured, monkeypatch):
     CUR = "hunter2hunter2"
     path = "wireless.default_radio0.key"
     fp = redact.fingerprint(path, CUR)
@@ -1168,7 +1168,7 @@ def test_r5_accepts_unquoted_exact_placeholder(configured, monkeypatch):
     assert path in out
 
 
-def test_r5_accepts_single_quoted_exact_placeholder(configured, monkeypatch):
+def test_accepts_single_quoted_exact_placeholder(configured, monkeypatch):
     CUR = "hunter2hunter2"
     path = "wireless.default_radio0.key"
     fp = redact.fingerprint(path, CUR)
@@ -1179,7 +1179,7 @@ def test_r5_accepts_single_quoted_exact_placeholder(configured, monkeypatch):
     assert path in out
 
 
-def test_r5_accepts_double_quoted_exact_placeholder(configured, monkeypatch):
+def test_accepts_double_quoted_exact_placeholder(configured, monkeypatch):
     CUR = "hunter2hunter2"
     path = "wireless.default_radio0.key"
     fp = redact.fingerprint(path, CUR)
@@ -1190,7 +1190,7 @@ def test_r5_accepts_double_quoted_exact_placeholder(configured, monkeypatch):
     assert path in out
 
 
-def test_r5_refuses_placeholder_with_extra_text_in_quotes(configured, monkeypatch):
+def test_refuses_placeholder_with_extra_text_in_quotes(configured, monkeypatch):
     CUR = "hunter2hunter2"
     path = "wireless.default_radio0.key"
     fp = redact.fingerprint(path, CUR)
@@ -1200,7 +1200,7 @@ def test_r5_refuses_placeholder_with_extra_text_in_quotes(configured, monkeypatc
         resolve("quasar", batch + "\n")
 
 
-def test_r5_refuses_placeholder_with_trailing_text(configured, monkeypatch):
+def test_refuses_placeholder_with_trailing_text(configured, monkeypatch):
     CUR = "hunter2hunter2"
     path = "wireless.default_radio0.key"
     fp = redact.fingerprint(path, CUR)
@@ -1210,7 +1210,7 @@ def test_r5_refuses_placeholder_with_trailing_text(configured, monkeypatch):
         resolve("quasar", batch + "\n")
 
 
-def test_r5_refuses_placeholder_for_wrong_path(configured, monkeypatch):
+def test_refuses_placeholder_for_wrong_path(configured, monkeypatch):
     CUR = "hunter2hunter2"
     fp = redact.fingerprint("wireless.default_radio0.key", CUR)
     resolve = _resolve_only(configured, monkeypatch, CUR)
@@ -1219,7 +1219,7 @@ def test_r5_refuses_placeholder_for_wrong_path(configured, monkeypatch):
         resolve("quasar", batch + "\n")
 
 
-def test_r5_refuses_placeholder_with_wrong_fingerprint(configured, monkeypatch):
+def test_refuses_placeholder_with_wrong_fingerprint(configured, monkeypatch):
     CUR = "hunter2hunter2"
     path = "wireless.default_radio0.key"
     resolve = _resolve_only(configured, monkeypatch, CUR)
@@ -1228,7 +1228,7 @@ def test_r5_refuses_placeholder_with_wrong_fingerprint(configured, monkeypatch):
         resolve("quasar", batch + "\n")
 
 
-def test_r5_refuses_placeholder_in_add_list(configured, monkeypatch):
+def test_refuses_placeholder_in_add_list(configured, monkeypatch):
     CUR = "hunter2hunter2"
     fp = redact.fingerprint("network.lan.dns", CUR)
     resolve = _resolve_only(configured, monkeypatch, CUR)
@@ -1237,7 +1237,7 @@ def test_r5_refuses_placeholder_in_add_list(configured, monkeypatch):
         resolve("quasar", batch + "\n")
 
 
-def test_r5_refuses_placeholder_in_rename(configured, monkeypatch):
+def test_refuses_placeholder_in_rename(configured, monkeypatch):
     CUR = "hunter2hunter2"
     path = "wireless.default_radio0.key"
     fp = redact.fingerprint(path, CUR)
@@ -1247,7 +1247,7 @@ def test_r5_refuses_placeholder_in_rename(configured, monkeypatch):
         resolve("quasar", batch + "\n")
 
 
-def test_r5_refuses_placeholder_in_set_space_form(configured, monkeypatch):
+def test_refuses_placeholder_in_set_space_form(configured, monkeypatch):
     CUR = "hunter2hunter2"
     path = "wireless.default_radio0.key"
     fp = redact.fingerprint(path, CUR)
@@ -1257,7 +1257,7 @@ def test_r5_refuses_placeholder_in_set_space_form(configured, monkeypatch):
         resolve("quasar", batch + "\n")
 
 
-def test_r5_refuses_placeholder_for_a_different_unrelated_path(configured, monkeypatch):
+def test_refuses_placeholder_for_a_different_unrelated_path(configured, monkeypatch):
     CUR = "hunter2hunter2"
     fp = redact.fingerprint("wireless.default_radio0.key", CUR)
     resolve = _resolve_only(configured, monkeypatch, CUR)
@@ -1266,7 +1266,7 @@ def test_r5_refuses_placeholder_for_a_different_unrelated_path(configured, monke
         resolve("quasar", batch + "\n")
 
 
-def test_r5_lines_without_placeholder_pass_through(configured, monkeypatch):
+def test_lines_without_placeholder_pass_through(configured, monkeypatch):
     CUR = "this-is-not-a-secret"
     resolve = _resolve_only(configured, monkeypatch, CUR)
     batch = (
