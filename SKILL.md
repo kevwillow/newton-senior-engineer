@@ -735,7 +735,9 @@ changes nothing. Explain each finding in plain words: what an attacker does with
    the DC refused it or it did not arrive; `restored` and `conflicts` are then unknown). Run
    `newton_ad_change_status` and tell the owner what the DC holds: a change that is not confirmed is put back by the DC
    itself at its `undo_at`, except an `unlock`, which has no undo and stays written. A connection lost while a DC is
-   read back counts as that DC not showing the change, so the change is aborted. Do not apply the plan again.
+   read back counts as that DC not showing the change, so the change is aborted, except an unlock, which is not aborted and reaches the other DCs by replication. A request Newton refuses
+   before it leaves the Newton host (the SSH runner's own check, or a request over the size limit) is `refused`: nothing
+   was sent. Do not apply the plan again.
    `newton_ad_abort_change(device, plan_id)` works only on a change still armed (written and not yet confirmed: while Newton is still verifying it, or an apply cut off before its confirm):
    the DC runs the undo then; on any other change the abort is refused with `conflict`. The undo, from that abort or
    from the apply's own abort when a DC does not catch up, writes back only attributes still equal to the after-image

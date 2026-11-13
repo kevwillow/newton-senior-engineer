@@ -105,6 +105,16 @@ UNLOCK_LAG_MESSAGE = (
     "reaches the other domain controllers by replication. Run "
     "newton_ad_change_status to read it from the DC."
 )
+UNLOCK_ABORT_LOST_MESSAGE = (
+    "The connection to the domain controller failed while the abort was "
+    "sent. An unlock has no undo, so there is nothing to abort: if it was "
+    "written, it stays written. Run newton_ad_change_status to read it "
+    "from the DC."
+)
+REFUSED_BEFORE_SEND_MESSAGE = (
+    "Newton refused the request before it left this host, so nothing was "
+    "sent to the domain controller and nothing changed."
+)
 STATUS_LOST_MESSAGE = (
     "The connection to the domain controller failed, so the status could "
     "not be read. Try newton_ad_change_status again."
@@ -117,6 +127,14 @@ def _try_send(sender: "Send", device: Any, payload: Mapping[str, Any]) -> dict[s
         return sender(device, payload)
     except LINK_ERRORS:
         return None
+
+
+def _refused_before_send(exc: BaseException | None) -> bool:
+    """A failure raised before anything left the Newton host: the SSH
+    runner's pre-flight refusal, or a request over the size limit."""
+    if isinstance(exc, RunnerRefused):
+        return True
+    return isinstance(exc, transport.TransportError) and exc.code == "schema"
 
 
 def _link_code(exc: BaseException | None) -> str:
@@ -267,6 +285,10 @@ def apply_change(
     if answer is None:
         code = _link_code(lost)
         apply_unknown = UNLOCK_APPLY_UNKNOWN_MESSAGE if unlock else APPLY_UNKNOWN_MESSAGE
+        unknown_state = STATE_APPLY_UNKNOWN
+        if _refused_before_send(lost):
+            apply_unknown = REFUSED_BEFORE_SEND_MESSAGE
+            unknown_state = STATE_REFUSED
         receipt = {
             "v": 1,
             "plan_id": plan_id,
@@ -278,7 +300,7 @@ def apply_change(
             "target": plan.get("target"),
             "before": plan.get("before"),
             "after": plan.get("after"),
-            "state": STATE_APPLY_UNKNOWN,
+            "state": unknown_state,
             "code": code,
             "message": apply_unknown,
             "dcs": {},
@@ -288,7 +310,7 @@ def apply_change(
         return {
             "result": "error",
             "plan_id": plan_id,
-            "state": STATE_APPLY_UNKNOWN,
+            "state": unknown_state,
             "code": code,
             "message": apply_unknown,
             "dcs": {},
@@ -539,7 +561,11 @@ def abort_change(
             "state": None,
             "restored": None,
             "conflicts": None,
-            "message": ABORT_LOST_MESSAGE,
+            "message": (
+                UNLOCK_ABORT_LOST_MESSAGE
+                if plan.get("verb") == "unlock"
+                else ABORT_LOST_MESSAGE
+            ),
         }
     ok = answer.get("code") == "ok"
     message = None

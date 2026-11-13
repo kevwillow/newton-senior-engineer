@@ -789,3 +789,77 @@ def test_an_unlock_a_dc_has_not_shown_yet_is_not_aborted() -> None:
     receipt = store.read_json(store.receipt_path(plan_id))
     assert receipt["state"] == ad_apply.STATE_NOT_TESTED
     assert ad_render.applied(result)["message"] == result["message"]
+
+
+def test_a_lost_read_back_session_counts_as_a_dc_not_showing_the_change() -> None:
+    """The session fails while a DC is read back: that DC is not matched,
+    so the change is not confirmed and the automatic abort is sent."""
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+    modes: list[str] = []
+
+    result = ad_apply.apply_change(
+        plan_id, send=_drops("read", lab, modes), devices=lab.devices, timeout_s=0.0
+    )
+
+    assert "confirm" not in modes
+    assert "abort" in modes
+    assert result["state"] == ad_apply.STATE_NOT_TESTED
+    assert all(one["state"] != "matched" for one in result["dcs"].values())
+
+
+def test_a_lost_read_back_session_on_an_unlock_sends_no_abort() -> None:
+    """The same for an unlock: nothing to abort, and it stays written."""
+    lab, plan_id = _unlock_lab()
+    modes: list[str] = []
+
+    result = ad_apply.apply_change(
+        plan_id, send=_drops("read", lab, modes), devices=lab.devices, timeout_s=0.0
+    )
+
+    assert "abort" not in modes
+    assert result["state"] == ad_apply.STATE_NOT_TESTED
+    assert result["message"] == ad_apply.UNLOCK_LAG_MESSAGE
+
+
+def test_a_lost_abort_session_on_an_unlock_promises_no_undo() -> None:
+    """The owner's abort of an unlock: its session fails.  The message
+    must not mention a rollback at undo_at."""
+    lab, plan_id = _unlock_lab()
+
+    result = ad_apply.abort_change(
+        plan_id, send=_drops("abort", lab), devices=lab.devices
+    )
+
+    message = str(result["message"])
+    assert "undo_at" not in message
+    assert "no undo" in message
+
+
+@pytest.mark.parametrize("refusal", ["runner", "oversize"])
+def test_a_request_refused_before_it_is_sent_says_nothing_was_sent(refusal: str) -> None:
+    """A pre-flight refusal (the SSH runner's own, or a request over the
+    size limit) is raised before anything leaves the Newton host, so the
+    apply is refused and the owner is not told the change may be written."""
+    from newton_mcp.adapters.ssh_cli import RunnerRefused
+    from newton_mcp.ad.write.transport import TransportError
+
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+
+    def send(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        if request_body["mode"] == "apply":
+            if refusal == "runner":
+                raise RunnerRefused("the inventory entry has no key file")
+            raise TransportError("schema", "the request is bigger than 64 KiB")
+        return lab.send(target, request_body)  # type: ignore[arg-type]
+
+    result = ad_apply.apply_change(
+        plan_id, send=send, devices=lab.devices, timeout_s=0.0
+    )
+
+    assert result["state"] == ad_apply.STATE_REFUSED
+    assert "does not know" not in str(result["message"])
+    assert "nothing was sent" in str(result["message"])
+    receipt = store.read_json(store.receipt_path(plan_id))
+    assert receipt["state"] == ad_apply.STATE_REFUSED
