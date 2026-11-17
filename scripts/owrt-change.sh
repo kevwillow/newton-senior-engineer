@@ -152,7 +152,7 @@ oneline() {
 		LC_ALL=C sed 's/\xe2\x80\xa8/ /g; s/\xe2\x80\xa9/ /g; s/\xc2\x85/ /g' |
 		mask | cut -c1-120
 }
-# One secret-name catalog shared with mcp/newton_mcp/redact.py (triage #4).
+# One secret-name catalog shared with mcp/newton_mcp/redact.py.
 # scripts/ and mcp/ are siblings both in the repo and in /opt/newton.
 SECRET_CATALOG=$HERE/../mcp/newton_mcp/secret_names.txt
 # Loads the catalog ONCE into four ERE fragments (no forks per diff line).
@@ -368,7 +368,7 @@ staged_check() {
 }
 
 cmd=${1:-}; ROUTER=${2:-}; [[ -n $ROUTER ]] || { sed -n '2,31p' "$0"; exit 2; }
-# INJ-1: the destination is one argv word of every ssh call.  A shape check
+# the destination is one argv word of every ssh call.  A shape check
 # keeps a value that ssh could read as an option (a leading dash), a second
 # word (a space), a shell metacharacter or a newline out of the command
 # line; `--` before the destination tells ssh the next word is the host

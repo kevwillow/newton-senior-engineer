@@ -124,7 +124,7 @@ VERSION_FIELD_RE = re.compile(r"^version=([0-9]{1,4})\.([0-9]{1,4})\.([0-9]{1,4}
 MAX_GREPABLE_LINES = 10_000
 MAX_GREPABLE_LINE = 4096
 MAX_HOSTS = 256
-# SC-2: a planned scan request without consent is unusable forever
+# a planned scan request without consent is unusable forever
 # without a bound; the 30-minute window matches the consent window the
 # operator already accepts.  Enforced in ``load_request`` so the run
 # path (after consent is consumed) and ``newton-approve`` (before
@@ -536,7 +536,7 @@ def load_request(state: Path, request_id: str) -> dict[str, Any]:
 
 
 def _check_request_age(value: dict[str, Any]) -> None:
-    """SC-2: a planned scan request is only good for SCAN_REQUEST_MAX_AGE
+    """A planned scan request is only good for SCAN_REQUEST_MAX_AGE
     after ``created_at``; older requests are expired, requests with a
     ``created_at`` more than SCAN_REQUEST_FUTURE_TOLERANCE in the future
     are refused as "modified or invalid" (the hash check above is the
@@ -1199,7 +1199,7 @@ def scan_complete(raw: str) -> bool:
 WAN_CONTROL_IDS = {22: "OW-MGMT-01", 53: "OW-DNS-02", 80: "OW-MGMT-02", 443: "OW-MGMT-02"}
 
 
-# SC-1: scan target sanity.  The target string comes from the router's
+# scan target sanity.  The target string comes from the router's
 # own interface report (server.py: ``plan_scan`` -> ``address_and_network``
 # for an inside scan, or the default-route interface's address for an
 # outside scan), so a compromised router can steer an approved scan at

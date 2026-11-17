@@ -187,3 +187,46 @@ def test_a_verified_unlock_on_windows_ends_confirmed(tmp_path: Path) -> None:
     assert dc.current_record(str(planned["txid"]))["state"] == "confirmed"
     # an unlock arms no undo: no task was ever registered
     assert dc.last["tasks"] == []
+
+
+def test_a_second_apply_of_a_lost_user_create_on_windows_is_never_reported_refused(
+    tmp_path: Path,
+) -> None:
+    """The first apply of a user-create reached the DC and its answer was
+    lost (apply_unknown): the user is there and its record is armed.  The
+    plan record no longer holds the secret, so a second apply would reach
+    the helper with a token that does not match (bad_token), which Newton
+    would report as nothing changed over the apply_unknown receipt.  Newton
+    refuses it before sending and keeps the receipt."""
+    from newton_mcp.ad.write.transport import TransportError
+    from test_win_write_modes import PARENT_GUID
+
+    _pwsh()
+    dc = WindowsDc(tmp_path, _directory())
+    devices = {DEVICE: dc.device}
+
+    def lost(target: Any, body: Mapping[str, Any]) -> dict[str, Any]:
+        answer = dc.send(target, body)
+        if body["mode"] == "apply":
+            raise TransportError("unavailable", "the answer was lost")
+        return answer
+
+    planned = ad_plan.plan_change(
+        DEVICE, "user-create", ["new.user"], PARENT_GUID, send=dc.send, devices=devices
+    )
+    plan_id = str(planned["plan_id"])
+    _approve(plan_id)
+    first = ad_apply.apply_change(plan_id, send=lost, devices=devices, timeout_s=0.0)
+    assert first["state"] == ad_apply.STATE_APPLY_UNKNOWN
+    assert dc.current_record(str(planned["txid"]))["state"] == "armed"
+    receipt = store.read_json(store.receipt_path(plan_id))
+    sent_before = len(dc.sent)
+
+    second = ad_apply.apply_change(plan_id, send=dc.send, devices=devices, timeout_s=0.0)
+
+    assert [one["mode"] for one in dc.sent[sent_before:]] == []
+    assert second["state"] != ad_apply.STATE_REFUSED
+    assert second["code"] == "not_sent"
+    assert "nothing changed" not in str(second["message"])
+    assert "may already be written" in str(second["message"])
+    assert store.read_json(store.receipt_path(plan_id)) == receipt

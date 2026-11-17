@@ -344,7 +344,7 @@ def _ssh_argv(
             "StrictHostKeyChecking=yes",
             "-o",
             f"UserKnownHostsFile={vantage.known_hosts}",
-            # INJ-1: the destination can never be read as an ssh option
+            # the destination can never be read as an ssh option
             "--",
             vantage.destination,
             "check",

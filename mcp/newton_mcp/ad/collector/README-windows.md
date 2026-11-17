@@ -51,7 +51,7 @@ Match Group newton-ad-collectors
     ForceCommand powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\ProgramData\Newton\ad\collector.ps1
 ```
 
-The group name above is a placeholder: LVR-AD-02 has to confirm the exact `Match` spelling Windows
+The group name above is a placeholder: a live check has to confirm the exact `Match` spelling Windows
 OpenSSH accepts for a domain group before the setup script is generated.
 
 ## Running it by hand

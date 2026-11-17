@@ -1,4 +1,4 @@
-"""Unit tests of the shared approval crypto in newton_mcp.approve (round ap1).
+"""Unit tests of the shared approval crypto in newton_mcp.approve.
 
 ``approval_token`` is pinned against vectors computed once OUTSIDE the
 implementation with two independent methods: (1) hashlib/hmac in a fresh

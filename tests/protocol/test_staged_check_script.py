@@ -1,4 +1,4 @@
-"""Host side: `owrt-change.sh plan` and the staged-config check (SC-06..SC-10).
+"""Host side: `owrt-change.sh plan` and the staged-config check.
 
 The plan asks the router program for `check-staged <SID>` only when the router's hello
 `version=` is 1.3.0 or newer (the program that carries the verb). An older program reports
@@ -75,7 +75,7 @@ def _stagedcheck_lines(stdout):
     return [l for l in stdout.splitlines() if l.startswith("STAGEDCHECK ")]
 
 
-# SC-06: a router program without the verb is reported as not-checked, never as a pass.
+# a router program without the verb is reported as not-checked, never as a pass.
 def test_sc06_old_router_program_is_not_checked(router13):
     # the repo's program is 1.3.1 (it has the verb); the fake ssh makes hello say 1.2.0
     res = _plan(router13, {"FAKE_HELLO_VERSION": "1.2.0"})
@@ -100,7 +100,7 @@ def test_sc07_router_13_statuses_pass_through(router13, out, expected):
     assert f"check-staged {sid}" in router13.check_log.read_text()
 
 
-# SC-08: a failed staged check aborts the plan and discards the staged session.
+# a failed staged check aborts the plan and discards the staged session.
 @pytest.mark.parametrize(("out", "words"), [
     ("fw4 fail Error: Could not resolve protocol name\n", "staged firewall config fails fw4 check"),
     ("fw4 running-fails Could not resolve protocol name\n", "already fails fw4 check before the change"),
@@ -116,7 +116,7 @@ def test_sc08_failed_check_refuses_the_plan(router13, out, words):
     assert leftovers == [] or all(not (p / "sealed").exists() for p in leftovers)
 
 
-# SC-09: a check that could not run, or answered in a shape we do not know, is not-checked.
+# a check that could not run, or answered in a shape we do not know, is not-checked.
 @pytest.mark.parametrize(("out", "rc", "expected"), [
     ("", 0, "STAGEDCHECK fw4 not-checked check-error"),
     ("garbage\n", 0, "STAGEDCHECK fw4 not-checked check-error"),
@@ -134,7 +134,7 @@ def test_sc09_unusable_answer_is_not_a_pass(router13, out, rc, expected):
     assert _stagedcheck_lines(res.stdout) == [expected]
 
 
-# SC-10: router text in a fail detail is masked and single-lined before it reaches the log.
+# router text in a fail detail is masked and single-lined before it reaches the log.
 def test_sc10_fail_detail_is_masked(router13):
     out = "fw4 fail key=PlantedKey8812 and more\n"
     res = _plan(router13, {"FAKE_HELLO_VERSION": "1.3.0", "FAKE_CHECK_OUT": out, "FAKE_CHECK_RC": "1"})
@@ -150,7 +150,7 @@ def test_sc08b_fail_without_detail_still_refuses(router13):
     assert "staged firewall config fails fw4 check" in res.stdout
 
 
-# SC-23: the real program and helper answer the verb in the e2e fake root (no canned line).
+# the real program and helper answer the verb in the e2e fake root (no canned line).
 def test_sc23_real_verb_runs_in_the_e2e_root(e2e):  # noqa: F811
     res = _plan(e2e, {})
     assert res.returncode == 0, res.stdout

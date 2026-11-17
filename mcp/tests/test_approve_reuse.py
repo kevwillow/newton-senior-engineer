@@ -348,7 +348,7 @@ def test_mint_approval_clamps_the_window_to_the_stage_expiry(tmp_path, monkeypat
 def test_mint_approval_refuses_when_the_clamped_window_is_not_after_created(
     tmp_path, monkeypatch
 ):
-    """R8 (b-1): the stage can expire while the operator is typing."""
+    """The stage can expire while the operator is typing."""
     _, record = write_plan(tmp_path, monkeypatch)
     # timeout_s = 2340 -> the stage window is 300 s = 5 min.
     record["timeout_s"] = 2340

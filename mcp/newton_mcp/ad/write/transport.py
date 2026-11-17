@@ -32,7 +32,10 @@ class TransportError(Exception):
     """The helper did not answer with one JSON object.
 
     The code is the word of the contract: ``error`` for a broken answer
-    and ``unavailable`` for a session that never reached the helper.
+    and ``unavailable`` when the helper's answer was not received (the
+    session failed, timed out or overran its cap).  Either can follow a
+    request the helper received: it may have acted, so neither code means
+    nothing was sent.
     """
 
     def __init__(self, code: str, message: str) -> None:
@@ -55,6 +58,25 @@ def _one_object(text: str) -> dict[str, Any]:
     return value
 
 
+def _payload(request: Mapping[str, Any]) -> str:
+    """The request as one JSON object, or a schema error when it is too big."""
+    payload = json.dumps(request, separators=(",", ":"), ensure_ascii=True)
+    if len(payload.encode("utf-8")) > MAX_REQUEST_BYTES:
+        raise TransportError("schema", "the request is bigger than 64 KiB")
+    return payload
+
+
+def preflight(target: Any, request: Mapping[str, Any]) -> None:
+    """Every check ``send`` makes before anything leaves the Newton host.
+
+    It raises the ``TransportError`` (code schema) or the ``RunnerRefused``
+    that ``send`` would raise there, and opens no session.
+    """
+    payload = _payload(request)
+    runner = SshSessionRunner(target, stdout_cap=STDOUT_CAP, timeout_s=TIMEOUT_S)
+    runner.preflight(SessionSpec(remote="", stdin=payload))
+
+
 def send(
     target: Any,
     request: Mapping[str, Any],
@@ -66,9 +88,7 @@ def send(
     The request is written as one JSON object on stdin.  The answer is
     one JSON object; anything else raises ``TransportError``.
     """
-    payload = json.dumps(request, separators=(",", ":"), ensure_ascii=True)
-    if len(payload.encode("utf-8")) > MAX_REQUEST_BYTES:
-        raise TransportError("schema", "the request is bigger than 64 KiB")
+    payload = _payload(request)
     if runner is None:
         runner = SshSessionRunner(target, stdout_cap=STDOUT_CAP, timeout_s=TIMEOUT_S)
     out = runner(SessionSpec(remote="", stdin=payload))

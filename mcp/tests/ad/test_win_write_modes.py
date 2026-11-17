@@ -499,6 +499,57 @@ def _cases() -> list[dict[str, Any]]:
         store_files={TXID + ".json": _stored_record("refused")},
         requests=[{"raw": _apply(), "stage": "write"}],
     )
+    # a retry of an apply the DC holds, once the approval is over or with a
+    # token the key does not match: the record of the txid is found first
+    _retry_unlock = {
+        "verb": "unlock",
+        "target": {"guid": SEED_GUID, "sid": SEED_SID, "sam": SEED_SAM},
+        "before": {"lockout": 1000},
+        "after": {"lockout": 0},
+        "window": 120,
+        "risk": "LOW",
+    }
+    _retry_member_add = {
+        "verb": "member-add",
+        "target": {
+            "group_guid": GROUP_GUID,
+            "group_sid": GROUP_SID,
+            "group_sam": GROUP_SAM,
+            "member_guid": MEMBER_GUID,
+            "member_sid": MEMBER_SID,
+            "member_sam": MEMBER_SAM,
+        },
+        "before": {"member": "absent"},
+        "after": {"member": "present"},
+    }
+    for verb, fields in (("unlock", _retry_unlock), ("member-add", _retry_member_add)):
+        first = _apply(**fields)
+        for retry, second, now in (
+            ("expired", first, EXP + 1),
+            ("bad-token", _apply(**fields, token="f" * 64), NOW),
+        ):
+            add(
+                f"apply-retry-{verb}-{retry}",
+                ldap=_directory(
+                    objects=[
+                        _object(
+                            f"CN={SEED_SAM},{OU_USERS}",
+                            SEED_GUID,
+                            SEED_SID,
+                            SEED_SAM,
+                            uac=4260352,
+                            lockout=1000,
+                            parent=OU_USERS,
+                        )
+                    ]
+                )
+                if verb == "unlock"
+                else _directory(),
+                requests=[
+                    {"raw": first, "stage": "write", "now": NOW},
+                    {"raw": second, "stage": "write", "now": now},
+                ],
+            )
     add(
         "apply-record-create-collision",
         ldap=_directory(),
@@ -590,6 +641,8 @@ def _cases() -> list[dict[str, Any]]:
         requests=[{"raw": _apply(), "stage": "write"}],
     )
     add(
+        # The write landed and its answer was lost with no result code: a
+        # code the server answered means the atomic modify wrote nothing.
         "apply-error-after-the-write-landed",
         ldap=_directory(
             objects=[
@@ -600,7 +653,7 @@ def _cases() -> list[dict[str, Any]]:
                     SEED_SAM,
                     uac=4260352,
                     parent=OU_USERS,
-                    modify_error_after_write=1,
+                    lost_answer_on_modify=1,
                 )
             ]
         ),
@@ -887,6 +940,43 @@ def _cases() -> list[dict[str, Any]]:
             }
         ],
     )
+    for name, flags, search_errors in (
+        # landed with its answer lost and no result code
+        ("apply-unlock-error-after-the-write-landed", {"lost_answer_on_modify": 1}, 0),
+        ("apply-unlock-error-after-the-write-landed-and-no-reread", {"modify_error_after_write": 1}, 1),
+        ("apply-unlock-error-before-the-write", {"modify_error": 1}, 0),
+    ):
+        add(
+            name,
+            ldap=_directory(
+                objects=[
+                    _object(
+                        f"CN={SEED_SAM},{OU_USERS}",
+                        SEED_GUID,
+                        SEED_SID,
+                        SEED_SAM,
+                        uac=4260352,
+                        lockout=1000,
+                        parent=OU_USERS,
+                        **flags,
+                    )
+                ],
+                **({"search_errors_after_write": search_errors} if search_errors else {}),
+            ),
+            requests=[
+                {
+                    "raw": _apply(
+                        "unlock",
+                        target={"guid": SEED_GUID, "sid": SEED_SID, "sam": SEED_SAM},
+                        before={"lockout": 1000},
+                        after={"lockout": 0},
+                        window=120,
+                        risk="LOW",
+                    ),
+                    "stage": "write",
+                }
+            ],
+        )
     add(
         "apply-user-create",
         ldap=_directory(),
@@ -1765,6 +1855,43 @@ def _cases() -> list[dict[str, Any]]:
         ],
     )
 
+    # an unlock left armed (its write raised, the re-read failed): nothing
+    # may ever write the lockout back
+    _unlock_raw = _apply(
+        "unlock",
+        target={"guid": SEED_GUID, "sid": SEED_SID, "sam": SEED_SAM},
+        before={"lockout": 1000},
+        after={"lockout": 0},
+        window=120,
+        risk="LOW",
+    )
+    for name, second in (
+        ("sweep-never-undoes-an-unlock", _mode("status")),
+        ("abort-never-undoes-an-unlock", _mode("abort")),
+    ):
+        add(
+            name,
+            ldap=_directory(
+                objects=[
+                    _object(
+                        f"CN={SEED_SAM},{OU_USERS}",
+                        SEED_GUID,
+                        SEED_SID,
+                        SEED_SAM,
+                        uac=4260352,
+                        lockout=1000,
+                        parent=OU_USERS,
+                        modify_error_after_write=1,
+                    )
+                ],
+                search_errors_after_write=1,
+            ),
+            requests=[
+                {"raw": _unlock_raw, "stage": "write", "now": NOW},
+                {"raw": second, "stage": "write", "now": NOW + 900},
+            ],
+        )
+
     # the privileged groups
     add(
         "nested-privileged-group",
@@ -2027,6 +2154,26 @@ def test_the_apply_mode_refuses_a_replay(
 
 
 @pytest.mark.parametrize(
+    "name",
+    [
+        f"apply-retry-{verb}-{retry}"
+        for verb in ("unlock", "member-add")
+        for retry in ("expired", "bad-token")
+    ],
+)
+def test_a_retry_of_an_apply_the_dc_holds_is_a_replay_even_with_a_stale_approval(
+    answers: dict[str, dict[str, Any]], name: str
+) -> None:
+    """The first apply reached the DC; the retry comes after the approval
+    is over, or with a token the key does not match.  The record of the
+    txid is looked for before the token and the window, so the answer is
+    replay (Newton sends the owner to the status) and never expired or
+    bad_token (which Newton would take for nothing changed)."""
+    answer = answers[name]
+    assert _codes(answer) == ["ok", "replay"]
+
+
+@pytest.mark.parametrize(
     "name", ["apply-replay-numbered-record", "apply-replay-legacy-record"]
 )
 def test_any_record_file_makes_an_apply_a_replay(
@@ -2166,7 +2313,8 @@ def test_an_error_of_a_write_that_never_landed_is_refused_and_disarmed(
 def test_an_error_of_a_write_that_landed_runs_the_undo_at_once(
     answers: dict[str, dict[str, Any]],
 ) -> None:
-    """The server applied the modify and the answer was lost.
+    """The server applied the modify and the answer was lost (no result
+    code).
 
     The helper re-reads the target, finds the after-image and runs the
     undo at once, as the Samba helper does: the change never stays on
@@ -2179,6 +2327,38 @@ def test_an_error_of_a_write_that_landed_runs_the_undo_at_once(
     assert record["restored"] is True
     assert "task:delete newton-undo-" + TXID in _calls(answer)
     assert _object_of(answer, SEED_SAM)["values"]["useraccountcontrol"] == ["4260352"]
+
+
+def test_an_unlock_whose_write_landed_before_its_error_is_never_recorded_refused(
+    answers: dict[str, dict[str, Any]],
+) -> None:
+    """The unlock reached the directory and the answer was lost.  The
+    helper re-reads the target: an unlock has no undo, so the record says
+    confirmed (written), never refused, and Newton never tells the owner
+    nothing changed."""
+    answer = answers["apply-unlock-error-after-the-write-landed"]
+    assert answer["code"] == "error"
+    assert _current_record(answer)["state"] == "confirmed"
+    assert _object_of(answer, SEED_SAM)["values"]["lockouttime"] == ["0"]
+
+
+def test_an_unlock_whose_write_cannot_be_re_read_is_never_recorded_refused(
+    answers: dict[str, dict[str, Any]],
+) -> None:
+    """The unlock's write raised and the re-read failed too: the helper
+    cannot tell whether it landed, so the record is not refused."""
+    answer = answers["apply-unlock-error-after-the-write-landed-and-no-reread"]
+    assert answer["code"] == "error"
+    assert _current_record(answer)["state"] != "refused"
+
+
+def test_an_unlock_whose_write_failed_before_landing_is_refused(
+    answers: dict[str, dict[str, Any]],
+) -> None:
+    """The re-read shows the before-image: nothing was written."""
+    answer = answers["apply-unlock-error-before-the-write"]
+    assert _current_record(answer)["state"] == "refused"
+    assert _object_of(answer, SEED_SAM)["values"]["lockouttime"] == ["1000"]
 
 
 def test_an_error_of_a_write_that_cannot_be_re_read_stays_armed(
@@ -2362,25 +2542,41 @@ def test_the_apply_mode_creates_a_user(
     assert "unicodepwd" in created["values"]
 
 
-@pytest.mark.parametrize(
-    "name", ["apply-user-create-missing-guid", "apply-user-create-missing-usn"]
-)
-def test_user_create_without_both_undo_facts_deletes_the_new_dn(
-    answers: dict[str, dict[str, Any]], name: str
+def test_user_create_without_its_usn_deletes_the_object_of_its_guid(
+    answers: dict[str, dict[str, Any]],
 ) -> None:
-    """No ok answer is possible without both read-back facts."""
-    answer = answers[name]
+    """No ok answer is possible without both read-back facts: a GUID that
+    was read deletes the object of that GUID at once."""
+    answer = answers["apply-user-create-missing-usn"]
     assert answer["code"] == "error"
-    assert "ldap:delete CN=new.user," + DOMAIN_DN in _calls(answer)
+    # the delete names the GUID, never the planned DN
+    deletes = [call for call in _calls(answer) if call.startswith("ldap:delete")]
+    assert len(deletes) == 1 and deletes[0].startswith("ldap:delete <GUID="), deletes
     with pytest.raises(AssertionError):
         _object_of(answer, "new.user")
     assert _current_record(answer)["state"] == "undone"
 
 
+def test_user_create_without_its_guid_is_never_deleted(
+    answers: dict[str, dict[str, Any]],
+) -> None:
+    """No ok answer is possible without both read-back facts, and with no
+    GUID the account at the planned DN may not be Newton's: nothing is
+    deleted and the record is undo_failed with the DN."""
+    answer = answers["apply-user-create-missing-guid"]
+    assert answer["code"] == "error"
+    assert not [call for call in _calls(answer) if call.startswith("ldap:delete")]
+    _object_of(answer, "new.user")
+    record = _current_record(answer)
+    assert record["state"] == "undo_failed"
+    assert record["conflicts"] == ["CN=new.user," + DOMAIN_DN]
+
+
 def test_user_create_cleanup_failure_records_the_new_dn(
     answers: dict[str, dict[str, Any]],
 ) -> None:
-    """A failed exact-DN delete records undo_failed with that DN."""
+    """A cleanup with no GUID deletes nothing and records undo_failed with
+    the DN."""
     answer = answers["apply-user-create-missing-facts-delete-fails"]
     assert answer["code"] == "error"
     record = _current_record(answer)
@@ -2393,13 +2589,15 @@ def test_a_user_create_whose_facts_cannot_be_recorded_deletes_the_new_object(
 ) -> None:
     """No ok answer is possible when the undo facts cannot be written.
 
-    The object is deleted by the name it was added with, and the answer
-    is an error: the undo of a user-create needs the two facts, and it
-    can never delete an object whose facts it does not hold.
+    The object is deleted by the GUID that was read (here it is still at
+    the name it was added with), and the answer is an error: the undo of a
+    user-create needs the two facts in the record.
     """
     answer = answers["apply-user-create-record-write-error"]
     assert answer["code"] == "error"
-    assert "ldap:delete CN=new.user," + DOMAIN_DN in _calls(answer)
+    # the delete names the GUID, never the planned DN
+    deletes = [call for call in _calls(answer) if call.startswith("ldap:delete")]
+    assert len(deletes) == 1 and deletes[0].startswith("ldap:delete <GUID="), deletes
     with pytest.raises(AssertionError):
         _object_of(answer, "new.user")
 
@@ -2774,6 +2972,18 @@ def test_the_sweep_leaves_a_record_alone_until_its_deadline(
     assert _object_of(answer, SEED_SAM)["values"]["useraccountcontrol"] == ["66048"]
 
 
+@pytest.mark.parametrize("case", ["sweep-never-undoes-an-unlock", "abort-never-undoes-an-unlock"])
+def test_an_unlock_left_armed_is_never_undone(
+    answers: dict[str, dict[str, Any]], case: str
+) -> None:
+    """An unlock has no undo: a record left armed because the outcome was
+    unknown is never put back by the sweep or an abort, so the account is
+    never locked again."""
+    answer = answers[case]
+    assert _object_of(answer, SEED_SAM)["values"]["lockouttime"] == ["0"]
+    assert _current_record(answer)["state"] not in ("undone", "undo_failed")
+
+
 def test_a_group_nested_in_a_privileged_group_is_privileged(
     answers: dict[str, dict[str, Any]],
 ) -> None:
@@ -2814,7 +3024,7 @@ def test_the_move_verb_renames_the_object(
     answer = answers["move-ok"]
     assert answer["code"] == "ok"
     calls = _calls(answer)
-    assert "ldap:modifydn CN=" + SEED_SAM + "," + OU_USERS in " ".join(calls)
+    assert "ldap:modifydn <GUID=" + SEED_GUID + ">" in calls
     assert "ldap:modify distinguishedName" not in " ".join(calls)
     moved = _object_with_dn(answer, f"CN={SEED_SAM},{OU_OPS}")
     assert moved["sam"] == SEED_LIVE_SAM
@@ -2924,7 +3134,7 @@ def test_a_user_create_without_a_dns_name_is_an_error(
 def test_the_token_is_checked_before_the_rules_of_the_verb(
     answers: dict[str, dict[str, Any]],
 ) -> None:
-    """The order of the checks: the token, the window, the replay, the rest."""
+    """The order of the checks: the replay, the token, the window, the rest."""
     answer = answers["apply-bad-token-before-the-verb-rules"]
     assert answer["code"] == "bad_token"
     assert "ldap:modify userAccountControl" not in _calls(answer)

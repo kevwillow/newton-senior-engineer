@@ -656,7 +656,7 @@ def test_install_restore_failure_note_keeps_no_prev(
 @pytest.mark.parametrize("failed_step", ["stop", "disable", "removal"])
 def test_install_restore_failure_note_keeps_restored_paths(
 		setup_env, tmp_path, failed_step):
-	"""Review finding 7: when core tools are restored from .prev but a
+	"""When core tools are restored from .prev but a
 	first-install wan-health stop, disable or file removal fails, one state
 	note reports both facts and names both files that remain."""
 	env = setup_env
@@ -736,7 +736,7 @@ def test_install_restore_stop_failure_with_only_wan_health_extras(
 # -- 15. upgrade restarts only an enabled daemon -------------
 
 def test_upgrade_unchanged_enabled_wan_health_is_not_restarted(setup_env):
-	"""Review finding 1: two upgrades from the same sources write nothing
+	"""Two upgrades from the same sources write nothing
 	the second time; restarting the enabled daemon would run its restore
 	path and could re-promote a link the daemon had marked dead, so the
 	second run must not invoke restart."""
@@ -1184,7 +1184,7 @@ def test_uninstall_stop_failure_removes_nothing_and_skips_disable(setup_env):
 
 
 def test_uninstall_disable_failure_stops_before_removal(setup_env):
-	"""Review finding 7 coverage: when stop succeeds but disable fails,
+	"""When stop succeeds but disable fails,
 	uninstall stops at step 2a and leaves both wan-health files in place."""
 	env = setup_env
 	install_ok(env)

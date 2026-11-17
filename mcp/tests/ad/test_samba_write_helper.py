@@ -647,12 +647,7 @@ def test_the_user_create_answers_with_the_created_object(dc: Dc) -> None:
     ) == "514"
 
 
-@pytest.mark.parametrize("created", [(None, "1018"), (fake_samba_write.ALICE_GUID, None)])
-def test_a_user_create_without_both_undo_facts_is_deleted(
-    dc: Dc, monkeypatch: pytest.MonkeyPatch, created: tuple[str | None, str | None]
-) -> None:
-    """A successful add is removed by its exact DN when readback is incomplete."""
-    monkeypatch.setattr(dc.helper, "read_created", lambda directory, request: created)
+def _user_create_payload(dc: Dc) -> dict[str, Any]:
     payload = dc.request(verb="user-create", secret=SECRET)
     payload["target"] = {
         "parent_guid": fake_samba_write.SERVERS_OU_GUID,
@@ -663,19 +658,49 @@ def test_a_user_create_without_both_undo_facts_is_deleted(
     payload["token"] = core_request.token(
         KEY_HEX, core_request.digest(payload), payload["nbf"], payload["exp"]
     )
-    dn = "CN=newton-user," + fake_samba_write.SERVERS_OU_DN
+    return payload
 
-    answer = dc.run(payload)
+
+def test_a_user_create_whose_guid_was_read_without_its_usn_is_deleted_by_its_guid(
+    dc: Dc, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successful add whose uSNChanged did not come back is removed at
+    once, by the GUID that was read: the record is undone."""
+    dn = "CN=newton-user," + fake_samba_write.SERVERS_OU_DN
+    monkeypatch.setattr(
+        dc.helper, "read_created",
+        lambda directory, request: (fake_samba_write.created_guid(dn), None),
+    )
+
+    answer = dc.run(_user_create_payload(dc))
 
     assert answer["code"] == "error"
     assert not dc.fake.has_object(dn)
     assert dc.record()["state"] == "undone"
 
 
+def test_a_user_create_whose_guid_was_not_read_is_never_deleted(
+    dc: Dc, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no GUID the account at the planned DN may not be Newton's: it is
+    left in place and the record is undo_failed with its DN."""
+    dn = "CN=newton-user," + fake_samba_write.SERVERS_OU_DN
+    monkeypatch.setattr(dc.helper, "read_created", lambda directory, request: (None, "1018"))
+
+    answer = dc.run(_user_create_payload(dc))
+
+    assert answer["code"] == "error"
+    assert dc.fake.has_object(dn)
+    record = dc.record()
+    assert record["state"] == "undo_failed"
+    assert record["conflicts"] == [dn]
+
+
 def test_a_failed_cleanup_of_a_user_without_undo_facts_records_its_dn(
     dc: Dc, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed exact-DN delete is an error and an undo_failed record."""
+    """A cleanup with no GUID deletes nothing: an error and an undo_failed
+    record with the DN."""
     monkeypatch.setattr(
         dc.helper, "read_created", lambda directory, request: (None, None)
     )
@@ -811,8 +836,7 @@ def test_every_verb_applies(dc: Dc) -> None:
     ]
 
     for index, (verb, target, before, after, risk) in enumerate(cases):
-        if verb == "member-remove":
-            dc.fake.add_member(fake_samba_write.GROUP_DN, fake_samba_write.ALICE_DN)
+        # the member-add before the member-remove made alice a member
         payload = dc.request(
             verb=verb,
             target=target,
@@ -824,6 +848,10 @@ def test_every_verb_applies(dc: Dc) -> None:
         )
         answer = dc.run(payload)
         assert answer["code"] == "ok", (verb, answer)
+        # Confirmed as Newton does, so the next change of the same target is
+        # not refused by the armed record of this one.
+        confirm = {"v": 1, "mode": "confirm", "device": DEVICE, "txid": f"{index:032x}"}
+        assert dc.run(confirm)["code"] == "ok", verb
 
 
 def test_the_unlock_arms_no_undo(dc: Dc) -> None:
@@ -846,6 +874,80 @@ def test_the_unlock_arms_no_undo(dc: Dc) -> None:
     assert answer["code"] == "ok"
     assert [line for line in dc.log_lines() if "systemd-run" in line] == []
     assert dc.record()["state"] == "confirmed"
+
+
+def _unlock(dc: Dc) -> dict[str, Any]:
+    return dc.request(
+        verb="unlock",
+        target={
+            "guid": fake_samba_write.ALICE_GUID,
+            "sid": fake_samba_write.ALICE_SID,
+            "sam": "alice",
+        },
+        before={"lockout": 1000},
+        after={"lockout": 0},
+        risk="LOW",
+        window=120,
+    )
+
+
+def test_an_unlock_whose_read_back_fails_after_the_write_is_confirmed_not_undone(
+    dc: Dc, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unlock is written and the read-back then throws once.  An
+    unlock has no undo, so the record never says undone (nothing was put
+    back): the account is read again and the record says confirmed."""
+    real = dc.helper.read_back
+    calls: list[int] = []
+
+    def failing_once(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("the read-back failed")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(dc.helper, "read_back", failing_once)
+
+    answer = dc.run(_unlock(dc))
+
+    assert answer["code"] == "error"
+    assert dc.fake.get_attribute(fake_samba_write.ALICE_DN, "lockoutTime") == "0"
+    assert dc.record()["state"] == "confirmed"
+
+
+def test_an_unlock_that_cannot_be_read_again_is_left_armed_and_never_relocked(
+    dc: Dc, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every read of the account fails: the outcome is unknown, so the
+    record stays as it is, and the lockout is never written back."""
+
+    def failing(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("the read-back failed")
+
+    monkeypatch.setattr(dc.helper, "read_back", failing)
+
+    dc.run(_unlock(dc))
+
+    assert dc.fake.get_attribute(fake_samba_write.ALICE_DN, "lockoutTime") == "0"
+    assert dc.record()["state"] not in ("undone", "undo_failed", "refused")
+
+
+def test_an_unlock_whose_write_failed_is_refused_not_undone(
+    dc: Dc, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unlock's write raised and the account still shows the
+    before-image: nothing was written, so the record says refused."""
+
+    def failing(directory: Any, request: Any) -> Any:
+        raise directory.ldb.LdbError(50, "insufficient access rights")
+
+    monkeypatch.setattr(dc.helper, "write_after", failing)
+
+    answer = dc.run(_unlock(dc))
+
+    assert answer["code"] != "ok"
+    assert dc.fake.get_attribute(fake_samba_write.ALICE_DN, "lockoutTime") == "1000"
+    assert dc.record()["state"] == "refused"
 
 
 # ---- the read mode ----------------------------------------------------------
@@ -2551,9 +2653,18 @@ def test_the_clock_is_read_under_the_lock(dc: Dc) -> None:
 # -- the records that are never left armed --------------------------------------
 
 
-def test_an_apply_that_fails_leaves_no_armed_record(dc: Dc) -> None:
-    """An error after the record is created sets its final state."""
-    dc.fake.modify_error = RuntimeError("the directory is gone")
+def test_an_apply_that_fails_leaves_no_armed_record(
+    dc: Dc, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An error after the record is created and before the write is sent
+    sets its final state.  (An error from the write itself may follow a
+    write that was sent: that record stays armed, see
+    test_an_exception_after_the_write_was_sent_leaves_the_record_armed.)"""
+
+    def failing(directory: Any) -> bool:
+        raise RuntimeError("the directory is gone")
+
+    monkeypatch.setattr(dc.helper, "write_account_is_privileged", failing)
 
     answer = dc.run(dc.request())
 
@@ -3024,7 +3135,9 @@ def test_a_user_create_whose_parent_cannot_be_read_back_records_its_dn(
     record = dc.record()
     assert record["state"] == "undo_failed"
     assert record["conflicts"] == [dn]
-    assert "delete: dn=" + dn in dc.log_lines()
+    # with no GUID read, the account at the DN is never deleted
+    assert not [line for line in dc.log_lines() if line.startswith("delete:")]
+    assert dc.fake.has_object(dn)
 
 
 # ---- an unlock from the plan to the confirm --------------------------------
@@ -3087,3 +3200,326 @@ def test_a_verified_unlock_on_samba_ends_confirmed(
     assert result["result"] == "ok"
     assert dc.record(str(planned["txid"]))["state"] == "confirmed"
     assert [line for line in dc.log_lines() if "systemd-run" in line] == []
+
+
+# ---- a second apply of a user-create whose apply answer was lost -----------
+
+
+def test_a_second_apply_of_a_lost_user_create_on_samba_is_never_reported_refused(
+    dc: Dc, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first apply of a user-create reached the DC and its answer was
+    lost (apply_unknown); the user is there and its record is armed.  The
+    plan record no longer holds the secret, so a second apply would reach
+    the helper without it and be refused with ``schema``, which Newton would
+    report as nothing changed over the apply_unknown receipt.  Newton
+    refuses it before sending and keeps the receipt."""
+    from newton_mcp.ad.write import apply as ad_apply, plan as ad_plan, store
+    from newton_mcp.ad.write.transport import TransportError
+    from newton_mcp.server import Device
+
+    monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
+    device = Device(
+        name=DEVICE,
+        platform="ad-samba-write",
+        host="192.0.2.20",
+        user="newton-ops-ssh",
+        ad_domain=DEVICE,
+        ad_domain_guid="af9619ff-8b86-d011-b42d-00c04fc964ff",
+    )
+    devices = {DEVICE: device}
+    modes: list[str] = []
+
+    def send(target: Any, body: dict[str, Any]) -> dict[str, Any]:
+        modes.append(str(body["mode"]))
+        return dc.run(body)
+
+    def lost(target: Any, body: dict[str, Any]) -> dict[str, Any]:
+        answer = send(target, body)
+        if body["mode"] == "apply":
+            raise TransportError("unavailable", "the answer was lost")
+        return answer
+
+    planned = ad_plan.plan_change(
+        DEVICE, "user-create", ["newton-user"], fake_samba_write.SERVERS_OU_GUID,
+        send=send, devices=devices,
+    )
+    plan_id = str(planned["plan_id"])
+    record = store.read_json(store.plan_path(plan_id))
+    digest = core_request.digest(record)
+    store.write_json(
+        store.approval_path(plan_id),
+        {
+            "plan_id": plan_id,
+            "device": record["device"],
+            "digest": digest,
+            "nbf": NBF,
+            "exp": EXP,
+            "token": core_request.token(KEY_HEX, digest, NBF, EXP),
+        },
+    )
+    first = ad_apply.apply_change(plan_id, send=lost, devices=devices, timeout_s=0.0)
+    assert first["state"] == ad_apply.STATE_APPLY_UNKNOWN
+    assert dc.fake.has_object("CN=newton-user," + fake_samba_write.SERVERS_OU_DN)
+    assert dc.record(str(planned["txid"]))["state"] == "armed"
+    receipt = store.read_json(store.receipt_path(plan_id))
+    modes.clear()
+
+    second = ad_apply.apply_change(plan_id, send=send, devices=devices, timeout_s=0.0)
+
+    assert "apply" not in modes
+    assert second["state"] != ad_apply.STATE_REFUSED
+    assert second["code"] == "not_sent"
+    assert "nothing changed" not in str(second["message"])
+    assert "may already be written" in str(second["message"])
+    assert store.read_json(store.receipt_path(plan_id)) == receipt
+
+
+# ---- a retry of an apply that reached the DC and left no receipt ------------
+
+
+class _HostDied(BaseException):
+    """The Newton host stopped between the send and the receipt."""
+
+
+@pytest.mark.parametrize("retry", ["expired", "bad_token"])
+@pytest.mark.parametrize("loss", ["host-died", "receipt-write-failed", "receipt-gone"])
+@pytest.mark.parametrize("verb", ["unlock", "member-add"])
+def test_a_retry_of_a_sent_apply_on_samba_with_a_stale_approval_is_never_refused(
+    dc: Dc, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verb: str, loss: str, retry: str
+) -> None:
+    """The first apply reached the DC and left no final receipt on the
+    Newton host (the host stopped right after the DC answered, or the final
+    receipt could not be written: both keep the pending receipt), or no
+    receipt at all (it is gone from the host).  With the pending receipt the
+    retry reads the record by txid, finds it and sends nothing.  With none,
+    Newton sends the plan again once the approval is over or the key
+    changed: the helper finds the record of the txid before it checks the
+    token and the window and answers replay.  Newton never reports refused,
+    and no refused receipt is written over a change the DC holds."""
+    from newton_mcp.ad.write import apply as ad_apply, plan as ad_plan, store
+    from newton_mcp.server import Device
+
+    monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
+    device = Device(
+        name=DEVICE,
+        platform="ad-samba-write",
+        host="192.0.2.20",
+        user="newton-ops-ssh",
+        ad_domain=DEVICE,
+        ad_domain_guid="af9619ff-8b86-d011-b42d-00c04fc964ff",
+    )
+    devices = {DEVICE: device}
+
+    def send(target: Any, body: dict[str, Any]) -> dict[str, Any]:
+        return dc.run(body)
+
+    names = ["alice"] if verb == "unlock" else ["group1106", "alice"]
+    planned = ad_plan.plan_change(DEVICE, verb, names, send=send, devices=devices)
+    plan_id = str(planned["plan_id"])
+    txid = str(planned["txid"])
+    record = store.read_json(store.plan_path(plan_id))
+    digest = core_request.digest(record)
+    store.write_json(
+        store.approval_path(plan_id),
+        {
+            "plan_id": plan_id,
+            "device": record["device"],
+            "digest": digest,
+            "nbf": NBF,
+            "exp": EXP,
+            "token": core_request.token(KEY_HEX, digest, NBF, EXP),
+        },
+    )
+    receipt_path = store.receipt_path(plan_id)
+    if loss in ("host-died", "receipt-gone"):
+
+        def died(target: Any, body: dict[str, Any]) -> dict[str, Any]:
+            answer = dc.run(body)
+            if body["mode"] == "apply":
+                raise _HostDied()
+            return answer
+
+        with pytest.raises(_HostDied):
+            ad_apply.apply_change(plan_id, send=died, devices=devices, timeout_s=0.0)
+    else:
+        real = store.write_json
+
+        def failing(path: Path, value: Any) -> None:
+            if Path(path) == receipt_path and value.get("pending") is not True:
+                raise OSError("the state directory is full")
+            real(path, value)
+
+        monkeypatch.setattr(store, "write_json", failing)
+        ad_apply.apply_change(plan_id, send=send, devices=devices, timeout_s=0.0)
+        monkeypatch.setattr(store, "write_json", real)
+    pending = store.read_json(receipt_path)
+    assert pending["pending"] is True
+    assert pending["state"] == ad_apply.STATE_APPLY_UNKNOWN
+    if loss == "receipt-gone":
+        receipt_path.unlink()
+    assert dc.record(txid)["state"] in ("armed", "confirmed")
+    if retry == "expired":
+        dc.helper.current_time = lambda: float(EXP + 1)
+    else:
+        (dc.config / "approval.key").write_text("22" * 32 + "\n", encoding="utf-8")
+    applies: list[dict[str, Any]] = []
+    modes: list[str] = []
+
+    def watched(target: Any, body: dict[str, Any]) -> dict[str, Any]:
+        answer = dc.run(body)
+        modes.append(str(body["mode"]))
+        if body["mode"] == "apply":
+            applies.append(answer)
+        return answer
+
+    result = ad_apply.apply_change(plan_id, send=watched, devices=devices, timeout_s=0.0)
+
+    if loss == "receipt-gone":
+        assert [answer["code"] for answer in applies] == ["replay"]
+    else:
+        assert modes == ["status"]
+        assert result["code"] == "not_sent"
+        assert store.read_json(receipt_path) == pending
+    assert result["state"] == ad_apply.STATE_REPLAY
+    assert "nothing changed" not in str(result["message"])
+    assert "newton_ad_change_status" in str(result["message"])
+    if receipt_path.exists():
+        assert store.read_json(receipt_path)["state"] != ad_apply.STATE_REFUSED
+    assert dc.record(txid)["state"] != "refused"
+
+
+# ---- the README's "covered by tests" marks -----------------------------------
+
+COMPUTER_DN = "CN=ws01," + fake_samba_write.SERVERS_OU_DN
+COMPUTER_SID = fake_samba_write.DOMAIN_SID + "-1120"
+COMPUTER_GUID = "c02b3c4d-5e6f-4a8b-9c0d-1e2f3a4b5c6d"
+
+
+def _add_computer(dc: Dc, uac: int) -> None:
+    """A workstation's computer account (WORKSTATION_TRUST_ACCOUNT), with
+    its primary group Domain Computers (RID 515, not a privileged one)."""
+    dc.fake.add_object("CN=Domain Computers," + fake_samba_write.USERS_DN, {
+        "objectClass": [b"group"],
+        "sAMAccountName": [b"domaincomputers"],
+        "objectSid": [fake_samba_write.sid_bytes(fake_samba_write.DOMAIN_SID + "-515")],
+        "objectGUID": [fake_samba_write.guid_bytes("c12b3c4d-5e6f-4a8b-9c0d-1e2f3a4b5c6d")],
+        "member": [],
+        "uSNChanged": [b"1029"],
+    })
+    dc.fake.add_object(COMPUTER_DN, {
+        "objectClass": [b"top", b"person", b"organizationalPerson", b"user", b"computer"],
+        "sAMAccountName": [b"ws01$"],
+        "objectSid": [fake_samba_write.sid_bytes(COMPUTER_SID)],
+        "objectGUID": [fake_samba_write.guid_bytes(COMPUTER_GUID)],
+        "userAccountControl": [str(uac).encode("ascii")],
+        "adminCount": [b"0"],
+        "primaryGroupID": [b"515"],
+        "uSNChanged": [b"1030"],
+    })
+
+
+def _computer_request(dc: Dc, verb: str, before: int, after: int) -> dict[str, Any]:
+    return dc.request(
+        verb=verb,
+        target={"guid": COMPUTER_GUID, "sid": COMPUTER_SID, "sam": "ws01$"},
+        before={"uac": before},
+        after={"uac": after},
+        risk="MED",
+    )
+
+
+@pytest.mark.parametrize("verb, before, after", [("disable", 4096, 4098), ("enable", 4098, 4096)])
+@pytest.mark.parametrize("ending", ["confirm", "abort", "undo"])
+def test_a_computer_account_is_disabled_or_enabled_then_confirmed_or_undone(
+    dc: Dc, verb: str, before: int, after: int, ending: str,
+) -> None:
+    """A computer account goes through the apply like a user: confirmed it
+    stays written, and an abort or the undo timer puts the before-image
+    back."""
+    _add_computer(dc, before)
+
+    answer = dc.run(_computer_request(dc, verb, before, after))
+
+    assert answer["code"] == "ok"
+    assert dc.fake.get_attribute(COMPUTER_DN, "userAccountControl") == str(after)
+    if ending == "confirm":
+        done = dc.run({"v": 1, "mode": "confirm", "device": DEVICE, "txid": TXID})
+        assert done["code"] == "ok"
+        assert dc.record()["state"] == "confirmed"
+        assert dc.fake.get_attribute(COMPUTER_DN, "userAccountControl") == str(after)
+        return
+    if ending == "abort":
+        done = dc.run({"v": 1, "mode": "abort", "device": DEVICE, "txid": TXID})
+    else:
+        done = dc.undo()
+    assert done["code"] == "ok"
+    assert done["restored"] is True
+    assert dc.record()["state"] == "undone"
+    assert dc.fake.get_attribute(COMPUTER_DN, "userAccountControl") == str(before)
+
+
+def _privileged_unlock(dc: Dc) -> dict[str, Any]:
+    dc.fake.set_attribute(fake_samba_write.ADMIN_DN, "lockoutTime", "1000")
+    return dc.request(
+        verb="unlock",
+        target={
+            "guid": fake_samba_write.ADMIN_GUID,
+            "sid": fake_samba_write.ADMIN_SID,
+            "sam": "admin2",
+        },
+        before={"lockout": 1000},
+        after={"lockout": 0},
+        risk="HIGH",
+        window=120,
+    )
+
+
+def test_a_privileged_account_is_unlocked_and_never_undone(dc: Dc) -> None:
+    """A member of Domain Admins with adminCount 1 is unlocked at the HIGH
+    risk the helper derives.  An unlock has no undo: nothing is armed, the
+    abort is refused, and the undo and the sweep never lock it again."""
+    answer = dc.run(_privileged_unlock(dc))
+
+    assert answer["code"] == "ok"
+    assert dc.record()["state"] == "confirmed"
+    assert [line for line in dc.log_lines() if "systemd-run" in line] == []
+    assert dc.fake.get_attribute(fake_samba_write.ADMIN_DN, "lockoutTime") == "0"
+
+    abort = dc.run({"v": 1, "mode": "abort", "device": DEVICE, "txid": TXID})
+    assert abort["code"] == "conflict"
+    dc.undo()
+    dc.helper.current_time = lambda: float(NBF + 3601)
+    dc.run({"v": 1, "mode": "status", "device": DEVICE, "txid": TXID})
+
+    assert dc.fake.get_attribute(fake_samba_write.ADMIN_DN, "lockoutTime") == "0"
+    assert dc.record()["state"] == "confirmed"
+
+
+def test_a_privileged_unlock_sent_as_low_is_a_risk_mismatch(dc: Dc) -> None:
+    """The helper derives HIGH for a privileged account, unlock included."""
+    payload = _privileged_unlock(dc)
+    payload = dc.request(**{key: payload[key] for key in ("verb", "target", "before", "after", "window")},
+                         risk="LOW")
+
+    answer = dc.run(payload)
+
+    assert answer["code"] == "risk_mismatch"
+    assert dc.fake.get_attribute(fake_samba_write.ADMIN_DN, "lockoutTime") == "1000"
+
+
+def test_an_undo_failed_record_is_final_and_never_swept_again(dc: Dc) -> None:
+    """An undo that met somebody else's value records undo_failed, and the
+    sweep never runs it again: when the after-image comes back later, the
+    record stays undo_failed and nothing is written."""
+    dc.run(dc.request())
+    dc.fake.set_attribute(fake_samba_write.ALICE_DN, "userAccountControl", "4096")
+    assert dc.undo()["code"] == "ok"
+    assert dc.record()["state"] == "undo_failed"
+    dc.fake.set_attribute(fake_samba_write.ALICE_DN, "userAccountControl", "512")
+    dc.helper.current_time = lambda: float(NBF + 601)
+
+    dc.run({"v": 1, "mode": "status", "device": DEVICE, "txid": TXID})
+
+    assert dc.record()["state"] == "undo_failed"
+    assert dc.fake.get_attribute(fake_samba_write.ALICE_DN, "userAccountControl") == "512"

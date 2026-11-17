@@ -67,6 +67,7 @@ def _fake_send(calls: list[dict[str, Any]]) -> Any:
                 "v": 1,
                 "code": "ok",
                 "live": {"uac": 4260352},
+                "outcome": {"uac": 4260352},
                 "ids": {"guid": SEED_GUID, "sid": SEED_SID, "sam": SEED_SAM},
                 "facts": {
                     "target": {

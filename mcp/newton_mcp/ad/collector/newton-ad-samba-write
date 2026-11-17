@@ -12,8 +12,10 @@ one JSON request on stdin, at most 64 KiB, and writes one JSON object on
 stdout.  It exits 0 whatever the outcome; a non-zero exit means the
 helper itself crashed.
 
-The only other way in is the undo, ``--undo <txid>``, and it is refused
-when ``SUDO_USER`` is set: the undo runs from the timer of systemd, never
+The two other ways in are the undo, ``--undo <txid>``, and the sweep,
+``--sweep``, which takes no argument.  Both are refused when
+``SUDO_USER`` is set: the undo runs from its one-shot timer of systemd
+and the sweep from the persistent ``newton-ad-sweep.timer``, never
 through the SSH channel of the write login.
 
 The three files of section 8 are read before anything else happens: the
@@ -60,7 +62,9 @@ a request whose risk is not the one the helper derives is refused with
 The transaction store is ``/var/lib/newton-ad/tx``.  Every mode but
 ``read`` holds an exclusive lock on it for the whole run, and the
 start-up sweep takes the same lock: every run undoes the armed records
-whose deadline has passed.  The sweep never confirms anything.
+whose deadline has passed.  The sweep never confirms a change that has an
+undo; an unlock, which has none, is read again and recorded confirmed
+when the account shows the after-image.
 
 The secret of a user-create is in the request and in nothing else: it is
 in no record, in no answer and in no line of the log.
@@ -193,6 +197,12 @@ WINDOW_MAX_S = 1800
 #: The window of an unlock: no undo is armed, so it is the unused floor.
 UNLOCK_WINDOW_S = 120
 
+#: How long after its undo_at the sweep reads an armed unlock again to
+#: settle it.  An unlock it cannot settle (another lockout, an account it
+#: cannot read) then stays armed and is not read again: it has no undo,
+#: and its status says the record does not say whether it was written.
+UNLOCK_SETTLE_S = 3600
+
 #: The secret of a user-create: 16..128 printable ASCII (0x21..0x7e).
 SECRET_MIN = 16
 SECRET_MAX = 128
@@ -317,6 +327,12 @@ LOCKOUT_ATTRIBUTE = "lockoutTime"
 #: The name of the attribute of the membership.
 MEMBER_ATTRIBUTE = "member"
 
+#: The control that answers every linked DN value with the GUID and the SID
+#: of the object it names: ``<GUID=...>;<SID=...>;<DN>``, the GUID in its
+#: string form (type 1).  Samba's ``extended_dn_out`` module renders it, and
+#: ``dbchecker.py`` searches with the same control.
+EXTENDED_DN_CONTROL = "extended_dn:1:1"
+
 #: The name of the attribute of the quota of the machine accounts.
 MAQ_ATTRIBUTE = "ms-DS-MachineAccountQuota"
 
@@ -339,6 +355,19 @@ class Refused(Exception):
 
 class NotFound(Exception):
     """The object of the target is not there."""
+
+
+class Unreadable(Exception):
+    """An object is there and the bind cannot read it."""
+
+
+class UndoAnswerLost(Exception):
+    """An undo write failed with a code the server did not answer itself.
+
+    Its answer may be lost while the write landed, or the write may still
+    land: the outcome is read from the directory, and an outcome that
+    cannot be read leaves the record armed.
+    """
 
 
 def _is_int(value: Any) -> bool:
@@ -938,6 +967,30 @@ def _sid_binary(text: str) -> bytes:
     return bytes(out)
 
 
+def extended_guid(value: bytes) -> uuid.UUID | None:
+    """The GUID component of one DN value in the extended form.
+
+    The form is ``<GUID=...>;<SID=...>;<DN>``: components in angle
+    brackets joined by ``;``, then the DN.  None when no GUID component
+    is there or it is not a GUID.
+    """
+    text = value.decode("utf-8", "replace")
+    while text.startswith("<"):
+        end = text.find(">")
+        if end < 0:
+            return None
+        name, _, component = text[1:end].partition("=")
+        if name.upper() == "GUID":
+            try:
+                return uuid.UUID(component)
+            except ValueError:
+                return None
+        text = text[end + 1 :]
+        if text.startswith(";"):
+            text = text[1:]
+    return None
+
+
 def split_dn(dn: str) -> list[str]:
     """The components of a distinguished name."""
     parts: list[str] = []
@@ -994,6 +1047,7 @@ class Directory:
         scope: int,
         expression: str,
         attrs: Sequence[str],
+        controls: Sequence[str] = (),
     ) -> list[Any]:
         """One search of the directory."""
         try:
@@ -1003,7 +1057,7 @@ class Directory:
                     scope=scope,
                     expression=expression,
                     attrs=list(attrs),
-                    controls=[],
+                    controls=list(controls),
                 )
             )
         except TypeError:
@@ -1013,7 +1067,7 @@ class Directory:
                     scope=scope,
                     expressions=expression,
                     attrs=list(attrs),
-                    controls=[],
+                    controls=list(controls),
                 )
             )
 
@@ -1023,9 +1077,10 @@ class Directory:
         scope: int,
         expression: str,
         attrs: Sequence[str],
+        controls: Sequence[str] = (),
     ) -> Any | None:
         """The first result of one search, or None."""
-        found = self.search(base, scope, expression, attrs)
+        found = self.search(base, scope, expression, attrs, controls)
         return found[0] if found else None
 
     def domain_dn(self) -> str:
@@ -1053,6 +1108,32 @@ class Directory:
             "(objectGUID=%s)" % _escape_binary(raw),
             attrs,
         )
+
+    def by_guid_name(self, guid: str, attrs: Sequence[str]) -> Any | None:
+        """The object of that GUID, read by a base search of its GUID name.
+
+        None only when the directory answers LDB_ERR_NO_SUCH_OBJECT: Samba's
+        extended_dn_in resolves ``<GUID=...>`` as the system
+        (DSDB_FLAG_AS_SYSTEM) and answers it ("Base-DN '...' not found") when
+        no object holds the GUID, a deleted object included unless the
+        search asks for deleted objects.  acl_read answers it as well for an
+        object the bind cannot see at all (a known limit: such a user reads
+        gone).  A filter on
+        objectGUID proves nothing of the kind: one the bind cannot read
+        matches nothing (MS-ADTS 3.1.1.4.3).  A search that answers no
+        entry and no error proves neither (acl_read matches the
+        objectClass presence filter on an object the bind can see, so
+        Samba is not known to answer so): it raises ``Unreadable``.
+        """
+        try:
+            found = self.search(guid_dn(guid), self.ldb.SCOPE_BASE, "(objectClass=*)", attrs)
+        except self.ldb.LdbError as exc:
+            if ldb_code(exc) == error_code(self.ldb, "ERR_NO_SUCH_OBJECT", 32):
+                return None
+            raise
+        if not found:
+            raise Unreadable(guid)
+        return found[0]
 
     def by_sam(self, sam: str, attrs: Sequence[str]) -> list[Any]:
         """The objects with that name."""
@@ -1145,6 +1226,53 @@ class Directory:
     def dn_of(self, message: Any) -> str:
         """The name of an object."""
         return str(message.dn)
+
+    def membership(self, group_guid: Any, member_guid: Any) -> str | None:
+        """Whether the member of that GUID is in the group of that GUID.
+
+        The answer is decided in one search: the group is read by its GUID
+        with the extended DN control, and each member value carries the
+        GUID of the object it names, so the member is matched by its GUID
+        and never by a DN read in another search (a member moved between
+        two searches, even moved back, never changes the answer).
+
+        ``"present"``: a value of the group names the member.  ``"absent"``:
+        the group answers member values and none names it.  ``"empty"``:
+        the group answers no member value.  An empty group and a group whose
+        member the bind has no right to read answer the same (MS-ADTS
+        3.1.1.4.3: an attribute the requester cannot read is treated as "does
+        not exist" in the returned attributes and in the filter; Samba's
+        acl_read drops it from the answer), so "empty" never says the member
+        is out: each caller decides what it may take it for.  ``None``: the
+        group is not there, or a member value carries no GUID.
+        """
+        if not isinstance(group_guid, str) or not isinstance(member_guid, str):
+            return None
+        try:
+            raw = uuid.UUID(group_guid).bytes_le
+            wanted = uuid.UUID(member_guid)
+        except ValueError:
+            return None
+        group = self.one(
+            self.domain_dn(),
+            self.ldb.SCOPE_SUBTREE,
+            "(objectGUID=%s)" % _escape_binary(raw),
+            [MEMBER_ATTRIBUTE],
+            [EXTENDED_DN_CONTROL],
+        )
+        if group is None:
+            return None
+        values = self.values(group, MEMBER_ATTRIBUTE)
+        if not values:
+            return "empty"
+        present = False
+        for value in values:
+            guid = extended_guid(value)
+            if guid is None:
+                return None
+            if guid == wanted:
+                present = True
+        return "present" if present else "absent"
 
     # -- the domain -------------------------------------------------------
 
@@ -1468,10 +1596,16 @@ def resolve(
             "member_sid": directory.sid(member),
             "member_sam": _lower_sam(directory.text(member, "sAMAccountName")),
         }
-        member_dn = directory.dn_of(member)
-        live = {
-            "member": "present" if member_dn in directory.members(group) else "absent"
-        }
+        # The presence is decided in one search, by the member's GUID.  A
+        # group that answers no member value reads absent here: the plan and
+        # the before-check of a member-add take it so, and the add is a
+        # write the server checks against the values it holds (an add of a
+        # member that is in answers 20, nothing written).  A confirm never
+        # takes it for the after-image of a member-add (see read_back).
+        state = directory.membership(ids["group_guid"], ids["member_guid"])
+        if state is None:
+            raise NotFound(str(ids["group_guid"]))
+        live = {"member": "present" if state == "present" else "absent"}
         facts = {
             "group": facts_of(directory, group, pdc),
             "member": facts_of(directory, member, pdc),
@@ -1687,6 +1821,31 @@ def write_record(path: str, record: Mapping[str, Any]) -> None:
     fsync_directory(os.path.dirname(path))
 
 
+def store_record(path: str, record: Mapping[str, Any]) -> None:
+    """Write the record, and raise only when the disk does not hold it.
+
+    ``write_record`` can raise after the record was replaced on the disk
+    (the flush of its directory failed): the record is there all the
+    same, and a caller that took the error for "not written" would act
+    on a disk that says otherwise.  After an error the record is read
+    back, and the error stands only when the disk does not read the
+    record that was written.  The armed record of an apply is the one
+    write that never goes through here: the write it guards is sent only
+    once that record is on the disk with its name flushed.
+    """
+    try:
+        write_record(path, record)
+    except Exception:
+        expected = json.loads(json.dumps(record, sort_keys=True))
+        try:
+            again = read_record(path)
+        except Refused:
+            # A read-back that fails says nothing: the error stands.
+            again = None
+        if again != expected:
+            raise
+
+
 def fsync_directory(path: str) -> None:
     """The name of a file is on the disk, and not only in the directory.
 
@@ -1729,11 +1888,24 @@ def create_record(path: str, record: Mapping[str, Any]) -> None:
 
 
 def read_record(path: str) -> dict[str, Any] | None:
-    """The record of one transaction, or None."""
+    """The record of one transaction, or None when there is none.
+
+    None is a record that is not there, or one that was read and does not
+    parse.  A read that raises for any other reason (a denied access, an IO
+    error) says nothing about what the record holds, so it is never taken
+    for a record that is absent: it raises ``Refused("error")``, and a
+    status, confirm, abort or timer answers error and writes nothing.
+    """
     try:
         with open(path, "rb") as handle:
-            value = json.loads(handle.read().decode("utf-8"))
-    except (OSError, ValueError):
+            raw = handle.read()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise Refused("error", "the record of the transaction cannot be read") from None
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except ValueError:
         return None
     if not isinstance(value, dict):
         return None
@@ -1747,6 +1919,67 @@ def record_files() -> list[str]:
     except OSError:
         return []
     return sorted(name for name in names if name.endswith(".json"))
+
+
+def undo_target(request: Any) -> tuple[str, ...] | None:
+    """What the undo of a request writes back: the attribute and the object.
+
+    Two requests with the same answer touch the same value, so the undo of
+    one may write over the other.  An unlock has no undo and answers None,
+    and so does a request that is not one (a malformed record, whose undo
+    raises and never writes).
+    """
+    if not isinstance(request, dict):
+        return None
+    verb = request.get("verb")
+    target = request.get("target")
+    if not isinstance(target, dict):
+        return None
+
+    def low(name: str) -> str:
+        return str(target.get(name, "")).lower()
+
+    if verb in ("uac-clear", "disable", "enable"):
+        return ("uac", low("guid"))
+    if verb == "enc-types":
+        return ("etypes", low("guid"))
+    if verb == "move":
+        return ("parent", low("guid"))
+    if verb == "maq":
+        return ("maq", low("guid"))
+    if verb in ("member-add", "member-remove"):
+        return ("member", low("group_guid"), low("member_guid"))
+    if verb == "user-create":
+        return ("user", low("sam"))
+    return None
+
+
+def armed_on_target(txid: str, request: Mapping[str, Any]) -> bool:
+    """True when another armed record's undo writes the same target.
+
+    Its undo runs at its undo_at and writes the before-image when the
+    target shows the after-image, which a later change of the same target
+    can make true (an unanswered write kept armed on its before-image, say):
+    the apply is refused while it is armed (section 6).  A store that cannot
+    be listed, or a record of it that cannot be read, may hide such a
+    record: it raises ``Refused("error")``.  The caller holds the store lock.
+    """
+    wanted = undo_target(dict(request))
+    if wanted is None:
+        return False
+    try:
+        names = sorted(name for name in os.listdir(TX_DIR) if name.endswith(".json"))
+    except OSError:
+        raise Refused("error", "the transaction store cannot be listed") from None
+    for name in names:
+        if name == f"{txid}.json":
+            continue
+        record = read_record(os.path.join(TX_DIR, name))
+        if record is None or record.get("state") != "armed":
+            continue
+        if undo_target(record.get("request")) == wanted:
+            return True
+    return False
 
 
 # ---- the commands (section 7) ----------------------------------------------
@@ -1796,13 +2029,15 @@ def arm_undo(txid: str, window: int) -> None:
 def disarm_undo(txid: str) -> bool:
     """Cancel the timer of the undo of one transaction.
 
-    A timer that is not cancelled is harmless: the undo of the timer
-    only acts on a record that is still armed.  The answer is True when
-    the timer is cancelled, and False when the cancel failed.
+    A timer that is not cancelled is harmless while the record it undoes
+    is not armed: the undo of the timer only acts on a record that is
+    still armed.  The answer is True when the timer is cancelled, and
+    False when the cancel failed, timed out or could not be spawned (it
+    never raises, so a caller always goes on to write its record).
     """
     try:
         done = run_command(["systemctl", "stop", f"{undo_unit(txid)}.timer"])
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError):
         return False
     return done.returncode == 0
 
@@ -1921,13 +2156,17 @@ def ldb_code(exc: Any) -> int | None:
 def map_ldb_error(exc: Any, ldb: Any) -> str:
     """The code of the contract for one error of the ldb.
 
-    16 and 20 are a conflict, 50 is a denial, 32 is a missing object and
-    every other code is an error.
+    16, 20 and 68 are a conflict, 50 is a denial, 32 is a missing object
+    and every other code is an error.
     """
     code = ldb_code(exc)
     if code == error_code(ldb, "ERR_NO_SUCH_ATTRIBUTE", 16):
         return "conflict"
     if code == error_code(ldb, "ERR_ATTRIBUTE_OR_VALUE_EXISTS", 20):
+        return "conflict"
+    if code == error_code(ldb, "ERR_ENTRY_ALREADY_EXISTS", 68):
+        # The name of a new user, or of a moved object, was taken in the
+        # meantime: the add or the rename wrote nothing.
         return "conflict"
     if code == error_code(ldb, "ERR_INSUFFICIENT_ACCESS_RIGHTS", 50):
         return "denied"
@@ -1939,9 +2178,15 @@ def map_ldb_error(exc: Any, ldb: Any) -> str:
 def _live_value(
     directory: Directory,
     verb: str,
-    dn: str,
+    message: Any,
 ) -> bytes | None:
-    """The live value of the attribute the undo writes, or None."""
+    """The live value of the attribute the undo writes, or None.
+
+    The value is taken from the message the undo read by the GUID (or,
+    for a maq, from the domain head), never from a second read by a DN
+    that message answered: somebody may move Newton's object away and
+    make another holding the before-image at that DN in between.
+    """
     attribute = {
         "uac-clear": UAC_ATTRIBUTE,
         "disable": UAC_ATTRIBUTE,
@@ -1951,11 +2196,22 @@ def _live_value(
     }.get(verb)
     if attribute is None:
         return None
-    message = directory.by_dn(dn, (attribute,))
-    if message is None:
-        return None
     values = directory.values(message, attribute)
     return values[0] if values else None
+
+
+def guid_dn(guid: str) -> str:
+    """The GUID form of the DN of an object: ``<GUID=...>``.
+
+    A write that names its object this way acts on the object of that GUID
+    wherever it is: Samba's extended DN module resolves the name inside the
+    one request.  A DN a search answered earlier may name another object by
+    the time the write arrives (somebody may have moved Newton's object away
+    and made another at that DN), so every delete, modify and rename of an
+    object Newton knows by its GUID names it this way.  A GUID that is not
+    one raises ``ValueError``.
+    """
+    return "<GUID=%s>" % uuid.UUID(guid)
 
 
 def _account_dn(directory: Directory, target: Mapping[str, Any]) -> str | None:
@@ -2020,21 +2276,29 @@ def undo_attribute(directory: Directory, record: Mapping[str, Any]) -> tuple[boo
     if not isinstance(target, dict):
         return False, []
     if verb == "maq":
-        dn = directory.domain_dn()
+        # The domain head cannot be moved away or made again.
+        write_dn = directory.domain_dn()
+        message = directory.by_dn(write_dn, _DOMAIN_ATTRS)
     else:
-        dn = _account_dn(directory, target)
-    if dn is None:
+        # The live value is read by the GUID the modify names, in the
+        # one search: never by a DN that search answered.
+        message = _account_message(directory, target)
+        write_dn = guid_dn(str(target["guid"]))
+    if message is None:
         return False, []
 
-    live = _live_value(directory, str(verb), dn)
+    live = _live_value(directory, str(verb), message)
     if live == delete_value:
         # The after value is still there: the modify puts the before
         # value back, and the server refuses it when somebody else moved
         # the value on in the meantime.
         pass
     elif add_value is None and live is None:
-        # There was no value and there is none: nothing to restore.
-        return True, conflicts
+        # There was no value and none is read: there may be none, or one the
+        # bind cannot read (MS-ADTS 3.1.1.4.3).  The undo writes the remove
+        # of the after value, and the server checks it against the values it
+        # holds: removed, the before-image is back; 16, somebody else's.
+        pass
     elif live == add_value:
         # The before value is already there: nothing to restore.
         return True, conflicts
@@ -2043,11 +2307,13 @@ def undo_attribute(directory: Directory, record: Mapping[str, Any]) -> tuple[boo
         conflicts.append(_conflict_name(directory, str(verb), request))
         return False, conflicts
     try:
-        _modify(directory, dn, attribute, delete_value, add_value)
+        _modify(directory, write_dn, attribute, delete_value, add_value)
     except directory.ldb.LdbError as exc:
         if map_ldb_error(exc, directory.ldb) == "conflict":
             conflicts.append(_conflict_name(directory, str(verb), request))
             return False, conflicts
+        if ldb_code(exc) not in SERVER_REFUSAL_CODES:
+            raise UndoAnswerLost() from None
         return False, conflicts
     return True, conflicts
 
@@ -2066,29 +2332,42 @@ def _undo_member(
     target = request.get("target")
     if not isinstance(target, dict):
         return False, conflicts
-    dn = _group_dn(directory, target)
-    if dn is None:
-        return False, conflicts
-    group = directory.by_dn(dn, _GROUP_ATTRS)
-    if group is None:
+    group_guid = target.get("group_guid")
+    if not isinstance(group_guid, str):
         return False, conflicts
     member = _member_dn(directory, target.get("member_guid"))
     if member is None:
         return False, conflicts
-    present = member.decode("utf-8", "replace") in directory.members(group)
+    # The presence is decided in one search of the group by the GUID the
+    # modify names, matching the member by its GUID: never by a DN read in
+    # another search.  A member moved since its DN was read makes the
+    # modify name a DN the server does not find in the group, which it
+    # refuses.
+    #
+    # Only a presence the group answered decides without a write: "absent"
+    # (member values, none of them the member) for a member-add, "present"
+    # for a member-remove.  A group that answers no member value may be
+    # empty or unreadable to the bind (Directory.membership): the undo then
+    # writes, and the server checks the write against the values it holds.
+    state = directory.membership(group_guid, target.get("member_guid"))
+    if state is None:
+        return False, conflicts
+    write_dn = guid_dn(group_guid)
     try:
         if request.get("verb") == "member-add":
-            if not present:
+            if state == "absent":
                 return True, conflicts
-            _modify(directory, dn, MEMBER_ATTRIBUTE, member, None)
+            _modify(directory, write_dn, MEMBER_ATTRIBUTE, member, None)
         else:
-            if present:
+            if state == "present":
                 return True, conflicts
-            _modify(directory, dn, MEMBER_ATTRIBUTE, None, member)
+            _modify(directory, write_dn, MEMBER_ATTRIBUTE, None, member)
     except directory.ldb.LdbError as exc:
         if map_ldb_error(exc, directory.ldb) == "conflict":
             conflicts.append(str(target.get("member_guid", "")))
             return False, conflicts
+        if ldb_code(exc) not in SERVER_REFUSAL_CODES:
+            raise UndoAnswerLost() from None
         return False, conflicts
     return True, conflicts
 
@@ -2140,11 +2419,16 @@ def _undo_move(
         conflicts.append(guid)
         return False, conflicts
     try:
-        directory.db.rename(current_dn, old_dn)
+        directory.db.rename(guid_dn(guid), old_dn)
     except directory.ldb.LdbError as exc:
         if ldb_code(exc) == error_code(directory.ldb, "ERR_NO_SUCH_OBJECT", 32):
             conflicts.append(guid)
             return False, conflicts
+        if ldb_code(exc) not in SERVER_REFUSAL_CODES:
+            raise UndoAnswerLost() from None
+        # The server refused the rename back (a name taken under the old
+        # parent, say): the object stays where it is, a conflict.
+        conflicts.append(guid)
         return False, conflicts
     return True, conflicts
 
@@ -2155,11 +2439,20 @@ def undo_user_create(directory: Directory, record: Mapping[str, Any]) -> tuple[b
     The object is deleted when it is still disabled, when its uSNChanged
     is the one the record holds and when it has no members and no group
     of its own.  Otherwise a conflict is recorded and the object stays.
+    A delete that fails with a code the server did not answer itself
+    raises ``UndoAnswerLost``: the delete may have landed, and the
+    caller looks for the object again.
     """
     created = record.get("created")
     if not isinstance(created, str):
         return False, []
-    message = directory.by_guid(created, _ACCOUNT_ATTRS)
+    # Gone only when the directory says no object holds the GUID: a search
+    # by objectGUID that finds nothing may be an objectGUID the bind cannot
+    # read, the user still there.
+    try:
+        message = directory.by_guid_name(created, _ACCOUNT_ATTRS)
+    except Unreadable:
+        return False, [created]
     if message is None:
         return True, []
     control = directory.integer(message, UAC_ATTRIBUTE)
@@ -2170,8 +2463,14 @@ def undo_user_create(directory: Directory, record: Mapping[str, Any]) -> tuple[b
     if directory.members(message) or directory.member_of(message):
         return False, [created]
     try:
-        directory.db.delete(directory.dn_of(message))
-    except directory.ldb.LdbError:
+        # The delete names the GUID: the object the checks above read is
+        # the one deleted, wherever it is now (see guid_dn).
+        directory.db.delete(guid_dn(created))
+    except directory.ldb.LdbError as exc:
+        if ldb_code(exc) not in SERVER_REFUSAL_CODES:
+            # The answer may be lost while the delete landed: the caller
+            # looks for the object again.
+            raise UndoAnswerLost() from None
         return False, [created]
     return True, []
 
@@ -2179,36 +2478,127 @@ def undo_user_create(directory: Directory, record: Mapping[str, Any]) -> tuple[b
 def run_undo(directory: Directory, record: dict[str, Any], path: str) -> tuple[bool, list[str]]:
     """The undo of one transaction, and the state it leaves behind.
 
-    The state is ``undone`` only when the undo restored its value.  An
-    undo that did not restore it, whether it met a conflict or an
-    error, leaves the record in ``undo_failed``: a transaction is never
-    reported as undone when it was not.
+    The state is ``undone`` only when the directory shows the
+    before-image again.  An undo whose write failed with no conflict
+    (its answer may be lost while the write landed) reads the target
+    again, and the before-image there is undone.  An undo that did not
+    restore it, whether it met a conflict, an error the server answered
+    or another change, leaves the record in ``undo_failed``: a
+    transaction is never reported as undone when it was not.
+
+    An undo whose write failed with a code the server did not answer
+    itself, and whose target then cannot be read or still shows the
+    after-image, has an unknown outcome: it raises ``UndoAnswerLost``
+    and the record stays armed, so the timer or the sweep runs the undo
+    again later.
+
+    A user-create is proven gone only by its created GUID: its re-read is
+    by that GUID, and one with no recorded GUID is never undone from a
+    name lookup: it is ``undo_failed`` with the planned DN as the conflict.
     """
     conflicts = [str(one) for one in (record.get("conflicts") or [])]
-    verb = (record.get("request") or {}).get("verb")
-    if verb == "user-create":
-        restored, more = undo_user_create(directory, record)
+    if record.get("answered") is not None:
+        # The server answered the apply's write with a refusal: the atomic
+        # write wrote nothing of Newton's, so the undo writes nothing (the
+        # after-image there is somebody else's) and the record is refused.
+        record["state"] = "refused"
+        record["restored"] = False
+        store_record(path, record)
+        return False, conflicts
+    request = record.get("request") or {}
+    verb = request.get("verb")
+    if verb == "unlock":
+        return _settle_unlock(directory, record, path)
+    created = record.get("created")
+    if verb == "user-create" and not isinstance(created, str):
+        # No created GUID is recorded: the account cannot be identified.
+        # A name lookup never proves it gone (it may have been moved or
+        # renamed) and never proves an account at the planned DN is
+        # Newton's, so it is left and the conflict names the planned DN.
+        restored, more = False, [_user_create_name(directory, request)]
+        lost = False
     else:
-        restored, more = undo_attribute(directory, record)
-    conflicts.extend(more)
+        lost = False
+        undo = undo_user_create if verb == "user-create" else undo_attribute
+        try:
+            restored, more = undo(directory, record)
+        except UndoAnswerLost:
+            restored, more, lost = False, [], True
+    if not restored and not more:
+        # A user-create is read again by its created GUID, never by its
+        # planned DN: an account moved away from the DN is still there.
+        try:
+            live = _reread(directory, request, created if verb == "user-create" else None)
+        except Exception:
+            if lost:
+                raise UndoAnswerLost() from None
+            live = {}
+        if lost and (not live or live == request.get("after")):
+            raise UndoAnswerLost()
+        restored = bool(live) and live == request.get("before")
+        if lost and not restored:
+            more = [_conflict_name(directory, str(verb), request)]
+    conflicts.extend(one for one in more if one not in conflicts)
     record["restored"] = restored
     record["conflicts"] = conflicts
     record["state"] = "undone" if restored else "undo_failed"
-    write_record(path, record)
+    store_record(path, record)
     return restored, conflicts
 
 
-def sweep(now: int, skip: str | None = None) -> None:
-    """Undo every armed record whose deadline has passed.
+def _settle_unlock(directory: Directory, record: dict[str, Any], path: str) -> tuple[bool, list[str]]:
+    """An unlock has no undo (section 3): nothing writes the lockout back.
 
-    The sweep never confirms anything: a record it did not undo stays
-    armed.
+    The account is read again instead.  The after-image: the unlock is
+    written, which for an unlock is confirmed.  Any other value leaves the
+    record as it is, so the outcome stays unknown: the before-image too,
+    since an armed unlock is one whose write may still land (a code the
+    server did not answer itself), and an unlock never recorded refused
+    here can be recorded confirmed once it lands (Windows leaves it armed
+    as well).  An account that cannot be read leaves it as it is too.
+    """
+    request = record.get("request") or {}
+    try:
+        live = read_back(directory, request, None)
+    except Exception:
+        return False, []
+    if not live:
+        return False, []
+    after = request.get("after") or {}
+    if live.get("lockout") != after.get("lockout"):
+        return False, []
+    record["state"] = "confirmed"
+    record["restored"] = False
+    store_record(path, record)
+    return False, []
+
+
+def sweep(now: int, skip: str | None = None) -> None:
+    """Run the undo of every armed record whose deadline has passed.
+
+    Each record is undone on its own: a record that is malformed, or
+    whose bind or undo raises, is logged to stderr and left armed, so a later pass (the next request
+    or the sweep timer) tries it again, and it never stops the undo of
+    another record or the mode that runs the sweep.  An undo that ran
+    records ``undone`` when it restored the value and ``undo_failed``
+    when it did not; ``undo_failed`` is final and is never tried again.
+    An unlock has no undo: it is read again and recorded ``confirmed``
+    when the account shows the after-image, or left armed (never
+    ``refused``: its write may still land).  An armed
+    unlock is read again only until ``UNLOCK_SETTLE_S`` after its
+    undo_at; after that the sweep leaves it armed and does not bind for
+    it again.
     """
     for name in record_files():
         if skip is not None and name == f"{skip}.json":
             continue
         path = os.path.join(TX_DIR, name)
-        record = read_record(path)
+        try:
+            record = read_record(path)
+        except Refused:
+            # A record that cannot be read is left for a later pass.
+            _log("a record cannot be read; the sweep leaves it for a later pass")
+            continue
         if record is None:
             continue
         if record.get("state") != "armed":
@@ -2219,10 +2609,16 @@ def sweep(now: int, skip: str | None = None) -> None:
         if undo_at > now:
             continue
         try:
+            # A malformed record (a request that is not an object) raises
+            # here and is skipped and left as it is.
+            verb = (record.get("request") or {}).get("verb")
+            if verb == "unlock" and undo_at + UNLOCK_SETTLE_S <= now:
+                continue
             directory = bind()
+            run_undo(directory, record, path)
         except Exception:
+            _log("the undo of an expired record failed; it stays armed")
             continue
-        run_undo(directory, record, path)
 
 
 # ---- the bind (section 9) ---------------------------------------------------
@@ -2355,15 +2751,42 @@ def _log(message: str) -> None:
     print(f"newton-ad-samba-write: {message}", file=sys.stderr)
 
 
+def read_outcome(directory: Directory, verb: str, ids: Mapping[str, Any],
+                 live: Mapping[str, Any]) -> dict[str, Any]:
+    """The image Newton verifies a DC with: the read-back of the target.
+
+    ``live`` is the planning image (a missing quota or lockoutTime reads
+    0, an empty group absent); the verification read of every DC is an
+    outcome, and each DC binds as its own account, so a value its bind
+    cannot read is an empty image there, never the after-image.  No
+    enc-types value reads "absent", which matches only an after-image
+    that removes the value (the read-back's known limit), never a number.
+    A user-create's image is its name lookup: a name the bind cannot see
+    reads absent, never the after-image "present".
+    """
+    if verb == "user-create":
+        return dict(live)
+    request: dict[str, Any] = {"verb": verb, "target": dict(ids)}
+    if verb == "enc-types":
+        request["after"] = {"etypes": "absent"}
+    return read_back(directory, request, None)
+
+
 def do_read(request: Mapping[str, Any]) -> dict[str, Any]:
-    """The read mode: what this DC sees (section 6)."""
+    """The read mode: what this DC sees (section 6).
+
+    ``live`` is the planning image; ``outcome`` is the image an outcome is
+    read from (read_outcome), the one Newton's verification matches.
+    """
     directory = bind()
     pdc = directory.holds_pdc_role()
+    verb = str(request["verb"])
     try:
-        ids, live, facts = resolve(directory, str(request["verb"]), request["target"], True, pdc)
+        ids, live, facts = resolve(directory, verb, request["target"], True, pdc)
     except NotFound:
         return {"v": 1, "code": "not_found"}
-    return {"v": 1, "code": "ok", "live": live, "ids": ids, "facts": facts}
+    outcome = read_outcome(directory, verb, ids, live)
+    return {"v": 1, "code": "ok", "live": live, "outcome": outcome, "ids": ids, "facts": facts}
 
 
 def _write_account(directory: Directory) -> Any:
@@ -2480,10 +2903,11 @@ def write_after(directory: Directory, request: Mapping[str, Any]) -> str | None:
         member = _member_dn(directory, target.get("member_guid"))
         if member is None:
             raise Refused("not_found", "the member is not there")
+        write_dn = guid_dn(str(target["group_guid"]))
         if verb == "member-add":
-            _modify(directory, dn, MEMBER_ATTRIBUTE, None, member)
+            _modify(directory, write_dn, MEMBER_ATTRIBUTE, None, member)
         else:
-            _modify(directory, dn, MEMBER_ATTRIBUTE, member, None)
+            _modify(directory, write_dn, MEMBER_ATTRIBUTE, member, None)
         return None
 
     if verb == "maq":
@@ -2509,7 +2933,7 @@ def write_after(directory: Directory, request: Mapping[str, Any]) -> str | None:
             # The move of an object is a rename of it: a modify of the
             # distinguished name answers 53 (measured on Samba 4.22.11,
             # 2026-11-09).
-            directory.db.rename(current_dn, new_dn)
+            directory.db.rename(guid_dn(str(target["guid"])), new_dn)
         except directory.ldb.LdbError as exc:
             if ldb_code(exc) == error_code(
                 directory.ldb, "ERR_NO_SUCH_OBJECT", 32
@@ -2518,9 +2942,10 @@ def write_after(directory: Directory, request: Mapping[str, Any]) -> str | None:
             raise
         return None
 
-    dn = _account_dn(directory, target)
-    if dn is None:
+    if _account_dn(directory, target) is None:
         raise Refused("not_found", "the target is not there")
+    # The modify names the GUID, never the DN the search answered.
+    dn = guid_dn(str(target["guid"]))
     if verb in ("uac-clear", "disable", "enable"):
         _modify(
             directory,
@@ -2555,37 +2980,69 @@ def read_back(
     request: Mapping[str, Any],
     created: str | None,
 ) -> dict[str, Any]:
-    """The live values of the target after the write (step 7)."""
+    """The live values of the target after the write (step 7).
+
+    A value that cannot be read (a parent, a domain head or a
+    userAccountControl the bind does not see) makes the answer empty: a
+    target that cannot be read, never a value that matches neither image.
+    """
     verb = str(request["verb"])
     target = request["target"]
     if verb == "user-create":
         return {"object": "present" if created else "absent"}
     if verb in ("member-add", "member-remove"):
-        group = directory.by_guid(str(target["group_guid"]), _GROUP_ATTRS)
-        member = directory.by_guid(str(target["member_guid"]), _ACCOUNT_ATTRS)
-        if group is None or member is None:
+        # A member that is not there cannot be read.  The presence is one
+        # search of the group by its GUID, matching the member by its GUID,
+        # never the member's DN read in another search.
+        if directory.by_guid(str(target["member_guid"]), _ACCOUNT_ATTRS) is None:
             return {}
-        present = directory.dn_of(member) in directory.members(group)
-        return {"member": "present" if present else "absent"}
+        state = directory.membership(target.get("group_guid"), target.get("member_guid"))
+        if state is None:
+            return {}
+        if state == "empty":
+            # No member value: an empty group or a member the bind cannot
+            # read (Directory.membership).  It is the after-image of a
+            # member-remove only (a known limit: the group's member made
+            # unreadable after the before-check proved it readable reads
+            # absent); for a member-add it is a group that cannot be read.
+            return {"member": "absent"} if verb == "member-remove" else {}
+        return {"member": state}
     if verb == "maq":
         head = directory.by_dn(directory.domain_dn(), _DOMAIN_ATTRS)
-        quota = directory.integer(head, MAQ_ATTRIBUTE) if head is not None else None
-        return {"maq": 0 if quota is None else quota}
+        if head is None:
+            return {}
+        # A domain head always holds its quota: no value is one the bind
+        # cannot read, never 0.
+        quota = directory.integer(head, MAQ_ATTRIBUTE)
+        return {} if quota is None else {"maq": quota}
     message = _account_message(directory, target)
     if message is None:
         return {}
     if verb in ("uac-clear", "disable", "enable"):
         control = directory.integer(message, UAC_ATTRIBUTE)
-        return {"uac": 0 if control is None else control}
+        return {} if control is None else {"uac": control}
     if verb == "enc-types":
         types = directory.integer(message, ETYPES_ATTRIBUTE)
-        return {"etypes": "absent" if types is None else types}
+        if types is not None:
+            return {"etypes": types}
+        # No value: none, or one the bind cannot read (MS-ADTS 3.1.1.4.3).
+        # It is the after-image of an enc-types that removes the value only
+        # (the same known limit as a member-remove); otherwise the target
+        # cannot be read, never "absent".
+        after = request.get("after")
+        if isinstance(after, dict) and after.get("etypes") == "absent":
+            return {"etypes": "absent"}
+        return {}
     if verb == "unlock":
+        # An unlock writes 0, so the after-image holds a value: no value is
+        # a lockoutTime the bind cannot read (or one never written), never
+        # the after-image.
         lockout = directory.integer(message, LOCKOUT_ATTRIBUTE)
-        return {"lockout": 0 if lockout is None else lockout}
+        return {} if lockout is None else {"lockout": lockout}
     if verb == "move":
         parent = directory.by_dn(parent_dn(directory.dn_of(message)), _GROUP_ATTRS)
-        return {"parent": directory.guid(parent) if parent is not None else None}
+        guid = directory.guid(parent) if parent is not None else None
+        return {} if guid is None else {"parent": guid}
     return {}
 
 
@@ -2624,20 +3081,231 @@ def _settle(
 ) -> None:
     """The final state of a record whose run did not finish.
 
-    Nothing was written: the record is refused.  A write happened: the
-    undo runs at once, and the record says whether it restored its
-    value.
+    Nothing was written: the record is refused and the timer is
+    cancelled, even when the refused record cannot be written (the record
+    then raises, and the disk may read armed for a write that was never
+    sent: a timer left running on it would undo over somebody else's
+    value).  A write happened: the undo runs at once, and the record says
+    whether it restored its value.  An undo that raises has an unknown
+    outcome: the record stays armed with its timer, so the timer or the
+    sweep runs the undo later.
     """
     if written:
         try:
             run_undo(directory, record, path)
-            return
         except Exception:
-            record["state"] = "undo_failed"
-            write_record(path, record)
-            return
+            _log("the undo of a failed run failed; it stays armed")
+        return
     record["state"] = "refused"
-    write_record(path, record)
+    try:
+        store_record(path, record)
+    finally:
+        if record["request"].get("verb") != "unlock":
+            disarm_undo(str(record["txid"]))
+
+
+#: The LDB codes with which the server itself refused a write, so the
+#: write wrote nothing (an LDAP modify or rename is atomic: 16 a stale old
+#: value, 20 a value already there and 68 a name already taken are the
+#: server's own answers too).  Any other code (1 operations error, 51 busy, 52
+#: unavailable, 80 other, a time limit) can be the client's own for a
+#: connection that failed: the write may still land.
+SERVER_REFUSAL_CODES = frozenset({16, 17, 18, 19, 20, 21, 32, 34, 50, 53, 64, 65, 66, 67, 68, 69})
+
+
+def _user_create_name(directory: Directory, request: Mapping[str, Any]) -> str:
+    """The name of a new user whose GUID is not recorded: the planned DN,
+    or the planned name when the parent cannot be read."""
+    try:
+        dn = user_create_dn(directory, request)
+    except Exception:
+        dn = None
+    if dn is not None:
+        return dn
+    target = request.get("target")
+    return str(target.get("sam", "")) if isinstance(target, dict) else ""
+
+
+def _reread(
+    directory: Directory, request: Mapping[str, Any], created: str | None = None
+) -> dict[str, Any]:
+    """The live image of the target, read again after a failed write.
+
+    A user-create whose created GUID is known is read by that GUID; one
+    with no GUID is read at the DN its add named (the apply's own re-read
+    after a failed add).  An empty answer is a target that cannot be read.
+    """
+    if request.get("verb") == "user-create" and isinstance(created, str):
+        # Absent only when no object holds the GUID (Directory.by_guid_name);
+        # an object the bind cannot read raises, a target that cannot be read.
+        present = directory.by_guid_name(created, _ACCOUNT_ATTRS) is not None
+        return {"object": "present" if present else "absent"}
+    if request.get("verb") == "user-create":
+        dn = user_create_dn(directory, request)
+        if dn is None:
+            return {}
+        present = directory.by_dn(dn, _ACCOUNT_ATTRS) is not None
+        return {"object": "present" if present else "absent"}
+    return read_back(directory, request, None)
+
+
+def _settle_failed_write(
+    directory: Directory,
+    record: dict[str, Any],
+    path: str,
+    exc: Any,
+) -> tuple[str, dict[str, Any]]:
+    """The record of a write that failed for a reason other than a conflict.
+
+    The target is read again, and the record says what the directory
+    shows (section 6):
+
+    * the before-image, after a code the server itself answered
+      (``SERVER_REFUSAL_CODES``): nothing was written, the record is
+      refused and the timer is cancelled;
+    * the before-image after any other code: the write may still land,
+      so the record stays armed and the timer runs the undo at undo_at;
+    * the after-image after a code the server did not answer itself: the
+      write landed and its answer was lost, so the undo runs now (an
+      unlock has no undo and is confirmed; a user-create found at its DN
+      is left, since the object there may not be Newton's, and the record
+      says it is still there);
+    * the after-image after a code the server itself answered: the write
+      is atomic, so nothing of Newton's was written and somebody else made
+      the same change; the record is refused with the conflict, the timer
+      is cancelled and the undo never runs (the answer is ``conflict``
+      with the live value; an unlock is refused too, since Newton's
+      unlock did not land);
+    * any other value after a code the server itself answered: nothing
+      of Newton's was written and somebody else changed the target, so
+      the record is refused with the conflict (the answer is
+      ``conflict`` with the live value);
+    * any other value after any other code: somebody else changed the
+      target, and Newton's write may have landed before that change, so
+      the outcome is unknown and never refused.  The undo never writes
+      over the other change: the record is ``undo_failed`` with the
+      conflict and the timer is cancelled (an unlock, which has no undo,
+      stays armed).  The answer keeps the code of the write, with the
+      live value, so Newton reads the record;
+    * a target that cannot be read, or an undo that raises: the record
+      stays armed, so the outcome is reported unknown and the timer or
+      the sweep runs the undo later (after a code the server itself
+      answered, the record's mark makes that undo record it refused and
+      write nothing).
+
+    After a code the server itself answered, the timer is cancelled even
+    when the refused record cannot be written; the record write then
+    raises, so the answer is the write's own code and never conflict, and
+    the mark ``answered`` the caller wrote before the re-read keeps any
+    later undo of the record from writing (when the store took that mark;
+    when it took neither, the caller's answer says ``unmarked``).
+
+    The answer is the code of the answer and its extra fields.
+    """
+    request = record["request"]
+    txid = str(record["txid"])
+    verb = request.get("verb")
+    code = map_ldb_error(exc, directory.ldb)
+    try:
+        live = _reread(directory, request)
+    except Exception:
+        return code, {}
+    if not live:
+        return code, {}
+    answered = ldb_code(exc) in SERVER_REFUSAL_CODES
+    if live == request.get("before"):
+        if answered:
+            record["state"] = "refused"
+            record["restored"] = False
+            # Nothing of Newton's was written: the timer is cancelled even
+            # when the record cannot be written (the record then raises, so
+            # the answer is the write's own code and Newton reads the armed
+            # record, whose mark keeps its undo from writing).
+            try:
+                store_record(path, record)
+            finally:
+                if verb != "unlock":
+                    disarm_undo(txid)
+        return code, {}
+    if answered or live != request.get("after"):
+        # After a code the server answered, the atomic write wrote nothing:
+        # the after-image is somebody else's same change, and any other
+        # value somebody else's other change.  Either way it is refused
+        # with the conflict and the undo never runs over it.
+        if verb == "unlock" and not answered:
+            return code, {"live": live}
+        record["state"] = "refused" if answered else "undo_failed"
+        record["restored"] = False
+        record["conflicts"] = [_conflict_name(directory, str(verb), request)]
+        if answered:
+            # The timer is cancelled even when the refused record cannot be
+            # written: the record then raises, so the answer is the write's
+            # own code (never conflict, which says nothing was written while
+            # the store says armed), and the record's mark keeps the sweep
+            # from writing over the other change.
+            try:
+                store_record(path, record)
+            finally:
+                if verb != "unlock":
+                    disarm_undo(txid)
+            return "conflict", {"live": live}
+        store_record(path, record)
+        if verb != "unlock":
+            disarm_undo(txid)
+        return code, {"live": live}
+    if verb == "unlock":
+        record["state"] = "confirmed"
+        store_record(path, record)
+        return code, {}
+    if verb == "user-create":
+        # An object at the planned DN does not prove Newton's add made it
+        # (somebody else may have created the same name): its undo facts
+        # are never taken from it, so the undo leaves it and the record
+        # says it is still there.
+        record["conflicts"] = [str(name) for name in (record.get("conflicts") or [])]
+        dn = user_create_dn(directory, request)
+        if dn is not None and dn not in record["conflicts"]:
+            record["conflicts"].append(dn)
+    try:
+        run_undo(directory, record, path)
+    except Exception:
+        return code, {}
+    disarm_undo(txid)
+    return code, {}
+
+
+def _unmarked(
+    path: str, verb: str, exc: Any, code: str, extra: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The extra fields of the answer to a failed write, with ``unmarked``
+    when the store on the disk does not say the server answered it.
+
+    After a code the server itself answered, nothing of Newton's was
+    written, and only the mark ``answered`` (or a refused record) keeps a
+    later undo from writing the before-image over somebody else's value.
+    When the store took neither, the record on the disk is armed with no
+    mark, and the timer or the sweep cannot tell it from a write whose
+    answer was lost: its undo may write over somebody else's change.  The
+    answer then says ``unmarked`` (never with ok or conflict), so Newton
+    tells the owner.  An unlock has no undo and is never unmarked, and
+    neither is a conflict: that answer is given only once the refused
+    record is on the disk, so a read-back that fails after it says nothing
+    about the record.
+    """
+    answer = dict(extra)
+    if verb == "unlock" or code == "conflict" or ldb_code(exc) not in SERVER_REFUSAL_CODES:
+        return answer
+    try:
+        on_disk = read_record(path)
+    except Refused:
+        on_disk = None
+    if (
+        on_disk is not None
+        and (on_disk.get("answered") is not None or on_disk.get("state") != "armed")
+    ):
+        return answer
+    answer["unmarked"] = True
+    return answer
 
 
 def do_apply(request: Mapping[str, Any], now: int) -> dict[str, Any]:
@@ -2645,11 +3313,18 @@ def do_apply(request: Mapping[str, Any], now: int) -> dict[str, Any]:
 
     The order of the checks is the one of the steps of ``apply``
     (SPEC-1.4-REQUEST section 6, "Modes and responses"): the rules of
-    the schema, then the token, then the expiry, then the replay, then
+    the schema, then the replay, then the token, then the expiry, then
     the rules of the verb, then the role of this DC, and only then the
-    rest; the order of the token, the expiry and the replay inside it
-    is the one of section 4, "The digest and the token".  An unsigned
-    request learns nothing beyond the schema and the token.
+    rest; the order of the replay, the token and the expiry inside it
+    is the one of section 4, "The digest and the token".  The replay
+    comes first so that a retry of an apply this DC holds answers replay
+    even once its approval is over or the key changed: the Newton side
+    takes bad_token and expired for nothing changed.  An unsigned request
+    learns nothing beyond the schema, the token and whether a record file
+    of its txid exists, which the status mode answers without a token too
+    (a record file that does not parse answers replay here, while the
+    status answers not_found for it; such a file is only left by a create
+    that failed, before anything was written).
     """
     verb = str(request["verb"])
     if verb == "user-create" and not isinstance(request.get("secret"), str):
@@ -2658,17 +3333,17 @@ def do_apply(request: Mapping[str, Any], now: int) -> dict[str, Any]:
         # armed.
         raise Refused("schema", "the user-create carries no secret")
 
+    txid = str(request["txid"])
+    path = record_path(txid)
+    if os.path.exists(path):
+        raise Refused("replay", "the record of the transaction is already there")
+
     key = read_key()
     expected = token(key, digest(request), int(request["nbf"]), int(request["exp"]))
     if not hmac.compare_digest(expected, str(request["token"])):
         raise Refused("bad_token", "the token does not match the key")
     if not int(request["nbf"]) - 60 <= now <= int(request["exp"]):
         raise Refused("expired", "the approval is outside the window")
-
-    txid = str(request["txid"])
-    path = record_path(txid)
-    if os.path.exists(path):
-        raise Refused("replay", "the record of the transaction is already there")
 
     check_verb_rules(request)
 
@@ -2683,7 +3358,11 @@ def do_apply(request: Mapping[str, Any], now: int) -> dict[str, Any]:
         "request": {
             key: value for key, value in request.items() if key not in ("secret", "token")
         },
-        "state": "armed",
+        # The record is created refused (nothing is written yet) and reads
+        # armed only once the timer is armed, right before the write: a
+        # store that refuses a later write never leaves armed a change that
+        # was never sent, which the sweep would undo over somebody else's.
+        "state": "refused",
         "undo_at": now + int(request["window"]),
         "restored": False,
         "conflicts": [],
@@ -2696,6 +3375,7 @@ def do_apply(request: Mapping[str, Any], now: int) -> dict[str, Any]:
         raise Refused("replay", "the record of the transaction is already there") from None
 
     written = False
+    sent = False
     settled = False
     created_dn: str | None = None
     try:
@@ -2737,47 +3417,132 @@ def do_apply(request: Mapping[str, Any], now: int) -> dict[str, Any]:
                 {"live": live},
             )
 
+        if armed_on_target(txid, request):
+            # Another change of the target is armed: its undo could write
+            # over this one once confirmed.  Nothing is armed or written.
+            raise Refused(
+                "conflict",
+                "another change of the target is armed",
+                {"live": live, "armed": True},
+            )
+
         if verb != "unlock":
             arm_undo(txid, int(request["window"]))
+        record["state"] = "armed"
+        try:
+            write_record(path, record)
+        except Exception:
+            # The armed record may be on the disk all the same (the flush of
+            # its directory failed after the replace), so nothing is sent
+            # and nothing is assumed: the timer goes and the record is
+            # written refused again.  A disk that then does not read refused
+            # reads armed for a write that was never sent, which the sweep
+            # would undo over somebody else's value: the answer says
+            # unmarked (an unlock has no undo and is never unmarked).
+            record["state"] = "refused"
+            if verb != "unlock":
+                disarm_undo(txid)
+            settled = True
+            extra: dict[str, Any] = {}
+            try:
+                store_record(path, record)
+            except Exception:
+                if verb != "unlock":
+                    extra["unmarked"] = True
+            raise Refused("error", "the armed record could not be written", extra) from None
 
         try:
+            sent = True
             created_dn = write_after(directory, request)
         except directory.ldb.LdbError as exc:
             code = map_ldb_error(exc, directory.ldb)
-            disarm_undo(txid)
+            if ldb_code(exc) in SERVER_REFUSAL_CODES:
+                # The server answered the write: the mark goes to the disk
+                # before the target is read again, so whatever happens next
+                # the timer, the sweep and an abort find it and never undo.
+                # A store that takes neither it nor the refused record leaves
+                # the record armed with no mark: the answer says unmarked.
+                record["answered"] = ldb_code(exc)
+                try:
+                    store_record(path, record)
+                except Exception:
+                    _log("the mark of an answered write could not be recorded")
             if code == "conflict":
-                raise Refused("conflict", "the old value was stale") from None
+                # The modify, the add and the rename are atomic: a stale
+                # old value or a taken name wrote nothing.  A refused record
+                # that cannot be written answers an error, never conflict.
+                disarm_undo(txid)
+                record["state"] = "refused"
+                try:
+                    store_record(path, record)
+                    answer_code, extra = "conflict", {}
+                except Exception:
+                    answer_code, extra = "error", {}
+                settled = True
+                raise Refused(
+                    answer_code, "the old value was stale",
+                    _unmarked(path, verb, exc, answer_code, extra),
+                ) from None
             try:
-                run_undo(directory, record, path)
+                answer_code, extra = _settle_failed_write(directory, record, path, exc)
             except Exception:
-                record["state"] = "undo_failed"
-                write_record(path, record)
+                # The outcome could not be settled: the record stays armed
+                # and the timer runs the undo at undo_at.
+                answer_code, extra = code, {}
             settled = True
-            raise Refused(code, "the write failed") from None
+            raise Refused(
+                answer_code, "the write failed",
+                _unmarked(path, verb, exc, answer_code, extra),
+            ) from None
         written = True
 
         created: str | None = None
         if verb == "user-create":
             created, usn = read_created(directory, request)
             if not created or not usn:
-                # The name of the object the add made is the one the
-                # write computed before the add: the parent that cannot
-                # be read back does not take it away.
-                dn = created_dn
+                # The undo facts of the new user are missing: it is put back
+                # at once, and only by its GUID.  An account at the planned
+                # DN may not be Newton's (somebody may have moved Newton's
+                # away and made another there), so with no GUID nothing is
+                # deleted: the record is undo_failed with the DN.
                 restored = False
                 conflicts: list[str] = []
-                if dn is not None:
+                if not created:
+                    conflicts.append(
+                        created_dn if created_dn is not None
+                        else _user_create_name(directory, request)
+                    )
+                else:
                     try:
-                        directory.db.delete(dn)
+                        # The delete names the GUID: the object of that GUID
+                        # is deleted wherever it is, in the one request, and
+                        # an account made at the planned DN is never touched.
+                        directory.db.delete(guid_dn(created))
                         restored = True
                     except Exception:
-                        conflicts.append(dn)
+                        # The answer of the delete may be lost: the object of
+                        # the GUID is looked for again.  One that cannot be
+                        # looked for leaves the record armed with its timer.
+                        try:
+                            again = directory.by_guid_name(created, _ACCOUNT_ATTRS)
+                        except Unreadable:
+                            # There, and the bind cannot read it: not gone.
+                            again = created
+                        except Exception:
+                            settled = True
+                            raise Refused(
+                                "error", "the undo facts of the new user are missing"
+                            ) from None
+                        if again is None:
+                            restored = True
+                        else:
+                            conflicts.append(created)
                 record["restored"] = restored
                 record["conflicts"] = conflicts
                 record["state"] = "undone" if restored else "undo_failed"
                 # The record is written before the timer is cancelled: a
                 # record that cannot be written leaves the undo armed.
-                write_record(path, record)
+                store_record(path, record)
                 disarm_undo(txid)
                 settled = True
                 raise Refused("error", "the undo facts of the new user are missing")
@@ -2788,7 +3553,7 @@ def do_apply(request: Mapping[str, Any], now: int) -> dict[str, Any]:
             # so the transaction is confirmed and the sweep leaves it alone.
             record["state"] = "confirmed"
         after_live = read_back(directory, request, created)
-        write_record(path, record)
+        store_record(path, record)
         settled = True
         answer: dict[str, Any] = {
             "v": 1,
@@ -2799,14 +3564,31 @@ def do_apply(request: Mapping[str, Any], now: int) -> dict[str, Any]:
         if created is not None:
             answer["created"] = created
         return answer
-    except Refused:
-        if not settled:
-            # Nothing was written: the record is refused, never armed.
-            # A write that happened is put back at once.
-            _settle(record, path, directory, written)
+    except Refused as refusal:
+        if not settled and (written or record["state"] == "armed"):
+            # Nothing was written: the record is refused, never armed (a
+            # record that never read armed is refused on the disk already).
+            # A write that happened is put back at once.  A refused record
+            # the disk does not take leaves it armed for a write that was
+            # never sent (its timer is cancelled all the same): the answer
+            # says unmarked, and is never conflict (a move whose rename
+            # answered 32 refuses with conflict from inside the write),
+            # since Newton reports a conflict as nothing changed.
+            try:
+                _settle(record, path, directory, written)
+            except Exception:
+                if written:
+                    raise
+                if verb != "unlock":
+                    refusal.extra["unmarked"] = True
+                    if refusal.code == "conflict":
+                        refusal.code = "error"
         raise
     except Exception:
-        if not settled:
+        # An exception after the write was sent and before it was known to
+        # be written: the write may have landed, so the record stays armed
+        # with its timer, never refused.
+        if not settled and (written or (not sent and record["state"] == "armed")):
             _settle(record, path, directory, written)
         raise
 
@@ -2838,15 +3620,27 @@ def do_confirm(request: Mapping[str, Any]) -> dict[str, Any]:
         )
     except NotFound:
         raise Refused("conflict", "the target is not there") from None
+    if stored.get("verb") != "user-create":
+        # The after-image is read as the read-back reads it: a value the
+        # bind cannot read is a target that cannot be read, never the
+        # after-image (a quota read as 0, a member-add's group read empty).
+        live = read_back(directory, stored, None)
     if live != stored.get("after"):
         raise Refused("conflict", "the target does not show the after-image")
     record["state"] = "confirmed"
     try:
         write_record(path, record)
     except Exception:
-        # The confirmation is not recorded: the timer stays armed and it
-        # puts the change back.
-        raise Refused("error", "the confirmation could not be recorded") from None
+        # A record replaced before the error (the flush of its directory
+        # failed) reads confirmed: the timer finds it so and does nothing.
+        # Otherwise the confirmation is not recorded: the timer stays
+        # armed and it puts the change back.
+        try:
+            again = read_record(path)
+        except Exception:
+            again = None
+        if again is None or again.get("state") != "confirmed":
+            raise Refused("error", "the confirmation could not be recorded") from None
     if not disarm_undo(txid):
         print(
             "the timer of the undo was not cancelled; it will find a"
@@ -2860,7 +3654,8 @@ def do_abort(request: Mapping[str, Any]) -> dict[str, Any]:
     """The abort mode: the undo runs at once (section 6).
 
     Only an armed transaction may be aborted: a transaction that is
-    confirmed, refused or already undone changes nothing.
+    confirmed, refused or already undone changes nothing, and so does an
+    unlock, which has no undo.
     """
     txid = str(request["txid"])
     path = record_path(txid)
@@ -2869,9 +3664,17 @@ def do_abort(request: Mapping[str, Any]) -> dict[str, Any]:
         raise Refused("not_found", "there is no record of the transaction")
     if record.get("state") != "armed":
         raise Refused("conflict", "the transaction is not armed")
+    if (record.get("request") or {}).get("verb") == "unlock":
+        # An unlock has no undo (section 3): its abort is refused, as the
+        # Windows helper refuses it, and the record is left as it is.
+        raise Refused("conflict", "an unlock has no undo")
     directory = bind()
     restored, conflicts = run_undo(directory, record, path)
     disarm_undo(txid)
+    if record.get("state") == "refused":
+        # The server answered the apply's write: nothing was written, so
+        # there was nothing to abort.
+        raise Refused("conflict", "the write of the transaction was refused by the server")
     return {"v": 1, "code": "ok", "restored": restored, "conflicts": conflicts}
 
 
@@ -2966,6 +3769,26 @@ def _undo_path(argv: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
         return do_undo(txid, now)
 
 
+def _sweep_path(argv: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
+    """The way in for the sweep timer (``--sweep``).
+
+    The persistent timer the setup installs runs it about once a minute
+    and once after boot: an undo whose one-shot timer a reboot dropped,
+    or whose run failed (a bind or an LDAP error), is tried again here.
+    It never runs through the ssh channel and takes no other argument.
+    """
+    if env.get("SUDO_USER"):
+        raise Refused("denied", "the sweep never runs through the ssh channel")
+    if len(argv) != 1:
+        raise Refused("schema", "the sweep takes no argument")
+    problem = install_problem()
+    if problem:
+        raise Refused("unavailable", problem)
+    with StoreLock(lock_path()):
+        sweep(int(current_time()))
+    return {"v": 1, "code": "ok"}
+
+
 def handle(
     argv: Sequence[str],
     stdin: bytes,
@@ -2977,6 +3800,8 @@ def handle(
     a crash is a refusal with the code ``error``.
     """
     try:
+        if argv and argv[0] == "--sweep":
+            return _sweep_path(argv, env)
         if argv:
             return _undo_path(argv, env)
         return _stdin_path(stdin, env)

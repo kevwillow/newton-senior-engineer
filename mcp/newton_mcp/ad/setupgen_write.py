@@ -75,9 +75,8 @@ from .setupgen import _b64_block as _b64_block
 from .setupgen import _b64_literal as _b64_literal
 
 
-# The write helper of the Windows platform (SPEC-1.4 section 8).  The
-# file is built on another branch and merges in later; until then the
-# setup says so and installs nothing.
+# The write helper of the Windows platform (SPEC-1.4 section 8).  When
+# the file is not there, the setup says so and installs nothing.
 WRITE_HELPER_PATH = Path(__file__).with_name("collector") / "write.ps1"
 
 # The write helper of the Samba platform (SPEC-1.4 section 8).
@@ -2520,6 +2519,15 @@ fi
 # says so; the run goes on, because a domain device may be a
 # controller that does not hold the role.
 if [ "${IS_PDC}" = "no" ] && [ "${DOMAIN_DEVICE}" = "${DEVICE}" ]; then echo "WARNING: this DC does not hold the PDC emulator role and its entry names its own device. If another DC of the domain already has a write entry, run this setup again with --domain-device <that entry's name>, or every change of the domain is refused."; fi
+
+# The sudoers line is checked with visudo here, before anything is
+# installed, so a line this host's sudo refuses stops the run with
+# nothing in place.  Step 6 checks it again before it puts it in place.
+printf '%s\\n' "${SUDOERS_LINE}" > "${WORK_DIR}/sudoers.check"
+if ! visudo -cf "${WORK_DIR}/sudoers.check" >/dev/null; then
+    echo "visudo refused the sudoers line. Nothing was installed." >&2
+    exit 1
+fi
 """
 
 
@@ -2678,7 +2686,39 @@ install_blob "${WORK_DIR}/newton-ad-samba-write" "${HELPER_PATH}" 0755 '@@HELPER
 # with `schema` when the name differs from this one.
 printf '%s\\n' "${DOMAIN_DEVICE}" > "${WORK_DIR}/device.txt"
 install -m 0644 -o root -g root "${WORK_DIR}/device.txt" "${DEVICE_FILE}"
-echo "  the helper, the device name and the transaction store are in place."
+
+# The sweep timer.  The undo of each change is a one-shot systemd-run
+# timer under /run: a reboot drops it, and an undo whose run fails (a
+# bind or an LDAP error) is not tried again by it.  This persistent timer
+# runs the helper's sweep once after boot and about once a minute, so an
+# armed change whose undo_at has passed is put back then.  The sweep runs
+# as root, like the one-shot timer, and it acts only on the armed records
+# of the root-only transaction store; it adds no right to the login.
+cat > "${WORK_DIR}/newton-ad-sweep.service" <<'NEWTON_AD_UNIT_EOF'
+[Unit]
+Description=Newton AD write helper: undo the armed changes whose undo_at has passed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/newton-ad-samba-write --sweep
+NEWTON_AD_UNIT_EOF
+cat > "${WORK_DIR}/newton-ad-sweep.timer" <<'NEWTON_AD_UNIT_EOF'
+[Unit]
+Description=Newton AD write helper: the sweep of the armed changes
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+Unit=newton-ad-sweep.service
+
+[Install]
+WantedBy=timers.target
+NEWTON_AD_UNIT_EOF
+install -m 0644 -o root -g root "${WORK_DIR}/newton-ad-sweep.service" "/etc/systemd/system/newton-ad-sweep.service"
+install -m 0644 -o root -g root "${WORK_DIR}/newton-ad-sweep.timer" "/etc/systemd/system/newton-ad-sweep.timer"
+systemctl daemon-reload
+systemctl enable --now newton-ad-sweep.timer
+echo "  the helper, the device name, the transaction store and the sweep timer are in place."
 """
 
 
@@ -2752,7 +2792,7 @@ if visudo -cf "${SUDOERS_TMP}" >/dev/null; then
     rm -f "${SUDOERS_TMP}"
 else
     rm -f "${SUDOERS_TMP}"
-    echo "visudo refused the sudoers line. Nothing was installed." >&2
+    echo "visudo refused the sudoers line in step 6, although it took it in the pre-checks: the newton-ops account and its delegation, the approval key, the helper and its files, the sweep timer, the keytab, the local login and its authorized_keys are in place, and no new sudoers line was installed: on a first run the SSH channel is not enabled; on a rerun the sudoers file of the earlier run is left as it was. Fix sudo and run this setup again." >&2
     exit 1
 fi
 visudo -cf "${SUDOERS_FILE}"

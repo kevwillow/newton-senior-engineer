@@ -34,7 +34,20 @@ measurements of SPEC-1.4-REQUEST section 9):
 * ``LoadParm.get(name)`` raises a ``KeyError`` for a name it does not
   hold;
 * every value of an attribute of a result is bytes, and a result holds
-  the attributes the search named and nothing else.
+  the attributes the search named and nothing else;
+* a search with the ``extended_dn:<critical>:1`` control answers every
+  value of a linked DN attribute (``member``, ``memberOf``) as
+  ``<GUID=...>;<SID=...>;<DN>``, the GUID in its string form and the SID
+  only for an object that has one, the way ``extended_dn_out`` renders
+  them (Samba source ``source4/dsdb/samdb/ldb_modules/extended_dn_out.c``,
+  type 1 = the string form; ``lib/ldb/common/ldb_dn.c``
+  ``ldb_dn_get_extended_linearized`` joins the components with ``;``;
+  ``python/samba/dbchecker.py`` searches with ``extended_dn:1:1``).  The
+  fake models only that string form;
+* a linked value follows its object: a rename or a move of an object
+  changes the ``member`` and ``memberOf`` values that name it, the way
+  Samba stores a link by the GUID of its target and answers it at the
+  target's current DN (``repl_meta_data``).
 
 The fake holds one domain, with the shapes the lab DC was measured with
 on 2026-11-09:
@@ -183,6 +196,10 @@ SPECIFIED = 1
 #: The attributes the directory only gives in a base search.
 BASE_ONLY_ATTRS = ("tokengroups",)
 
+#: The linked DN attributes: their values follow the object they name,
+#: and the extended_dn control renders them with its GUID and SID.
+LINKED_DN_ATTRS = ("member", "memberof")
+
 
 def sid_bytes(text: str) -> bytes:
     """The binary form of a SID."""
@@ -252,6 +269,7 @@ FLAG_MOD_REPLACE = 0x000000ff
 ERR_TIME_LIMIT_EXCEEDED = 3
 ERR_SIZE_LIMIT_EXCEEDED = 4
 ERR_NO_SUCH_ATTRIBUTE = 16
+ERR_ATTRIBUTE_OR_VALUE_EXISTS = 20
 ERR_NO_SUCH_OBJECT = 32
 ERR_INVALID_CREDENTIALS = 49
 ERR_INSUFFICIENT_ACCESS_RIGHTS = 50
@@ -620,14 +638,37 @@ class FakeSamDB:
             "base=%s scope=%s expression=%s attrs=%s"
             % (base, scope, expression, ",".join(wanted)),
         )
+        base = str(base)
+        if base.startswith("<GUID=") and base.endswith(">"):
+            # Samba's extended_dn_in resolves the GUID form of a base as the
+            # system (DSDB_FLAG_AS_SYSTEM), so an objectGUID the bind cannot
+            # read still names its object; a GUID no object holds answers
+            # LDB_ERR_NO_SUCH_OBJECT ("Base-DN '...' not found").
+            resolved = active.resolve(base)
+            if resolved == base:
+                raise LdbError(ERR_NO_SUCH_OBJECT, "Base-DN '%s' not found" % base)
+            base = resolved
+        if int(scope or 0) == SCOPE_BASE and base.lower() in active.invisible:
+            # acl_read answers a base the bind cannot see at all as no such
+            # object, the way it answers a base no object holds
+            raise LdbError(ERR_NO_SUCH_OBJECT, "Base-DN '%s' not found" % base)
+        # acl_read exempts the objectClass presence filter for an object the
+        # bind can see: it matches even when objectClass cannot be read
+        any_class = str(expression).strip().lower() == "(objectclass=*)"
         tree = _parse_filter(str(expression))
         found = []
         for dn, attributes in active.objects.items():
-            if not _in_scope(dn, str(base), int(scope or 0)):
+            if not _in_scope(dn, base, int(scope or 0)):
                 continue
-            if not _evaluate(tree, attributes):
+            if dn.lower() in active.invisible:
                 continue
-            found.append(FakeMessage(dn, attributes, wanted))
+            visible = active.visible(attributes)
+            if not any_class and not _evaluate(tree, visible):
+                continue
+            found.append(FakeMessage(dn, visible, wanted))
+        if _extended_dn(controls):
+            for message in found:
+                active.extend_links(message)
         return found
 
     # -- the writes -------------------------------------------------------
@@ -643,7 +684,7 @@ class FakeSamDB:
             "modify",
             "dn=%s elements=%s"
             % (
-                dn,
+                active.named(dn),
                 ",".join(
                     "%s:%s:%s"
                     % (
@@ -655,6 +696,8 @@ class FakeSamDB:
                 ),
             ),
         )
+        active.before("modify", dn)
+        dn = active.resolve(dn)
         attributes = active.objects.get(dn)
         if attributes is None:
             raise LdbError(ERR_NO_SUCH_OBJECT, "no such object")
@@ -696,13 +739,19 @@ class FakeSamDB:
                 raise LdbError(ERR_NO_SUCH_ATTRIBUTE, "no such attribute")
             values.remove(delete.value)
         if add is not None:
+            if add.value in values:
+                # The server checks an add against the values it holds,
+                # whether or not the bind can read them: 20.
+                raise LdbError(ERR_ATTRIBUTE_OR_VALUE_EXISTS, "the value is already there")
             values.append(add.value)
         active.set_values(dn, name, values)
 
     def rename(self, olddn: str, newdn: str, controls: Any = None) -> None:
         """Move one object to another name, as the bindings do."""
         active = _ACTIVE
-        active.record("rename", "old=%s new=%s" % (olddn, newdn))
+        active.record("rename", "old=%s new=%s" % (active.named(str(olddn)), newdn))
+        active.before("rename", str(olddn))
+        olddn = active.resolve(str(olddn))
         code = active.rename_errors.get(olddn)
         if code is not None:
             raise LdbError(code, "the rename was refused")
@@ -717,6 +766,7 @@ class FakeSamDB:
             raise LdbError(ERR_INSUFFICIENT_ACCESS_RIGHTS, "access denied")
         attributes = active.objects.pop(found)
         active.objects[str(newdn)] = attributes
+        active.follow_links(found, str(newdn))
 
     def add(self, message: Any, controls: Any = None) -> None:
         """One object: one dict with the name and the class in it."""
@@ -748,7 +798,9 @@ class FakeSamDB:
 
     def delete(self, dn: str, controls: Any = None) -> None:
         active = _ACTIVE
-        active.record("delete", "dn=%s" % dn)
+        active.record("delete", "dn=%s" % active.named(str(dn)))
+        active.before("delete", str(dn))
+        dn = active.resolve(str(dn))
         if dn not in active.objects:
             raise LdbError(ERR_NO_SUCH_OBJECT, "no such object")
         if not active.delegated(dn):
@@ -758,6 +810,23 @@ class FakeSamDB:
         if active.delete_code is not None:
             raise LdbError(active.delete_code, "the delete was refused")
         del active.objects[dn]
+
+
+def _extended_dn(controls: Any) -> bool:
+    """True when the controls of a search hold the extended_dn control.
+
+    The control is ``extended_dn:<critical>:<type>``; the fake models
+    type 1 (the string form) only and raises for any other type.
+    """
+    for control in controls or []:
+        text = str(control)
+        if not text.startswith("extended_dn:"):
+            continue
+        parts = text.split(":")
+        if len(parts) != 3 or parts[2] != "1":
+            raise ValueError("the fake models only the extended_dn string form (type 1)")
+        return True
+    return False
 
 
 def _message_dn(message: Any) -> str:
@@ -820,6 +889,22 @@ class Fake:
         self.delete_code: int | None = None
         self.delete_error: Exception | None = None
         self.rename_errors: dict[str, int] = {}
+        #: The attributes the bind cannot read (lower case): a search
+        #: answers them on no object and a filter on them matches as if the
+        #: object did not hold them, the way acl_read redacts an attribute
+        #: the caller has no read right on (MS-ADTS 3.1.1.4.3 "Access
+        #: Checks": such a value is treated as "does not exist" in the
+        #: returned attributes and the LDAP filter).  Writes still see them:
+        #: the server checks a modify against the values it holds.
+        self.hidden: set[str] = set()
+        #: The objects (DNs, lower case) the bind cannot see at all, as with
+        #: no list right on the parent: a search never returns them and a
+        #: base search of one answers 32.  Writes still see them.
+        self.invisible: set[str] = set()
+        #: Called with the kind and the name of every delete, modify and
+        #: rename before the fake finds its object: a test moves objects
+        #: there, the way somebody else's write lands between two calls.
+        self.before_write: Any = None
         self._usn = 1000
         self._sid_counter = 0
         self.reset()
@@ -838,6 +923,9 @@ class Fake:
         self.delete_code = None
         self.delete_error = None
         self.rename_errors = {}
+        self.hidden = set()
+        self.invisible = set()
+        self.before_write = None
         self._usn = 1000
         self._sid_counter = 0
         for dn, attributes in _initial_objects().items():
@@ -861,6 +949,16 @@ class Fake:
             handle.write(f"{kind}: {text}\n")
 
     # -- the objects ------------------------------------------------------
+
+    def visible(self, attributes: dict[str, list[bytes]]) -> dict[str, list[bytes]]:
+        """The attributes of one object the bind can read."""
+        if not self.hidden:
+            return attributes
+        return {
+            name: values
+            for name, values in attributes.items()
+            if name.lower() not in self.hidden
+        }
 
     def has_object(self, dn: str) -> bool:
         """True when the fake holds that object."""
@@ -926,10 +1024,92 @@ class Fake:
         """Move one object to another name, as somebody else would."""
         attributes = self.objects.pop(dn)
         self.objects[new_dn] = attributes
+        self.follow_links(dn, new_dn)
+
+    def follow_links(self, dn: str, new_dn: str) -> None:
+        """Every linked value that names ``dn`` names ``new_dn`` now."""
+        old = dn.lower().encode("utf-8")
+        new = new_dn.encode("utf-8")
+        for attributes in self.objects.values():
+            for name in LINKED_DN_ATTRS:
+                values = attributes.get(name)
+                if values:
+                    attributes[name] = [new if one.lower() == old else one for one in values]
+
+    def extend_links(self, message: "FakeMessage") -> None:
+        """The linked values of one result in the extended DN string form.
+
+        A value that names no object is left as it is.
+        """
+        for key, values in message._attributes.items():
+            if key.lower() not in LINKED_DN_ATTRS:
+                continue
+            rendered = []
+            for value in values:
+                text = value.decode("utf-8", "replace")
+                held = None
+                for dn, attributes in self.objects.items():
+                    if dn.lower() == text.lower():
+                        held = attributes
+                        text = dn
+                        break
+                guids = (held or {}).get("objectguid") or []
+                if not guids:
+                    rendered.append(value)
+                    continue
+                parts = ["<GUID=%s>" % guid_text(guids[0])]
+                sids = held.get("objectsid") or []
+                if sids:
+                    parts.append("<SID=%s>" % sid_text(sids[0]))
+                parts.append(text)
+                rendered.append(";".join(parts).encode("utf-8"))
+            message._attributes[key] = rendered
 
     def set_rename_error(self, dn: str, code: int) -> None:
         """The rename of that object answers that code."""
         self.rename_errors[dn] = code
+
+    def resolve(self, name: str) -> str:
+        """The name of the object a write names.
+
+        A name in the GUID form ``<GUID=...>`` names the object that holds
+        that objectGUID now, wherever it is, the way Samba's extended DN
+        module resolves it inside the one request (no object: a name no
+        object has).  Any other name is the name itself.
+        """
+        if not (name.startswith("<GUID=") and name.endswith(">")):
+            return name
+        try:
+            wanted = guid_bytes(name[len("<GUID="):-1])
+        except ValueError:
+            return name
+        for dn, attributes in self.objects.items():
+            if wanted in attributes.get("objectguid", []):
+                return dn
+        return name
+
+    def named(self, name: str) -> str:
+        """The name of a write as the log shows it: a GUID form with the
+        object it names now."""
+        resolved = self.resolve(name)
+        if resolved == name:
+            return name
+        return "%s object=%s" % (name, resolved)
+
+    def before(self, kind: str, name: str) -> None:
+        """Run the hook of a test before a write finds its object."""
+        if self.before_write is not None:
+            self.before_write(kind, name)
+
+    def move_and_replace(self, dn: str, new_dn: str, replacement_guid: str) -> None:
+        """Somebody moves the object at ``dn`` to ``new_dn`` and creates
+        another object at ``dn``: a copy of it with ``replacement_guid``."""
+        attributes = self.objects.pop(dn)
+        self.objects[new_dn] = attributes
+        self.follow_links(dn, new_dn)
+        replacement = {name: list(values) for name, values in attributes.items()}
+        replacement["objectguid"] = [guid_bytes(replacement_guid)]
+        self.objects[dn] = replacement
 
     def delegated(self, dn: str) -> bool:
         """True when the fake lets the write account write that object."""

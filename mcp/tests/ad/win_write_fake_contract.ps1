@@ -104,6 +104,20 @@ $config = @{
             delegated = $true
         }
         @{
+            dn = 'CN=someone,OU=Users,' + $domainDn
+            guid = 'df9619ff-8b86-d011-b42d-00c04fc964ff'
+            sid = 'S-1-5-21-1-2-3-1120'
+            sam = 'someone'
+            object_class = @('top', 'person', 'user')
+            delegated = $true
+        }
+        @{
+            dn = 'CN=empty-group,OU=Users,' + $domainDn
+            guid = 'ef9619ff-8b86-d011-b42d-00c04fc964ff'
+            object_class = @('top', 'group')
+            delegated = $true
+        }
+        @{
             # a real DC keeps the case of the name the account was given
             dn = 'CN=Administrator,' + $domainDn
             guid = '3f9619ff-8b86-d011-b42d-00c04fc964ff'
@@ -177,6 +191,43 @@ $found = @($fake.Search($groupDn, '(member=' + $memberDn + ')', 'base', [string[
 $result['member_filter_found'] = ($found.Count -eq 1)
 $absent = @($fake.Search($groupDn, '(member=CN=other,OU=Users,' + $domainDn + ')', 'base', [string[]]@('objectClass')))
 $result['member_filter_absent'] = ($absent.Count -eq 0)
+
+# the GUID forms (MS-ADTS 3.1.1.3.1.2.4): a base search of the group named by
+# its GUID, a member filter naming the member by its GUID, the presence filter
+# (member=*), and a base GUID no object holds (no such object)
+$groupBase = '<GUID=cf9619ff-8b86-d011-b42d-00c04fc964ff>'
+$memberValue = '<GUID=df9619ff-8b86-d011-b42d-00c04fc964ff>'
+$result['guid_member_found'] = (@($fake.Search($groupBase, '(member=' + $memberValue + ')', 'base', [string[]]@('objectClass'))).Count -eq 1)
+$result['guid_member_other'] = (@($fake.Search($groupBase, '(member=<GUID=0a9619ff-8b86-d011-b42d-00c04fc964ff>)', 'base', [string[]]@('objectClass'))).Count -eq 0)
+$result['any_member_found'] = (@($fake.Search($groupBase, '(member=*)', 'base', [string[]]@('objectClass'))).Count -eq 1)
+$result['any_member_empty'] = (@($fake.Search('<GUID=ef9619ff-8b86-d011-b42d-00c04fc964ff>', '(member=*)', 'base', [string[]]@('objectClass'))).Count -eq 0)
+try {
+    $null = $fake.Search('<GUID=00000000-0000-4000-8000-000000000000>', '(objectClass=*)', 'base', [string[]]@('objectClass'))
+    $result['unknown_guid_base_code'] = 0
+} catch {
+    $result['unknown_guid_base_code'] = Get-ProbeResultCode $_
+}
+# an attribute the bind cannot read is left out of every answer and matches
+# no filter (MS-ADTS 3.1.1.4.3), while the object is still there
+$hiddenConfig = $config.Clone()
+$hiddenConfig['hidden_attributes'] = @('member')
+$hidden = New-NewtonFakeLdap -Config $hiddenConfig
+$result['hidden_member_found'] = (@($hidden.Search($groupBase, '(member=' + $memberValue + ')', 'base', [string[]]@('objectClass'))).Count -eq 1)
+$result['hidden_any_member'] = (@($hidden.Search($groupBase, '(member=*)', 'base', [string[]]@('objectClass'))).Count -eq 1)
+$hiddenEntry = @($hidden.Search($groupBase, '(objectClass=*)', 'base', [string[]]@('objectClass', 'member')))
+$result['hidden_group_found'] = ($hiddenEntry.Count -eq 1)
+$result['hidden_member_returned'] = (($hiddenEntry.Count -eq 1) -and $hiddenEntry[0]['attrs'].ContainsKey('member'))
+# a hidden objectGUID or sAMAccountName matches no filter, while the GUID
+# form of a base still names the object (the directory resolves it)
+$guidHiddenConfig = $config.Clone()
+$guidHiddenConfig['hidden_attributes'] = @('objectGUID', 'sAMAccountName')
+$guidHidden = New-NewtonFakeLdap -Config $guidHiddenConfig
+$guidBytes = ([guid]'cf9619ff-8b86-d011-b42d-00c04fc964ff').ToByteArray()
+$guidFilter = '(objectGUID=' + ((@($guidBytes | ForEach-Object { '\{0:X2}' -f [int]$_ })) -join '') + ')'
+$result['hidden_guid_filter_found'] = (@($guidHidden.Search($domainDn, $guidFilter, 'sub', [string[]]@('objectClass'))).Count -eq 1)
+$result['shown_guid_filter_found'] = (@($fake.Search($domainDn, $guidFilter, 'sub', [string[]]@('objectClass'))).Count -eq 1)
+$result['hidden_guid_base_found'] = (@($guidHidden.Search($groupBase, '(objectClass=*)', 'base', [string[]]@('objectClass'))).Count -eq 1)
+$result['hidden_sam_filter_found'] = (@($guidHidden.Search($domainDn, '(sAMAccountName=administrator)', 'sub', [string[]]@('objectClass'))).Count -eq 1)
 
 # the name of an account is held with the case the directory gave it, and a
 # name is found without its case

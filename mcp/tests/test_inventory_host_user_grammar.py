@@ -1,4 +1,4 @@
-"""INJ-1: the inventory host and the inventory user are pasted into an ssh
+"""The inventory host and the inventory user are pasted into an ssh
 argv (``<user>@<host>``), so both must match the same grammar the getter
 lane already uses, and the destination must be preceded by ``--`` so ssh
 can never read it as an option.

@@ -185,7 +185,7 @@ def _fake_reads(
 
 
 def _request(*, device: str = "router", vantage: str = "outside-a") -> dict[str, object]:
-    # SC-2: a planned scan request expires 30 minutes after planning;
+    # a planned scan request expires 30 minutes after planning;
     # use the current wall clock so the request is always inside the
     # expiry window of ``load_request``.  Tests that need a specific
     # offset overwrite ``created_at`` (and ``request_hash``) themselves.

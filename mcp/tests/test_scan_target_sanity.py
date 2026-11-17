@@ -1,4 +1,4 @@
-"""SC-1: scan target sanity.
+"""Scan target sanity.
 
 The scan target is taken from the router's own interface report, so a
 compromised router can steer an approved scan at any host or /24 it likes
@@ -159,7 +159,7 @@ def _outside_request(
     device: str = "router",
     vantage: str = "outside-a",
 ) -> dict[str, object]:
-    # SC-2: a planned scan request expires 30 minutes after planning;
+    # a planned scan request expires 30 minutes after planning;
     # stamp it at the current wall clock so the request stays inside
     # the expiry window of ``load_request``.  Tests that need a
     # specific offset overwrite ``created_at`` (and ``request_hash``)
@@ -254,7 +254,7 @@ def _write_consent(tmp_path: Path, record: dict[str, object]) -> Path:
     ],
 )
 def test_inside_target_refused(target):
-    """SC-1: every target class the design lists must be refused by
+    """Every target class the design lists must be refused by
     ``scans._validate_target`` so a hand-edited request cannot slip a
     public, loopback, link-local, multicast, unspecified, broadcast or
     partly-overlapping network onto the nmap command line."""
@@ -511,13 +511,13 @@ def test_plan_outside_accepts_public_private_and_cgnat_default_route(
 
 
 # ---------------------------------------------------------------------------
-# Approve screen: SC-1 also requires the human approver to see that the
+# Approve screen: the scan target check also requires the human approver to see that the
 # target came from the router's own interface report, not from the agent.
 # ---------------------------------------------------------------------------
 
 
 def test_approve_scan_screen_prints_target_source_line(tmp_path, monkeypatch, capsys):
-    """SC-1: the approve screen prints one fixed line directly after
+    """The approve screen prints one fixed line directly after
     the ``Target:`` row, naming the source of the target string.  A
     compromised router can change its interface report, so the approver
     has to know the string did not come from the agent or from the

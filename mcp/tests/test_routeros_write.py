@@ -1548,8 +1548,7 @@ UPTIME_NOT_UPTIME = (
     "--",
 )
 
-# The clock of the live CHR, as "/system clock print" printed it (the
-# recorded session 10).  The text is multi-line and padded, so the
+# The clock of the live CHR, as "/system clock print" printed it.  The text is multi-line and padded, so the
 # parser has to read it exactly as the device printed it.
 CLOCK_LIVE = (
     "                  time: 18:33:57  \r\n"
@@ -1569,14 +1568,13 @@ LIVE_COMMAND = "/ip address add address=999.1.1.1/24 interface=ether2"
 class LiveAbortChr(FakeChr):
     """The live CHR abort, as the recorded session shows it.
 
-    The recorded session (chr-05.log, sessions 13-31) shows this: the
-    statement is refused (session 13), the marker is printed (14), the
-    load is accepted (15) and the device reboots.  The three sessions of
-    the proof are unreachable (16, 17 and 18), then the device answers
-    again (19 to 21): the entry of the revert is gone (the load
-    restored the configuration of the backup), the backup file is still
-    on the device (sessions 24, 27 and 31 count one) and the uptime
-    says that the device rebooted.
+    The recorded live abort shows this: the statement is refused, the
+    marker is printed, the load is accepted and the device reboots.  The
+    three sessions of the proof are unreachable, then the device answers
+    again: the entry of the revert is gone (the load restored the
+    configuration of the backup), the backup file is still on the device
+    (each later count finds one) and the uptime says that the device
+    rebooted.
     """
 
     def __init__(self, **kwargs: Any) -> None:

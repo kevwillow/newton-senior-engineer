@@ -1222,7 +1222,7 @@ def test_the_installed_uninstall_is_unchanged(setup_env):
     assert sections(env) == {}
 
 
-# -- 7. the review round r3 (items 1, 4, 5 and 6) -----------------------------
+# -- 7. what no-install and uninstall refuse and what they prove -------------
 
 
 def test_no_install_refuses_when_newton_is_installed_on_a_no_install_device(

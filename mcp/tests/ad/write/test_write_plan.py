@@ -413,3 +413,89 @@ def test_the_plan_of_a_mixed_case_membership_carries_the_lowercase_names() -> No
 
     assert result["target"]["group_sam"] == "seed-group"
     assert result["target"]["member_sam"] == "other-user"
+
+
+# ---- a before-image is never a value the bind cannot read -------------------
+#
+# The read answers the planning image ``live`` and the outcome image
+# ``outcome``.  A quota, a userAccountControl or a move's parent the domain
+# controller's account cannot read reads 0 (or no parent) in ``live`` and
+# is missing from ``outcome``: a plan built on it would hold a before-image
+# nobody read, which its undo would write back.
+
+
+def _unreadable(send_to: object, verbs: tuple[str, ...]) -> object:
+    def send(target: object, request: dict[str, object]) -> dict[str, object]:
+        answer = send_to(target, request)  # type: ignore[operator]
+        target = request["target"]
+        # the before-image read names the target by its GUIDs
+        if request["mode"] == "read" and request["verb"] in verbs and any(  # type: ignore[operator]
+            str(key).endswith("guid") for key in target  # type: ignore[attr-defined]
+        ):
+            answer = {**answer, "outcome": {}}
+        return answer
+    return send
+
+
+#: One plan per verb whose before-image must be one the outcome read shows:
+#: the names and the value of the request.
+_READ_BEFORE_PLANS: dict[str, tuple[list[str], object]] = {
+    "maq": ([], 0),
+    "uac-clear": (["seed-asrep"], 4194304),
+    "disable": (["seed-asrep"], None),
+    "enable": (["seed-asrep"], None),
+    "move": (["seed-asrep"], harness.OTHER_GUID),
+}
+
+
+def _read_before_lab(verb: str) -> harness.Lab:
+    lab = harness.Lab()
+    # an account with the AS-REP bit under the domain head, enabled (512)
+    # for a disable and disabled (514) otherwise
+    uac = 4194816 if verb == "disable" else 4194818
+    lab.add_user(uac=uac, parent=harness.DOMAIN_GUID)
+    lab.add_domain_head()
+    # the parent a move names
+    lab.add_other(kind="ou", object_class=["organizationalUnit"])
+    return lab
+
+
+@pytest.mark.parametrize("verb", sorted(_READ_BEFORE_PLANS))
+def test_the_plan_of_a_value_the_bind_can_read_goes_ahead(verb: str) -> None:
+    """The control of the refusal below: the same plan, read in full, is made."""
+    lab = _read_before_lab(verb)
+    names, value = _READ_BEFORE_PLANS[verb]
+
+    result = plan.plan_change(
+        harness.DOMAIN, verb, names, value, send=lab.send, devices=lab.devices,
+    )
+
+    assert result["verb"] == verb
+
+
+@pytest.mark.parametrize("verb", sorted(_READ_BEFORE_PLANS))
+def test_the_plan_of_a_value_the_bind_cannot_read_is_refused(verb: str) -> None:
+    lab = _read_before_lab(verb)
+    names, value = _READ_BEFORE_PLANS[verb]
+
+    with pytest.raises(WriteError, match="cannot read"):
+        plan.plan_change(
+            harness.DOMAIN, verb, names, value,
+            send=_unreadable(lab.send, (verb,)), devices=lab.devices,
+        )
+
+
+def test_the_plan_of_a_member_add_to_a_group_that_shows_no_member_is_not_refused() -> None:
+    """An empty group and a member list the bind cannot read look the same;
+    the add is a write the server checks, so the plan goes ahead."""
+    lab = harness.Lab()
+    lab.add_group()
+    lab.add_user()
+    lab.add_other()
+
+    result = plan.plan_change(
+        harness.DOMAIN, "member-add", ["seed-group", "other"], None,
+        send=_unreadable(lab.send, ("member-add",)), devices=lab.devices,
+    )
+
+    assert result["before"] == {"member": "absent"}

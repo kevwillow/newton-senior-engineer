@@ -1510,7 +1510,7 @@ fp_hex = hmac.new(
     hashlib.sha256,
 ).hexdigest()
 
-# R8 (a-2): remove the OLD fingerprint BEFORE writing the new one.  If
+# remove the OLD fingerprint BEFORE writing the new one.  If
 # the write below fails (mkstemp, write, fsync, replace), the old fp
 # would otherwise stay and approve.py would compare the new K's
 # fingerprint against the OLD fp, refusing the new passphrase as

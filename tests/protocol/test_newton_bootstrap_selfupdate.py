@@ -116,7 +116,7 @@ def test_identical_copy_is_up_to_date(tmp_path):
 def test_diff_output_is_terminal_safe(tmp_path):
     new_text = OLD + "# esc \x1b]0;pwn\x07 bell\n"
     cid, rc, out, err = update(tmp_path, new_text=new_text, typed="")
-    # since round b4 the control bytes are refused before any diff is shown (see ..._selfupdate_review.py)
+    # the control bytes are refused before any diff is shown (see ..._selfupdate_review.py)
     assert "\x1b" not in out and "\x1b" not in err
     assert "\x07" not in out and "\x07" not in err
     assert "outside TAB/LF/printable-ASCII" in err

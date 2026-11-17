@@ -1,4 +1,4 @@
-"""INJ-4: the seam values of scripts/newton-router-setup that leave the host
+"""The seam values of scripts/newton-router-setup that leave the host
 are shape-checked before the tool does anything.
 
 NEWTON_SETUP_REMOTE_ROOT is interpolated into shell text that runs on the

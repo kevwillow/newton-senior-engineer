@@ -48,7 +48,7 @@ class _FrozenDatetime(datetime):
 
 class _SequenceDatetime(datetime):
     """Frozen datetime that returns successive entries from a sequence
-    on each ``datetime.now()`` call.  Used by the R8 (b-1) "expired
+    on each ``datetime.now()`` call.  Used by the "expired
     while you typed" test: approve.main() calls ``datetime.now()``
     twice -- once for the display line (``now``) and once for the
     approval creation (``created``) -- so a sequence of two values lets
@@ -540,7 +540,7 @@ def test_consume_approval_accepts_the_record_main_wrote(tmp_path, monkeypatch, c
     assert grant.token == expected_token
     assert grant.not_before == saved["not_before"]
     assert grant.not_after == saved["not_after"]
-    # APR-05: consume_approval now CLAIMS the record by
+    # consume_approval now CLAIMS the record by
     # renaming it to .claimed; settle_approval() is what turns the
     # claim into .used after the script reaches the router.
     assert not (state / "approvals" / f"{SID}.json").exists()
@@ -834,7 +834,7 @@ def test_approve_accepts_when_fingerprint_matches(
 def test_approve_missing_fingerprint_refuses_with_setup_remediation(
     tmp_path, monkeypatch, capsys
 ):
-    """APR-05: a missing approval fingerprint is a refusal,
+    """A missing approval fingerprint is a refusal,
     not a NOTICE.  The previous behaviour wrote an approval whose
     token the device then refused (bad-approval) and the human
     approval was burned; refuse here too, with a clear message that
@@ -877,7 +877,7 @@ def test_approve_treats_malformed_fingerprint_as_mismatch(
 def test_approve_treats_non_ascii_fingerprint_as_mismatch(
     tmp_path, monkeypatch
 ):
-    """R8 (a-1): a fingerprint file holding a non-ASCII byte does NOT
+    """A fingerprint file holding a non-ASCII byte does NOT
     crash with UnicodeDecodeError (a ValueError, not an OSError); it
     is treated as a mismatch, exactly like a truncated or non-v1 file.
     read_text(encoding='ascii') raises UnicodeDecodeError when the file
@@ -896,7 +896,7 @@ def test_approve_treats_non_ascii_fingerprint_as_mismatch(
 def test_approve_refuses_with_wrong_passphrase_message_when_fingerprint_is_non_ascii(
     tmp_path, monkeypatch, capsys
 ):
-    """R8 (a-1) end-to-end: the full main path catches the non-ASCII
+    """The full main path catches the non-ASCII
     fingerprint as a mismatch and prints the existing 'wrong approval
     passphrase' message; no traceback, no approval file."""
     state, _ = write_plan(tmp_path, monkeypatch)
@@ -1092,7 +1092,7 @@ def test_stage_expiry_helper_computes_router_window():
     ) is None
 
 
-# R8 (b-1): the stage can expire while the operator is typing the
+# the stage can expire while the operator is typing the
 # passphrase.  expires_at is clamped to stage_expiry; if that clamp
 # leaves expires_at <= created (the time we wrote the approval), the
 # approval would already be stale the moment it lands -- refuse instead
@@ -1105,7 +1105,7 @@ def test_stage_expiry_helper_computes_router_window():
 def test_approve_refuses_when_clamped_expires_at_is_not_after_created(
     tmp_path, monkeypatch, capsys, frozen_now, frozen_now_sequence
 ):
-    """R8 (b-1): the staged change expired while the operator typed
+    """The staged change expired while the operator typed
     the passphrase.  expires_at (= stage_expiry, computed from
     staged_at + 2700 - timeout_s - 60) falls between the display time
     (first datetime.now()) and the creation time (second
@@ -1121,7 +1121,7 @@ def test_approve_refuses_when_clamped_expires_at_is_not_after_created(
     record["timeout_s"] = 2340
     record["staged_at"] = frozen_now.isoformat()
     write_record(state, record)
-    # APR-05: approve now refuses when the fingerprint is
+    # approve now refuses when the fingerprint is
     # missing, so the test has to seed one to reach the clamped-expiry
     # branch it is actually exercising.
     passphrase = "any-typed-pass"
@@ -1148,7 +1148,7 @@ def test_approve_refuses_when_clamped_expires_at_is_not_after_created(
 def test_approve_prints_real_minutes_when_window_is_shorter_than_thirty(
     tmp_path, monkeypatch, capsys, frozen_now
 ):
-    """R8 (b-1): the final 'Approved plan ... for N minutes' line is
+    """The final 'Approved plan ... for N minutes' line is
     truthful.  When the clamp yields a window shorter than 30 minutes
     (here exactly 10 minutes), the printed minutes equal the real
     window minutes, not the default 30."""
@@ -1180,7 +1180,7 @@ def test_approve_prints_real_minutes_when_window_is_shorter_than_thirty(
 def test_approve_keeps_thirty_minute_text_when_window_is_thirty(
     tmp_path, monkeypatch, capsys, frozen_now
 ):
-    """R8 (b-1): the exact old 'for 30 minutes' text is preserved on
+    """The exact old 'for 30 minutes' text is preserved on
     the default-window path (no staged_at -> no clamp -> 30 min)."""
     state, _ = write_plan(tmp_path, monkeypatch)
     passphrase = "made-up-default-pass"

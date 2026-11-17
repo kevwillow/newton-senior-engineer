@@ -1,11 +1,11 @@
-"""INJ-1 and U-8 for scripts/owrt-change.sh.
+"""The ssh destination and the hello tokens of scripts/owrt-change.sh.
 
-INJ-1: the ssh destination is an argv word of every ssh call.  A
+The ssh destination is an argv word of every ssh call.  A
 destination that does not look like `user@host` is refused before any ssh
 call, and the ssh argv carries `--` before the destination so a value that
 starts with a dash can never be read as an option.
 
-U-8: the router-supplied hello tokens reach the die text only through
+The router-supplied hello tokens reach the die text only through
 `oneline`, so a token cannot forge a line, smuggle a control character or
 grow the message without bound.
 
@@ -167,7 +167,7 @@ def run_with_hello(host, reply, *args):
     )
 
 
-# --- INJ-1: the destination is shape-checked before any ssh call ---------
+# --- the destination is shape-checked before any ssh call ---------
 
 @pytest.mark.parametrize(
     "destination",
@@ -209,7 +209,7 @@ def test_good_destination_reaches_ssh_with_a_double_dash(host, destination):
     assert argv.index("--") == len(argv) - 3
 
 
-# --- U-8: the hello tokens reach the die text through oneline ------------
+# --- the hello tokens reach the die text through oneline ------------
 
 def test_api_token_in_the_die_text_goes_through_oneline(host):
     r = run_with_hello(

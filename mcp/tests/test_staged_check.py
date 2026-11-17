@@ -1,4 +1,4 @@
-"""MCP side: the staged-config check is part of the plan and of what an approval binds (SC-01..SC-05, SC-11..SC-14).
+"""MCP side: the staged-config check is part of the plan and of what an approval binds.
 
 The router program does the check (`check-staged`, router program 1.3.0); `owrt-change.sh plan` prints a
 `STAGEDCHECK fw4 <status>` line before the diff. The server reads it into the plan record's `staged_check`,
@@ -39,7 +39,7 @@ def _output(line: str | None, *, in_diff: str = "") -> str:
     return head + marker + tail
 
 
-# SC-01: the status words reach the parsed plan.
+# the status words reach the parsed plan.
 @pytest.mark.parametrize(("line", "fw4", "reason"), [
     ("STAGEDCHECK fw4 pass", "pass", ""),
     ("STAGEDCHECK fw4 skipped-untouched", "skipped-untouched", ""),
@@ -53,7 +53,7 @@ def test_sc01_parse_plan_reads_the_stagedcheck_line(line, fw4, reason):
     assert parsed["staged_check"]["reason"] == reason
 
 
-# SC-04: no line, or a line we do not understand, is not-checked: never a pass.
+# no line, or a line we do not understand, is not-checked: never a pass.
 @pytest.mark.parametrize("line", [
     None,
     "STAGEDCHECK fw4 maybe",
@@ -69,13 +69,13 @@ def test_sc04_missing_or_odd_line_is_not_checked(line):
     assert parsed["staged_check"]["reason"] == "no-report"
 
 
-# SC-12: diff text cannot forge the check result.
+# diff text cannot forge the check result.
 def test_sc12_a_line_inside_the_diff_block_is_ignored():
     parsed = server.parse_plan(_output(None, in_diff="STAGEDCHECK fw4 pass"))
     assert parsed["staged_check"]["fw4"] == "not-checked"
 
 
-# SC-13: the packages with no check before apply are listed; fw4 covers only the firewall.
+# the packages with no check before apply are listed; fw4 covers only the firewall.
 def test_sc13_not_checked_packages():
     parsed = server.parse_plan(_output("STAGEDCHECK fw4 pass"))
     touched = parsed["touched_configs"]
@@ -84,7 +84,7 @@ def test_sc13_not_checked_packages():
     assert set(parsed["staged_check"]["not_checked"]) == set(parsed["touched_configs"])
 
 
-# SC-02: the field is hash-bound.
+# the field is hash-bound.
 def test_sc02_staged_check_is_a_plan_hash_field():
     assert "staged_check" in plan.PLAN_HASH_FIELDS
     record = _record(staged_check={"fw4": "pass", "reason": "", "not_checked": []})
@@ -130,7 +130,7 @@ def test_sc02c_a_record_without_the_field_does_not_hash():
         compute_plan_hash(record)
 
 
-# SC-03: plan() stores what the script reported and returns it.
+# plan() stores what the script reported and returns it.
 @pytest.fixture
 def configured_lab(tmp_path, monkeypatch):
     inventory = tmp_path / "devices-lab.toml"
@@ -168,7 +168,7 @@ def test_sc03b_apply_refuses_an_edited_staged_check(configured_lab, monkeypatch)
     assert "plan record was modified" in server.newton_apply_change("quasar", SID)["error"]
 
 
-# SC-05: newton-approve prints the result in Newton's own facts, in words an owner reads.
+# newton-approve prints the result in Newton's own facts, in words an owner reads.
 class TTY(io.StringIO):
     def isatty(self):
         return True
@@ -220,7 +220,7 @@ def test_sc05d_approve_masks_odd_values(tmp_path, monkeypatch, capsys):
     assert "Staged check: unknown" in out
 
 
-# SC-14: the existing fw4 precheck on the running config still refuses up front (item 1's follow-up on the MCP path).
+# the existing fw4 precheck on the running config still refuses up front (item 1's follow-up on the MCP path).
 @pytest.mark.real_fw4_precheck
 def test_sc14_running_fw4_failure_still_refuses_plan(configured_lab, monkeypatch):
     monkeypatch.setattr(

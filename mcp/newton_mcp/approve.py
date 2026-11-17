@@ -119,7 +119,7 @@ def approval_token(k_hex: str, digest: str, not_before: int, not_after: int) -> 
 
 
 def read_passphrase_file(path) -> bytes:
-    """Read a passphrase file the way setup does (round ap1 contract).
+    """Read a passphrase file the way setup does.
 
     The whole file is read and EXACTLY ONE trailing LF is stripped (a
     CRLF keeps its CR; two trailing LFs keep one), matching
@@ -811,7 +811,7 @@ def mint_approval(
         expires_at = stage_expires
     else:
         expires_at = thirty_min
-    # R8 (b-1): the stage can expire while the operator is typing the
+    # the stage can expire while the operator is typing the
     # passphrase.  The earlier ``expiry <= now`` check only catches a
     # stage that was already expired when the plan was displayed; this
     # one catches the window in between, where the clamp produced an
@@ -897,7 +897,7 @@ def _approve_scan(request_id: str) -> int:
             "it runs only when the router reports its own BSSID."
         )
     else:
-        # SC-1: the scan target came from the router's own interface report,
+        # the scan target came from the router's own interface report,
         # so a compromised router could change it.  Tell the approver the
         # source of the string they are about to approve so they cannot read
         # the row as if it were a host-controlled value.
@@ -1155,7 +1155,7 @@ def approve_plan(
         write_approval(plan_id, approval)
     except OSError as exc:
         return False, f"could not write approval: {exc}"
-    # R8 (b-1): the final 'Approved plan ... for N minutes' line is
+    # the final 'Approved plan ... for N minutes' line is
     # truthful.  When the clamp shortened the window to something
     # shorter than 30 minutes, print the real number of minutes
     # (rounded down, at least 1); keep the exact old "30 minutes"

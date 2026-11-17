@@ -120,11 +120,13 @@ function New-NewtonFakeLdapError {
 }
 
 function ConvertTo-NewtonFakeEntry {
-    # The entry of one object of the fake directory.
-    param($Object, [string[]]$Requested, [string]$Base, [string]$Scope)
+    # The entry of one object of the fake directory.  An attribute the bind
+    # cannot read ($Hidden) is left out of it (MS-ADTS 3.1.1.4.3).
+    param($Object, [string[]]$Requested, [string]$Base, [string]$Scope, [string[]]$Hidden = @())
     $attributes = @{}
     foreach ($requestedName in @($Requested)) {
         $key = ([string]$requestedName).ToLowerInvariant()
+        if (@($Hidden) -contains $key) { continue }
         if ($key -eq 'distinguishedname') {
             $attributes[$key] = @([string]$Object['dn'])
             continue
@@ -173,6 +175,9 @@ function Get-NewtonFakeFilter {
     if ($Filter -match '\A\(userPrincipalName=(.*)\)\z') {
         return @{ kind = 'upn'; value = (ConvertFrom-NewtonFakeFilterText $Matches[1]) }
     }
+    if ($Filter -ceq '(member=*)') {
+        return @{ kind = 'member_any' }
+    }
     if ($Filter -match '\A\(member=(.*)\)\z') {
         return @{ kind = 'member'; value = (ConvertFrom-NewtonFakeFilterText $Matches[1]) }
     }
@@ -206,6 +211,57 @@ function New-NewtonFakeLdap {
         CreatedMissingGuid = $false
         CreatedMissingUsn = $false
         DeleteError = 0
+        # the delete lands and its answer is lost with no result code, once
+        DeleteLostAnswer = $false
+        # the add lands and its answer is lost with no result code, once
+        LostAnswerOnAdd = $false
+        # every search by this GUID fails (the harness sets it)
+        FailGuidSearches = ''
+        # right after an add lands, somebody moves the new object to
+        # 'to' and creates another account at its DN ('replacement_guid',
+        # 'replacement_sam'); it happens once
+        MoveAfterAdd = $null
+        # the 'nth' write of 'kind' (delete, modify, modifydn): before the
+        # fake finds its object, somebody moves the object at 'from' to 'to'
+        # and creates another account at 'from' ('replacement_guid',
+        # 'replacement_sam'); it happens once
+        ReplaceDuring = $null
+        # every modify that landed, for the knobs below
+        ModifyCount = 0
+        # searches fail once this many modifies landed
+        SearchErrorsAfterModifies = 0
+        SearchErrorsLeft = 0
+        # the attributes the bind cannot read (lower case): a search answers
+        # them on no object and a filter on them matches as if the object did
+        # not hold them (MS-ADTS 3.1.1.4.3, "Access Checks": such a value is
+        # treated as "does not exist" in the returned attributes and the LDAP
+        # filter).  A write still sees them: the server checks a modify
+        # against the values it holds.
+        Hidden = @()
+        # the first modify makes these attributes unreadable to the bind
+        # before it does anything else (the ACL changed during the write)
+        HideOnModify = @()
+        HideOnDelete = @()
+        MemberReadableBySearch = @()
+    }
+    if ($null -ne $Config['hide_on_modify']) {
+        $names = @()
+        foreach ($name in @($Config['hide_on_modify'])) { $names += ([string]$name).ToLowerInvariant() }
+        $fake.HideOnModify = $names
+    }
+    if ($null -ne $Config['hide_on_delete']) {
+        $names = @()
+        foreach ($name in @($Config['hide_on_delete'])) { $names += ([string]$name).ToLowerInvariant() }
+        $fake.HideOnDelete = $names
+    }
+    if ($null -ne $Config['hidden_attributes']) {
+        $names = @()
+        foreach ($name in @($Config['hidden_attributes'])) { $names += ([string]$name).ToLowerInvariant() }
+        $fake.Hidden = $names
+    }
+    if ($null -ne $Config['search_errors_after_modifies']) {
+        $fake.SearchErrorsAfterModifies = [int]$Config['search_errors_after_modifies']['after']
+        $fake.SearchErrorsLeft = [int]$Config['search_errors_after_modifies']['count']
     }
     if ($null -ne $Config['leak_indexes']) {
         # The real adapter of the helper leaked the index of every entry it
@@ -226,8 +282,66 @@ function New-NewtonFakeLdap {
     if ($null -ne $Config['created_missing_usn']) {
         $fake.CreatedMissingUsn = [bool]$Config['created_missing_usn']
     }
+    if ($null -ne $Config['lost_answer_on_add']) {
+        $fake.LostAnswerOnAdd = [bool]$Config['lost_answer_on_add']
+    }
     if ($null -ne $Config['ldap_delete_error']) {
         $fake.DeleteError = [int]$Config['ldap_delete_error']
+    }
+    if ($null -ne $Config['ldap_delete_lost_answer']) {
+        $fake.DeleteLostAnswer = [bool]$Config['ldap_delete_lost_answer']
+    }
+    if ($null -ne $Config['moved_and_replaced_after_add']) {
+        $fake.MoveAfterAdd = $Config['moved_and_replaced_after_add']
+    }
+    if ($null -ne $Config['replace_during']) {
+        $fake.ReplaceDuring = $Config['replace_during']
+    }
+
+    $fake | Add-Member -MemberType ScriptMethod -Name ResolveName -Value {
+        # The name of the object a write names.  The GUID form <GUID=...>
+        # names the object that holds that GUID now, wherever it is, the
+        # way the directory resolves it inside the one request; a GUID no
+        # object holds names nothing.  Any other name is the name itself.
+        param($Name)
+        $text = [string]$Name
+        if (-not ($text.StartsWith('<GUID=') -and $text.EndsWith('>'))) { return $text }
+        $wanted = $text.Substring(6, $text.Length - 7)
+        foreach ($key in @($this.Objects.Keys)) {
+            $candidate = $this.Objects[$key]
+            if ((-not [string]::IsNullOrEmpty([string]$candidate['guid'])) -and
+                ([string]$candidate['guid'] -ieq $wanted)) {
+                return [string]$key
+            }
+        }
+        return $text
+    }
+
+    $fake | Add-Member -MemberType ScriptMethod -Name RunReplaceDuring -Value {
+        param([string]$Kind)
+        $spec = $this.ReplaceDuring
+        if (($null -eq $spec) -or ([string]$spec['kind'] -ne $Kind)) { return }
+        # 'nth' (from 1) picks which write of that kind; the first by default
+        $seen = 1
+        if ($null -ne $spec['seen']) { $seen = [int]$spec['seen'] + 1 }
+        $spec['seen'] = $seen
+        $nth = 1
+        if ($null -ne $spec['nth']) { $nth = [int]$spec['nth'] }
+        if ($seen -ne $nth) { return }
+        $this.ReplaceDuring = $null
+        $from = [string]$spec['from']
+        $to = [string]$spec['to']
+        $object = $this.Objects[$from]
+        $replacement = $object.Clone()
+        $replacement['values'] = $object['values'].Clone()
+        $replacement['guid'] = [string]$spec['replacement_guid']
+        $replacement['sam'] = [string]$spec['replacement_sam']
+        $replacement['values']['samaccountname'] = @([string]$spec['replacement_sam'])
+        $this.Objects.Remove($from)
+        $object['dn'] = $to
+        $object['parent'] = $to.Substring($to.IndexOf(',') + 1)
+        $this.Objects[$to] = $object
+        $this.Objects[$from] = $replacement
     }
 
     $fake | Add-Member -MemberType ScriptMethod -Name AddObject -Value {
@@ -251,6 +365,22 @@ function New-NewtonFakeLdap {
             $this.SearchErrorsAfterWrite = $this.SearchErrorsAfterWrite - 1
             throw (New-NewtonFakeLdapError 1 'the readback failed')
         }
+        if (($this.SearchErrorsAfterModifies -gt 0) -and
+            ($this.ModifyCount -ge $this.SearchErrorsAfterModifies) -and
+            ($this.SearchErrorsLeft -gt 0)) {
+            $this.SearchErrorsLeft = $this.SearchErrorsLeft - 1
+            throw (New-NewtonFakeLdapError 1 'the search failed')
+        }
+        if ($this.FailGuidSearches -ne '') {
+            $parsed = Get-NewtonFakeFilter ([string]$Filter)
+            if (($parsed['kind'] -eq 'guid') -and ([string]$parsed['value'] -ieq $this.FailGuidSearches)) {
+                throw (New-NewtonFakeLdapError 1 'the search failed')
+            }
+            # a base search of the account's GUID name fails the same way
+            if (([string]$Base) -ieq ('<GUID=' + $this.FailGuidSearches + '>')) {
+                throw (New-NewtonFakeLdapError 1 'the search failed')
+            }
+        }
         $base = [string]$Base
         $scope = [string]$Scope
         $requested = @()
@@ -272,10 +402,52 @@ function New-NewtonFakeLdap {
         if ($base -eq '') {
             throw (New-NewtonFakeLdapError 32 'the object does not exist')
         }
+        if ($base.StartsWith('<GUID=')) {
+            # the GUID form of a base names the object that holds the GUID
+            # (MS-ADTS 3.1.1.3.1.2.4); one no object holds is no such object
+            $resolved = $this.ResolveName($base)
+            if ($resolved -ceq $base) {
+                throw (New-NewtonFakeLdapError 32 'the object does not exist')
+            }
+            $base = $resolved
+        }
         $filter = Get-NewtonFakeFilter $Filter
+        if (($filter['kind'] -eq 'member') -and ([string]$filter['value']).StartsWith('<GUID=')) {
+            # the GUID form of a DN value of a filter names the object that
+            # holds the GUID now; one no object holds matches nothing
+            $named = $this.ResolveName([string]$filter['value'])
+            if ($named -ceq [string]$filter['value']) { $named = '' }
+            $filter = @{ kind = 'member'; value = $named }
+        }
+        # whether the bind may read member during this search, for the next
+        # searches on member (the MemberReadableBySearch knob: an ACL that
+        # changes between two searches); once the list is spent, Hidden
+        # decides
+        $memberOverride = $null
+        if ((($filter['kind'] -eq 'member') -or ($filter['kind'] -eq 'member_any')) -and
+            (@($this.MemberReadableBySearch).Count -gt 0)) {
+            $memberOverride = [bool]@($this.MemberReadableBySearch)[0]
+            $this.MemberReadableBySearch = @(@($this.MemberReadableBySearch) | Select-Object -Skip 1)
+        }
         $entries = @()
         foreach ($key in @($this.Objects.Keys)) {
             $object = $this.Objects[$key]
+            # the attributes the bind cannot read: the fake's Hidden knob and
+            # the object's own hidden_attributes.  A filter on one matches
+            # nothing (MS-ADTS 3.1.1.4.3); the GUID form of a base is
+            # resolved above, as the directory does, whatever the bind may
+            # read
+            $objectHidden = @($this.Hidden)
+            foreach ($name in @($object['hidden_attributes'])) {
+                if ($null -ne $name) { $objectHidden += ([string]$name).ToLowerInvariant() }
+            }
+            $memberHidden = ($objectHidden -contains 'member')
+            if ($null -ne $memberOverride) { $memberHidden = (-not $memberOverride) }
+            $guidHidden = ($objectHidden -contains 'objectguid')
+            $sidHidden = ($objectHidden -contains 'objectsid')
+            $samHidden = ($objectHidden -contains 'samaccountname')
+            $upnHidden = ($objectHidden -contains 'userprincipalname')
+            $classHidden = ($objectHidden -contains 'objectclass')
             if ($base -ne '') {
                 if ($scope -eq 'base') {
                     if ($key -ine $base) { continue }
@@ -290,20 +462,34 @@ function New-NewtonFakeLdap {
             }
             $keep = $true
             if ($filter['kind'] -eq 'guid') {
-                $keep = ([string]$object['guid'] -ieq [string]$filter['value'])
+                $keep = (-not $guidHidden) -and ([string]$object['guid'] -ieq [string]$filter['value'])
             } elseif ($filter['kind'] -eq 'sid') {
-                $keep = ([string]$object['sid'] -ieq [string]$filter['value'])
+                $keep = (-not $sidHidden) -and ([string]$object['sid'] -ieq [string]$filter['value'])
             } elseif ($filter['kind'] -eq 'sam') {
-                $keep = ([string]$object['sam'] -ieq [string]$filter['value'])
+                $keep = (-not $samHidden) -and ([string]$object['sam'] -ieq [string]$filter['value'])
             } elseif ($filter['kind'] -eq 'upn') {
-                $keep = ([string]$object['upn'] -ieq [string]$filter['value'])
+                $keep = (-not $upnHidden) -and ([string]$object['upn'] -ieq [string]$filter['value'])
             } elseif ($filter['kind'] -eq 'member') {
+                # the values the directory holds now (a modify changes them)
                 $keep = $false
-                foreach ($member in @($object['member'])) {
-                    if ([string]$member -ieq [string]$filter['value']) { $keep = $true; break }
+                $held = @()
+                if ($object['values'].ContainsKey('member')) { $held = @($object['values']['member']) }
+                if (-not $memberHidden -and ([string]$filter['value'] -ne '')) {
+                    foreach ($member in $held) {
+                        if ([string]$member -ieq [string]$filter['value']) { $keep = $true; break }
+                    }
+                }
+            } elseif ($filter['kind'] -eq 'member_any') {
+                $keep = $false
+                if ((-not $memberHidden) -and $object['values'].ContainsKey('member')) {
+                    foreach ($member in @($object['values']['member'])) {
+                        if ([string]$member -ne '') { $keep = $true; break }
+                    }
                 }
             } elseif ($filter['kind'] -eq 'class') {
-                if ([string]$filter['value'] -eq '*') {
+                if ($classHidden) {
+                    $keep = $false
+                } elseif ([string]$filter['value'] -eq '*') {
                     $keep = $true
                 } else {
                     $keep = $false
@@ -313,7 +499,7 @@ function New-NewtonFakeLdap {
                 }
             }
             if (-not $keep) { continue }
-            $entries += ,(ConvertTo-NewtonFakeEntry $object $requested $base $scope)
+            $entries += ,(ConvertTo-NewtonFakeEntry $object $requested $base $scope $objectHidden)
         }
         return ,$entries
     }
@@ -324,12 +510,57 @@ function New-NewtonFakeLdap {
         if ($null -ne $this.CallLog) {
             [void]$this.CallLog.Add('ldap:modify ' + [string]$Attribute)
         }
+        $this.RunReplaceDuring('modify')
+        if (@($this.HideOnModify).Count -gt 0) {
+            $this.Hidden = @($this.HideOnModify)
+            $this.HideOnModify = @()
+        }
+        $Dn = $this.ResolveName($Dn)
         $object = $this.ObjectByDn($Dn)
         if ($null -eq $object) {
             throw (New-NewtonFakeLdapError 32 ('no such object ' + [string]$Dn))
         }
+        if ($null -ne $object['race_values']) {
+            # somebody else wrote the attribute right before this modify;
+            # it happens once
+            $raceKey = ([string]$Attribute).ToLowerInvariant()
+            $raced = @($object['race_values'])
+            $object['race_values'] = $null
+            $object['values'][$raceKey] = $raced
+            if ($raceKey -eq 'member') { $object['member'] = $raced }
+        }
+        if ($null -ne $object['modify_error_no_response']) {
+            # the client gave up before the server answered (a timeout, a
+            # dropped connection): no result code, and nothing was applied
+            # yet; it happens once
+            $object['modify_error_no_response'] = $null
+            throw ([System.TimeoutException]::new('the request timed out'))
+        }
         if ($null -ne $object['modify_error']) {
             throw (New-NewtonFakeLdapError ([int]$object['modify_error']) 'the modify failed')
+        }
+        if ($null -ne $object['no_response_on_modify']) {
+            # the client gave up before the server answered this modify of
+            # the object (counted from 1, landed modifies before it
+            # included), and nothing was applied yet; it happens once
+            $attempt = 1
+            if ($null -ne $object['modify_count']) { $attempt = [int]$object['modify_count'] + 1 }
+            if ([int]$object['no_response_on_modify'] -eq $attempt) {
+                $object['no_response_on_modify'] = $null
+                throw ([System.TimeoutException]::new('the request timed out'))
+            }
+        }
+        if ($null -ne $object['refused_unreadable_on_modify']) {
+            # the server refused this modify of the object (counted from 1,
+            # landed modifies before it included) with its own code, and
+            # the attribute reads empty afterwards; it happens once
+            $attempt = 1
+            if ($null -ne $object['modify_count']) { $attempt = [int]$object['modify_count'] + 1 }
+            if ([int]$object['refused_unreadable_on_modify'] -eq $attempt) {
+                $object['refused_unreadable_on_modify'] = $null
+                $object['values'][([string]$Attribute).ToLowerInvariant()] = @('')
+                throw (New-NewtonFakeLdapError 53 'the server is unwilling to perform')
+            }
         }
         if (-not [bool]$object['delegated']) {
             throw (New-NewtonFakeLdapError 50 'the user has insufficient access rights')
@@ -349,6 +580,18 @@ function New-NewtonFakeLdap {
             }
             if (-not $found) {
                 throw (New-NewtonFakeLdapError 16 'the requested attribute does not exist')
+            }
+        }
+        foreach ($new in @($NewValues)) {
+            # the server checks an add against the values it holds, whether
+            # or not the bind can read them
+            $kept = $true
+            foreach ($old in @($OldValues)) { if ([string]$old -ieq [string]$new) { $kept = $false } }
+            if (-not $kept) { continue }
+            foreach ($value in $current) {
+                if ([string]$value -ieq [string]$new) {
+                    throw (New-NewtonFakeLdapError 20 'the value is already there')
+                }
             }
         }
         $updated = @()
@@ -371,6 +614,15 @@ function New-NewtonFakeLdap {
             $object['values'][$key] = @([string]$object['drift_after_write'])
         }
         $this.WriteOccurred = $true
+        $this.ModifyCount = $this.ModifyCount + 1
+        $count = 1
+        if ($null -ne $object['modify_count']) { $count = [int]$object['modify_count'] + 1 }
+        $object['modify_count'] = $count
+        if (($null -ne $object['lost_answer_on_modify']) -and ([int]$object['lost_answer_on_modify'] -eq $count)) {
+            # this modify of the object landed and its answer was lost with
+            # no result code
+            throw ([System.TimeoutException]::new('the answer of the modify was lost'))
+        }
         if ($null -ne $object['modify_error_after_write']) {
             # the server applied the modify and the answer was lost (a
             # timeout, a dropped connection): the caller sees an error for
@@ -398,12 +650,21 @@ function New-NewtonFakeLdap {
         param($Dn, $NewParentDn, $NewRdn)
         [void]$this.Log.Add(('modifydn ' + [string]$Dn + ' ' + [string]$NewParentDn + ' ' + [string]$NewRdn))
         if ($null -ne $this.CallLog) { [void]$this.CallLog.Add('ldap:modifydn ' + [string]$Dn) }
+        $this.RunReplaceDuring('modifydn')
+        $Dn = $this.ResolveName($Dn)
         $object = $this.ObjectByDn($Dn)
         if ($null -eq $object) {
             throw (New-NewtonFakeLdapError 32 ('no such object ' + [string]$Dn))
         }
         if (-not [bool]$object['delegated']) {
             throw (New-NewtonFakeLdapError 50 'the user has insufficient access rights')
+        }
+        if ($null -ne $object['modifydn_no_response_drops_parent']) {
+            # the client gave up before the server answered, and somebody
+            # deleted the object's current parent meanwhile; it happens once
+            $object['modifydn_no_response_drops_parent'] = $null
+            $this.Objects.Remove([string]$object['parent'])
+            throw ([System.TimeoutException]::new('the request timed out'))
         }
         $newDn = [string]$NewRdn + ',' + [string]$NewParentDn
         if ($this.Objects.ContainsKey($newDn)) {
@@ -510,6 +771,26 @@ function New-NewtonFakeLdap {
         }
         $this.Objects[[string]$Dn] = $object
         $this.WriteOccurred = $true
+        if ($null -ne $this.MoveAfterAdd) {
+            $spec = $this.MoveAfterAdd
+            $this.MoveAfterAdd = $null
+            $to = [string]$spec['to']
+            $replacement = $object.Clone()
+            $replacement['values'] = $object['values'].Clone()
+            $replacement['guid'] = [string]$spec['replacement_guid']
+            $replacement['sam'] = [string]$spec['replacement_sam']
+            $replacement['values']['samaccountname'] = @([string]$spec['replacement_sam'])
+            $this.Objects.Remove([string]$Dn)
+            $object['dn'] = $to
+            $object['parent'] = $to.Substring($to.IndexOf(',') + 1)
+            $this.Objects[$to] = $object
+            $this.Objects[[string]$Dn] = $replacement
+        }
+        if ($this.LostAnswerOnAdd) {
+            # the add landed and its answer was lost with no result code
+            $this.LostAnswerOnAdd = $false
+            throw ([System.TimeoutException]::new('the answer of the add was lost'))
+        }
         if ($this.LeakIndexes) {
             # the defect of the real adapter: the index of every
             # attribute reaches the pipeline of the caller
@@ -527,6 +808,13 @@ function New-NewtonFakeLdap {
         if ($null -ne $this.CallLog) {
             [void]$this.CallLog.Add('ldap:delete ' + [string]$Dn)
         }
+        $this.RunReplaceDuring('delete')
+        if (@($this.HideOnDelete).Count -gt 0) {
+            # from this delete on, the bind cannot read these attributes
+            $this.Hidden = @($this.HideOnDelete)
+            $this.HideOnDelete = @()
+        }
+        $Dn = $this.ResolveName($Dn)
         $object = $this.ObjectByDn($Dn)
         if ($null -eq $object) {
             throw (New-NewtonFakeLdapError 32 ('no such object ' + [string]$Dn))
@@ -539,6 +827,11 @@ function New-NewtonFakeLdap {
         }
         $this.Objects.Remove([string]$Dn)
         $this.WriteOccurred = $true
+        if ($this.DeleteLostAnswer) {
+            # the delete landed and its answer was lost with no result code
+            $this.DeleteLostAnswer = $false
+            throw ([System.TimeoutException]::new('the answer of the delete was lost'))
+        }
     }
 
     # NTDS Settings objects live below Sites/Configuration and do not carry
@@ -715,12 +1008,15 @@ function New-NewtonFakeScheduler {
     return $fake
 }
 
-function New-NewtonFakeStream([System.IO.FileStream]$Inner, [System.Collections.ArrayList]$Log) {
+function New-NewtonFakeStream([System.IO.FileStream]$Inner, [System.Collections.ArrayList]$Log, [bool]$FailFlush = $false) {
     # The stream of a file of the transaction store.  The fake records
     # the flush to the disk: a record that is in the buffer of the
     # process is a record that a power cut loses, and a test has to be
     # able to see whether the helper flushed it.
-    $stream = [PSCustomObject]@{ Inner = $Inner; Log = $Log }
+    #
+    # A stream may fail its flush to the disk after the bytes reached the
+    # file: the record is there, and the write threw all the same.
+    $stream = [PSCustomObject]@{ Inner = $Inner; Log = $Log; FailFlush = $FailFlush }
     $stream | Add-Member -MemberType ScriptMethod -Name Write -Value {
         param([byte[]] $Buffer, [int] $Offset, [int] $Count)
         $this.Inner.Write($Buffer, $Offset, $Count)
@@ -729,6 +1025,9 @@ function New-NewtonFakeStream([System.IO.FileStream]$Inner, [System.Collections.
         param([bool] $ToDisk = $false)
         [void]$this.Log.Add('flush-to-disk ' + $ToDisk)
         $this.Inner.Flush($ToDisk)
+        if ($this.FailFlush) {
+            throw ([System.IO.IOException]::new('the flush to the disk failed'))
+        }
     }
     $stream | Add-Member -MemberType ScriptMethod -Name Close -Value {
         $this.Inner.Close()
@@ -744,12 +1043,43 @@ function New-NewtonFakeFileSystem {
     # DC: an inherited CreateFiles right can create and write a new file, but
     # it cannot reopen an existing file for Write/ReadWrite and has no DELETE
     # right for replace, delete or move.  Read remains allowed.
-    param([bool]$LockUnauthorized = $false, [string]$CreateNewCollisionPath = '')
+    param([bool]$LockUnauthorized = $false, [string]$CreateNewCollisionPath = '', $Ldap = $null, [int]$ReadErrorAfterModifies = 0, [string]$CreateNewFailOncePath = '', [string]$FlushFailOncePath = '', [string]$ReadFailsOncePath = '', [string]$TornWriteOncePath = '', [string]$ReadThrowsPath = '', [bool]$ListThrows = $false)
     $fake = [pscustomobject]@{
         LockUnauthorized = $LockUnauthorized
         CreateNewCollisionPath = $CreateNewCollisionPath
         CreateNewCollisionUsed = $false
         Log = (New-Object System.Collections.ArrayList)
+        # one read of the store fails once this many modifies landed
+        Ldap = $Ldap
+        ReadErrorAfterModifies = $ReadErrorAfterModifies
+        ReadErrorUsed = $false
+        # the first CreateNew of this path fails and writes nothing: a
+        # transient failure of the store
+        CreateNewFailOncePath = $CreateNewFailOncePath
+        CreateNewFailOnceUsed = $false
+        # the first CreateNew of this path writes its bytes and then fails
+        # its flush to the disk: the record is there and the write threw
+        FlushFailOncePath = $FlushFailOncePath
+        FlushFailOnceUsed = $false
+        # once this file is in the store, every read of the store fails
+        ReadFailsOncePath = $ReadFailsOncePath
+        # the first CreateNew of this path creates the file and its write
+        # then fails (a full disk): an empty generation is left on the disk
+        TornWriteOncePath = $TornWriteOncePath
+        TornWriteOnceUsed = $false
+        # every read of this one file throws (a sharing violation): the
+        # file is complete on the disk, and only its read fails
+        ReadThrowsPath = $ReadThrowsPath
+        # the listing of the store throws (a denied access)
+        ListThrows = $ListThrows
+    }
+    $fake | Add-Member -MemberType ScriptMethod -Name ListFiles -Value {
+        param([string]$Path)
+        [void]$this.Log.Add(('list ' + $Path))
+        if ($this.ListThrows) {
+            throw ([System.UnauthorizedAccessException]::new('access to the path is denied'))
+        }
+        return @(Get-ChildItem -LiteralPath $Path -File -ErrorAction Stop)
     }
     $fake | Add-Member -MemberType ScriptMethod -Name Open -Value {
         param([string]$Path, $Mode, $Access, $Share)
@@ -765,6 +1095,22 @@ function New-NewtonFakeFileSystem {
             $this.CreateNewCollisionUsed = $true
             throw ([System.IO.IOException]::new('another writer created the generation first'))
         }
+        if (($this.CreateNewFailOncePath -ne '') -and
+            (-not $this.CreateNewFailOnceUsed) -and
+            ($Path -ceq $this.CreateNewFailOncePath) -and
+            ([string]$Mode -eq [string][System.IO.FileMode]::CreateNew)) {
+            $this.CreateNewFailOnceUsed = $true
+            throw ([System.IO.IOException]::new('the store failed once'))
+        }
+        if (($this.TornWriteOncePath -ne '') -and
+            (-not $this.TornWriteOnceUsed) -and
+            ($Path -ceq $this.TornWriteOncePath) -and
+            ([string]$Mode -eq [string][System.IO.FileMode]::CreateNew)) {
+            $this.TornWriteOnceUsed = $true
+            $torn = [System.IO.File]::Open($Path, $Mode, $Access, $Share)
+            $torn.Close()
+            throw ([System.IO.IOException]::new('there is not enough space on the disk'))
+        }
         $exists = [System.IO.File]::Exists($Path)
         $writeAccess = ([string]$Access -eq [string][System.IO.FileAccess]::Write) -or
             ([string]$Access -eq [string][System.IO.FileAccess]::ReadWrite)
@@ -777,11 +1123,30 @@ function New-NewtonFakeFileSystem {
             # contract takes it as it is.
             return $stream
         }
-        return (New-NewtonFakeStream $stream $this.Log)
+        $failFlush = $false
+        if (($this.FlushFailOncePath -ne '') -and
+            (-not $this.FlushFailOnceUsed) -and
+            ($Path -ceq $this.FlushFailOncePath) -and
+            ([string]$Mode -eq [string][System.IO.FileMode]::CreateNew)) {
+            $this.FlushFailOnceUsed = $true
+            $failFlush = $true
+        }
+        return (New-NewtonFakeStream $stream $this.Log $failFlush)
     }
     $fake | Add-Member -MemberType ScriptMethod -Name ReadAllText -Value {
         param([string]$Path)
         [void]$this.Log.Add(('read ' + $Path))
+        if (($this.ReadThrowsPath -ne '') -and ($Path -ceq $this.ReadThrowsPath)) {
+            throw ([System.IO.IOException]::new('the process cannot access the file because it is being used by another process'))
+        }
+        if (($this.ReadFailsOncePath -ne '') -and [System.IO.File]::Exists($this.ReadFailsOncePath)) {
+            throw ([System.IO.IOException]::new('the store cannot be read'))
+        }
+        if (($this.ReadErrorAfterModifies -gt 0) -and (-not $this.ReadErrorUsed) -and
+            ($null -ne $this.Ldap) -and ($this.Ldap.ModifyCount -ge $this.ReadErrorAfterModifies)) {
+            $this.ReadErrorUsed = $true
+            throw ([System.IO.IOException]::new('the record could not be read'))
+        }
         return [System.IO.File]::ReadAllText($Path)
     }
     $fake | Add-Member -MemberType ScriptMethod -Name Replace -Value {

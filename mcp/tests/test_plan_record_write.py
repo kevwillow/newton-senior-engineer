@@ -1,4 +1,4 @@
-"""APR-04: the plan record is written the way approve.py writes a record.
+"""The plan record is written the way approve.py writes a record.
 
 The old code wrote the record to a fixed temporary name
 (``<session_id>.json.tmp``) and chmod'ed it afterwards, so the file

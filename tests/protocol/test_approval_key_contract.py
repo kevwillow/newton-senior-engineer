@@ -1,4 +1,4 @@
-"""Contract test (round ap1): the host-side approval key K in
+"""Contract test: the host-side approval key K in
 newton_mcp.approve.derive_k equals the setup tool's derive_k in
 scripts/newton-router-setup for the same passphrase bytes and device, and
 the passphrase-file reading strips exactly one trailing LF like setup does

@@ -370,3 +370,21 @@ def test_the_audit_uses_the_query_set_of_the_package() -> None:
 
 
 AUDIT_FIXTURE_HASH = "f6a57d9647e829b61abdb74aa45a6256653d7b67674ebd3966bd931ddf069116"
+
+
+def test_the_readme_counts_the_checks_and_every_one_runs_on_both_kinds_of_domain() -> None:
+    """The release README says how many checks the audit has and that every
+    one runs on both kinds of domain: the catalogue holds exactly that."""
+    import re
+
+    root = Path(__file__).resolve().parents[3]
+    readme = root / "docs" / "release" / "README-1.0.md"
+    if not readme.exists():
+        readme = root / "README.md"
+    text = " ".join(readme.read_text(encoding="utf-8").split())
+    found = re.search(r"Samba AD domains: (\d+) checks", text)
+    assert found is not None
+    assert int(found.group(1)) == len(catalogue.CHECKS)
+    assert "Every check runs on both kinds of domain." in text
+    for check in catalogue.CHECKS:
+        assert set(check.platforms) == {"ad-windows", "ad-samba"}, check.id

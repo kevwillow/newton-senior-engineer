@@ -42,7 +42,7 @@ OLD_CONTAINS = {
     "key", "password", "passwd", "psk", "secret", "passphrase",
     "private_key", "priv_key",
 }
-# triage #4 additions that must be named explicitly (deleting them from the
+# Additions that must be named explicitly (deleting them from the
 # catalog removes them from the generated loop below, so they are pinned here).
 REQUIRED_EXACT = {"r0kh", "r1kh", "authkey", "apikey", "passphrase"}
 ALLOW_NAMES = frozenset(
@@ -171,7 +171,7 @@ def test_every_catalog_name_is_masked_by_bash_mask_secrets(name, tmp_path):
 
 
 @pytest.mark.parametrize("name", sorted(REQUIRED_EXACT | {n.upper() for n in REQUIRED_EXACT}))
-def test_triage4_names_are_masked_by_both_maskers(name, tmp_path):
+def test_the_key_option_names_are_masked_by_both_maskers(name, tmp_path):
     for form in (
         f"uci set a.b.{name}={SECRET_VALUE}",
         f"\toption {name} '{SECRET_VALUE}'",
@@ -212,7 +212,7 @@ def test_allow_names_are_normalized_before_both_maskers(name, tmp_path):
 
 # ---- new contains rules (added 2026-10-10): token / community / uuid / pwd
 # Catalog names that CONTAIN one of the four new words must be redacted by
-# BOTH maskers (triage #4 -- a name with `token` inside should be as secret
+# BOTH maskers (a name with `token` inside should be as secret
 # as an option named exactly `token`).  pin and pw remain exact-only on
 # purpose; this test asserts the four added names specifically.
 

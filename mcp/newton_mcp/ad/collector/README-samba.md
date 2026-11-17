@@ -23,7 +23,8 @@ so a link is never read. The collector reads `queries.json` and `forbidden.json`
 `querysetsha`; Newton refuses a document whose hash differs from its own copy ("collector out of
 date: rerun the setup").
 
-The generator of the setup script is `newton-ad-setup samba`; it writes these files, the local
+The generator of the setup script is `/opt/newton/scripts/newton-ad-setup samba` on an installed
+Newton (`scripts/newton-ad-setup samba` in the source tree); it writes these files, the local
 account, the authorized key and the sudoers line, and it checks every file against the hash of the
 package.
 

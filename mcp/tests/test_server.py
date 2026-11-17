@@ -264,7 +264,7 @@ def test_approval_gate_blocks_before_subprocess(configured, monkeypatch):
 
 
 def test_approval_gate_marks_used_only_after_script_reaches_router(configured, monkeypatch):
-    """APR-05: the approval is .used AFTER run_script
+    """The approval is .used AFTER run_script
     reached the router (here the script reported CONFIRMED and the
     caller-stamped ``APPLYING session=<sid>`` line was also in
     stdout), not before.  A failure before the APPLYING line leaves
@@ -302,7 +302,7 @@ def test_replayed_approval_is_refused(configured, monkeypatch):
     assert "already used" in server.newton_apply_change("quasar", SID)["error"]
 
 
-# --- APR-05: the approval is .used only after the script
+# --- the approval is .used only after the script
 # reached the router.  Five tests pin the contract:
 
 # (1) run_script that fails BEFORE the router (no APPLYING line, non-zero
@@ -430,7 +430,7 @@ def test_apply_mid_line_applying_text_does_not_burn_approval(configured, monkeyp
 # the apply-reached signal) as ``unknown``.  APPLYING is a host-side
 # line; only APPLIED counts as a router outcome line.
 def test_classify_apply_does_not_match_applying_line():
-    """U-2 widened the APPLIED mask; the APPLYING line is the host
+    """An earlier change widened the APPLIED mask; the APPLYING line is the host
     signal that the script reached the router, not a router outcome
     line.  ``APPLYING`` is a prefix of ``APPLIED`` -- without the
     word boundary, ``APPLYING session=<sid>`` alone would mis-fire
@@ -618,7 +618,7 @@ def test_classify_apply_strict_terminal_contract(returncode, stdout, expected):
     ["\u2028", "\u2029", "\u0085", "\x0c", "\x1e"],
 )
 def test_classify_apply_splits_stdout_on_newline_only(separator):
-    """U-4: Unicode/C0 separators in device text must not forge an outcome line."""
+    """Unicode/C0 separators in device text must not forge an outcome line."""
     assert server.classify_apply(
         1,
         f"ERROR: x{separator}APPLIED session={SID} rollback=60s",
@@ -948,14 +948,14 @@ def test_plan_record_carries_staged_at_after_successful_stage(
     assert compute_plan_hash(tampered) != saved["plan_hash"]
 
 
-# --- APR-08: staged_at is stamped BEFORE the plan script
+# --- staged_at is stamped BEFORE the plan script
 # starts, so the host's stage expiry is never later than the router's.
 
 
 class _RecordingDatetime(datetime):
     """A datetime subclass that returns successive fixed values from
     ``_sequence`` on each ``.now(...)`` call, like test_approve's
-    _SequenceDatetime.  Used by the APR-08 test to prove that
+    _SequenceDatetime.  Used by the stage-time test to prove that
     ``staged_at`` is captured BEFORE the plan script runs -- the
     sequence is [before_script, ...] so a run_script stub can take the
     second ``now()`` to advance the clock and the recorded staged_at
@@ -975,13 +975,13 @@ class _RecordingDatetime(datetime):
 
 
 def test_staged_at_is_stamped_before_plan_script_runs(configured_lab, monkeypatch):
-    """APR-08: ``staged_at`` must be captured BEFORE the plan script
+    """``staged_at`` must be captured BEFORE the plan script
     starts.  The router counts stage age from stage-up at stage time,
     so a host that stamps staged_at AFTER the plan script returns
     (the previous behaviour) showed and capped an approval a few
     seconds to tens of seconds too late.  An approval at the edge
-    would then fail with stale-stage and burn the human approval
-    (APR-05).  This test patches ``datetime.now()`` to return one
+    would then fail with stale-stage and burn the human approval.
+    This test patches ``datetime.now()`` to return one
     instant when ``_stage_plan`` stamps staged_at, and a LATER
     instant from the run_script stub.  The persisted staged_at must
     be the BEFORE instant -- the time the host handed the stage

@@ -1,5 +1,5 @@
 """mask_secrets must scan the WHOLE line for NAME=VALUE assignments
-(triage #4/#6 confirmed leak). scripts/owrt-change.sh lines 111-163.
+(a confirmed leak). scripts/owrt-change.sh lines 111-163.
 
 Before this fix, mask_secrets only inspected the part of a line before
 the FIRST '='.  A line such as
@@ -124,7 +124,7 @@ def test_harmless_multi_eq_long_unrelated_line(tmp_path):
     "name",
     ["r0kh", "r1kh", "authkey", "apikey"],
 )
-def test_triage4_name_masked_only_when_in_second_position(tmp_path, name):
+def test_a_key_option_name_masked_only_when_in_second_position(tmp_path, name):
     line = f"foo=bar {name}='{SECRET}'"
     (out,) = bash_mask([line], tmp_path)
     assert SECRET not in out

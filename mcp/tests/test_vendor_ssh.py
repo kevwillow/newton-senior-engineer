@@ -610,3 +610,24 @@ def test_a_cap_kill_stops_the_reading_of_both_pipes(
     assert out.status == "output_cap"
     assert killed == [process]
     assert elapsed < 3.0
+
+
+def test_the_preflight_runs_every_check_of_a_session_and_starts_no_process(
+    target: Target,
+) -> None:
+    """``preflight`` refuses exactly what a session would refuse before ssh
+    starts, and never starts a process: the AD apply records its attempt
+    only once it has passed."""
+    popen = FakePopen()
+    runner = SshSessionRunner(target, popen=popen)
+
+    assert runner.preflight(SessionSpec(remote=REMOTE, stdin=SCRIPT)) is None
+    with pytest.raises(RunnerRefused) as caught:
+        runner.preflight(SessionSpec(remote="", stdin=SCRIPT))
+    assert "CLI login shell" in str(caught.value)
+    no_hosts = dataclasses.replace(target, known_hosts=None)
+    with pytest.raises(RunnerRefused) as caught:
+        SshSessionRunner(no_hosts, popen=popen).preflight(SessionSpec(remote=REMOTE, stdin=SCRIPT))
+    assert "known_hosts" in str(caught.value)
+
+    assert popen.calls == []

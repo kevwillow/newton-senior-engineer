@@ -759,6 +759,41 @@ def test_the_samba_login_writes_the_sudoers_line_last(samba_script: str) -> None
     assert login.index("visudo -cf") > login.index("useradd")
 
 
+def test_the_samba_sudoers_line_is_checked_before_anything_is_installed(
+    samba_script: str,
+) -> None:
+    """visudo checks the sudoers line in the pre-checks, before the first
+    install, so a line visudo refuses stops the run with nothing installed.
+    The check in step 6 stays; its message says what is in place by then
+    (every step before it) and
+    that the SSH channel is not enabled, never that nothing was installed."""
+    prechecks = _step(samba_script, 0)
+    assert 'printf \'%s\\n\' "${SUDOERS_LINE}" > "${WORK_DIR}/sudoers.check"' in prechecks
+    assert 'visudo -cf "${WORK_DIR}/sudoers.check"' in prechecks
+    check = prechecks.index('visudo -cf "${WORK_DIR}/sudoers.check"')
+    refused = prechecks[check:]
+    assert "Nothing was installed" in refused[: refused.index("exit 1")]
+    start = samba_script.index("Step 0:")
+    first_install = min(
+        found
+        for found in (
+            samba_script.find(word, start)
+            for word in ("install -", "install_blob ", "systemctl ", "useradd ", "samba-tool user")
+        )
+        if found >= 0
+    )
+    assert samba_script.index('visudo -cf "${WORK_DIR}/sudoers.check"') < first_install
+    login = _step(samba_script, 6)
+    assert "Nothing was installed" not in login
+    assert (
+        "the newton-ops account and its delegation, the approval key, the helper and "
+        "its files, the sweep timer, the keytab, the local login and its authorized_keys "
+        "are in place, and no new sudoers line was installed: on a first run the SSH "
+        "channel is not enabled; on a rerun the sudoers file of the earlier run is left "
+        "as it was"
+    ) in login
+
+
 def test_the_samba_keytab_is_made_and_proved(samba_script: str) -> None:
     """The keytab is made on every controller and it is proved."""
     assert "KEYTAB_PATH='/etc/newton-ad/ops.keytab'" in samba_script

@@ -136,3 +136,34 @@ def test_the_request_is_never_larger_than_the_cap() -> None:
     transport.send(DEVICE, {"v": 1, "mode": "read", "device": "lab-win"}, runner=runner)
 
     assert len(seen["spec"].stdin.encode("utf-8")) <= transport.MAX_REQUEST_BYTES
+
+
+def test_the_preflight_makes_the_checks_of_send_and_sends_nothing() -> None:
+    """``preflight`` refuses a request too big for the contract with the
+    code schema, and runs the runner's own pre-flight on the session send
+    would open, which starts no process."""
+    seen: dict[str, Any] = {}
+
+    class FakeRunner:
+        def __init__(self, target: Any, **kwargs: Any) -> None:
+            seen["target"] = target
+
+        def preflight(self, spec: Any) -> None:
+            seen["spec"] = spec
+
+        def __call__(self, spec: Any) -> RunOut:
+            raise AssertionError("preflight never opens a session")
+
+    original = transport.SshSessionRunner
+    transport.SshSessionRunner = FakeRunner  # type: ignore[assignment]
+    try:
+        transport.preflight("dc", {"v": 1, "mode": "apply"})
+        with pytest.raises(transport.TransportError) as caught:
+            transport.preflight("dc", {"v": 1, "pad": "x" * transport.MAX_REQUEST_BYTES})
+    finally:
+        transport.SshSessionRunner = original  # type: ignore[assignment]
+
+    assert caught.value.code == "schema"
+    assert seen["target"] == "dc"
+    assert seen["spec"].remote == ""
+    assert json.loads(seen["spec"].stdin) == {"v": 1, "mode": "apply"}

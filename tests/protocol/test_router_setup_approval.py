@@ -485,7 +485,7 @@ def test_approval_no_fingerprint_on_mismatched_passphrase(setup_env):
 	assert not env.fp_path("r1").exists()
 
 
-# -- R8 (a-2): host-side approval fingerprint write failure ------------------
+# -- host-side approval fingerprint write failure ------------------
 #
 # When approval_fingerprint_write fails AFTER the router-side K has been
 # verified, the OLD host-side fingerprint must NOT stay behind -- a stale
@@ -545,7 +545,7 @@ def _fail_python3_dir(env, real_python):
 def test_approval_fingerprint_write_failure_removes_old_fingerprint(
 	setup_env,
 ):
-	"""R8 (a-2): the second run hits approval_fingerprint_write with a
+	"""The second run hits approval_fingerprint_write with a
 	failing python3; the OLD fingerprint (from the first run) must NOT
 	stay behind, otherwise approve.py would compare the new passphrase's
 	fingerprint against the OLD one and refuse it as wrong.  The fix
@@ -585,7 +585,7 @@ def test_approval_fingerprint_write_failure_removes_old_fingerprint(
 
 
 def test_approval_fingerprint_write_success_keeps_new_fingerprint(setup_env):
-	"""R8 (a-2) regression: with the fix in place (unlink-before-write),
+	"""With the fix in place (unlink-before-write),
 	a successful re-write leaves exactly the new fingerprint and nothing
 	else in the fp dir.  Same shape as the existing
 	test_approval_writes_fingerprint_on_already_set_path but pinned

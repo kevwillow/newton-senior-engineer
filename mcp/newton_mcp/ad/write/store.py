@@ -65,7 +65,10 @@ def receipt_path(plan_id: str) -> Path:
 
 
 def write_json(path: Path, value: Any) -> None:
-    """Write one JSON file atomically, with mode 0600."""
+    """Write one JSON file atomically, with mode 0600, and sync it to the
+    disk: the file before the rename, then its directory and every
+    directory above it to the root, so the new file survives a power cut
+    once this returns."""
     refusal = _receipts.check_state_write_path(path, state_dir())
     if refusal is not None:
         raise OSError(refusal)
@@ -86,6 +89,26 @@ def write_json(path: Path, value: Any) -> None:
         except OSError:
             pass
         raise
+    # Every directory from this one to the root holds the entry of the one
+    # below it, and each is synced on every write, whoever created it: a
+    # check of which step made which directory broke twice.
+    root = state_dir().parent
+    for synced in (path.parent, *path.parent.parents):
+        try:
+            directory = os.open(synced, os.O_RDONLY | os.O_DIRECTORY)
+        except OSError:
+            if synced.is_relative_to(root):
+                raise
+            # kiss: a directory above the state directory's parent that
+            # cannot be opened (no read right) is not Newton's; skipped.
+            continue
+        try:
+            os.fsync(directory)
+        except OSError:
+            if synced.is_relative_to(root):
+                raise
+        finally:
+            os.close(directory)
 
 
 def read_json(path: Path) -> Any:

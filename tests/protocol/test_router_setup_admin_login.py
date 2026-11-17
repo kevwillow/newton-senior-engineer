@@ -339,7 +339,7 @@ def login_fail_lines(result):
 
 
 def test_a_tolerated_remote_failure_leaves_no_stale_login_line(pulsar_env):
-	"""Review finding 1 (the stale line): a tolerated exit-255 call left
+	"""The stale line: a tolerated exit-255 call left
 	the pending "admin login failed" line in the file, and a later
 	unrelated stop printed it.
 
@@ -393,7 +393,7 @@ def test_a_real_login_failure_during_the_swap_is_reported_once(pulsar_env):
 
 
 def test_the_profile_upload_failure_survives_the_cleanup_call(setup_env):
-	"""Review finding 2 (the erased line): the profile upload fails and
+	"""The erased line: the profile upload fails and
 	the cleanup call that follows it (rm -f of the .new file) truncated
 	the record of the failure, so the STOPPED line had no FAIL line at
 	all.  The record of a real login failure is never truncated by a
@@ -413,7 +413,7 @@ def test_the_profile_upload_failure_survives_the_cleanup_call(setup_env):
 
 
 def test_a_remote_command_exit_255_is_not_a_login_failure(setup_env):
-	"""Review finding 3 (the misclassified 255): ssh returns the remote
+	"""The misclassified 255: ssh returns the remote
 	command's exit status too, so an authenticated router command that
 	fails with 255 must not produce the "fix your key/password" advice.
 	The busy check of the upgrade (step 2) is the command: it runs and

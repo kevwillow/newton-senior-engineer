@@ -173,6 +173,41 @@ def test_a_lagging_dc_gives_not_tested_and_an_abort() -> None:
     assert result["dcs"]["win-dc2"]["state"] == "not_tested"
 
 
+@pytest.mark.parametrize("outcome", ["missing", "empty"])
+def test_a_dc_whose_planning_image_matches_but_whose_outcome_does_not_is_never_matched(
+    outcome: str,
+) -> None:
+    """A DC whose bind cannot read the value answers the planning image
+    ``live`` (a missing quota reads 0, which may equal the after-image) and
+    an empty ``outcome``.  The verification matches the outcome only, so
+    that DC reads not_tested and the change is aborted, never confirmed."""
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+    lab.lag()
+    modes: list[str] = []
+
+    def send(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        modes.append(str(request_body["mode"]))
+        answer = lab.send(target, request_body)  # type: ignore[arg-type]
+        if request_body["mode"] == "read" and getattr(target, "name", "") == "win-dc2":
+            plan = store.read_json(store.plan_path(plan_id))
+            answer = {**answer, "live": dict(plan["after"])}
+            if outcome == "missing":
+                answer.pop("outcome", None)
+            else:
+                answer["outcome"] = {}
+        return answer
+
+    result = ad_apply.apply_change(
+        plan_id, send=send, devices=lab.devices, timeout_s=0.0
+    )
+
+    assert result["state"] == "not_tested"
+    assert "confirm" not in modes
+    assert result["dcs"]["win-dc1"]["state"] == "matched"
+    assert result["dcs"]["win-dc2"]["state"] == "not_tested"
+
+
 def test_the_automatic_abort_carries_restored_and_conflicts() -> None:
     """A DC that does not catch up: the abort's restored and conflicts reach the owner.
 
@@ -321,6 +356,221 @@ def test_the_password_leaves_the_plan_record_when_the_send_fails() -> None:
         ad_apply.apply_change(plan_id, send=send, devices=lab.devices, timeout_s=0.0)
 
     assert "secret" not in store.read_json(store.plan_path(plan_id))
+
+
+@pytest.mark.parametrize("refusal", ["runner", "oversize"])
+def test_a_user_create_refused_before_it_is_sent_keeps_its_password(refusal: str) -> None:
+    """A request refused before it leaves the Newton host never reached the
+    DC, so its txid is not spent: the plan keeps its password, and the same
+    plan applied again sends it.  Dropping it would leave a plan the DC can
+    only answer with bad_token, since the approval covers the password."""
+    from newton_mcp.adapters.ssh_cli import RunnerRefused
+    from newton_mcp.ad.write.transport import TransportError
+
+    lab = harness.Lab()
+    lab.add_user(uac=512)
+    lab.add_domain_head()
+    plan_id = _approved_plan(lab, "user-create", ["newuser"], harness.DOMAIN_GUID)
+    new_secret = store.read_json(store.plan_path(plan_id))["secret"]
+
+    def refuse(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        if refusal == "runner":
+            raise RunnerRefused("the inventory entry has no key file")
+        raise TransportError("schema", "the request is bigger than 64 KiB")
+
+    result = ad_apply.apply_change(plan_id, send=refuse, devices=lab.devices, timeout_s=0.0)
+    assert result["state"] == ad_apply.STATE_REFUSED
+    assert store.read_json(store.plan_path(plan_id))["secret"] == new_secret
+
+    sent: list[dict[str, object]] = []
+
+    def send(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        sent.append(dict(request_body))
+        return lab.send(target, request_body)  # type: ignore[arg-type]
+
+    again = ad_apply.apply_change(plan_id, send=send, devices=lab.devices, timeout_s=0.0)
+    assert [one.get("secret") for one in sent if one["mode"] == "apply"] == [new_secret]
+    assert again["state"] == ad_apply.STATE_CONFIRMED
+    assert "secret" not in store.read_json(store.plan_path(plan_id))
+
+
+@pytest.mark.parametrize("code", ["unavailable", "error"])
+def test_the_password_leaves_the_plan_record_when_the_session_fails(code: str) -> None:
+    """A session that fails after the request may have left the Newton host
+    (a lost connection, a timeout, an error from the runner) may have
+    reached the DC, so the txid counts as spent and the password goes."""
+    from newton_mcp.ad.write.transport import TransportError
+
+    lab = harness.Lab()
+    lab.add_user(uac=512)
+    lab.add_domain_head()
+    plan_id = _approved_plan(lab, "user-create", ["newuser"], harness.DOMAIN_GUID)
+
+    def send(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        if request_body["mode"] == "apply":
+            raise TransportError(code, "the session to the domain controller failed")
+        return lab.send(target, request_body)  # type: ignore[arg-type]
+
+    result = ad_apply.apply_change(plan_id, send=send, devices=lab.devices, timeout_s=0.0)
+
+    assert result["state"] == ad_apply.STATE_APPLY_UNKNOWN
+    assert "secret" not in store.read_json(store.plan_path(plan_id))
+
+
+def _answers(code: str, lab: harness.Lab, record: str | None = None):
+    """A send whose apply the DC answers with `code`; a status request
+    answers the DC's record `record` when given; the rest go to the lab."""
+
+    def send(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        if request_body["mode"] == "apply":
+            return {"v": 1, "code": code, "message": "the dc said no"}
+        if request_body["mode"] == "status" and record is not None:
+            return {"v": 1, "code": "ok", "state": record}
+        return lab.send(target, request_body)  # type: ignore[arg-type]
+
+    return send
+
+
+@pytest.mark.parametrize("record", [None, "armed", "undone", "undo_failed", "confirmed"])
+@pytest.mark.parametrize("code", ["error", "unavailable", "denied", "not_found"])
+def test_a_dc_error_answer_to_the_apply_is_not_called_refused(code: str, record: str | None) -> None:
+    """Both helpers answer these codes also after a write was tried: an
+    exception after the write ('error'), or a failed write whose target is
+    then undone, left armed or left undo_failed (the write's own LDAP code).
+    Unless the DC's record of the transaction says 'refused', the change
+    may be written or put back, so the outcome is unknown and the owner is
+    sent to newton_ad_change_status.  None: the record cannot be read."""
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+
+    result = ad_apply.apply_change(
+        plan_id, send=_answers(code, lab, record), devices=lab.devices, timeout_s=0.0
+    )
+
+    assert result["state"] == ad_apply.STATE_APPLY_UNKNOWN
+    assert result["code"] == code
+    assert "newton_ad_change_status" in str(result["message"])
+    assert "nothing was sent" not in str(result["message"])
+    receipt = store.read_json(store.receipt_path(plan_id))
+    assert receipt["state"] == ad_apply.STATE_APPLY_UNKNOWN
+    assert receipt["message"] == result["message"]
+
+
+def test_a_dc_error_answer_to_an_unlock_promises_no_undo() -> None:
+    """An unlock is confirmed once written, so a DC 'error' after the write
+    leaves it written: the message must not promise a rollback."""
+    lab, plan_id = _unlock_lab()
+
+    result = ad_apply.apply_change(
+        plan_id, send=_answers("error", lab), devices=lab.devices, timeout_s=0.0
+    )
+
+    assert result["state"] == ad_apply.STATE_APPLY_UNKNOWN
+    assert "undo_at" not in str(result["message"])
+    assert "no undo" in str(result["message"])
+
+
+@pytest.mark.parametrize(
+    ("code", "record"),
+    [
+        ("schema", None),
+        ("bad_token", None),
+        ("expired", None),
+        ("privileged", None),
+        ("not_pdc", None),
+        ("risk_mismatch", None),
+        ("error", "refused"),
+        ("denied", "refused"),
+        ("not_found", "refused"),
+    ],
+)
+def test_a_dc_refusal_before_its_write_is_refused_and_says_nothing_changed(code: str, record: str | None) -> None:
+    """Both helpers raise the first six codes only before they write.  Any
+    other code is refused only when the DC's own record of the transaction
+    says 'refused', which both helpers write only when nothing was written."""
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+
+    result = ad_apply.apply_change(
+        plan_id, send=_answers(code, lab, record), devices=lab.devices, timeout_s=0.0
+    )
+
+    assert result["state"] == ad_apply.STATE_REFUSED
+    assert result["code"] == code
+    assert "nothing changed" in str(result["message"])
+    assert "nothing was sent" not in str(result["message"])
+
+
+def test_the_record_read_after_a_dc_error_never_carries_the_password() -> None:
+    """The status request Newton sends after a DC error is its own small
+    request: the password of a user-create never goes out a second time."""
+    lab = harness.Lab()
+    lab.add_user(uac=512)
+    lab.add_domain_head()
+    plan_id = _approved_plan(lab, "user-create", ["newuser"], harness.DOMAIN_GUID)
+    sent: list[dict[str, object]] = []
+
+    def send(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        sent.append(dict(request_body))
+        if request_body["mode"] == "apply":
+            return {"v": 1, "code": "error", "message": "the dc said no"}
+        return {"v": 1, "code": "ok", "state": "armed"}
+
+    ad_apply.apply_change(plan_id, send=send, devices=lab.devices, timeout_s=0.0)
+
+    status = [one for one in sent if one["mode"] == "status"]
+    assert len(status) == 1
+    assert set(status[0]) == {"v", "mode", "device", "txid"}
+
+
+def test_a_record_read_that_is_not_ok_never_counts_as_refused() -> None:
+    """Only an ok status answer whose record says refused makes the apply
+    refused; any other answer leaves it unknown."""
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+
+    def send(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        if request_body["mode"] == "apply":
+            return {"v": 1, "code": "error", "message": "the dc said no"}
+        return {"v": 1, "code": "not_found", "state": "refused"}
+
+    result = ad_apply.apply_change(plan_id, send=send, devices=lab.devices, timeout_s=0.0)
+
+    assert result["state"] == ad_apply.STATE_APPLY_UNKNOWN
+
+
+def test_a_replay_answer_says_an_earlier_apply_reached_the_dc() -> None:
+    """A replay means the DC already holds this transaction: an earlier
+    apply reached it, so the owner is sent to newton_ad_change_status and
+    never told nothing changed."""
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+
+    result = ad_apply.apply_change(
+        plan_id, send=_answers("replay", lab), devices=lab.devices, timeout_s=0.0
+    )
+
+    assert result["state"] == ad_apply.STATE_REPLAY
+    assert "newton_ad_change_status" in str(result["message"])
+    assert "nothing changed" not in str(result["message"])
+
+
+def test_a_runner_refusal_before_the_send_has_its_own_code() -> None:
+    """A request Newton refuses before it leaves the host is not a lost
+    connection: its code says it was not sent."""
+    from newton_mcp.adapters.ssh_cli import RunnerRefused
+
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+
+    def send(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        raise RunnerRefused("the inventory entry has no key file")
+
+    result = ad_apply.apply_change(plan_id, send=send, devices=lab.devices, timeout_s=0.0)
+
+    assert result["state"] == ad_apply.STATE_REFUSED
+    assert result["code"] == "not_sent"
+    assert store.read_json(store.receipt_path(plan_id))["code"] == "not_sent"
 
 
 def test_the_receipt_is_written_under_the_receipts_directory() -> None:
@@ -838,8 +1088,8 @@ def test_a_lost_abort_session_on_an_unlock_promises_no_undo() -> None:
 
 @pytest.mark.parametrize("refusal", ["runner", "oversize"])
 def test_a_request_refused_before_it_is_sent_says_nothing_was_sent(refusal: str) -> None:
-    """A pre-flight refusal (the SSH runner's own, or a request over the
-    size limit) is raised before anything leaves the Newton host, so the
+    """A pre-flight refusal (the SSH runner's own, or the transport's size
+    check) is raised before anything leaves the Newton host, so the
     apply is refused and the owner is not told the change may be written."""
     from newton_mcp.adapters.ssh_cli import RunnerRefused
     from newton_mcp.ad.write.transport import TransportError

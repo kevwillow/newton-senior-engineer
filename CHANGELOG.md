@@ -26,20 +26,138 @@ Two version numbers exist and are separate:
   groups, the machine account quota, new users (created disabled), moves between OUs, and unlock. The undo is armed on
   the domain controller until Newton confirms; `newton_ad_apply_change` confirms or aborts before it returns, and when a
   DC does not catch up its result says what the undo restored and which attributes it left as conflicts, or
-  `abort_failed` when that abort did not run. If the connection to a domain controller fails mid-apply, the receipt
+  `abort_failed` when Newton does not know whether that abort ran (an abort the DC answers with `conflict` because its
+  own undo already ran is reported `not_tested` with that undo's `dc_state`). A confirm the DC answers with an error
+  or a conflict after every DC showed the change is `not_confirmed`, and Newton reads
+  the DC's record (an unlock has no undo, so for an unlock the result says it stays written and never what the record
+  reads: the DC normally records an unlock `confirmed` when it is written, and a DC that cannot write that record keeps it armed;
+  a conflict says the PDC emulator may have read the account locked again, or could not read the account or its record). The result says the change is still armed only when that record says `armed`; when the record
+  shows its undo already ran (its `undo_at` passed, or an abort ran it) it carries that undo's `dc_state`, and when
+  the record cannot be read it says Newton does not know whether the confirm was recorded; a record that says `confirmed` (the DC recorded the confirm before its
+  error) makes the result `confirmed`, and a Samba DC answers such a confirm ok. A
+  second apply of a plan whose earlier apply reached the DC, or may have (its receipt says anything but `refused`,
+  or the password of a new user already went out), is refused before it is sent: `replay` with code `not_sent`, and
+  the earlier receipt is kept; a replay the DC itself answers is `replay` too, changes nothing and keeps the earlier
+  apply's receipt; a pending receipt is an earlier apply that may have reached the DC until the DC's record of the
+  transaction answers `not_found` (the status then says no apply of the plan had reached the DC's write when it was
+  read, unless an apply sent before Newton stopped is still on its way, and a retry sends the plan); a second apply of a
+  plan while one runs on the same host is refused `not_sent` before anything is sent or written. If the connection to a domain controller fails mid-apply, the receipt (a final receipt that cannot be
+  written is named in `receipt_error` and never changes the result; before it sends the apply, Newton writes a pending
+  receipt (`apply_unknown`) and syncs it to the disk; when that receipt cannot be written, nothing is sent and the
+  apply is refused with code `not_sent`; a receipt whose presence cannot be checked is taken for an earlier apply)
   is still written and the result names the lost step (`apply_unknown`, `confirm_unknown` or `abort_failed`) and
-  sends the owner to `newton_ad_change_status`; a change that is not confirmed is put back by the DC itself at its
-  `undo_at`, except an unlock, which has no undo and stays written. A connection lost while a DC is read back counts
-  as that DC not showing the change, so the change is aborted, except an unlock, which is not aborted and reaches the other DCs by replication. A request Newton refuses before it leaves
-  the Newton host is recorded as refused: nothing was sent.
+  sends the owner to `newton_ad_change_status`; a change that is not confirmed is put back by the DC itself at or after
+  its `undo_at`, when it next runs the undo (a Samba DC whose write setup was run with this release runs a sweep timer about once a minute
+  that retries an undo whose run did not finish or that a reboot dropped (an `undo_failed` record is final); a Windows DC retries one at the next Newton request to
+  it), except an unlock, which has no undo and stays written, and a new user whose objectGUID the DC did not record
+  (the connection can fail between the add and that record), which the DC leaves in place and records `undo_failed`
+  with its DN in `conflicts`; after a lost apply the DC may already have run the undo, when it could not finish the
+  apply after its write: its record then says `undone` or `undo_failed`. A connection lost while a DC is read back counts
+  as that DC not showing the change, so the change is aborted, except an unlock, which is not aborted and reaches the other DCs by replication. An apply request the SSH runner refuses before it
+  leaves the Newton host is recorded as refused with code `not_sent`: nothing was sent, and the plan keeps its
+  password, so it can be applied again once the cause is fixed (the transport's own size refusal, which the apply's
+  contract check makes unreachable today, is refused before send too and keeps the code `schema`); a confirm, an automatic
+  abort, an abort or a status the SSH runner refuses the same way carries the code `not_sent`: a status says it was not
+  sent and could not be read, and a confirm or an abort says it was not sent and the DC holds the change as it did: a
+  change still armed is put back by the DC itself at or after its `undo_at` (an unlock stays written). A domain controller that answers the apply with an
+  error code that can follow a write it tried (`error`, `denied`, `not_found`) or any other error (except the codes both
+  helpers give only before they write, which are `refused` only when the DC holds no record of the transaction and
+  the answer carries no `unmarked`, or its record says `refused`) is no longer reported
+  as `refused` unless its own record of the change says `refused`; otherwise the result is `apply_unknown` and sends
+  the owner to `newton_ad_change_status`. Both helpers look for a record of the transaction before the token and the approval window, so a
+  retry of an apply the DC holds whose receipt is gone from the Newton host answers `replay`, never `bad_token` or `expired`; against a helper set up with an earlier release, which
+  checks the token first, Newton reads the record by txid and the retry is `apply_unknown`, never `refused`. When the DC reads the target again after such an error and finds neither
+  the before-image nor the after-image, somebody else changed it and Newton's write may have landed first: the result
+  is `apply_unknown` with the `live` value the DC read, never `refused`, and the DC records the change `undo_failed`
+  so that its undo never writes over the other change (an unlock stays armed). A value the re-read cannot read (a
+  move's parent, the domain head, an account's `userAccountControl`) is a target that cannot be read, so the record
+  stays armed. After an error code the DC answered itself, its atomic write wrote nothing, so a re-read that shows
+  the after-image is somebody else's same change: the result is `conflict`, the DC records it `refused` and its undo
+  never runs over that change. The DC marks the record before it reads the target again, so while that mark (or the
+  refused record) is on its disk no later undo of it (the timer or task, the sweep, an abort) writes anything; the undo
+  is cancelled even when the refused record cannot be written, and the answer is then an error (`apply_unknown`), never
+  `conflict`. A DC whose store takes neither the mark nor the refused record (a full disk, say) leaves the record armed
+  with no mark, which its undo cannot tell from a write whose answer was lost: the answer then carries `unmarked`, and
+  Newton reports `apply_unknown` and tells the owner that the DC's undo may write the before-image over somebody else's
+  change (a known limit: nothing on that DC's disk can stop it). A failure inside the handling of a
+  write that was sent leaves the record armed, never `refused`. A Samba record is created `refused` and reads `armed`
+  only once its undo timer is armed, right before the write (a refusal before the write, or a timer that cannot be
+  armed, leaves it `refused`); on Windows, a task that cannot be registered whose refused record cannot be written
+  answers `unavailable` with `unmarked`, and the current record is the highest generation that can be read and parses; a
+  generation that cannot be read stops the reader, so a generation whose write failed after its file was made (a full
+  disk) never hides the record below it. On both DCs a record that cannot be read is never taken for absent: a read of
+  it that raises (a sharing violation, a denied access, an IO error) makes a status, a confirm, an abort and the timer
+  or task answer `error` and write nothing, and the sweep leaves that transaction for a later pass; a Windows store that
+  cannot be listed is never taken for empty either (the apply answers `error` too). On both DCs a record write that fails is read back, and the helper acts on
+  what the disk holds (the write can fail after the record reached the disk, when its flush fails; a read-back that fails counts as the armed record having landed): an armed record
+  of a write that was never sent that cannot be written `refused` again answers with `unmarked`, and a `conflict`
+  never carries `unmarked`. On Samba a refusal after the undo timer was armed cancels the timer, and when its refused
+  record cannot be written it answers with `unmarked`, and with `error` in place of `conflict` (a move whose rename
+  the server answered with "no such object" is such a refusal); Newton never reports an answer that carries
+  `unmarked` as nothing changed unless its record of the change reads `refused` when Newton reads it back (a replay
+  the DC answers stays a replay). The undo of a new user looks the account up again by the GUID it was created with, so
+  an account somebody renamed is `undo_failed` (still there), never `undone`; a new user with no recorded GUID is
+  never `undone` from a lookup by its name: it is left in place and recorded `undo_failed` with its planned DN as the
+  conflict. A new user whose undo facts are missing right after the add is put back at once, and only by its
+  objectGUID: with the GUID read, the object of that GUID is deleted wherever it is; with no GUID nothing is deleted
+  (an account at the planned DN may not be Newton's) and the record is `undo_failed` with the DN. Every delete,
+  modify and rename the helpers send, in an apply or an undo, names its object by the GUID form of its DN
+  (`<GUID=...>`), never by a DN a search answered earlier (the machine account quota on Samba is written on the domain
+  head by its DN), so a write never lands on an account somebody made at
+  that DN after moving Newton's away, apart from the three DN values named in the known limits (this form was not
+  run live on the lab DCs; tests cover it). The Samba undo of an
+  attribute or a membership reads the live value, or the group's members, by that GUID too, never by the DN that
+  search answered, so it never records `undone` from an object somebody made at that DN. Samba decides whether a
+  member is in a group in one search of the group by its GUID, matching each member value by the GUID the directory
+  gives with it (the extended DN control); Windows decides it in base searches of the group named by its GUID with
+  the member named by its GUID in the filter. A member moved between two reads, even moved back, never reads as
+  out of the group (in the apply's checks, the confirm, the undo and its re-read). The helpers bind as the domain
+  controller's account, so the directory's ACLs apply, and an attribute it cannot read looks like one that is not
+  there. A group that shows no member value (empty, or a member list it cannot read) is never taken for "the member
+  is out": the undo of a membership then writes, and the domain controller checks the write against the values it
+  holds; the read-back and the confirm of a member-add read it as a target that cannot be read. A missing machine
+  account quota, a missing lockoutTime and a missing encryption-types value (unless removing it is the change) are
+  read the same way, never as 0 or as "no value": the record then stays armed rather than reading `undone` or
+  `confirmed`. The read Newton verifies every domain controller with answers that image too (`outcome`, beside the
+  planning image `live`): each domain controller binds as its own account, so one that still holds another value it
+  cannot read never shows the after-image (a removal's aside, see the known limits), and the change is aborted
+  rather than confirmed. Newton refuses to plan a
+  change whose before-image the account cannot read (a quota, a userAccountControl, a moved object's parent). A new
+  user counts as gone only when a base search of its GUID name answers noSuchObject, never from a
+  search on objectGUID that finds nothing (an objectGUID the account cannot read matches no filter); one that answers
+  no entry is a user the account cannot read, never gone. On Windows a member reads out of a group only when a second
+  pair of searches agrees with the first. Both helpers refuse
+  an apply with `conflict` (with `live` and `armed`, which Newton explains) while another armed record names the
+  same target: that record's undo could write the before-image over this change once it is confirmed (a write that
+  got no answer stays armed on its before-image). Nothing is armed or written; a store that cannot be checked
+  answers `error`. The check reads only the store of the domain controller it runs on (see the known limits for a PDC role move). A user-create whose plan record cannot be rewritten without its password after the apply sent it
+  keeps the password there, and the result says so in `secret_error`. A malformed record never stops the sweep of a
+  domain controller: it is skipped and left as it is.
+  On both domain controller helpers an unlock is never undone. An unlock whose write succeeded is recorded
+  `confirmed` (on Samba, a read-back that fails after it reads the account again first; on Windows, a confirmed record
+  that cannot be written leaves the unlock armed, and its status says an unlock has no undo). One whose write failed for a
+  reason other than a conflict is read again: `confirmed` when the account shows the after-image and the DC gave the
+  write no error code of its own (an after-image after the DC's own error code is somebody else's same change:
+  recorded `refused` with the conflict and answered `conflict`), `refused` when it
+  still shows the before-image and the DC answered the write with its own error code; any other value is somebody
+  else's change, recorded `refused` and answered `conflict` when the DC answered the write with its own error code,
+  and otherwise left armed, since the unlock may have landed before that change. An account that cannot be read
+  again, a write the DC gave no answer to, or a record that cannot be written leaves the record armed (a Samba DC's sweep
+  reads the account again for an hour after its `undo_at` and records it `confirmed` only from the after-image, never
+  `refused` from the before-image: its write may still land), and the status of an armed unlock says it has no undo. An unlock write the DC refused as a conflict is recorded `refused` without a
+  read. Neither the sweep nor an abort writes the lockout back, and the abort of an unlock is refused on both helpers.
   `newton_ad_abort_change` works only on a change still armed (an apply cut off before its confirm). Once confirmed,
-  Newton does not undo it: the owner plans the reverse change. An unlock has no undo and is written at once. The owner approves each change in their own terminal with
+  Newton does not undo it (a known limit: if the PDC role moves while an earlier change of the same target is still armed on the old PDC, that domain controller's undo can write the earlier before-image over the new change): the owner plans the reverse change. An unlock has no undo and is written at once. The owner approves each change in their own terminal with
   `sudo -u newton /usr/local/bin/newton-approve ad-change <plan_id>`; the
   domain controller checks that approval itself and arms its undo before it writes, and Newton confirms a change only
   when every domain controller with a write entry in the inventory shows it. Newton does not list the DCs of the
   directory, so a DC without a write entry is never read; each plan lists the DCs it will check and says so. `scripts/newton-ad-setup write windows|samba` sets up the `newton-ops`
-  account, which is never in a privileged group and holds only the rights these changes need. The write helpers were
-  tested live in the lab on Windows Server 2025 and Samba 4.22 domain controllers. The second-DC setup
+  account, which is never in a privileged group and holds only the rights these changes need; the Samba setup checks
+  its sudoers line with visudo before it installs anything. The write helpers were
+  tested live in the lab on Windows Server 2025 and Samba 4.22 domain controllers; both changed after those runs
+  (the failed-write, unlock and confirm outcomes above, the replay checked before the token, and the Samba sweep
+  timer), and those changes are covered by
+  tests only. The second-DC setup
   (--domain-device), the printed ad_domain_guid and changes on a domain with two domain controllers were tested live
   on a two-DC Windows Server 2025 domain and a two-DC Samba domain: both DCs of a domain hold the same approval key,
   every change is confirmed on both, and a withheld confirm rolls back on both; the log of those runs is not kept in
@@ -52,6 +170,36 @@ Two version numbers exist and are separate:
   as a lone plan id, and `newton-doctor` checks the new launcher like the others.
 
 ### Known limits
+- A new user's objectGUID is read on Samba at its planned DN, and on Windows by its sAMAccountName right after the add:
+  an account somebody else put at that DN, or gave that name, in that moment (after moving or renaming Newton's away)
+  would be taken for Newton's.
+- A write names its object by GUID, but three names in it are still DNs read just before: the member value of a
+  membership change, the new parent of a move, and the parent of a new user. A member or an OU somebody moves away
+  and replaces at that DN in that moment would be the one written; for a membership, the undo of that membership,
+  which matches the member by GUID, then reads Newton's account as not changed by the apply and records undone while
+  the other account stays in the group. The undo of a new user and of a move checks the
+  object (disabled, unchanged, no members; still in the parent the apply put it in) and then writes it in a second
+  request: a change somebody makes to that object in between is not seen.
+- An empty group and a group whose member list the helper's account cannot read look the same, and so do a missing
+  value and one it cannot read. A member-remove and an encryption-types change that removes the value take "no
+  value" for their after-image: if somebody makes the member list or the value unreadable to the domain controller's
+  account after the apply read it, their read-back, their confirm and the read that verifies each domain controller
+  read "removed" whatever is there (a member or a value put back while it is unreadable included). A read cannot
+  tell them apart: removing a group's last member leaves the same answer. The undo of a new
+  user reads its groups the same way: a membership the account cannot read is not seen, and the delete goes ahead.
+- A new user counts as gone when a base search of its GUID name answers noSuchObject. Samba resolves that name as the
+  system, whatever the account may read (its source); whether a Windows domain controller does so for an object
+  whose objectGUID the account cannot read was not measured. An object the account cannot see at all (a denied list
+  right on its parent) answers noSuchObject as well (Samba's acl_read; on Windows not measured): such a user would be
+  taken for gone, and the record would say `undone` while it is there.
+- On Windows a member is in or out of a group by four separate searches; a right on `member` that changes more than
+  once inside those searches can still read the member out while it is in.
+- The same-target guard reads only the store of the domain controller it runs on. If the PDC role moves to another
+  domain controller with a write entry while an earlier change of the same target is still armed on the old PDC
+  (a write that got no answer, or a lost confirm), a change applied on the new PDC is not refused, and the old PDC's
+  undo can write the earlier before-image over it when the target shows the same after-image. The undo writes only
+  while the target shows its own after-image, so a later change to another value is not written over (apart from
+  the second-request check of a move and a new user above).
 - Changes work only while the PDC emulator's own write entry is in the inventory and names the device that stands
   for the domain; if the PDC role moves to a controller without a write entry, every change is refused until the
   inventory follows it.

@@ -1,4 +1,4 @@
-"""SC-2: planned scan requests expire 30 minutes after planning.
+"""Planned scan requests expire 30 minutes after planning.
 
 A scan request carries ``created_at`` and is usable forever when no consent
 exists yet; without a bound, an old plan can be approved and run minutes
@@ -165,7 +165,7 @@ def test_request_hash_covers_created_at_so_edit_after_writing_fails_hash(
     # recomputing the hash.  Because the request hash already covers
     # created_at, the load path refuses with the same
     # "modified or is invalid" message that other integrity checks
-    # emit.  This is the property SC-2 relies on -- if the hash did
+    # emit.  This is the property the scan request expiry relies on -- if the hash did
     # NOT cover created_at, the same edit would defeat the 5-min
     # future check and shorten the apparent age of any old plan.
     record = _record_with_created_at(FROZEN_NOW.isoformat())

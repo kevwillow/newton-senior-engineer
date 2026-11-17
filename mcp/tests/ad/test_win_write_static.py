@@ -414,12 +414,18 @@ def test_no_search_uses_an_empty_base_with_a_subtree_scope() -> None:
 
 
 def test_the_membership_of_a_group_is_never_read_whole() -> None:
-    """The presence of a member is a base-scope search."""
+    """The presence of a member is a base-scope search of the group named by
+    its GUID, with the member named by its GUID, and the readability of the
+    member is its own base-scope (member=*) search."""
     text = _script()
-    body = text[text.index("function Test-NewtonMemberPresent") :]
-    body = body[: body.index("function Find-NewtonObjectByGuid")]
+    assert "function Test-NewtonMemberPresent" not in text
+    body = text[text.index("function Get-NewtonMembership") :]
+    body = body[: body.index("function Get-NewtonReadLive")]
     assert "'base'" in body
     assert "(member=" in body
+    assert "'(member=*)'" in body
+    assert "ConvertTo-NewtonGuidDn $GroupGuid" in body
+    assert "ConvertTo-NewtonGuidDn $MemberGuid" in body
     assert "ConvertTo-NewtonFilterText" in body
     assert "'member'" not in text[text.index("$script:ObjectReadAttributes") :][:400]
 
@@ -453,7 +459,7 @@ def test_spec_section_7_describes_the_measured_append_only_store() -> None:
 
 
 def test_the_rules_of_the_verb_come_after_the_token() -> None:
-    """The order of the checks: the token, the window, the replay, the rest."""
+    """The order of the checks: the replay, the token, the window, the rest."""
     text = _script()
     apply_body = text[text.index("function Invoke-NewtonApply") :]
     apply_body = apply_body[: apply_body.index("function Get-NewtonLiveAfter")]
@@ -465,6 +471,17 @@ def test_the_rules_of_the_verb_come_after_the_token() -> None:
     mode_body = text[text.index("function Invoke-NewtonWriteMode") :]
     mode_body = mode_body[: mode_body.index("function Invoke-NewtonRequest")]
     assert "Test-NewtonVerbRules" not in mode_body
+
+
+def test_the_replay_is_checked_before_the_token_and_the_window() -> None:
+    """A retry of an apply the DC holds answers replay whatever its token
+    and its window: Newton takes expired and bad_token for nothing changed."""
+    text = _script()
+    apply_body = text[text.index("function Invoke-NewtonApply") :]
+    apply_body = apply_body[: apply_body.index("function Get-NewtonLiveAfter")]
+    replay = apply_body.index("return (New-NewtonResponse 'replay')")
+    assert replay < apply_body.index("Test-NewtonConstantTime")
+    assert replay < apply_body.index("'expired'")
 
 
 def test_only_a_record_that_exists_is_a_replay() -> None:

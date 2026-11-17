@@ -186,7 +186,7 @@ def test_UX1_06_command_files_skill_name_and_phrase() -> None:
 
 
 def test_UX1_07_commands_directory_has_exactly_two_files() -> None:
-    """UX1 #7: commands/ contains exactly claude-code/network-engineer.md and opencode/network-engineer.md."""
+    """commands/ contains exactly claude-code/network-engineer.md and opencode/network-engineer.md."""
     expected = {
         COMMANDS_DIR / "claude-code" / "network-engineer.md",
         COMMANDS_DIR / "opencode" / "network-engineer.md",

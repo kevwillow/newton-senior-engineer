@@ -30,7 +30,7 @@ This document covers the first two. Build mode (1.5, a whole new domain from a r
    2. it writes the undo record and schedules the undo;
    3. it applies the after-image.
 4. **Verify.** A fresh session reads the target back from **every** DC in the domain (section 5). Every DC must show the after-image. A DC that has not caught up within the window is NOT TESTED, which blocks the confirm.
-5. **Confirm or undo.** Confirm cancels the scheduled undo. If confirm does not come in time, because Newton died, the session dropped or verify failed, the DC itself puts the before-image back. The undo restores only attributes whose live value still equals the after-image. An attribute someone else changed in the meantime is left alone and reported as a conflict in the receipt.
+5. **Confirm or undo.** Confirm cancels the scheduled undo. If confirm does not come in time, because Newton died, the session dropped or verify failed, the DC itself puts the before-image back, except a new user whose objectGUID the DC did not record (the session can drop between the add and that record): the DC never deletes an account by its name, so it leaves that user in place and records `undo_failed` with its DN in `conflicts`. The undo restores only attributes whose live value still equals the after-image. An attribute someone else changed in the meantime is left alone and reported as a conflict in the receipt.
 
 ## 2. Verbs in 1.4
 
@@ -80,7 +80,7 @@ The helper takes no arguments. It reads one JSON request on stdin: verb, GUIDs, 
   - On Samba, it is `systemd-run --on-active=<window>` calling the helper in undo mode.
   - The undo record (before- and after-images) is stored in the helper's directory, readable only by the account and administrators.
   - Confirm deletes the task or timer. Records are never deleted, so a txid can never be replayed.
-  - After a reboot: Windows scheduled tasks survive one, and the helper's boot check runs any undo whose deadline has passed. This is never an auto-confirm (design rule 8).
+  - After a reboot: Windows scheduled tasks survive one; on Samba the persistent sweep timer (`newton-ad-sweep.timer`, installed by the write setup) runs any undo whose deadline has passed about a minute after boot and every minute after. This is never an auto-confirm (design rule 8).
 
 ## 4. The write account
 
@@ -101,7 +101,7 @@ The lab needs a second DC in each domain to prove this: WINDC2 on apollo, and a 
 ## 6. Passwords
 
 A password never passes through the model or the chat.
-- For `user-create`, Newton generates the initial password and shows it only in the `newton-approve` terminal, once, at the first approval of the plan. It reaches the DC on the helper's stdin, inside the request, is dropped from the plan record once the apply has sent it, and never appears in a log or receipt.
+- For `user-create`, Newton generates the initial password and shows it only in the `newton-approve` terminal, once, at the first approval of the plan. It reaches the DC on the helper's stdin, inside the request, is dropped from the plan record once the apply has sent it (a plan record that cannot be rewritten keeps it, and the apply result names that in `secret_error`), and never appears in a log or receipt.
 - The account is created disabled. Enabling it is a separate plan, after the owner has handed the password over.
 
 ## 7. The script tier

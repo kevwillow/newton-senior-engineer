@@ -84,10 +84,30 @@ def applied(result: Mapping[str, Any]) -> dict[str, Any]:
             out["conflicts"] = [wrap(str(one)) for one in conflicts]
         else:
             out["conflicts"] = None
+    if "dc_state" in result:
+        # The DC's record of the change, in the DC's own word.
+        dc_state = result["dc_state"]
+        out["dc_state"] = wrap(dc_state) if isinstance(dc_state, str) else None
+    live = result.get("live")
+    if isinstance(live, dict):
+        # The value a DC read after a failed write: the directory's own.
+        out["live"] = values(live)
     message = result.get("message")
     if isinstance(message, str):
         # Newton's own text (apply.CONFIRMED_ABORT_MESSAGE), never the directory's
         out["message"] = message
+    receipt_error = result.get("receipt_error")
+    if isinstance(receipt_error, str):
+        # Newton's own text (apply.RECEIPT_ERROR_MESSAGE or, when the
+        # pending receipt before the send could not be written and nothing
+        # was sent, apply.PENDING_ERROR_MESSAGE): the receipt of the apply
+        # could not be written on the Newton host.
+        out["receipt_error"] = receipt_error
+    secret_error = result.get("secret_error")
+    if isinstance(secret_error, str):
+        # Newton's own text (apply.SECRET_ERROR_MESSAGE): the plan record
+        # still holds the password of a user-create.
+        out["secret_error"] = secret_error
     dcs = result.get("dcs")
     if isinstance(dcs, dict):
         rendered: dict[str, Any] = {}

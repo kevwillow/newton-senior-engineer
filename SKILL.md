@@ -717,35 +717,63 @@ changes nothing. Explain each finding in plain words: what an attacker does with
    The plan comes back with its id, before- and
    after-image, risk (LOW, MED, HIGH), undo window (600 s), `dcs` (the DCs the apply will read back) and a
    `warning`. Newton knows a DC only by its write entry and does not list the DCs of the directory: check `dcs`
-   against the domain's DCs with the owner, and set up any DC that is missing before the approval. An `unlock` has no undo: it is confirmed as soon as it
-   is written, and its window field is fixed at 120 and unused. Tell the owner an unlock cannot be undone.
+   against the domain's DCs with the owner, and set up any DC that is missing before the approval. An `unlock` has no undo: it stays written once it
+   is written, the DC normally records it `confirmed` then (a DC that cannot write that record keeps it armed), and its window field is fixed at 120 and unused. Tell the owner an unlock cannot be undone.
 3. The owner approves in their own terminal: `sudo -u newton /usr/local/bin/newton-approve ad-change <plan_id>`. The
-   agent never approves and never asks for the passphrase. For `user-create` the initial password appears only in that terminal, once, after the first approval of the plan; the plan record on the Newton host holds it until the apply sends it to the DC, then drops it.
+   agent never approves and never asks for the passphrase. For `user-create` the initial password appears only in that terminal, once, after the first approval of the plan; the plan record on the Newton host holds it until the apply sends it to the DC, then drops it (a plan record that cannot be rewritten keeps it, and the result says so in `secret_error`).
 4. `newton_ad_apply_change(device, plan_id)`. The DC applies it with its own undo armed (every verb but `unlock`,
    which arms none), Newton reads the target back
    from every DC with a write entry in the inventory, and confirms only when each of those DCs shows the after-image.
    A DC of the domain without a write entry is never read. A DC that does not catch up in time means the
    change is aborted, not confirmed (an `unlock` has nothing to abort: it stays written).
 5. The undo is armed on the domain controller until Newton confirms, and `newton_ad_apply_change` confirms or aborts
-   before it returns, so after a normal apply nothing is left to abort.
-   `newton_ad_change_status(device, plan_id)` shows `armed`, `confirmed`, `undone`, `undo_failed` or `refused`.
-   If the connection to a domain controller fails mid-apply, the apply still writes its receipt and its result names
+   before it returns, so after a normal apply nothing is left to abort. One exception: when every DC showed the change
+   and the DC then answers the confirm with an error or a conflict, the result is `not_confirmed`, and Newton reads
+   the DC's record. When it says `armed` (`dc_state`), the DC runs the undo at or after its
+   `undo_at` (an `unlock` stays written); when it shows its undo already ran (its `undo_at` passed, or an abort ran
+   it), the result carries that undo's `dc_state` instead; when it says `confirmed`, the DC recorded the confirm
+   before its error, and the result is `confirmed`; when it cannot be read, the result says Newton does not know whether the
+   confirm was recorded, and the next step is `newton_ad_change_status`. `newton_ad_change_status(device, plan_id)` shows `armed`, `confirmed`, `undone`,
+   `undo_failed` or `refused`. An `unlock` that shows `armed` is one whose record the DC could not settle after its
+   write: it has no undo, so nothing runs at its `undo_at`, and the result says so.
+   If the connection to a domain controller fails mid-apply, the apply still writes its receipt (a final receipt that cannot be
+   written is named in `receipt_error` and never changes the result; before it sends the apply, Newton writes a pending
+   receipt (`apply_unknown`) and syncs it to the disk; when that receipt cannot be written, nothing is sent and the apply
+   is refused with code `not_sent`) and its result names
    the step that was lost: `apply_unknown` (Newton does not know whether the change was written), `confirm_unknown`
-   (every DC showed it, and the confirm may not have arrived) or `abort_failed` (the apply's own abort did not run:
-   the DC refused it or it did not arrive; `restored` and `conflicts` are then unknown). Run
+   (every DC showed it, and the confirm may not have arrived) or `abort_failed` (Newton does not know whether the
+   apply's own abort ran: the DC refused it or failed, or its answer was lost; `restored` and `conflicts` are then
+   unknown; with the code `not_sent` the abort was not sent and did not run, and the DC holds the change as it did). When the DC answers that abort with `conflict` because its own undo already ran, the result is
+   `not_tested` with `dc_state` (`undone` or `undo_failed`) read from the DC's record. Run
    `newton_ad_change_status` and tell the owner what the DC holds: a change that is not confirmed is put back by the DC
-   itself at its `undo_at`, except an `unlock`, which has no undo and stays written. A connection lost while a DC is
-   read back counts as that DC not showing the change, so the change is aborted, except an unlock, which is not aborted and reaches the other DCs by replication. A request Newton refuses
-   before it leaves the Newton host (the SSH runner's own check, or a request over the size limit) is `refused`: nothing
-   was sent. Do not apply the plan again.
+   itself at or after its `undo_at`, when it next runs the undo (on a Samba DC whose write setup was run with this release, a sweep timer retries an undo whose run did
+   not finish or that a reboot dropped about once a minute, while an `undo_failed` record is final; an older Samba DC and a Windows DC retry one at the next Newton request to it), except an
+   `unlock`, which has no undo and stays written, and a new user whose objectGUID the DC did not record (the connection
+   can fail between the add and that record), which the DC leaves in place and records `undo_failed` with its DN in
+   `conflicts`. After a lost apply the DC may already have run the undo, when it could not finish the apply after its
+   write: its record then says `undone` or `undo_failed`. A connection lost while a DC is
+   read back counts as that DC not showing the change, so the change is aborted, except an unlock, which is not aborted and reaches the other DCs by replication. Do not apply the plan
+   again. One exception: an apply request Newton refuses before it leaves the Newton host (the SSH runner's own check)
+   is `refused` with code `not_sent`: nothing was sent, the plan keeps its password, and it can be applied again once
+   the cause is fixed. A domain controller's own `refused` means it changed nothing. A `replay` (an earlier apply of
+   the plan reached the DC, or may have, and a pending receipt is an earlier apply that may have reached the DC until
+   the DC's record of the transaction answers `not_found`; with code `not_sent` Newton caught it and sent nothing) changed nothing now, keeps the earlier apply's receipt and sends
+   the owner to `newton_ad_change_status`. When a domain controller answers
+   the apply with an error code that can follow a write it tried (`error`, `denied`, `not_found`) or any other error
+   (the codes both helpers give only before they write anything, `schema`, `bad_token`, `expired`, `privileged`,
+   `not_pdc` and `risk_mismatch`, are `refused` only when the DC holds no record of the transaction and the answer carries no `unmarked`, or its record says `refused`), Newton reads the DC's record of the change and reports `refused` only when that record says `refused`; otherwise the
+   result is `apply_unknown` with the DC's error code, and the next step is `newton_ad_change_status`. When that
+   result carries `live`, the DC read the target again and found neither the before-image nor the after-image:
+   somebody else changed it, Newton does not know whether its own write landed first, and the DC does not write the
+   before-image over that change. Tell the owner to read the target with the admin tools before planning anything.
    `newton_ad_abort_change(device, plan_id)` works only on a change still armed (written and not yet confirmed: while Newton is still verifying it, or an apply cut off before its confirm):
    the DC runs the undo then; on any other change the abort is refused with `conflict`. The undo, from that abort or
    from the apply's own abort when a DC does not catch up, writes back only attributes still equal to the after-image
    and reports the others as conflicts (the result shows `restored` and `conflicts`): tell the owner which, and change
-   nothing more. Once confirmed, Newton does not undo it: the owner plans the reverse change, a new plan with the
+   nothing more. Once confirmed, Newton does not undo it (a known limit: if the PDC role moves while an earlier change of the same target is still armed on the old PDC, that domain controller's undo can write the earlier before-image over the new change): the owner plans the reverse change, a new plan with the
    reverse verb where one exists (`enable` and `disable`, `member-add` and `member-remove`, or `enc-types`, `maq` or
    `move` with the old value); `uac-clear` and `user-create` have no reverse verb in Newton. An unlock has no undo and
-   is written at once.
+   is written at once: its abort is refused, and the result carries the DC's record of it as `dc_state`.
 
 A user created disabled is enabled by a separate plan, after the owner has handed over the password.
 

@@ -1,4 +1,4 @@
-"""The plan input surface after the check -> probes change (round m2):
+"""The plan input surface after the check -> probes change:
 probes that fail the shared grammar, and the host-only secret-option rule,
 are refused before anything is staged or run; valid probes reach the script
 as a 0600 probe file whose content is exactly probe_file_bytes."""

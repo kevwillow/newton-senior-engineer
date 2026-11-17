@@ -178,6 +178,10 @@ def _full_target(verb: str, ids: Mapping[str, Any], value: Any) -> dict[str, Any
     return target
 
 
+#: The verbs whose before-image must be one the outcome read shows too.
+_READ_BEFORE_VERBS = frozenset({"uac-clear", "disable", "enable", "maq", "move"})
+
+
 def _after(verb: str, before: Mapping[str, Any], value: Any) -> dict[str, Any]:
     """The after-image of the change."""
     if verb == "uac-clear":
@@ -362,6 +366,16 @@ def plan_change(
     live = before_answer.get("live")
     if not isinstance(live, dict):
         raise WriteError("the domain controller did not answer the read")
+    # A quota, a userAccountControl or a move's parent the DC's account
+    # cannot read reads 0 (or no parent) in the planning image and is missing
+    # from the outcome image: a before-image nobody read, which the undo
+    # would write back.  A member-add's group that shows no member, an
+    # unlock's missing lockoutTime and a missing enc-types value are read as
+    # the planning image takes them (an empty group, an account never locked,
+    # no value): the add is a write the server checks, an unlock has no undo
+    # and removing the value puts back "no value".
+    if verb in _READ_BEFORE_VERBS and before_answer.get("outcome") != live:
+        raise WriteError("the domain controller's account cannot read the target's current value")
     before = dict(live)
     facts = before_answer.get("facts")
     if not isinstance(facts, dict):

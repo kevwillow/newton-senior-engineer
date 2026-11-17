@@ -347,7 +347,7 @@ def test_a_probe_never_passes_on_an_unknown_answer() -> None:
     assert result.passed is not True
 
 
-# ---- the review round r2 (items 1 to 6) -----------------------------------
+# ---- the no-install checks, second set -----------------------------------
 
 #: Every probe that runs over the stock groups, with arguments its own
 #: grammar accepts.  ``fail`` is a local constant: it makes no call, so
@@ -774,7 +774,7 @@ def test_a_batch_that_is_not_a_string_has_no_class() -> None:
     assert checks.checks_for(None) == []
 
 
-# ---- the review round r3 (items 1, 2 and 3) -------------------------------
+# ---- the no-install checks, third set ------------------------------------
 
 
 def test_a_service_that_the_answer_does_not_name_cannot_run() -> None:
@@ -1126,7 +1126,7 @@ def test_a_local_or_no_install_probe_counts_as_supported():
     assert not checks.probe_supported("no-such-probe")
 
 
-# ---- the third review, defect 2: a batch that only takes settings away ----
+# ---- a batch that only takes settings away ------------------------------
 
 
 def _service_check(results):

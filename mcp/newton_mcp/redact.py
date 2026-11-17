@@ -31,7 +31,7 @@ from . import receipts as _receipts
 
 # ---- catalog ---------------------------------------------------------------
 #
-# The catalog lives in secret_names.txt next to this file (triage #4): ONE
+# The catalog lives in secret_names.txt next to this file: ONE
 # list shared with scripts/owrt-change.sh mask_secrets.  It is loaded once at
 # import; a missing, unreadable, empty or malformed catalog raises at import
 # (fail closed, loud) -- there is never a smaller built-in fallback.

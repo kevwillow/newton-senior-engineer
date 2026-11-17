@@ -213,13 +213,6 @@ function Get-NewtonScriptPath {
     return (Join-Path $script:InstallRoot 'write.ps1')
 }
 
-function Get-NewtonRecordPath {
-    param([string]$Txid)
-    $info = Get-NewtonRecordInfo -Txid $Txid
-    if ($null -eq $info) { return $null }
-    return [string]$info['path']
-}
-
 function Get-NewtonNow {
     # The clock of the helper.  The tests pin it.
     if ($null -ne $script:NowOverride) { return [int64]$script:NowOverride }
@@ -1501,11 +1494,16 @@ function Get-NewtonLdapResultCode {
 }
 
 function Get-NewtonLdapCode {
-    # The code of the contract for a failed LDAP call: 16 is a conflict, 50
-    # is denied, 32 is not found and anything else is an error.
+    # The code of the contract for a failed LDAP call: 16, 20 and 68 are a
+    # conflict, 50 is denied, 32 is not found and anything else is an error.
     param($ErrorRecord)
     $code = Get-NewtonLdapResultCode $ErrorRecord
     if ($code -eq 16) { return 'conflict' }
+    # 20: the value to add is there already; 68: the name is taken.  The
+    # modify, the add and the rename are atomic, so neither wrote anything:
+    # somebody else made the same change first.
+    if ($code -eq 20) { return 'conflict' }
+    if ($code -eq 68) { return 'conflict' }
     if ($code -eq 50) { return 'denied' }
     if ($code -eq 32) { return 'not_found' }
     return 'error'
@@ -1749,17 +1747,107 @@ function Get-NewtonRdn {
     return [string]$parts['rdn']
 }
 
-function Test-NewtonMemberPresent {
-    # The member is in the group.  The presence is a base-scope search on
-    # the group with the member filter, so a group of more than 1500
-    # members still works and the whole list is never read.
-    param($Adapter, [string]$GroupDn, [string]$MemberDn)
-    if (($null -eq $GroupDn) -or ($GroupDn -eq '')) { return $false }
-    if (($null -eq $MemberDn) -or ($MemberDn -eq '')) { return $false }
-    $filter = '(member=' + (ConvertTo-NewtonFilterText $MemberDn) + ')'
-    $entries = Search-Newton $Adapter $GroupDn $filter 'base' ([string[]]@('objectClass'))
-    if ($entries.Count -eq 0) { return $false }
-    return $true
+function Get-NewtonMembership {
+    # Whether the member of one GUID is in the group of another GUID.  Each
+    # search is a base search of the group named by its GUID
+    # (<GUID=...>, MS-ADTS 3.1.1.3.1.2.4), so a group or a member moved
+    # between two searches, even moved back, never changes the answer, and a
+    # group of more than 1500 members still works (the list is never read).
+    #
+    # 'present': the filter (member=<GUID=member>) matches; the directory
+    # resolves the GUID form of the value inside the one request.  'absent':
+    # it does not match and (member=*) does, and both answer the same when
+    # run again, so the group holds member values the bind can read and none
+    # of them is the member.  'empty': neither
+    # matches.  An empty group and a group whose member the bind has no
+    # right to read answer the same (MS-ADTS 3.1.1.4.3: an attribute the
+    # requester cannot read is treated as "does not exist" in the returned
+    # attributes and in the LDAP filter, so (!(member=...)) would match it
+    # too), so 'empty' never says the member is out: each caller decides
+    # what it may take it for.  $null: the group is not there.
+    param($Adapter, [string]$GroupGuid, [string]$MemberGuid)
+    if ([string]::IsNullOrEmpty($GroupGuid) -or [string]::IsNullOrEmpty($MemberGuid)) { return $null }
+    try {
+        $base = ConvertTo-NewtonGuidDn $GroupGuid
+        $value = ConvertTo-NewtonGuidDn $MemberGuid
+    } catch {
+        return $null
+    }
+    $attributes = [string[]]@('objectClass')
+    try {
+        $equality = '(member=' + (ConvertTo-NewtonFilterText $value) + ')'
+        $found = Search-Newton $Adapter $base $equality 'base' $attributes
+        if ($found.Count -gt 0) { return 'present' }
+        $any = Search-Newton $Adapter $base '(member=*)' 'base' $attributes
+        if ($any.Count -gt 0) {
+            # The bind could read member for (member=*), but the right may
+            # have changed after the equality search missed: both run again,
+            # and the member is out only when the equality search still
+            # misses and (member=*) still matches.  A right that changes
+            # more than once inside one read is a known limit.
+            $again = Search-Newton $Adapter $base $equality 'base' $attributes
+            if ($again.Count -gt 0) { return 'present' }
+            $stillAny = Search-Newton $Adapter $base '(member=*)' 'base' $attributes
+            if ($stillAny.Count -gt 0) { return 'absent' }
+            return 'empty'
+        }
+        $group = Search-Newton $Adapter $base '(objectClass=*)' 'base' $attributes
+        if ($group.Count -eq 0) { return $null }
+    } catch {
+        if ((Get-NewtonLdapResultCode $_) -eq 32) { return $null }
+        throw
+    }
+    return 'empty'
+}
+
+function Get-NewtonReadLive {
+    # The live image an outcome is read from (a read-back, the re-read after
+    # a failed write or undo, a confirm).  A value the bind cannot read is a
+    # target that cannot be read (an empty image), never a known value:
+    #   a member-add's group that answers no member ('empty') is not the
+    #   before-image "absent" (a member-remove's is its after-image: a known
+    #   limit, the group's member made unreadable after the before-check
+    #   proved it readable reads absent);
+    #   no enc-types value is "absent" only when removing it is the
+    #   after-image;
+    #   no quota, no lockoutTime and no userAccountControl are never 0 (a
+    #   domain head holds its quota, an unlock writes 0, every account has a
+    #   userAccountControl).
+    param([hashtable]$Request, $Resolved)
+    if ($null -eq $Resolved) { return @{} }
+    $verb = [string]$Request['verb']
+    $live = $Resolved['live']
+    if ($verb -eq 'member-add' -or $verb -eq 'member-remove') {
+        if (($verb -eq 'member-add') -and ([string]$Resolved['membership'] -eq 'empty')) { return @{} }
+        return $live
+    }
+    if ($verb -eq 'enc-types') {
+        if (([string]$live['etypes'] -eq 'absent') -and ([string]$Request['after']['etypes'] -ne 'absent')) {
+            return @{}
+        }
+        return $live
+    }
+    if ($verb -eq 'maq') {
+        if ($null -eq (Get-NewtonAttrInt $Resolved['object'] 'ms-DS-MachineAccountQuota')) { return @{} }
+        return $live
+    }
+    if ($verb -eq 'unlock') {
+        if ($null -eq (Get-NewtonAttrInt $Resolved['object'] 'lockoutTime')) { return @{} }
+        return $live
+    }
+    if ($verb -eq 'uac-clear' -or $verb -eq 'disable' -or $verb -eq 'enable') {
+        # every account carries a userAccountControl: no value is one the
+        # bind cannot read, never 0
+        if ($null -eq (Get-NewtonAttrInt $Resolved['object'] 'userAccountControl')) { return @{} }
+        return $live
+    }
+    if ($verb -eq 'move') {
+        # a parent that cannot be read names no parent: a target that cannot
+        # be read
+        if ([string]::IsNullOrEmpty([string]$live['parent'])) { return @{} }
+        return $live
+    }
+    return $live
 }
 
 function Find-NewtonObjectByGuid {
@@ -1795,13 +1883,25 @@ function Find-NewtonCreatedObject {
     # The object a user-create made.  The undo needs the members and the
     # groups of that object, so this read asks for them: the read of every
     # other object never asks for the member list.
+    #
+    # $null only when a base search of the GUID name (<GUID=...>, MS-ADTS
+    # 3.1.1.3.1.2.4) answers noSuchObject (32), as it does when its base
+    # object does not exist (RFC 4511 4.5.1.1).  An object the bind cannot
+    # see at all may answer so too (a known limit: such a user reads gone).  A subtree search on objectGUID that finds nothing
+    # proves nothing: a filter on an objectGUID the bind cannot read matches
+    # nothing (MS-ADTS 3.1.1.4.3).  A base search that answers no entry and
+    # no error is an object the bind cannot read: an entry with no value,
+    # never gone.  $DomainDn is kept for the callers; the GUID name needs no
+    # base.
     param($Adapter, [string]$Guid, [string]$DomainDn)
-    if ($DomainDn -eq '') { $DomainDn = Get-NewtonDomainDn $Adapter }
-    if ($DomainDn -eq '') { return $null }
-    $entries = Search-Newton $Adapter $DomainDn (ConvertTo-NewtonGuidFilter $Guid) 'sub' ([string[]]@(
-        'objectGUID', 'userAccountControl', 'uSNChanged', 'member', 'memberOf'
-    ))
-    if ($entries.Count -eq 0) { return $null }
+    $attributes = [string[]]@('objectGUID', 'userAccountControl', 'uSNChanged', 'member', 'memberOf')
+    try {
+        $entries = Search-Newton $Adapter (ConvertTo-NewtonGuidDn $Guid) '(objectClass=*)' 'base' $attributes
+    } catch {
+        if ((Get-NewtonLdapResultCode $_) -eq 32) { return $null }
+        throw
+    }
+    if ($entries.Count -eq 0) { return @{ dn = ''; attrs = @{} } }
     return $entries[0]
 }
 
@@ -2066,15 +2166,20 @@ function Get-NewtonTarget {
             member_sid = (Get-NewtonSid $member)
             member_sam = (ConvertTo-NewtonLowerSam (Get-NewtonAttrString $member 'sAMAccountName' 0))
         }
+        # A group that answers no member value reads absent here: the plan
+        # and the before-check of a member-add take it so, and the add is a
+        # write the server checks against the values it holds (an add of a
+        # member that is in answers 20, nothing written).  An outcome is
+        # never read from it (Get-NewtonReadLive).
+        $membership = Get-NewtonMembership $Adapter ([string]$ids['group_guid']) ([string]$ids['member_guid'])
+        if ($null -eq $membership) { return $null }
         $live = @{ member = 'absent' }
-        if (Test-NewtonMemberPresent $Adapter ([string]$group['dn']) ([string]$member['dn'])) {
-            $live['member'] = 'present'
-        }
+        if ($membership -eq 'present') { $live['member'] = 'present' }
         $facts = @{
             group = (Get-NewtonFacts $Adapter $group $domainSid)
             member = (Get-NewtonFacts $Adapter $member $domainSid)
         }
-        return @{ ids = $ids; live = $live; facts = $facts; group = $group; member = $member; domain_dn = $domainDn; domain_sid = $domainSid }
+        return @{ ids = $ids; live = $live; facts = $facts; group = $group; member = $member; membership = $membership; domain_dn = $domainDn; domain_sid = $domainSid }
     }
 
     if ($verb -eq 'user-create') {
@@ -2223,10 +2328,28 @@ function Get-NewtonLive {
     Throw-NewtonRefusal 'error' 'the verb has no live values'
 }
 
+function Test-NewtonLiveReadable {
+    # A live image that names a value.  A move whose current parent cannot
+    # be read, or an account whose userAccountControl cannot be read (every
+    # account carries one, so 0 is no value), is a target that cannot be
+    # read, never a value that matches neither image.
+    param([string]$Verb, $Live)
+    if ($null -eq $Live) { return $false }
+    # an empty image is a value the bind cannot read (Get-NewtonReadLive)
+    if ($Live.Count -eq 0) { return $false }
+    if ($Verb -eq 'move') { return (-not [string]::IsNullOrEmpty([string]$Live['parent'])) }
+    if ($Verb -eq 'uac-clear' -or $Verb -eq 'disable' -or $Verb -eq 'enable') {
+        return ([int64]$Live['uac'] -ne 0)
+    }
+    return $true
+}
+
 function Test-NewtonImageEqual {
     # Two images of the same shape are equal when every value is.
     param($Left, $Right)
     if ($null -eq $Left -or $null -eq $Right) { return $false }
+    # an empty image (a value that cannot be read) equals no image
+    if (($Left.Count -eq 0) -or ($Left.Count -ne $Right.Count)) { return $false }
     foreach ($key in $Left.Keys) {
         if (-not $Right.ContainsKey($key)) { return $false }
         $first = $Left[$key]
@@ -2290,10 +2413,27 @@ function Get-NewtonAfterValues {
     return @([string]$after[$key])
 }
 
-function Get-NewtonMoveDn {
-    # The DN of the target of a move.
-    param($Resolved)
-    return [string]$Resolved['object']['dn']
+function ConvertTo-NewtonGuidDn {
+    # The GUID form of the DN of an object: <GUID=...>.  A write that names
+    # its object this way acts on the object of that GUID wherever it is:
+    # the directory resolves the name inside the one request.  A DN a search
+    # answered earlier may name another object by the time the write arrives
+    # (somebody may have moved Newton's object away and made another at that
+    # DN).  A GUID that is not one throws.
+    param([string]$Guid)
+    return ('<GUID=' + ([guid]$Guid).ToString() + '>')
+}
+
+function Get-NewtonWriteName {
+    # The name a modify or a rename of the verb is sent with: the GUID form
+    # of the object the plan named (the group of a membership), never the
+    # DN the read answered.
+    param([hashtable]$Request)
+    $verb = [string]$Request['verb']
+    if ($verb -eq 'member-add' -or $verb -eq 'member-remove') {
+        return (ConvertTo-NewtonGuidDn ([string]$Request['target']['group_guid']))
+    }
+    return (ConvertTo-NewtonGuidDn ([string]$Request['target']['guid']))
 }
 
 function Get-NewtonTargetDn {
@@ -2350,7 +2490,7 @@ function Invoke-NewtonWrite {
         $newParent = $Resolved['new_parent']
         if ($null -eq $newParent) { Throw-NewtonRefusal 'error' 'the new parent is not there' }
         $Adapter.ModifyDN(
-            (Get-NewtonMoveDn $Resolved),
+            (Get-NewtonWriteName $Request),
             [string]$newParent['dn'],
             (Get-NewtonRdn $Resolved['object'])
         )
@@ -2383,13 +2523,15 @@ function Invoke-NewtonWrite {
     $attribute = Get-NewtonAttributeOfVerb $verb
     $oldValues = Get-NewtonBeforeValues $Request $Resolved
     $newValues = Get-NewtonAfterValues $Request $Resolved
-    $Adapter.Modify((Get-NewtonTargetDn $Request $Resolved), $attribute, $oldValues, $newValues)
+    $Adapter.Modify((Get-NewtonWriteName $Request), $attribute, $oldValues, $newValues)
 }
 
 function Invoke-NewtonUndoWrite {
     # The undo of one write: the inverse, in one modify, one add or one
     # rename.
-    param([hashtable]$Request, $Resolved, $Adapter, [ref]$Conflicts, [ref]$Failed)
+    # $Unanswered is set when the write failed with no result code from the
+    # server (a client timeout, a dropped connection): it may still land.
+    param([hashtable]$Request, $Resolved, $Adapter, [ref]$Conflicts, [ref]$Failed, [ref]$Unanswered)
     $verb = [string]$Request['verb']
     $dn = Get-NewtonTargetDn $Request $Resolved
     try {
@@ -2409,7 +2551,7 @@ function Invoke-NewtonUndoWrite {
                 return
             }
             $Adapter.ModifyDN(
-                [string]$object['dn'],
+                (Get-NewtonWriteName $Request),
                 [string]$oldParent['dn'],
                 (Get-NewtonRdn $object)
             )
@@ -2418,7 +2560,10 @@ function Invoke-NewtonUndoWrite {
         if ($verb -eq 'user-create') {
             $created = $Resolved['created_guid']
             if ([string]::IsNullOrEmpty([string]$created)) {
-                $Conflicts.Value += [string]$Resolved['object_guid']
+                # No created GUID is recorded: the object cannot be
+                # identified, so it is left, and the conflict names the DN
+                # its add named.
+                $Conflicts.Value += $dn
                 return
             }
             $object = Find-NewtonCreatedObject $Adapter ([string]$created) ([string]$Resolved['domain_dn'])
@@ -2445,13 +2590,15 @@ function Invoke-NewtonUndoWrite {
                 $Conflicts.Value += [string]$created
                 return
             }
-            $Adapter.Delete([string]$object['dn'])
+            # The delete names the GUID: the object the checks above read is
+            # the one deleted, wherever it is now.
+            $Adapter.Delete((ConvertTo-NewtonGuidDn ([string]$created)))
             return
         }
         $attribute = Get-NewtonAttributeOfVerb $verb
         $oldValues = Get-NewtonAfterValues $Request $Resolved
         $newValues = Get-NewtonBeforeValues $Request $Resolved
-        $Adapter.Modify($dn, $attribute, $oldValues, $newValues)
+        $Adapter.Modify((Get-NewtonWriteName $Request), $attribute, $oldValues, $newValues)
     } catch {
         $code = Get-NewtonLdapCode $_
         if ($code -eq 'conflict') {
@@ -2459,6 +2606,7 @@ function Invoke-NewtonUndoWrite {
             return
         }
         $Failed.Value = $true
+        if ((Get-NewtonLdapResultCode $_) -eq 0) { $Unanswered.Value = $true }
     }
 }
 
@@ -2548,17 +2696,31 @@ function Get-NewtonRecordFileInfo {
     return $null
 }
 
+function Get-NewtonStoreFiles {
+    # The files of the transaction store.  A listing that fails throws: it
+    # says nothing about the records, so no caller takes it for an empty store.
+    param([string]$Directory)
+    if (($null -ne $script:FileSystemAdapter) -and
+        ($null -ne $script:FileSystemAdapter.PSObject.Methods['ListFiles'])) {
+        return @($script:FileSystemAdapter.ListFiles($Directory))
+    }
+    return @(Get-ChildItem -LiteralPath $Directory -File -ErrorAction Stop)
+}
+
 function Get-NewtonRecordFileInfos {
     # Every file whose name is a transaction record.  Invalid JSON is still
-    # a record for replay detection, although it cannot be used as state.
+    # a record for replay detection, although it cannot be used as state.  A
+    # store that cannot be listed throws with error: status, confirm, abort,
+    # the undo and the apply's replay check answer error, never take it for
+    # empty, and the sweep leaves every record for a later pass.
     $directory = Get-NewtonTxPath
     $infos = @()
     if (-not (Test-Path -LiteralPath $directory)) { return ,$infos }
     $files = @()
     try {
-        $files = @(Get-ChildItem -LiteralPath $directory -File -ErrorAction SilentlyContinue)
+        $files = @(Get-NewtonStoreFiles $directory)
     } catch {
-        return ,$infos
+        Throw-NewtonRefusal 'error' 'the transaction store cannot be listed'
     }
     foreach ($file in $files) {
         $info = Get-NewtonRecordFileInfo $file
@@ -2582,6 +2744,59 @@ function Get-NewtonRecordInfo {
         }
     }
     return $best
+}
+
+function Test-NewtonRecordInfoAbove {
+    # The order of the generations: a higher generation is above, and a
+    # numbered generation is above the legacy generation zero.
+    param($Info, $Other)
+    if ($null -eq $Other) { return $true }
+    if ([int64]$Info['generation'] -gt [int64]$Other['generation']) { return $true }
+    return (([int64]$Info['generation'] -eq [int64]$Other['generation']) -and
+        (-not [bool]$Info['legacy']) -and [bool]$Other['legacy'])
+}
+
+function Get-NewtonCurrentRecordInfo {
+    # The current record of one transaction as a reader takes it: the
+    # highest generation that can be read and parses, with the record it
+    # holds ('record').  A generation whose write failed after CreateNew
+    # made its file (a full disk) is left on the disk, torn or empty, since
+    # the store's ACL has no Delete right; it was read and does not parse,
+    # so it never hides the generation below it.  A generation whose read
+    # throws (a sharing violation, an IO error, a denied access) says
+    # nothing about what it holds: it may be a complete record that carries
+    # the mark of an answered write, and the generation below it never
+    # stands in for it.  It stops the reader with error, so nothing reads
+    # the record as absent, armed, refused or undone.  The file numbering
+    # and the replay check still count every generation
+    # (Get-NewtonRecordInfo).
+    param([string]$Txid)
+    $mine = @()
+    foreach ($info in (Get-NewtonRecordFileInfos)) {
+        if ([string]$info['txid'] -ceq $Txid) { $mine += ,$info }
+    }
+    $tried = @{}
+    while ($tried.Count -lt $mine.Count) {
+        $best = $null
+        $bestIndex = -1
+        for ($index = 0; $index -lt $mine.Count; $index++) {
+            if ($tried.ContainsKey($index)) { continue }
+            if (Test-NewtonRecordInfoAbove $mine[$index] $best) {
+                $best = $mine[$index]
+                $bestIndex = $index
+            }
+        }
+        $tried[$bestIndex] = $true
+        $read = Read-NewtonRecordChecked ([string]$best['path'])
+        if (-not [bool]$read['readable']) {
+            Throw-NewtonRefusal 'error' 'the transaction record cannot be read'
+        }
+        if ($null -ne $read['record']) {
+            $best['record'] = $read['record']
+            return $best
+        }
+    }
+    return $null
 }
 
 function Get-NewtonRecordGenerationPath {
@@ -2626,9 +2841,57 @@ function Add-NewtonRecord {
     try {
         New-NewtonRecordExclusive -Path $path -Record $Record
     } catch {
+        # The bytes may have reached the file before the throw (a flush to
+        # the disk that failed): the disk is read back, never assumed, and a
+        # generation that holds this record is written.  A read-back that
+        # fails ($null) says nothing, so the record is not taken as written.
+        if ($true -eq (Test-NewtonRecordLanded -Path $path -Record $Record)) { return $path }
         Throw-NewtonRefusal 'error' 'the append-only transaction record could not be created'
     }
     return $path
+}
+
+function Test-NewtonRecordLanded {
+    # A record whose write threw may be on the disk all the same: its bytes
+    # reached the file and its flush to the disk failed.  It reads as
+    # written ($true) only when the file holds exactly the bytes of this
+    # record; a file another writer created, or a torn one, reads $false.
+    # A read-back that itself throws tells nothing about the disk: the
+    # answer is $null, and each caller takes the worst case for its own
+    # write.
+    param([string]$Path, $Record)
+    try {
+        $json = $Record | ConvertTo-Json -Depth 12 -Compress
+    } catch {
+        # The write it follows serialized the same record first, so a
+        # record that cannot be serialized never reached the file.
+        return $false
+    }
+    try {
+        $text = Read-NewtonFileText $Path
+    } catch {
+        return $null
+    }
+    return ([string]$text -ceq [string]$json)
+}
+
+function Read-NewtonRecordChecked {
+    # One record file as a reader takes it: readable is $false when the
+    # read throws, and record is $null when the text that was read does not
+    # parse (an empty or torn file).
+    param([string]$Path)
+    try {
+        $text = Read-NewtonFileText $Path
+    } catch {
+        return @{ readable = $false; record = $null }
+    }
+    $record = $null
+    try {
+        $record = ConvertFrom-Json -InputObject $text
+    } catch {
+        $record = $null
+    }
+    return @{ readable = $true; record = $record }
 }
 
 function Read-NewtonRecord {
@@ -2655,14 +2918,140 @@ function Set-NewtonRecordState {
     $seed = Read-NewtonRecord $Path
     if ($null -eq $seed) { return $null }
     $txid = [string]$seed.txid
-    $info = Get-NewtonRecordInfo -Txid $txid
+    # A current record that cannot be read is never written over from a
+    # generation below it: the state is not written.
+    try {
+        $info = Get-NewtonCurrentRecordInfo -Txid $txid
+    } catch {
+        return $null
+    }
     if ($null -eq $info) { return $null }
-    $record = Read-NewtonRecord ([string]$info['path'])
-    if ($null -eq $record) { return $null }
+    $record = $info['record']
     $record.state = $State
     if ($null -ne $Restored) { $record.restored = $Restored }
     if ($null -ne $Conflicts) { $record.conflicts = $Conflicts }
     return (Add-NewtonRecord -Txid $txid -Record $record)
+}
+
+function Set-NewtonRecordAnswered {
+    # The mark of a write the server answered with a result code, in a new
+    # generation of the store, before the target is read again: the modify,
+    # the add and the rename are atomic, so nothing of Newton's was written,
+    # and an undo of this record (the task, the sweep or an abort) must
+    # never run, since it would write the before-image over somebody else's
+    # value.  The path of the new record is the answer, or $null.
+    param([string]$Path, [int]$ResultCode)
+    $seed = Read-NewtonRecord $Path
+    if ($null -eq $seed) { return $null }
+    $txid = [string]$seed.txid
+    # A current record that cannot be read is never written over from a
+    # generation below it: the state is not written.
+    try {
+        $info = Get-NewtonCurrentRecordInfo -Txid $txid
+    } catch {
+        return $null
+    }
+    if ($null -eq $info) { return $null }
+    $record = $info['record']
+    $record | Add-Member -NotePropertyName 'answered' -NotePropertyValue $ResultCode -Force
+    return (Add-NewtonRecord -Txid $txid -Record $record)
+}
+
+function Complete-NewtonAnsweredRefusal {
+    # The end of a write the server answered: the record is refused with the
+    # conflicts and the undo task is cancelled whatever the record write did
+    # (nothing of Newton's was written, so the task can only write over
+    # somebody else's value).  The answer is $true when the refused record
+    # was written.
+    param([string]$Path, [string]$Txid, [bool]$Unlock, $Conflicts)
+    $written = $null
+    try {
+        $written = Set-NewtonRecordState -Path $Path -State 'refused' -Restored $false -Conflicts $Conflicts
+    } catch {
+        $written = $null
+    }
+    if (-not $Unlock) {
+        try { Unregister-NewtonUndoTask -Txid $Txid } catch { }
+    }
+    return (-not [string]::IsNullOrEmpty([string]$written))
+}
+
+function Add-NewtonUnmarked {
+    # The answer to a write the server answered says unmarked when the store
+    # on the disk does not say so: neither the mark 'answered' nor a record
+    # that is no longer armed landed.  Nothing of Newton's was written, but
+    # the record reads armed with no mark, and the sweep (or the task, when
+    # it is still registered) cannot tell it from a write whose answer was
+    # lost: its undo may write the before-image over somebody else's value.
+    # Newton reads unmarked and tells the owner.  The caller never passes an
+    # unlock, which has no undo, or a conflict, whose refused record was
+    # written.
+    param($Response, [string]$Txid)
+    if (-not ($Response -is [System.Collections.IDictionary])) { return }
+    $record = $null
+    try {
+        $info = Get-NewtonCurrentRecordInfo -Txid $Txid
+        if ($null -ne $info) { $record = $info['record'] }
+    } catch {
+        $record = $null
+    }
+    if ($null -ne $record) {
+        if ($null -ne (Get-NewtonField $record 'answered')) { return }
+        if ([string]$record.state -ne 'armed') { return }
+    }
+    $Response['unmarked'] = $true
+}
+
+function Get-NewtonUndoTarget {
+    # What the undo of a request writes back: the attribute and the object,
+    # as one text.  Two requests with the same text touch the same value, so
+    # the undo of one may write over the other.  An unlock has no undo and
+    # answers $null, and so does a request that is not one (a malformed
+    # record, whose undo throws and never writes).
+    param($Request)
+    if ($Request -isnot [hashtable]) { return $null }
+    $target = $Request['target']
+    if ($target -isnot [hashtable]) { return $null }
+    $low = { param($Name) ([string]$target[$Name]).ToLowerInvariant() }
+    switch -CaseSensitive ([string]$Request['verb']) {
+        'uac-clear' { return ('uac|' + (& $low 'guid')) }
+        'disable' { return ('uac|' + (& $low 'guid')) }
+        'enable' { return ('uac|' + (& $low 'guid')) }
+        'enc-types' { return ('etypes|' + (& $low 'guid')) }
+        'move' { return ('parent|' + (& $low 'guid')) }
+        'maq' { return ('maq|' + (& $low 'guid')) }
+        'member-add' { return ('member|' + (& $low 'group_guid') + '|' + (& $low 'member_guid')) }
+        'member-remove' { return ('member|' + (& $low 'group_guid') + '|' + (& $low 'member_guid')) }
+        'user-create' { return ('user|' + (& $low 'sam')) }
+    }
+    return $null
+}
+
+function Test-NewtonArmedOnTarget {
+    # True when another armed record's undo writes the same target.  Its
+    # undo runs at its undo_at and writes the before-image when the target
+    # shows the after-image, which a later change of the same target can
+    # make true (a write with no answer kept armed on its before-image, say):
+    # the apply is refused while it is armed (SPEC section 6).  A store that
+    # cannot be listed, or a record of it that cannot be read, may hide such
+    # a record: it throws with error.  The caller holds the store lock.
+    param([hashtable]$Request)
+    $wanted = Get-NewtonUndoTarget $Request
+    if ($null -eq $wanted) { return $false }
+    $txids = @{}
+    foreach ($info in (Get-NewtonRecordFileInfos)) { $txids[[string]$info['txid']] = $true }
+    foreach ($txid in @($txids.Keys)) {
+        if ($txid -ceq [string]$Request['txid']) { continue }
+        $current = Get-NewtonCurrentRecordInfo -Txid $txid
+        if ($null -eq $current) { continue }
+        $record = $current['record']
+        if ([string]$record.state -ne 'armed') { continue }
+        $stored = $null
+        try { $stored = ConvertTo-NewtonRequestShape $record.request } catch { continue }
+        $other = Get-NewtonUndoTarget $stored
+        if (($null -ne $other) -and ($other -ceq $wanted)) { return $true }
+    }
+    return $false
 }
 
 function Enter-NewtonLock {
@@ -2701,7 +3090,13 @@ function Get-NewtonRecords {
     # are generation zero; leftover *.new files were excluded by the parser.
     $records = @()
     $current = @{}
-    foreach ($info in (Get-NewtonRecordFileInfos)) {
+    try {
+        $listed = Get-NewtonRecordFileInfos
+    } catch {
+        [Console]::Error.WriteLine('the transaction store cannot be listed; the sweep leaves it for a later pass')
+        return ,$records
+    }
+    foreach ($info in $listed) {
         $txid = [string]$info['txid']
         $best = $null
         if ($current.ContainsKey($txid)) { $best = $current[$txid] }
@@ -2713,10 +3108,17 @@ function Get-NewtonRecords {
         }
     }
     foreach ($txid in @($current.Keys)) {
-        $info = $current[$txid]
-        $record = Read-NewtonRecord ([string]$info['path'])
-        if ($null -eq $record) { continue }
-        $records += @{ path = [string]$info['path']; record = $record }
+        # A torn generation never hides the readable one below it, and a
+        # generation that cannot be read leaves its transaction out of this
+        # pass: the sweep does nothing for it, and a later pass reads it.
+        try {
+            $info = Get-NewtonCurrentRecordInfo -Txid $txid
+        } catch {
+            [Console]::Error.WriteLine('a transaction record cannot be read; the sweep leaves it for a later pass')
+            continue
+        }
+        if ($null -eq $info) { continue }
+        $records += @{ path = [string]$info['path']; record = $info['record'] }
     }
     return ,$records
 }
@@ -2784,11 +3186,20 @@ function Unregister-NewtonUndoTask {
 # ---------------------------------------------------------------------------
 
 function Invoke-NewtonRead {
+    # 'live' is the planning image (a missing quota or lockoutTime reads 0,
+    # an empty group absent).  'outcome' is the image an outcome is read
+    # from (Get-NewtonReadLive), the one Newton's verification of every DC
+    # matches: each DC binds as its own account, so a value its bind cannot
+    # read is an empty image there, never the after-image.  No enc-types
+    # value reads "absent", which matches only an after-image that removes
+    # the value (the read-back's known limit), never a number.
     param([hashtable]$Request, $Adapter)
     $resolved = Get-NewtonTarget $Adapter $Request
     if ($null -eq $resolved) { return (New-NewtonResponse 'not_found') }
     $response = New-NewtonResponse 'ok'
     $response['live'] = $resolved['live']
+    $outcomeRequest = @{ verb = [string]$Request['verb']; after = @{ etypes = 'absent' } }
+    $response['outcome'] = Get-NewtonReadLive $outcomeRequest $resolved
     $response['ids'] = $resolved['ids']
     $response['facts'] = $resolved['facts']
     return $response
@@ -2935,6 +3346,23 @@ function Test-NewtonDcOu {
 function Invoke-NewtonApply {
     param([hashtable]$Request, $Adapter)
     $txid = [string]$Request['txid']
+    # Replay means any legacy or numbered record already reserves this txid.
+    # It is checked before the token and the window: a retry of an apply
+    # this DC holds answers replay even once its approval is over or the key
+    # changed, since the Newton side takes bad_token and expired for nothing
+    # changed.  The answer says only that a record file of this txid exists,
+    # which the status mode answers without a token too (a txid none of whose
+    # generations parses answers replay here, while the status answers not_found
+    # for it; the status skips an unparsable generation).  The check and every
+    # CreateNew below run inside the transaction-store lock.  The record of a
+    # refusal is created as refused in generation zero, and the armed record
+    # only once every check before the write has passed, right before the
+    # undo task and the write: no refusal ever needs a second generation, so
+    # a store that cannot take one never leaves an armed record of a change
+    # that was never sent.
+    if ($null -ne (Get-NewtonRecordInfo -Txid $txid)) {
+        return (New-NewtonResponse 'replay')
+    }
     $key = Get-NewtonKeyBytes
     if ($null -eq $key) { return (New-NewtonResponse 'unavailable') }
     $expected = Get-NewtonToken -Key $key -Digest (Get-NewtonDigest $Request) -NotBefore $Request['nbf'] -NotAfter $Request['exp']
@@ -2951,50 +3379,38 @@ function Invoke-NewtonApply {
     if ($now -gt $exp) { return (New-NewtonResponse 'expired') }
 
     $undoAt = $now + [int64]$Request['window']
-    $record = New-NewtonRecord -Request $Request -UndoAt $undoAt
-    # Replay means any legacy or numbered record already reserves this txid.
-    # The check and CreateNew both run inside the transaction-store lock.
-    if ($null -ne (Get-NewtonRecordInfo -Txid $txid)) {
-        return (New-NewtonResponse 'replay')
-    }
     $path = Get-NewtonRecordGenerationPath -Txid $txid -Generation 0
-    try {
-        New-NewtonRecordExclusive -Path $path -Record $record
-    } catch {
-        # A CreateNew collision after the replay check means another writer
-        # violated the lock.  It is an error, never a replay, and this writer
-        # has changed no record.
-        return (New-NewtonResponse 'error')
-    }
 
-    # the rules of the table of the contract come after the token, the
-    # approval window and the replay (SPEC section 4).
+    # the rules of the table of the contract come after the replay, the
+    # token and the approval window (SPEC section 4).
     try {
         Test-NewtonVerbRules -Request $Request
     } catch {
         $code = Get-NewtonRefusalCode $_
-        $null = Set-NewtonRecordState -Path $path -State 'refused'
+        Save-NewtonRefusedRecord -Request $Request -UndoAt $undoAt -Path $path
         return (New-NewtonResponse $code)
     }
 
     $writeCompleted = $false
+    $writeSent = $false
+    $armed = $false
     $resolved = $null
     try {
         $domainDn = Get-NewtonDomainDn $Adapter
         if (-not (Test-NewtonIsPdc $Adapter $domainDn)) {
-            $null = Set-NewtonRecordState -Path $path -State 'refused'
+            Save-NewtonRefusedRecord -Request $Request -UndoAt $undoAt -Path $path
             return (New-NewtonResponse 'not_pdc')
         }
 
         $resolved = Get-NewtonTarget $Adapter $Request
         if ($null -eq $resolved) {
-            $null = Set-NewtonRecordState -Path $path -State 'refused'
+            Save-NewtonRefusedRecord -Request $Request -UndoAt $undoAt -Path $path
             return (New-NewtonResponse 'not_found')
         }
 
         $derived = Get-NewtonRisk ([string]$Request['verb']) $resolved['facts']
         if ($derived -cne [string]$Request['risk']) {
-            $null = Set-NewtonRecordState -Path $path -State 'refused'
+            Save-NewtonRefusedRecord -Request $Request -UndoAt $undoAt -Path $path
             return (New-NewtonResponse 'risk_mismatch')
         }
 
@@ -3005,68 +3421,244 @@ function Invoke-NewtonApply {
             }
         } catch {
             $code = Get-NewtonRefusalCode $_
-            $null = Set-NewtonRecordState -Path $path -State 'refused'
+            Save-NewtonRefusedRecord -Request $Request -UndoAt $undoAt -Path $path
             if ($code -eq 'not_found') { return (New-NewtonResponse 'not_found') }
             return (New-NewtonResponse $code)
         }
 
         if (-not (Test-NewtonImageEqual $resolved['live'] $Request['before'])) {
-            $null = Set-NewtonRecordState -Path $path -State 'refused'
+            Save-NewtonRefusedRecord -Request $Request -UndoAt $undoAt -Path $path
             $response = New-NewtonResponse 'conflict'
             $response['live'] = $resolved['live']
             return $response
         }
 
+        # Another change of the target is armed: its undo could write over
+        # this one once confirmed.  Nothing is armed or written.  A store
+        # that cannot be checked answers error.
+        $armedOnTarget = $true
+        try {
+            $armedOnTarget = Test-NewtonArmedOnTarget -Request $Request
+        } catch {
+            Save-NewtonRefusedRecord -Request $Request -UndoAt $undoAt -Path $path
+            return (New-NewtonResponse 'error')
+        }
+        if ($armedOnTarget) {
+            Save-NewtonRefusedRecord -Request $Request -UndoAt $undoAt -Path $path
+            $response = New-NewtonResponse 'conflict'
+            $response['live'] = $resolved['live']
+            $response['armed'] = $true
+            return $response
+        }
+
+        # Every check before the write has passed: the armed record is on
+        # the disk before the undo task and before the write.
+        $record = New-NewtonRecord -Request $Request -UndoAt $undoAt
+        try {
+            New-NewtonRecordExclusive -Path $path -Record $record
+        } catch {
+            # A CreateNew collision after the replay check means another
+            # writer violated the lock.  It is an error, never a replay, and
+            # this writer has written nothing.  The armed record may be on
+            # the disk all the same (its flush to the disk threw), so nothing
+            # is sent and nothing is assumed: a record that reads as this one,
+            # or a store that cannot be read back (the helper cannot tell what
+            # it holds, so it takes the worst case: the armed record landed),
+            # is written refused.  Only a file that reads as another record
+            # (a collision) is left alone.  A refused record that cannot be
+            # written leaves the disk reading armed, as far as the helper
+            # knows, for a write that was never sent, which the sweep would
+            # undo over somebody else's value: the answer then says unmarked
+            # (an unlock has no undo and is never unmarked).
+            $response = New-NewtonResponse 'error'
+            if ($false -ne (Test-NewtonRecordLanded -Path $path -Record $record)) {
+                $refusedPath = $null
+                try {
+                    $record['state'] = 'refused'
+                    $refusedPath = Add-NewtonRecord -Txid $txid -Record $record
+                } catch {
+                    $refusedPath = $null
+                }
+                if ([string]::IsNullOrEmpty([string]$refusedPath) -and
+                    ([string]$Request['verb'] -ne 'unlock')) {
+                    $response['unmarked'] = $true
+                }
+            }
+            return $response
+        }
+        $armed = $true
+
         if ([string]$Request['verb'] -ne 'unlock') {
             try {
                 Register-NewtonUndoTask -Txid $txid -UndoAt $undoAt
             } catch {
-                $null = Set-NewtonRecordState -Path $path -State 'refused'
-                return (New-NewtonResponse 'unavailable')
+                # Nothing is sent.  A refused record that cannot be written
+                # leaves the armed record with no task, which the sweep at the
+                # next request cannot tell from a write that landed: the
+                # answer then says unmarked.
+                $refusedPath = $null
+                try {
+                    $refusedPath = Set-NewtonRecordState -Path $path -State 'refused'
+                } catch {
+                    $refusedPath = $null
+                }
+                $response = New-NewtonResponse 'unavailable'
+                if ([string]::IsNullOrEmpty([string]$refusedPath)) { $response['unmarked'] = $true }
+                return $response
             }
         }
 
         try {
+            $writeSent = $true
             Invoke-NewtonWrite -Request $Request -Resolved $resolved -Adapter $Adapter
         } catch {
             $code = Get-NewtonLdapCode $_
-            if (($code -ne 'conflict') -and ([string]$Request['verb'] -ne 'unlock')) {
-                # A failure other than a conflict runs the undo at once (SPEC
-                # section 6): the server may have applied the write and lost
-                # the answer.  The target is read again first.  A target
-                # that still shows the before-image was never written, and
-                # the record is refused below.  One that shows anything else
-                # is undone now, and the record says what the undo restored.
-                # A target that cannot be read again leaves the record armed
-                # and the undo task registered: the task undoes it at
-                # undo_at.
-                $landed = $false
+            # A result code the server answered: the modify, the add and the
+            # rename are atomic, so a write the server refused wrote nothing.
+            # No result code (a client timeout, a connection that dropped):
+            # the request may still commit on the server.
+            $resultCode = Get-NewtonLdapResultCode $_
+            $answered = ($resultCode -ne 0)
+            $unlock = ([string]$Request['verb'] -eq 'unlock')
+            if ($answered) {
+                # The mark comes before the re-read: whatever happens next,
+                # the task, the sweep and an abort find it and never undo.  A
+                # store that takes neither it nor the refused record leaves
+                # the record armed with no mark: the answer says unmarked.
                 try {
-                    $again = Get-NewtonTarget $Adapter $Request
-                    if ($null -ne $again) {
-                        $landed = -not (Test-NewtonImageEqual $again['live'] $Request['before'])
-                    }
-                } catch {
-                    return (New-NewtonResponse $code)
-                }
-                if ($landed) {
+                    $null = Set-NewtonRecordAnswered -Path $path -ResultCode ([int]$resultCode)
+                } catch { }
+            }
+            # The answer of the failure.  After a code the server answered,
+            # an armed record on the disk with no mark is one the sweep
+            # cannot tell from a lost answer: the answer then says unmarked.
+            $failure = & {
+                if ($code -ne 'conflict') {
+                    # A failure other than a conflict (SPEC section 6): the
+                    # server may have applied the write and lost the answer, so
+                    # the target is read again and the record says what it shows.
+                    # A target that cannot be read again leaves the record armed
+                    # and the undo task registered: the task undoes it at undo_at
+                    # (after an error the server answered, the record's mark
+                    # makes that undo record it refused and write nothing; an
+                    # unlock, which has no undo, stays armed and its status says
+                    # so).
+                    $again = $null
                     try {
-                        $current = Read-NewtonRecord $path
-                        if ($null -ne $current) {
-                            $null = Invoke-NewtonUndoRecord -Path $path -Record $current -Adapter $Adapter
+                        $again = Get-NewtonTarget $Adapter $Request
+                    } catch {
+                        return (New-NewtonResponse $code)
+                    }
+                    if ($null -eq $again) { return (New-NewtonResponse $code) }
+                    $live = Get-NewtonReadLive $Request $again
+                    if (-not (Test-NewtonLiveReadable ([string]$Request['verb']) $live)) {
+                        return (New-NewtonResponse $code)
+                    }
+                    if ($answered -and (Test-NewtonImageEqual $live $Request['after'])) {
+                        # The after-image after a result code the server
+                        # answered: the write is atomic, so nothing of Newton's
+                        # was written and somebody else made the same change.
+                        # Refused with the conflict, and the undo never runs (it
+                        # would put back over their change): the task goes even
+                        # when the record cannot be written, and then the answer
+                        # is an error, so Newton reads the armed record and never
+                        # reports nothing written; an unlock is refused too, since
+                        # Newton's unlock did not land.
+                        $dn = Get-NewtonTargetDn $Request $resolved
+                        if (-not (Complete-NewtonAnsweredRefusal -Path $path -Txid $txid -Unlock $unlock -Conflicts @($dn))) {
+                            return (New-NewtonResponse 'error')
+                        }
+                        $response = New-NewtonResponse 'conflict'
+                        $response['live'] = $live
+                        return $response
+                    }
+                    if (Test-NewtonImageEqual $live $Request['after']) {
+                        # No answer from the server: the write landed and its
+                        # answer was lost.
+                        if ($unlock) {
+                            # An unlock has no undo: written is confirmed.  A
+                            # confirmed record that cannot be written leaves the
+                            # unlock armed (never refused: the account is
+                            # unlocked), and its status says so.
+                            try {
+                                $null = Set-NewtonRecordState -Path $path -State 'confirmed'
+                            } catch { }
                             return (New-NewtonResponse $code)
                         }
-                    } catch { }
-                    # The undo did not run to its end: the record stays
-                    # armed and the task undoes it at undo_at.
-                    return (New-NewtonResponse $code)
+                        try {
+                            $current = Read-NewtonRecord $path
+                            if ($null -ne $current) {
+                                $null = Invoke-NewtonUndoRecord -Path $path -Record $current -Adapter $Adapter
+                            }
+                        } catch { }
+                        # An undo that did not run to its end leaves the record
+                        # armed and the task undoes it at undo_at.
+                        return (New-NewtonResponse $code)
+                    }
+                    if (-not (Test-NewtonImageEqual $live $Request['before'])) {
+                        $dn = Get-NewtonTargetDn $Request $resolved
+                        if (-not $answered) {
+                            # Neither image and no answer from the server:
+                            # somebody else changed the target, and Newton's
+                            # write may have landed before that change.  The
+                            # outcome is unknown, never refused.  The undo never
+                            # writes over the other change: the record is
+                            # undo_failed with the conflict and the task goes (an
+                            # unlock, which has no undo, stays armed).  The
+                            # answer keeps the code, with the live value, so
+                            # Newton reads the record.  A record that cannot be
+                            # written stays armed with its task.
+                            $response = New-NewtonResponse $code
+                            if ($unlock) {
+                                $response['live'] = $live
+                                return $response
+                            }
+                            $written = $null
+                            try {
+                                $written = Set-NewtonRecordState -Path $path -State 'undo_failed' -Restored $false -Conflicts @($dn)
+                            } catch { }
+                            if (-not [string]::IsNullOrEmpty([string]$written)) {
+                                try { Unregister-NewtonUndoTask -Txid $txid } catch { }
+                                $response['live'] = $live
+                            }
+                            return $response
+                        }
+                        # Neither image after an answer from the server: the
+                        # write is atomic, so nothing of Newton's was written and
+                        # somebody else changed the target.  The undo never
+                        # writes over their value; a refused record that cannot
+                        # be written answers an error, never conflict.
+                        if (-not (Complete-NewtonAnsweredRefusal -Path $path -Txid $txid -Unlock $unlock -Conflicts @($dn))) {
+                            return (New-NewtonResponse 'error')
+                        }
+                        $response = New-NewtonResponse 'conflict'
+                        $response['live'] = $live
+                        return $response
+                    }
+                    if (-not $answered) {
+                        # Still the before-image, and no answer from the server:
+                        # the write may still land, so nothing is recorded refused.
+                        return (New-NewtonResponse $code)
+                    }
                 }
+                # Nothing was written: a conflict, or the before-image after a
+                # result code the server answered.  The task goes whatever the
+                # record write did (it could only write over somebody else's
+                # value), and a refused record that cannot be written answers an
+                # error, so Newton reads the armed record and never reports
+                # nothing written.
+                if (-not (Complete-NewtonAnsweredRefusal -Path $path -Txid $txid -Unlock $unlock -Conflicts @())) {
+                    return (New-NewtonResponse 'error')
+                }
+                return (New-NewtonResponse $code)
             }
-            if ([string]$Request['verb'] -ne 'unlock') {
-                try { Unregister-NewtonUndoTask -Txid $txid } catch { }
+            # A conflict is answered only once the refused record was
+            # written: a read-back that fails after it says nothing about the
+            # record, so a conflict is never unmarked.
+            if ($answered -and (-not $unlock) -and ([string]$failure['code'] -ne 'conflict')) {
+                Add-NewtonUnmarked -Response $failure -Txid $txid
             }
-            $null = Set-NewtonRecordState -Path $path -State 'refused' -Restored $false -Conflicts @()
-            return (New-NewtonResponse $code)
+            return $failure
         }
         $writeCompleted = $true
 
@@ -3081,18 +3673,24 @@ function Invoke-NewtonApply {
             }
             # The undo of a user-create needs the GUID and the uSNChanged
             # of the new object: without the two of them it can never
-            # delete it.  The object is deleted at once when one of them
-            # is missing, or when the record that holds them cannot be
-            # written, and the answer is an error.  The helper never
-            # answers ok without the two facts in the record.
+            # delete it.  When one of them is missing, or the record that
+            # holds them cannot be written, the object is put back at once by
+            # its GUID (never by its DN; with no GUID it is left, undo_failed),
+            # and the answer is an error.  The helper never answers ok
+            # without the two facts in the record.
             $facts = (($null -ne $created) -and
                 (-not [string]::IsNullOrEmpty([string]$created['guid'])) -and
                 ($null -ne $created['usn_changed']))
             if ($facts) {
                 $resolved['created_guid'] = $created['guid']
                 $resolved['created_usn'] = $created['usn_changed']
-                $currentPath = Get-NewtonRecordPath $txid
-                $record = Read-NewtonRecord $currentPath
+                $record = $null
+                try {
+                    $currentInfo = Get-NewtonCurrentRecordInfo -Txid $txid
+                    if ($null -ne $currentInfo) { $record = $currentInfo['record'] }
+                } catch {
+                    $record = $null
+                }
                 if ($null -eq $record) {
                     $facts = $false
                 } else {
@@ -3105,30 +3703,65 @@ function Invoke-NewtonApply {
                 }
             }
             if (-not $facts) {
+                # The new user is put back at once, and only by its GUID.  An
+                # account at the planned DN may not be Newton's (somebody may
+                # have moved Newton's away and made another there), so with no
+                # GUID nothing is deleted: the record is undo_failed with the DN.
                 $createdDn = Get-NewtonTargetDn $Request $resolved
+                $createdGuid = $null
+                if (($null -ne $created) -and (-not [string]::IsNullOrEmpty([string]$created['guid']))) {
+                    $createdGuid = [string]$created['guid']
+                }
                 $restored = $false
                 $conflicts = @()
-                try {
-                    $Adapter.Delete($createdDn)
-                    $restored = $true
-                } catch {
+                if ($null -eq $createdGuid) {
                     $conflicts = @($createdDn)
+                } else {
+                    try {
+                        # The delete names the GUID: the object of that GUID
+                        # is deleted wherever it is, in the one request, and
+                        # an account made at the planned DN is never touched.
+                        $Adapter.Delete((ConvertTo-NewtonGuidDn $createdGuid))
+                        $restored = $true
+                    } catch {
+                        # The answer of the delete may be lost: the object of
+                        # the GUID is looked for again.  One that cannot be
+                        # looked for leaves the record armed and the task
+                        # registered.
+                        $again = $null
+                        try {
+                            $again = Find-NewtonCreatedObject $Adapter $createdGuid ([string]$resolved['domain_dn'])
+                        } catch {
+                            return (New-NewtonResponse 'error')
+                        }
+                        if ($null -eq $again) {
+                            $restored = $true
+                        } else {
+                            $conflicts = @($createdGuid)
+                        }
+                    }
                 }
                 $state = 'undo_failed'
                 if ($restored) { $state = 'undone' }
                 # The record of the outcome comes before the cancel of
                 # the task: the task that fires anyway finds a record
                 # that is not armed and does nothing.
-                $null = Set-NewtonRecordState -Path $path -State $state -Restored $restored -Conflicts $conflicts
-                try { Unregister-NewtonUndoTask -Txid $txid } catch { }
+                $written = Set-NewtonRecordState -Path $path -State $state -Restored $restored -Conflicts $conflicts
+                if (-not [string]::IsNullOrEmpty([string]$written)) {
+                    try { Unregister-NewtonUndoTask -Txid $txid } catch { }
+                }
                 return (New-NewtonResponse 'error')
             }
         }
 
         # The first record is already armed.  Only unlock changes that state:
-        # it has no undo task and becomes confirmed after the write.
+        # it has no undo task and becomes confirmed after the write.  A
+        # confirmed record that cannot be written leaves the unlock armed,
+        # and its status says an unlock has no undo.
         if ([string]$Request['verb'] -eq 'unlock') {
-            $null = Set-NewtonRecordState -Path $path -State 'confirmed'
+            try {
+                $null = Set-NewtonRecordState -Path $path -State 'confirmed'
+            } catch { }
         }
 
         $response = New-NewtonResponse 'ok'
@@ -3140,39 +3773,63 @@ function Invoke-NewtonApply {
         $code = Get-NewtonRefusalCode $_
         if ($writeCompleted) {
             # the write happened: the undo runs now and the record says what
-            # it really restored.
+            # it really restored.  An undo that cannot run to its end leaves
+            # the record armed and the task undoes it at undo_at: the record
+            # never says undo_failed (still written) when that is not known.
             try {
                 $current = Read-NewtonRecord $path
                 if ($null -ne $current) {
                     $null = Invoke-NewtonUndoRecord -Path $path -Record $current -Adapter $Adapter
-                } else {
-                    $null = Set-NewtonRecordState -Path $path -State 'undo_failed' -Restored $false -Conflicts @()
                 }
-            } catch {
-                $null = Set-NewtonRecordState -Path $path -State 'undo_failed' -Restored $false -Conflicts @()
-            }
+            } catch { }
+        } elseif ($writeSent) {
+            # The write was sent, and the handling of its failure threw: the
+            # write may have landed, so the record stays armed with its task
+            # (a write the server answered carries its mark, and its undo
+            # writes nothing).
+        } elseif ($armed) {
+            # Armed, and the write was never sent: nothing was written.
+            try {
+                $written = Set-NewtonRecordState -Path $path -State 'refused' -Restored $false -Conflicts @()
+                if (([string]$Request['verb'] -ne 'unlock') -and (-not [string]::IsNullOrEmpty([string]$written))) {
+                    try { Unregister-NewtonUndoTask -Txid $txid } catch { }
+                }
+            } catch { }
         } else {
-            if ([string]$Request['verb'] -ne 'unlock') {
-                try { Unregister-NewtonUndoTask -Txid $txid } catch { }
-            }
-            $null = Set-NewtonRecordState -Path $path -State 'refused' -Restored $false -Conflicts @()
+            Save-NewtonRefusedRecord -Request $Request -UndoAt $undoAt -Path $path
         }
         return (New-NewtonResponse $code)
     }
 }
+
+function Save-NewtonRefusedRecord {
+    # The record of a request refused before anything was armed or sent: one
+    # generation zero whose state is refused.  It reserves the txid, so the
+    # same request is a replay.  A record that cannot be created is logged
+    # and the refusal stands: nothing was written and nothing is armed.
+    param([hashtable]$Request, [int64]$UndoAt, [string]$Path)
+    $record = New-NewtonRecord -Request $Request -UndoAt $UndoAt
+    $record.state = 'refused'
+    try {
+        New-NewtonRecordExclusive -Path $Path -Record $record
+    } catch {
+        [Console]::Error.WriteLine('the record of a refused request could not be created')
+    }
+}
+
 function Get-NewtonLiveAfter {
     # The live values after the write: the target is read back (SPEC
     # section 6, step 7).
     param([hashtable]$Request, $Resolved, $Adapter)
     $verb = [string]$Request['verb']
     if ($verb -eq 'member-add' -or $verb -eq 'member-remove') {
-        $group = Resolve-NewtonOne $Adapter $Request['target'] 'group_'
-        if ($null -eq $group) { return $Resolved['live'] }
+        # the presence is read by the GUIDs, never by a DN read earlier; a
+        # group that cannot be read is a target that cannot be read
+        $membership = Get-NewtonMembership $Adapter ([string]$Request['target']['group_guid']) ([string]$Request['target']['member_guid'])
+        if ($null -eq $membership) { return @{} }
         $live = @{ member = 'absent' }
-        if (Test-NewtonMemberPresent $Adapter ([string]$group['dn']) ([string]$Resolved['member']['dn'])) {
-            $live['member'] = 'present'
-        }
-        return $live
+        if ($membership -eq 'present') { $live['member'] = 'present' }
+        return (Get-NewtonReadLive $Request @{ live = $live; membership = $membership })
     }
     if ($verb -eq 'user-create') {
         $existing = Find-NewtonObjectBySam $Adapter ([string]$Request['target']['sam'])
@@ -3191,7 +3848,7 @@ function Get-NewtonLiveAfter {
     }
     $object = Resolve-NewtonOne $Adapter $Request['target'] ''
     if ($null -eq $object) { return $Resolved['live'] }
-    return (Get-NewtonLive $Adapter $verb $object)
+    return (Get-NewtonReadLive $Request @{ live = (Get-NewtonLive $Adapter $verb $object); object = $object })
 }
 
 function Invoke-NewtonConfirm {
@@ -3206,9 +3863,11 @@ function Invoke-NewtonConfirm {
     # nothing.
     param([hashtable]$Request, $Adapter)
     $txid = [string]$Request['txid']
-    $path = Get-NewtonRecordPath $txid
-    $record = Read-NewtonRecord $path
-    if ($null -eq $record) { return (New-NewtonResponse 'not_found') }
+    # A current record that cannot be read throws: the answer is error.
+    $current = Get-NewtonCurrentRecordInfo -Txid $txid
+    if ($null -eq $current) { return (New-NewtonResponse 'not_found') }
+    $path = [string]$current['path']
+    $record = $current['record']
     $state = [string]$record.state
     # An unlock arms no undo and is confirmed at the apply: the confirm
     # CORE sends after it re-reads the target and answers ok.  A confirmed
@@ -3221,7 +3880,7 @@ function Invoke-NewtonConfirm {
     try {
         $resolved = Get-NewtonTarget $Adapter $stored
         if ($null -eq $resolved) { return (New-NewtonResponse 'conflict') }
-        $live = $resolved['live']
+        $live = Get-NewtonReadLive $stored $resolved
     } catch {
         return (New-NewtonResponse 'conflict')
     }
@@ -3250,11 +3909,39 @@ function Invoke-NewtonConfirm {
 }
 
 function Invoke-NewtonUndoRecord {
-    # The undo of one record.
+    # The undo of one record.  The record says what the directory shows: an
+    # undo that failed or met a conflict is read again, and the before-image
+    # means the change is not there (undone).  A user-create with a recorded
+    # GUID is read again by that GUID: gone is undone, still there (renamed
+    # or not) is undo_failed.  A user-create with no recorded GUID is never
+    # undone from a lookup by its planned names: it is undo_failed with its
+    # DN as the conflict.  An outcome that cannot be read
+    # or cannot be recorded throws, so the record stays armed and the task
+    # stays registered: the undo is tried again, and the caller answers an
+    # error.
     param([string]$Path, $Record, $Adapter)
     $stored = ConvertTo-NewtonRequestShape $Record.request
+    if ([string]$stored['verb'] -eq 'unlock') {
+        # An unlock has no undo (section 3): writing the before-image back
+        # would lock the account again.  The record is left as it is.
+        return @{ restored = $false; conflicts = @(); state = [string]$Record.state }
+    }
+    if ($null -ne (Get-NewtonField $Record 'answered')) {
+        # The server answered the apply's write with a result code: the
+        # atomic write wrote nothing of Newton's, so the undo writes nothing
+        # (the after-image there is somebody else's) and the record is
+        # refused.  A refusal that cannot be recorded throws: the record
+        # stays armed and the next undo of it writes nothing either.
+        $written = Set-NewtonRecordState -Path $Path -State 'refused' -Restored $false -Conflicts $null
+        if ([string]::IsNullOrEmpty([string]$written)) {
+            Throw-NewtonRefusal 'error' 'the refusal of an answered write could not be recorded'
+        }
+        try { Unregister-NewtonUndoTask -Txid ([string]$stored['txid']) } catch { }
+        return @{ restored = $false; conflicts = @(Get-NewtonField $Record 'conflicts'); state = 'refused' }
+    }
     $conflicts = @()
     $failed = $false
+    $unanswered = $false
     try {
         $resolved = Get-NewtonTarget $Adapter $stored
     } catch {
@@ -3271,26 +3958,101 @@ function Invoke-NewtonUndoRecord {
         if ([string]$stored['verb'] -eq 'move') {
             $null = Set-NewtonMoveParent -Request $stored -Resolved $resolved -Adapter $Adapter
         }
-        Invoke-NewtonUndoWrite -Request $stored -Resolved $resolved -Adapter $Adapter -Conflicts ([ref]$conflicts) -Failed ([ref]$failed)
+        Invoke-NewtonUndoWrite -Request $stored -Resolved $resolved -Adapter $Adapter -Conflicts ([ref]$conflicts) -Failed ([ref]$failed) -Unanswered ([ref]$unanswered)
     }
+    $createdGuid = ''
+    $userCreate = ([string]$stored['verb'] -eq 'user-create')
+    if ($userCreate) {
+        $createdFacts = Get-NewtonField $Record 'created'
+        if ($null -ne $createdFacts) { $createdGuid = [string](Get-NewtonField $createdFacts 'guid') }
+    }
+    if ($userCreate -and ($createdGuid -eq '')) {
+        # No created GUID is recorded: the account cannot be identified. A
+        # lookup by the planned names never proves it gone (somebody may
+        # have renamed it), so it is left and the conflict names the DN its
+        # add named (or the planned name when the parent cannot be read).
+        $name = [string]$stored['target']['sam']
+        if ($null -ne $resolved) { $name = Get-NewtonTargetDn $stored $resolved }
+        $failed = $false
+        if ($conflicts -notcontains $name) { $conflicts += $name }
+    } elseif (($createdGuid -ne '') -and ($failed -or ($conflicts.Count -gt 0))) {
+        # A user-create with a recorded GUID is read again by that GUID,
+        # never by its planned names: an account somebody renamed is still
+        # there.  Gone: the change is not there (undone).  Still there: the
+        # undo met a conflict or failed, so it is undo_failed with the
+        # account named (or stays armed while a delete with no answer may
+        # still land).  An account that cannot be looked up throws, so the
+        # record stays armed.
+        $object = $null
+        try {
+            $domainDn = Get-NewtonDomainDn $Adapter
+            if ($domainDn -eq '') { throw 'the domain DN cannot be read' }
+            $object = Find-NewtonCreatedObject $Adapter $createdGuid $domainDn
+        } catch {
+            Throw-NewtonRefusal 'error' 'the outcome of the undo cannot be read'
+        }
+        if ($null -eq $object) {
+            $failed = $false
+            $conflicts = @()
+        } elseif ($failed -and $unanswered) {
+            Throw-NewtonRefusal 'error' 'the undo had no answer and the change is still there'
+        } elseif ($conflicts -notcontains $createdGuid) {
+            $conflicts += $createdGuid
+        }
+    } elseif ($failed -or ($conflicts.Count -gt 0)) {
+        # The answer of the undo may be lost, or the change was never there:
+        # the target is read again.  The before-image is the change put back.
+        # A target that is not there any more stays undo_failed, as before.
+        $again = $null
+        $unreadable = $false
+        try {
+            $again = Get-NewtonTarget $Adapter $stored
+        } catch {
+            $unreadable = $true
+        }
+        $againLive = $null
+        if ($null -ne $again) { $againLive = Get-NewtonReadLive $stored $again }
+        if (($null -ne $again) -and (Test-NewtonImageEqual $againLive $stored['before'])) {
+            $failed = $false
+            $conflicts = @()
+        } elseif ($failed -and ($unreadable -or (($null -ne $again) -and
+                (-not (Test-NewtonLiveReadable ([string]$stored['verb']) $againLive))))) {
+            Throw-NewtonRefusal 'error' 'the outcome of the undo cannot be read'
+        } elseif ($failed -and $unanswered -and ($null -ne $again) -and (Test-NewtonImageEqual $againLive $stored['after'])) {
+            # No answer from the server and the change is still there: the
+            # undo may still land, so the record stays armed with its task.
+            Throw-NewtonRefusal 'error' 'the undo had no answer and the change is still there'
+        } elseif ($failed -and ($null -ne $again) -and (-not (Test-NewtonImageEqual $againLive $stored['after']))) {
+            # Neither image: somebody else changed the target meanwhile.
+            $conflicts += (Get-NewtonTargetDn $stored $again)
+        }
+    }
+    $restored = (-not $failed -and ($conflicts.Count -eq 0))
     $state = 'undone'
-    if ($failed -or ($conflicts.Count -gt 0)) { $state = 'undo_failed' }
-    $null = Set-NewtonRecordState -Path $Path -State $state -Restored (-not $failed -and ($conflicts.Count -eq 0)) -Conflicts $conflicts
-    if ([string]$stored['verb'] -ne 'unlock') {
-        try { Unregister-NewtonUndoTask -Txid ([string]$stored['txid']) } catch { }
+    if (-not $restored) { $state = 'undo_failed' }
+    $written = Set-NewtonRecordState -Path $Path -State $state -Restored $restored -Conflicts $conflicts
+    if ([string]::IsNullOrEmpty([string]$written)) {
+        Throw-NewtonRefusal 'error' 'the outcome of the undo could not be recorded'
     }
-    return @{ restored = (-not $failed -and ($conflicts.Count -eq 0)); conflicts = $conflicts; state = $state }
+    try { Unregister-NewtonUndoTask -Txid ([string]$stored['txid']) } catch { }
+    return @{ restored = $restored; conflicts = $conflicts; state = $state }
 }
 
 function Invoke-NewtonAbort {
     param([hashtable]$Request, $Adapter)
     $txid = [string]$Request['txid']
-    $path = Get-NewtonRecordPath $txid
-    $record = Read-NewtonRecord $path
-    if ($null -eq $record) { return (New-NewtonResponse 'not_found') }
+    # A current record that cannot be read throws: the answer is error.
+    $current = Get-NewtonCurrentRecordInfo -Txid $txid
+    if ($null -eq $current) { return (New-NewtonResponse 'not_found') }
+    $path = [string]$current['path']
+    $record = $current['record']
     $state = [string]$record.state
     if ($state -ne 'armed') { return (New-NewtonResponse 'conflict') }
+    $stored = ConvertTo-NewtonRequestShape $record.request
+    if ([string]$stored['verb'] -eq 'unlock') { return (New-NewtonResponse 'conflict') }
     $result = Invoke-NewtonUndoRecord -Path $path -Record $record -Adapter $Adapter
+    # A write the server answered wrote nothing: there was nothing to abort.
+    if ([string]$result['state'] -eq 'refused') { return (New-NewtonResponse 'conflict') }
     $response = New-NewtonResponse 'ok'
     $response['restored'] = $result['restored']
     $response['conflicts'] = $result['conflicts']
@@ -3300,9 +4062,11 @@ function Invoke-NewtonAbort {
 function Invoke-NewtonStatus {
     param([hashtable]$Request)
     $txid = [string]$Request['txid']
-    $path = Get-NewtonRecordPath $txid
-    $record = Read-NewtonRecord $path
-    if ($null -eq $record) { return (New-NewtonResponse 'not_found') }
+    # A current record that cannot be read throws: the answer is error.
+    $current = Get-NewtonCurrentRecordInfo -Txid $txid
+    if ($null -eq $current) { return (New-NewtonResponse 'not_found') }
+    $path = [string]$current['path']
+    $record = $current['record']
     $response = New-NewtonResponse 'ok'
     $response['state'] = [string]$record.state
     $response['undo_at'] = $record.undo_at
@@ -3312,8 +4076,8 @@ function Invoke-NewtonStatus {
 }
 
 function Invoke-NewtonSweep {
-    # The start-up sweep: every armed record whose deadline has passed is
-    # undone.  It never confirms anything.
+    # The start-up sweep: the undo of every armed record whose deadline has
+    # passed runs, each on its own.  It never confirms anything.
     param($Adapter)
     $now = Get-NewtonNow
     foreach ($item in (Get-NewtonRecords)) {
@@ -3322,7 +4086,18 @@ function Invoke-NewtonSweep {
         $undoAt = 0
         if (-not [int64]::TryParse([string]$record.undo_at, [ref]$undoAt)) { continue }
         if ($undoAt -gt $now) { continue }
-        $null = Invoke-NewtonUndoRecord -Path $item['path'] -Record $record -Adapter $Adapter
+        try {
+            # A malformed record (a request that is not an object) throws
+            # here and is skipped and left as it is.
+            $stored = ConvertTo-NewtonRequestShape $record.request
+            if ([string]$stored['verb'] -eq 'unlock') { continue }
+            $null = Invoke-NewtonUndoRecord -Path $item['path'] -Record $record -Adapter $Adapter
+        } catch {
+            # One record that is malformed or whose undo throws never stops
+            # the sweep or the mode that runs it: it stays armed and a later
+            # sweep tries again.
+            [Console]::Error.WriteLine('the undo of an expired record failed; it stays armed')
+        }
     }
 }
 
@@ -3389,9 +4164,12 @@ function Invoke-NewtonUndoMode {
     try {
         $adapter = Get-NewtonLdapAdapter
         Invoke-NewtonSweep -Adapter $adapter
-        $path = Get-NewtonRecordPath $Txid
-        $record = Read-NewtonRecord $path
-        if ($null -eq $record) { return (New-NewtonResponse 'not_found') }
+        # A current record that cannot be read throws: the answer is
+        # error, and the task writes nothing for it.
+        $current = Get-NewtonCurrentRecordInfo -Txid $Txid
+        if ($null -eq $current) { return (New-NewtonResponse 'not_found') }
+        $path = [string]$current['path']
+        $record = $current['record']
         $state = [string]$record.state
         if ($state -ne 'armed') {
             $response = New-NewtonResponse 'ok'

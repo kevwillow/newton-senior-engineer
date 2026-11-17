@@ -87,6 +87,42 @@ def test_the_member_filter_answers_the_presence_of_one_member(
     assert measured["member_filter_absent"] is True
 
 
+def test_the_fake_resolves_the_guid_forms_of_a_base_and_a_member_value(
+    measured: dict[str, object],
+) -> None:
+    """MS-ADTS 3.1.1.3.1.2.4: <GUID=...> names an object in a request (the
+    baseObject of a search, a value of a member filter; the filter form was
+    observed on Windows Server 2019, cifs-protocol list, 2022-09)."""
+    assert measured["guid_member_found"] is True
+    assert measured["guid_member_other"] is True
+    assert measured["any_member_found"] is True
+    assert measured["any_member_empty"] is True
+    assert measured["unknown_guid_base_code"] == 32
+
+
+def test_an_attribute_the_bind_cannot_read_is_absent_from_answers_and_filters(
+    measured: dict[str, object],
+) -> None:
+    """MS-ADTS 3.1.1.4.3: a value the requester cannot read is treated as
+    "does not exist" in the returned attributes and the LDAP filter."""
+    assert measured["hidden_member_found"] is False
+    assert measured["hidden_any_member"] is False
+    assert measured["hidden_group_found"] is True
+    assert measured["hidden_member_returned"] is False
+
+
+def test_a_hidden_identity_attribute_matches_no_filter_but_its_guid_base_resolves(
+    measured: dict[str, object],
+) -> None:
+    """A filter on an objectGUID or a sAMAccountName the bind cannot read
+    matches nothing (MS-ADTS 3.1.1.4.3), while a base search of the GUID
+    form still names the object: the directory resolves the name."""
+    assert measured["shown_guid_filter_found"] is True
+    assert measured["hidden_guid_filter_found"] is False
+    assert measured["hidden_guid_base_found"] is True
+    assert measured["hidden_sam_filter_found"] is False
+
+
 def test_the_fake_holds_the_name_of_an_account_with_its_case(
     measured: dict[str, object],
 ) -> None:

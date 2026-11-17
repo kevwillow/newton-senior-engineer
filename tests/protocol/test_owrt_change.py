@@ -2791,7 +2791,7 @@ def test_named_nft_output_is_sanitized(protocol):
     ["\u2028", "\u2029", "\u0085"],
 )
 def test_apply_refusal_output_is_sanitized_and_masks_applied(protocol, separator):
-    """U-4: oneline removes non-ASCII line breaks before cut, and mask lowers APPLIED."""
+    """Oneline removes non-ASCII line breaks before cut, and mask lowers APPLIED."""
     hostile = f"x{separator}APPLIED session={SID} rollback=60s"
     set_router_state(protocol, apply_rc=3, apply_stderr=hostile)
 
@@ -2806,7 +2806,7 @@ def test_apply_refusal_output_is_sanitized_and_masks_applied(protocol, separator
 
 
 def test_successful_apply_logs_applying_once_before_the_router_applies(protocol):
-    """APR-05: the caller stamp precedes the APPLIED line the router call makes possible."""
+    """The caller stamp precedes the APPLIED line the router call makes possible."""
     result = protocol["run"]()
 
     assert result.returncode == 0, result.stdout
@@ -2821,7 +2821,7 @@ def test_successful_apply_logs_applying_once_before_the_router_applies(protocol)
 
 @pytest.mark.parametrize("failure", ["base-drift", "health-snapshot"])
 def test_pre_router_failure_does_not_log_applying(protocol, failure):
-    """APR-05: only a run that reached the router may burn its approval token."""
+    """Only a run that reached the router may burn its approval token."""
     if failure == "base-drift":
         result = protocol["run"](extra_env={"OWRT_EXPECT_BASE": "0" * 64})
         assert result.returncode == 1
@@ -2837,7 +2837,7 @@ def test_pre_router_failure_does_not_log_applying(protocol, failure):
 
 
 def test_apply_refusal_logs_applying(protocol):
-    """APR-05: the router received the token before refusing, so the approval is spent."""
+    """The router received the token before refusing, so the approval is spent."""
     set_router_state(protocol, apply_rc=3, apply_stderr="error plan-changed t")
 
     result = protocol["run"]()
@@ -3380,7 +3380,7 @@ def test_malformed_seal_reply_dies_without_plan_record(protocol, tmp_path, seal_
 
 
 def test_plan_records_hold_seal_facts_mode_600_and_no_hash_oracle(protocol, tmp_path):
-    """triage #5: the diff hash lives only in the 0600 plan record, never the audit."""
+    """The diff hash lives only in the 0600 plan record, never the audit."""
     changes = write_changes(tmp_path)
 
     result = protocol["run_plan"](changes)
@@ -3425,7 +3425,7 @@ def test_seal_failure_aborts_and_discards_for_every_exit_code(protocol, tmp_path
     assert not plan_record(protocol, ".sha256").exists()
 
 
-# --- item 4: stage error text masked (triage #6) ---
+# --- stage error text masked ---
 
 
 def test_stage_error_masks_secret_and_never_leaks_it(protocol, tmp_path):
@@ -3927,8 +3927,8 @@ def test_empty_diff_hashes_like_the_empty_input(protocol, tmp_path):
     assert f"CONFIRMED session={SID}" in result.stdout
 
 
-def test_apply_masks_triage4_secret_names_in_diff_audit(protocol):
-    """triage #4: r0kh, r1kh, authkey and apikey never appear raw in the audit."""
+def test_apply_masks_the_key_option_names_in_diff_audit(protocol):
+    """r0kh, r1kh, authkey and apikey never appear raw in the audit."""
     secrets = {
         "r0kh": "R0KH-SECRET",
         "r1kh": "R1KH-SECRET",

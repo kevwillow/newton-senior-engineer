@@ -260,11 +260,19 @@ class FakeHelper:
             ids, live, facts = self._resolve(req["verb"], req["target"])
         except NotFound:
             return {"v": 1, "code": "not_found"}
-        return {"v": 1, "code": "ok", "live": live, "ids": ids, "facts": facts}
+        # The fake reads every value it holds, so its outcome image is its
+        # live image.
+        return {"v": 1, "code": "ok", "live": live, "outcome": dict(live), "ids": ids,
+                "facts": facts}
 
     # -- the apply mode ---------------------------------------------------
 
     def _apply(self, req: dict[str, Any]) -> dict[str, Any]:
+        # The replay comes before the token and the window, as in both
+        # helpers: a retry of an apply this DC holds answers replay.
+        txid = str(req["txid"])
+        if txid in self.records:
+            return {"v": 1, "code": "replay"}
         expected = request.token(
             self.key_hex, request.digest(req), req["nbf"], req["exp"]
         )
@@ -272,9 +280,6 @@ class FakeHelper:
             return {"v": 1, "code": "bad_token"}
         if not req["nbf"] - 60 <= self.now <= req["exp"]:
             return {"v": 1, "code": "expired"}
-        txid = str(req["txid"])
-        if txid in self.records:
-            return {"v": 1, "code": "replay"}
         if not self.pdc:
             return {"v": 1, "code": "not_pdc"}
         record: dict[str, Any] = {

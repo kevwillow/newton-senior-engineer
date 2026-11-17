@@ -184,6 +184,14 @@ class SshSessionRunner:
             exit_code=exit_code,
         )
 
+    def preflight(self, spec: SessionSpec) -> None:
+        """Run every check a session makes before ssh starts, and start nothing.
+
+        It raises ``RunnerRefused`` exactly where ``__call__`` would before
+        its process starts (ssh that cannot be started is only found then).
+        """
+        self._argv(spec)
+
     def _argv(self, spec: SessionSpec) -> list[str]:
         """Build the argv of one session: the shared options and the remote.
 

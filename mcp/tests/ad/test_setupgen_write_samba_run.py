@@ -87,6 +87,10 @@ def _embedded_python(script: str) -> str:
     return "\n".join(lines[start:end]) + "\n"
 
 
+#: The one sudoers line of the Samba write setup.
+SUDOERS_LINE = 'newton-ops-ssh ALL=(root) NOPASSWD: /usr/local/sbin/newton-ad-samba-write ""'
+
+
 def _prechecks(script: str) -> str:
     """The generated shell through step 0, before the first possible write."""
     marker = 'echo "Step 1: the newton-ops account"'
@@ -222,6 +226,21 @@ else:
 '''
     _write_executable(bindir / "samba-tool", samba)
     _write_executable(bindir / "id", "#!/bin/sh\nprintf '0\\n'\n")
+    # visudo -cf <file>: it accepts the file of the one sudoers line of the
+    # setup, and refuses every file when FAKE_VISUDO is "refuse".
+    visudo = f'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+
+argv = sys.argv[1:]
+with Path(os.environ["FAKE_COMMAND_LOG"]).open("a", encoding="utf-8") as stream:
+    stream.write(json.dumps(["visudo"] + argv) + "\\n")
+if argv[:1] != ["-cf"] or len(argv) != 2 or os.environ.get("FAKE_VISUDO") == "refuse":
+    raise SystemExit(1)
+expected = {SUDOERS_LINE!r} + "\\n"
+raise SystemExit(0 if Path(argv[1]).read_text(encoding="utf-8") == expected else 1)
+'''
+    _write_executable(bindir / "visudo", visudo)
     return bindir, log
 
 
@@ -395,6 +414,35 @@ def test_prechecks_use_testparm_and_the_root_dse(
         and call[-1] == "dsServiceName"
         for call in calls
     )
+
+
+def test_a_sudoers_line_visudo_refuses_stops_the_prechecks_before_any_install(
+    tmp_path: Path, samba_script: str, fake_commands: tuple[Path, Path]
+) -> None:
+    """visudo checks the sudoers line in step 0: a line it refuses stops
+    the run there, with nothing installed, and the message says so."""
+    bindir, log = fake_commands
+    for name in ("install", "systemctl", "useradd"):
+        _write_executable(
+            bindir / name,
+            "#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> \"" + str(tmp_path / "writes.log") + "\"\n",
+        )
+    path = tmp_path / "setup.sh"
+    path.write_text(samba_script, encoding="utf-8")
+
+    result = subprocess.run(
+        ["/bin/bash", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_env(tmp_path, bindir, log, FAKE_VISUDO="refuse"),
+    )
+
+    assert result.returncode == 1
+    assert "visudo refused the sudoers line. Nothing was installed." in result.stderr
+    assert "Step 1:" not in result.stdout
+    assert not (tmp_path / "writes.log").exists()
+    assert any(call[0] == "visudo" for call in _commands(log))
 
 
 # ---- the warning of a controller that names itself ---------------------------

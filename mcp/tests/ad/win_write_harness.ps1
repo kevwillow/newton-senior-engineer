@@ -21,6 +21,33 @@ $mcpRoot = Split-Path -Parent (Split-Path -Parent $here)
 . (Join-Path $here 'win_write_fake.ps1')
 . (Join-Path $mcpRoot 'newton_mcp/ad/collector/write.ps1')
 
+# A case may trace every call of the undo of a record ('undo-record <txid>'
+# in the call log), so a test can see that a guard before it held, even
+# where the undo itself would change nothing.
+$script:OriginalUndoRecord = ${function:Invoke-NewtonUndoRecord}
+$script:TraceUndoRecord = $null
+function Invoke-NewtonUndoRecord {
+    param([string]$Path, $Record, $Adapter)
+    if ($null -ne $script:TraceUndoRecord) {
+        [void]$script:TraceUndoRecord.Add('undo-record ' + [string]$Record.txid)
+    }
+    return (& $script:OriginalUndoRecord -Path $Path -Record $Record -Adapter $Adapter)
+}
+
+# A case may make the readability test of the failed-write handler throw
+# once ('throw_in_live_readable'), so a test can see what a throw from
+# inside that handler leaves behind.
+$script:OriginalLiveReadable = ${function:Test-NewtonLiveReadable}
+$script:ThrowLiveReadable = $false
+function Test-NewtonLiveReadable {
+    param([string]$Verb, $Live)
+    if ($script:ThrowLiveReadable) {
+        $script:ThrowLiveReadable = $false
+        throw 'the readability test threw'
+    }
+    return (& $script:OriginalLiveReadable -Verb $Verb -Live $Live)
+}
+
 function ConvertTo-CaseHashtable {
     # The case of the JSON file as hashtables: the fake reads them by key.
     param($Value)
@@ -99,6 +126,88 @@ function Get-CaseObjects {
     return ,$objects
 }
 
+function Get-CaseObjectBySam {
+    param($Fake, [string]$Sam)
+    foreach ($key in @($Fake.Objects.Keys)) {
+        $object = $Fake.Objects[$key]
+        if ([string]$object['sam'] -ieq $Sam) { return $object }
+    }
+    throw ('the fake directory holds no ' + $Sam)
+}
+
+function Invoke-CaseDirectoryChange {
+    # A change another admin makes: 'rename_sam' {from, to}, 'delete_sam',
+    # 'hide_attributes' (names the bind cannot read from now on) or
+    # 'set_values' {sam or dn, name, values};
+    # 'fail_guid_searches_of_sam' makes every later search by the GUID of
+    # that account fail.
+    param($Request)
+    $fake = $script:LdapAdapter
+    $rename = Get-CaseField $Request 'rename_sam' $null
+    if ($null -ne $rename) {
+        $object = Get-CaseObjectBySam $fake ([string](Get-CaseField $rename 'from' ''))
+        $to = [string](Get-CaseField $rename 'to' '')
+        $upn = $to + '@' + [string]$fake.DnsDomain
+        $object['sam'] = $to
+        $object['upn'] = $upn
+        $object['values']['samaccountname'] = @($to)
+        $object['values']['userprincipalname'] = @($upn)
+        $fake.Usn = $fake.Usn + 1
+        $object['usn_changed'] = $fake.Usn
+        $object['values']['usnchanged'] = @([string]$fake.Usn)
+    }
+    $unreadable = Get-CaseField $Request 'fail_guid_searches_of_sam' $null
+    if ($null -ne $unreadable) {
+        # every later search by the GUID of that account fails
+        $object = Get-CaseObjectBySam $fake ([string]$unreadable)
+        $fake.FailGuidSearches = [string]$object['guid']
+    }
+    $hide = Get-CaseField $Request 'hide_attributes' $null
+    if ($null -ne $hide) {
+        # from now on the bind cannot read these attributes (the fake's
+        # Hidden knob)
+        $names = @()
+        foreach ($name in @($hide)) { $names += ([string]$name).ToLowerInvariant() }
+        $fake.Hidden = $names
+    }
+    $readable = Get-CaseField $Request 'member_readable_by_search' $null
+    if ($null -ne $readable) {
+        # whether the bind may read member during each of the next searches
+        # on member (the fake's MemberReadableBySearch knob)
+        $flags = @()
+        foreach ($flag in @($readable)) { $flags += [bool]$flag }
+        $fake.MemberReadableBySearch = $flags
+    }
+    $hideOf = Get-CaseField $Request 'hide_attributes_of' $null
+    if ($null -ne $hideOf) {
+        # from now on the bind cannot read these attributes of one object:
+        # {sam, names} or {dn, names}
+        $hideDn = [string](Get-CaseField $hideOf 'dn' '')
+        if ($hideDn -ne '') {
+            $object = $fake.ObjectByDn($hideDn)
+        } else {
+            $object = Get-CaseObjectBySam $fake ([string](Get-CaseField $hideOf 'sam' ''))
+        }
+        $object['hidden_attributes'] = @(Get-CaseField $hideOf 'names' @())
+    }
+    $values = Get-CaseField $Request 'set_values' $null
+    if ($null -ne $values) {
+        # somebody else writes one attribute of one account: {sam, name, values}
+        $dn = [string](Get-CaseField $values 'dn' '')
+        if ($dn -ne '') {
+            $object = $fake.ObjectByDn($dn)
+        } else {
+            $object = Get-CaseObjectBySam $fake ([string](Get-CaseField $values 'sam' ''))
+        }
+        $object['values'][([string](Get-CaseField $values 'name' '')).ToLowerInvariant()] = @(Get-CaseField $values 'values' @())
+    }
+    $delete = Get-CaseField $Request 'delete_sam' $null
+    if ($null -ne $delete) {
+        $object = Get-CaseObjectBySam $fake ([string]$delete)
+        $fake.Objects.Remove([string]$object['dn'])
+    }
+}
+
 function Invoke-CaseRequest {
     # One request of a case: the code, the canonical bytes and the answer.
     param($Request, [string]$Key)
@@ -119,6 +228,14 @@ function Invoke-CaseRequest {
     [Console]::SetError($errorWriter)
     try {
         try {
+            if ($stage -eq 'directory') {
+                # Somebody else changes the fake directory between two
+                # requests: renames an account (its sAMAccountName and its
+                # user principal name, with a new uSNChanged) or deletes it.
+                Invoke-CaseDirectoryChange -Request $Request
+                $result['code'] = 'ok'
+                return $result
+            }
             if ($stage -eq 'undo') {
                 $txid = [string](Get-CaseField $Request 'undo' '')
                 $response = Invoke-NewtonUndoMode -Txid $txid
@@ -230,6 +347,9 @@ foreach ($case in $cases) {
 
     $calls = New-Object System.Collections.ArrayList
     $script:LdapAdapter = New-NewtonFakeLdap -Config $config -CallLog $calls
+    $script:TraceUndoRecord = $null
+    if ([bool](Get-CaseField $case 'trace_undo_record' $false)) { $script:TraceUndoRecord = $calls }
+    $script:ThrowLiveReadable = [bool](Get-CaseField $case 'throw_in_live_readable' $false)
     $registerError = [bool](Get-CaseField $case 'scheduler_register_error' $false)
     $deleteError = [bool](Get-CaseField $case 'scheduler_delete_error' $false)
     $script:SchedulerAdapter = New-NewtonFakeScheduler -CallLog $calls -RegisterError $registerError -DeleteError $deleteError
@@ -238,7 +358,33 @@ foreach ($case in $cases) {
     if ($null -ne $collisionTxid) {
         $collisionPath = Join-Path (Join-Path $root 'tx') ([string]$collisionTxid + '.0.json')
     }
-    $script:FileSystemAdapter = New-NewtonFakeFileSystem -LockUnauthorized ([bool](Get-CaseField $case 'lock_unauthorized' $false)) -CreateNewCollisionPath $collisionPath
+    $readErrorAfter = [int](Get-CaseField $case 'read_error_after_modifies' 0)
+    $failOncePath = ''
+    $failOnceFile = Get-CaseField $case 'record_create_fails_once' $null
+    if ($null -ne $failOnceFile) {
+        $failOncePath = Join-Path (Join-Path $root 'tx') ([string]$failOnceFile)
+    }
+    $flushFailPath = ''
+    $flushFailFile = Get-CaseField $case 'record_flush_fails_once' $null
+    if ($null -ne $flushFailFile) {
+        $flushFailPath = Join-Path (Join-Path $root 'tx') ([string]$flushFailFile)
+    }
+    $readFailsPath = ''
+    $readFailsFile = Get-CaseField $case 'store_reads_fail_once_there' $null
+    if ($null -ne $readFailsFile) {
+        $readFailsPath = Join-Path (Join-Path $root 'tx') ([string]$readFailsFile)
+    }
+    $tornPath = ''
+    $tornFile = Get-CaseField $case 'record_write_torn_once' $null
+    if ($null -ne $tornFile) {
+        $tornPath = Join-Path (Join-Path $root 'tx') ([string]$tornFile)
+    }
+    $readThrowsPath = ''
+    $readThrowsFile = Get-CaseField $case 'record_read_throws' $null
+    if ($null -ne $readThrowsFile) {
+        $readThrowsPath = Join-Path (Join-Path $root 'tx') ([string]$readThrowsFile)
+    }
+    $script:FileSystemAdapter = New-NewtonFakeFileSystem -LockUnauthorized ([bool](Get-CaseField $case 'lock_unauthorized' $false)) -CreateNewCollisionPath $collisionPath -Ldap $script:LdapAdapter -ReadErrorAfterModifies $readErrorAfter -CreateNewFailOncePath $failOncePath -FlushFailOncePath $flushFailPath -ReadFailsOncePath $readFailsPath -TornWriteOncePath $tornPath -ReadThrowsPath $readThrowsPath -ListThrows ([bool](Get-CaseField $case 'store_list_throws' $false))
 
     $held = $null
     if ([bool](Get-CaseField $case 'hold_lock' $false)) {

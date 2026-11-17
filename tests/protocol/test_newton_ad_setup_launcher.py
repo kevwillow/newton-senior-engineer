@@ -439,3 +439,36 @@ def test_skill_ad_section_names_the_installed_commands():
     for match in re.finditer(r"newton-approve ad-change", section):
         before = section[max(0, match.start() - len("sudo -u newton /usr/local/bin/")):match.start()]
         assert before == "sudo -u newton /usr/local/bin/", section[match.start() - 40:match.end()]
+
+
+# ---- the setup scripts of an installed Newton --------------------------------
+
+
+def test_the_installed_form_of_the_ad_setup_scripts_exists_and_the_launcher_refuses_them(tmp_path):
+    """The README gives the installed form of the setup commands as
+    /opt/newton/scripts/newton-ad-setup: the installer copies the whole
+    scripts tree there, scripts/newton-ad-setup is a tracked executable in
+    it, and /usr/local/bin/newton-ad-setup refuses everything but
+    approval-key, so the bare launcher form would not print a setup."""
+    source = INSTALL.read_text()
+    assert "\tCODE_ROOT=/opt/newton\n" in source
+    assert 'copy_tree "$SNAP/scripts" "$CODE_ROOT/scripts" 0755' in source
+    listed = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-s", "scripts/newton-ad-setup"],
+        capture_output=True, text=True, check=True, timeout=30,
+    ).stdout.split()
+    assert listed and listed[0] == "100755", listed
+
+    launcher = make_launcher(tmp_path, AD_SLOT, "newton-ad-setup")
+    for argv in (("write", "samba"), ("samba",), ("windows",)):
+        result = run(launcher, *argv, env=owner_env())
+        assert result.returncode != 0, argv
+        assert "approval-key and one device name are required" in result.stderr, argv
+        assert result.stdout == "", argv
+
+    readme = ROOT / "docs" / "release" / "README-1.0.md"
+    if not readme.exists():
+        readme = ROOT / "README.md"
+    text = readme.read_text(encoding="utf-8")
+    assert "/opt/newton/scripts/newton-ad-setup write windows|samba" in text
+    assert "/opt/newton/scripts/newton-ad-setup windows|samba" in text
