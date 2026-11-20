@@ -1659,7 +1659,7 @@ def test_existing_group_writable_results_dirs_are_healed_to_0700(tmp_path,
     assert _mode(results / "backups") == 0o700
 
 
-def test_symlinked_results_dir_is_refused_and_its_target_untouched(tmp_path):
+def test_symlinked_results_dir_is_refused_and_its_target_untouched(tmp_path, umask_0002):
     target = tmp_path / "elsewhere"
     target.mkdir(mode=0o777)
     assert _mode(target) == 0o775
@@ -1674,7 +1674,7 @@ def test_symlinked_results_dir_is_refused_and_its_target_untouched(tmp_path):
     assert not (target / "backups").exists()
 
 
-def test_symlinked_backups_dir_is_refused_and_its_target_untouched(tmp_path):
+def test_symlinked_backups_dir_is_refused_and_its_target_untouched(tmp_path, umask_0002):
     target = tmp_path / "elsewhere"
     target.mkdir(mode=0o777)
     results = tmp_path / "results"
@@ -1687,7 +1687,7 @@ def test_symlinked_backups_dir_is_refused_and_its_target_untouched(tmp_path):
     assert _mode(target) == 0o775
 
 
-def test_results_dir_owned_by_another_user_is_refused_untouched(tmp_path,
+def test_results_dir_owned_by_another_user_is_refused_untouched(tmp_path, umask_0002,
                                                                monkeypatch):
     """We write full sysupgrade backups (secrets) and every result JSON into
     these directories, so one we do not own is refused, never written to and
@@ -1764,7 +1764,7 @@ def test_main_leaves_a_results_parent_outside_results_dir_alone(tmp_path, umask_
     assert _mode(results) == 0o700
 
 
-def test_main_refuses_a_symlinked_results_dir(tmp_path, capsys):
+def test_main_refuses_a_symlinked_results_dir(tmp_path, capsys, umask_0002):
     target = tmp_path / "elsewhere"
     target.mkdir(mode=0o777)
     link = tmp_path / "results"

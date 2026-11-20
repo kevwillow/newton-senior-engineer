@@ -48,13 +48,20 @@ jobs:
           git config --global user.email ci@example.invalid
       - name: Install the test environment
         working-directory: mcp
-        run: uv sync --locked --extra test --python ${{ matrix.python }}
+        run: |
+          uv sync --locked --extra test --python ${{ matrix.python }}
+          # The installed-layout tests install the package offline; one online
+          # install into a throwaway venv puts its index data in uv's cache.
+          uv venv -q "$RUNNER_TEMP/warm" --python .venv/bin/python
+          uv pip install -q --python "$RUNNER_TEMP/warm/bin/python" .
       - name: Run ${{ matrix.suite }}
         env:
           SUITE: ${{ matrix.suite }}
         run: |
           # Short on purpose: tests bind Unix sockets under it (limit 107 bytes).
           export PYTEST_DEBUG_TEMPROOT=/tmp/pt
+          # The AD setup tests run their PowerShell under the runner's pwsh.
+          export NEWTON_PWSH="$(command -v pwsh)"
           mkdir -p "$PYTEST_DEBUG_TEMPROOT"
           if [ "$SUITE" = mcp ]; then
             cd mcp && .venv/bin/python -m pytest -q -p no:cacheprovider
