@@ -10,7 +10,7 @@ verification, and the meta checks that catch plausible driver defects.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import pytest
@@ -325,6 +325,9 @@ def test_happy_path_uses_the_exact_session_sequence() -> None:
         "timer",
         "ping",
         "confirm script",
+        "read config",
+        "saved check",
+        "timer",
         "timer",
         "save script",
     ]
@@ -657,7 +660,8 @@ def _assert_no_confirm_before_verify(
         index for index, event in enumerate(ops.events) if event == "snapshot"
     ]
     confirm_indexes = [index for index, event in enumerate(ops.events) if event == "confirm"]
-    assert len(snapshot_indexes) == 2
+    # preflight, verify and the post-confirm proof
+    assert len(snapshot_indexes) == 3
     assert len(confirm_indexes) == 1
     assert confirm_indexes[0] > snapshot_indexes[1]
 
@@ -693,7 +697,8 @@ def _assert_verify_uses_a_fresh_snapshot(
 ) -> None:
     outcome = apply_plan(ops, FakeRunner(), _plan(), [])
     assert outcome.result == "confirmed"
-    assert ops.events.count("snapshot") == 2
+    # preflight, verify and the post-confirm proof
+    assert ops.events.count("snapshot") == 3
     assert ops.events.index("apply") < ops.events.index("snapshot", ops.events.index("apply") + 1)
     assert ops.events.index("confirm") > ops.events.index(
         "snapshot", ops.events.index("apply") + 1
@@ -798,7 +803,13 @@ def test_the_save_runs_after_the_confirm_in_its_own_session() -> None:
     confirm_index = kinds.index("confirm script")
     save_index = kinds.index("save script")
     assert save_index > confirm_index
-    assert kinds[confirm_index + 1 : save_index] == ["timer"]
+    # the post-confirm proof, then the timer read
+    assert kinds[confirm_index + 1 : save_index] == [
+        "read config",
+        "saved check",
+        "timer",
+        "timer",
+    ]
 
 
 def test_a_confirmed_change_is_saved_and_the_log_says_so() -> None:
@@ -1397,6 +1408,22 @@ CHR_TWO_LINES = (
     "/ip address add address=198.51.100.7/24 interface=bridge"
 )
 CHR_BASE_HASH = rw.config_hash(CHR_BASE_CONFIG)
+# The armed revert as the /export of a CHR lists it under
+# "/system scheduler" while the entry exists.
+CHR_REVERT_EXPORT_ENTRY = "\n".join(
+    [
+        'add interval=0s name=newton-revert on-event="/system backup load '
+        'name=newton-revert; :log info \\"newton\\"" \\',
+        "    policy=ftp,reboot,read,write,policy,test,password,sniff,sensitive,"
+        "romon \\",
+        "    start-date=2026-10-24 start-time=23:31:23",
+    ]
+)
+# An entry of the owner, which is part of the configuration.
+CHR_OWNER_EXPORT_ENTRY = (
+    "add interval=1d name=nightly on-event=\"/log info nightly\" "
+    "start-time=03:00:00"
+)
 CHR_PING_OK = (
     "    sent=3 received=3 packet-loss=0% min-rtt=0ms avg-rtt=0ms max-rtt=0ms"
 )
@@ -1451,7 +1478,9 @@ class FakeChrRunner:
         load_exit_code: int | None = 0,
         load_reboots: bool = True,
         scheduler_vanishes_after: int | None = None,
+        owner_scheduler: Sequence[str] = (),
     ) -> None:
+        self.owner_scheduler = tuple(owner_scheduler)
         self.config = config
         self.initial_config = config
         self.statement_failures = dict(statement_failures or {})
@@ -1480,6 +1509,20 @@ class FakeChrRunner:
     def remotes(self) -> list[str]:
         return [spec.remote for spec in self.calls]
 
+    def export_text(self) -> str:
+        """The /export of the device, as a CHR prints it.
+
+        A CHR lists its /system scheduler entries in the /export, so the
+        armed newton-revert entry shows there while it exists, and the
+        owner's own entries show there all the time.
+        """
+        entries = list(self.owner_scheduler)
+        if self.scheduler_present:
+            entries.append(CHR_REVERT_EXPORT_ENTRY)
+        if not entries:
+            return self.config
+        return "\n".join([self.config, "/system scheduler", *entries])
+
     def __call__(self, spec: vw.SessionSpec) -> vc.RunOut:
         self.calls.append(spec)
         if self.fail_after is not None and len(self.calls) > self.fail_after:
@@ -1498,7 +1541,7 @@ class FakeChrRunner:
                     stderr="connection timed out during banner exchange",
                     exit_code=255,
                 )
-            return _ok(self.config)
+            return _ok(self.export_text())
         if remote == rw.scheduler_count_command().remote:
             self.scheduler_reads += 1
             if (
@@ -2146,3 +2189,274 @@ def test_a_refusal_that_carries_the_phrase_is_a_lock(
     assert ops.abort_calls == 2
     assert waits == [5]
     assert outcome.result == "unknown"
+
+
+# The device that reverted before the confirm is never confirmed.
+#     A VyOS or a RouterOS has no candidate hash, so the post-confirm read
+#     is compared with the verified snapshot: a device that went back to
+#     its base after the verify is unknown.
+
+
+def test_a_vyos_that_reverted_before_the_confirm_is_unknown() -> None:
+    """[BASE, CHANGED, BASE]: the confirm went through, the change is gone."""
+    ops = FakeOps(
+        snapshots=[
+            _snapshot(BASE_CONFIG),
+            _snapshot(CHANGED_CONFIG),
+            _snapshot(BASE_CONFIG),
+        ]
+    )
+    outcome = vc.apply_plan(ops, FakeRunner(), _plan(), [])
+
+    assert outcome.result == "unknown"
+    assert outcome.log == (
+        "the device differs from the verified change after the confirm"
+    )
+    assert outcome.saved is None
+    assert "save" not in ops.events
+    assert ops.events.index("confirm") < len(ops.events) - 1
+
+
+def test_a_vyos_whose_post_confirm_read_fails_is_unknown() -> None:
+    """A post-confirm read that does not answer is not a proof."""
+
+    class _DeadAfterConfirmOps(FakeOps):
+        def snapshot(self, run: vc.Run) -> vc.Snapshot:
+            if "confirm" in self.events:
+                self.events.append("snapshot")
+                raise RuntimeError("the device went away")
+            return super().snapshot(run)
+
+    ops = _DeadAfterConfirmOps(
+        snapshots=[_snapshot(BASE_CONFIG), _snapshot(CHANGED_CONFIG)]
+    )
+    outcome = vc.apply_plan(ops, FakeRunner(), _plan(), [])
+
+    assert outcome.result == "unknown"
+    assert "save" not in ops.events
+
+
+def test_a_post_confirm_read_over_a_failed_session_is_unknown() -> None:
+    """The snapshot text is not a proof when its session did not answer."""
+
+    class _StaleAfterConfirmOps(FakeOps):
+        def snapshot(self, run: vc.Run) -> vc.Snapshot:
+            if "confirm" in self.events:
+                run(vw.read_config_command())
+            return super().snapshot(run)
+
+    def unreachable_after_confirm(spec: vw.SessionSpec) -> vc.RunOut:
+        return vc.RunOut(
+            status="unreachable", stdout="", stderr="timed out", exit_code=255
+        )
+
+    ops = _StaleAfterConfirmOps(
+        snapshots=[
+            _snapshot(BASE_CONFIG),
+            _snapshot(CHANGED_CONFIG),
+            _snapshot(CHANGED_CONFIG),
+        ]
+    )
+    outcome = vc.apply_plan(ops, unreachable_after_confirm, _plan(), [])
+
+    assert "confirm" in ops.events
+    assert outcome.result == "unknown"
+    assert "save" not in ops.events
+
+
+def test_a_vyos_change_still_there_after_the_confirm_is_confirmed() -> None:
+    """[BASE, CHANGED, CHANGED] stays confirmed and the read is fresh."""
+    ops = FakeOps(
+        snapshots=[
+            _snapshot(BASE_CONFIG),
+            _snapshot(CHANGED_CONFIG),
+            _snapshot(CHANGED_CONFIG),
+        ]
+    )
+    outcome = vc.apply_plan(ops, FakeRunner(), _plan(), [])
+
+    assert outcome.result == "confirmed"
+    confirm_at = ops.events.index("confirm")
+    assert "snapshot" in ops.events[confirm_at:]
+
+
+class _RevertBeforeConfirmChr(FakeChrRunner):
+    """A CHR whose scheduler fires just before the confirm removes it.
+
+    The device loads the backup and comes back at its base: the scheduler
+    entry and the backup file are gone, so the confirm removes nothing and
+    its read-back says both counts are zero.
+    """
+
+    def __call__(self, spec: vw.SessionSpec) -> vc.RunOut:
+        if spec.remote == rw.scheduler_remove_command().remote and self.scheduler_present:
+            self.config = self.initial_config
+            self.scheduler_present = False
+            self.backup_present = False
+        return super().__call__(spec)
+
+
+def test_a_routeros_that_reverted_before_the_confirm_is_unknown() -> None:
+    """The CHR loaded its backup before the confirm: unknown, never confirmed."""
+    runner = _RevertBeforeConfirmChr()
+    outcome = vc.apply_plan(rw.RouterosOps(), runner, _chr_plan(), [])
+
+    assert runner.config == CHR_BASE_CONFIG
+    assert outcome.result == "unknown"
+    assert outcome.log == (
+        "the device differs from the verified change after the confirm"
+    )
+    assert outcome.saved is None
+
+
+def test_the_chr_export_shows_the_armed_revert() -> None:
+    """The fake lists the armed entry in its /export, as a CHR does."""
+    runner = FakeChrRunner()
+    runner.scheduler_present = True
+    assert "name=newton-revert" in runner(rw.export_command()).stdout
+    runner.scheduler_present = False
+    assert "newton-revert" not in runner(rw.export_command()).stdout
+
+
+def test_a_chr_change_is_confirmed_although_the_export_listed_the_revert() -> None:
+    """The verify export lists the armed revert and the confirm removes it.
+
+    The post-confirm read is compared without Newton's own revert entry:
+    the change is still on the device, so it is confirmed and saved.
+    """
+    runner = FakeChrRunner()
+    outcome = vc.apply_plan(rw.RouterosOps(), runner, _chr_plan(), [])
+
+    assert outcome.result == "confirmed"
+    assert outcome.saved is True
+
+
+def test_a_chr_with_owner_scheduler_entries_is_confirmed() -> None:
+    """The owner's scheduler entries stay in the comparison and match."""
+    runner = FakeChrRunner(owner_scheduler=[CHR_OWNER_EXPORT_ENTRY])
+    plan = _chr_plan(
+        base_hash=rw.config_hash(
+            "\n".join([CHR_BASE_CONFIG, "/system scheduler", CHR_OWNER_EXPORT_ENTRY])
+        )
+    )
+    outcome = vc.apply_plan(rw.RouterosOps(), runner, plan, [])
+
+    assert outcome.result == "confirmed"
+    assert outcome.saved is True
+
+
+def test_a_chr_whose_owner_entry_changed_after_the_verify_is_unknown() -> None:
+    """Only Newton's own entry leaves the comparison, not the owner's."""
+
+    class _OwnerEntryMovesChr(FakeChrRunner):
+        def __call__(self, spec: vw.SessionSpec) -> vc.RunOut:
+            if spec.remote == rw.scheduler_remove_command().remote:
+                self.owner_scheduler = (
+                    CHR_OWNER_EXPORT_ENTRY.replace("03:00:00", "04:00:00"),
+                )
+            return super().__call__(spec)
+
+    runner = _OwnerEntryMovesChr(owner_scheduler=[CHR_OWNER_EXPORT_ENTRY])
+    plan = _chr_plan(
+        base_hash=rw.config_hash(
+            "\n".join([CHR_BASE_CONFIG, "/system scheduler", CHR_OWNER_EXPORT_ENTRY])
+        )
+    )
+    outcome = vc.apply_plan(rw.RouterosOps(), runner, plan, [])
+
+    assert outcome.result == "unknown"
+    assert outcome.log == (
+        "the device differs from the verified change after the confirm"
+    )
+
+
+def test_a_routeros_that_reverted_with_an_owner_entry_is_unknown() -> None:
+    """A CHR back at its base after the verify stays unknown with an owner entry."""
+    runner = _RevertBeforeConfirmChr(owner_scheduler=[CHR_OWNER_EXPORT_ENTRY])
+    plan = _chr_plan(
+        base_hash=rw.config_hash(
+            "\n".join([CHR_BASE_CONFIG, "/system scheduler", CHR_OWNER_EXPORT_ENTRY])
+        )
+    )
+    outcome = vc.apply_plan(rw.RouterosOps(), runner, plan, [])
+
+    assert outcome.result == "unknown"
+    assert outcome.saved is None
+
+
+def _clock(*values: float) -> Callable[[], float]:
+    ticks = list(values)
+
+    def now() -> float:
+        if len(ticks) > 1:
+            return ticks.pop(0)
+        return ticks[0]
+
+    return now
+
+
+def test_a_confirm_too_close_to_the_window_end_is_not_sent() -> None:
+    """Less than the margin left: the driver takes the revert, no confirm."""
+    ops = FakeOps(
+        snapshots=[
+            _snapshot(BASE_CONFIG),
+            _snapshot(CHANGED_CONFIG),
+            _snapshot(BASE_CONFIG),
+        ]
+    )
+    elapsed = 150 - vc.CONFIRM_MARGIN_S + 1
+    outcome = vc.apply_plan(
+        ops,
+        FakeRunner(),
+        _plan(timeout_s=150),
+        [],
+        now=_clock(1000.0, 1000.0 + elapsed),
+    )
+
+    assert "confirm" not in ops.events
+    assert "abort" in ops.events
+    assert outcome.result == "rolled_back"
+    assert "window" in outcome.log
+
+
+def test_a_confirm_inside_the_margin_is_sent() -> None:
+    """Exactly the margin left: the confirm still goes."""
+    ops = FakeOps(
+        snapshots=[
+            _snapshot(BASE_CONFIG),
+            _snapshot(CHANGED_CONFIG),
+            _snapshot(CHANGED_CONFIG),
+        ]
+    )
+    elapsed = 150 - vc.CONFIRM_MARGIN_S
+    outcome = vc.apply_plan(
+        ops,
+        FakeRunner(),
+        _plan(timeout_s=150),
+        [],
+        now=_clock(1000.0, 1000.0 + elapsed),
+    )
+
+    assert "confirm" in ops.events
+    assert outcome.result == "confirmed"
+
+
+def test_the_window_clock_starts_before_the_apply() -> None:
+    """The clock is read before the apply runs, never after the verify."""
+    order: list[str] = []
+    ops = FakeOps(
+        snapshots=[
+            _snapshot(BASE_CONFIG),
+            _snapshot(CHANGED_CONFIG),
+            _snapshot(CHANGED_CONFIG),
+        ]
+    )
+
+    def now() -> float:
+        order.append(f"now@{len(ops.events)}")
+        return 0.0
+
+    vc.apply_plan(ops, FakeRunner(), _plan(), [], now=now)
+
+    apply_at = ops.events.index("apply")
+    assert order[0] == f"now@{apply_at}"

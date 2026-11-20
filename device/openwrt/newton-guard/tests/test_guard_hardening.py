@@ -1932,6 +1932,15 @@ def wait_for_sleep_calls(router, count, seconds=60):
     return False
 
 
+def wait_for_path(path, seconds=60):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def stop_timer(proc):
     if proc.poll() is None:
         os.killpg(proc.pid, signal.SIGKILL)
@@ -1964,11 +1973,15 @@ def test_n2_unwritable_state_timer_keeps_trying_until_a_restore_works(router):
     (router / "control/cp-fail").write_text(".newton-tmp.\n")
     (router / "control/mv-fail").write_text("/etc/newton/.\n")
     set_uptime(router, 161)
+    # The guard waits in its fourth sleep while the failures are lifted, so
+    # no tick sees one lifted and the other still there.
+    (router / "control/sleep-hold").write_text("4\n")
     proc = start_timer(router)
     try:
-        assert wait_for_sleep_calls(router, 4)
+        assert wait_for_path(router / "control/sleep-held")
         (router / "control/cp-fail").unlink()
         (router / "control/mv-fail").unlink()
+        (router / "control/sleep-hold").unlink()
         stdout, _stderr = proc.communicate(timeout=GUARD_TIMEOUT)
     finally:
         if proc.poll() is None:

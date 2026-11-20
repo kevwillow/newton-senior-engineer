@@ -526,3 +526,24 @@ def test_nr23_09_usage_errors_exit_two(tmp_path):
     ):
         result = run_rules(tmp_path, *args)
         assert result.returncode == 2, args
+
+
+def test_nr24_the_description_claims_no_enforcement_the_plan_does_not_do():
+    # The plan does not read rules.toml yet: no module of the MCP server
+    # but net_rules itself loads the rules.  Until one does, the tool's
+    # own description must not say a rule is checked with every change.
+    import ast
+
+    package = ROOT / "mcp" / "newton_mcp"
+    readers = [
+        path
+        for path in package.rglob("*.py")
+        if path.name != "net_rules.py"
+        and ("load_rules" in path.read_text() or "rule_claims" in path.read_text())
+    ]
+    doc = ast.get_docstring(ast.parse(RULES.read_text()))
+    if readers:
+        pytest.skip("the plan reads the rules now; this test goes with that wiring")
+    assert "adds every rule" not in doc
+    assert "blocks the confirm" not in doc
+    assert "does not read" in doc

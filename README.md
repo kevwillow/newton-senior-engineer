@@ -14,11 +14,21 @@ Install Newton from https://github.com/kevwillow/newton-senior-engineer and foll
 
 Website: [gurutechnology.services/newton-engineer](https://gurutechnology.services/newton-engineer/), with the security boundaries, the roadmap, and how to help test Newton on network gear the lab does not have.
 
-Newton lets an AI assistant like Claude Code set up and change your network for you: routers, VLANs, Wi-Fi, firewall
-rules, port forwards, DHCP, DNS and dual-WAN. It is the safe way to let the AI do the work. On the default setup every change is shown to
-you first and needs your approval, unless you gave a scoped grant or set the router to lab (see Approvals). It arms an undo timer on the router, so it undoes itself if something breaks, and it is only kept after a
-fresh connection proves your network still works. In the no-install mode that timer lives in the router's RAM, so a
-router that reboots in the middle of a change keeps the change.
+Newton is for you if you own a home or small-office network, run an AI agent such as Claude Code on your own PC,
+and want it to change your router or your Active Directory domain without being locked out or left guessing. You
+say what you want in plain words; the agent reads the device, plans the change and shows it to you. On the default
+setup it applies the change only after you approve it yourself, in your own terminal or the approval dialog, unless
+you gave a scoped grant (a lab router on a development checkout can also skip it; see Approvals). On an OpenWrt router
+in the **installed** mode it covers VLANs, Wi-Fi, firewall rules, port forwards, DHCP, DNS and dual-WAN; in the
+**no-install** mode Newton applies DHCP reservations and DNS entries itself, and every other change is a script you
+approve and run. On Active Directory, on the main branch ahead of its release, it covers a read-only audit and a small
+set of account changes. Rollback timers and approvals are not new. Newton puts them together around each change, and each
+part below holds only in the modes it names:
+
+- **The undo is armed on the device before it writes.** On an OpenWrt router a timer on the router puts the settings back when a check fails or the change is not confirmed in time, so it still fires if the agent, its session or your PC goes away. In the **installed** mode the undo also survives a reboot: Newton's guard on the router's flash puts the last good settings back at boot. In the **no-install** mode it is OpenWrt's own rpcd timer, which lives in the router's RAM, so a router that reboots, or whose web service restarts, in the middle of a change keeps the change. On Active Directory the domain controller arms its own undo before it writes, for every change but an unlock, which has nothing to put back. One undo can fail: a new user whose ID the domain controller did not record stays written, recorded as `undo_failed` (the details are under [Active Directory](#active-directory)).
+- **A check from a client can roll a change back.** A router change is kept only after fresh connections prove the network still works. In the **installed** mode a plan can also claim what a client in a zone sees (DNS, DHCP, the internet, an address that must stay blocked), checked from a client machine you register as a vantage; a check that fails, or cannot run, stops the confirm and the router rolls the change back. Client checks have run in the virtual lab only, and Newton notices only the breaks its checks test for.
+- **Your approval is bound to the exact change and the state it was planned against.** In the **installed** mode the router itself checks the approval against the plan's digest, which covers the router's settings at plan time, the change and its checks, and refuses the apply if any of them changed. In the **no-install** mode Newton reads the settings the change touches again just before the write and stops if they changed. On Active Directory the domain controller checks the approval itself.
+- **An honest unknown instead of an invented success.** When Newton cannot tell what happened, because the connection dropped in the middle of an apply for example, it says the outcome is unknown and how to read the status, on a router in either mode and on Active Directory.
 
 Newton is an operational skill for an AI agent plus an MCP server (`newton-mcp`). Both speak the same change protocol, so
 any MCP-capable agent can use it: Claude Code, Codex, OpenCode or any MCP client.
@@ -26,17 +36,15 @@ any MCP-capable agent can use it: Claude Code, Codex, OpenCode or any MCP client
 Newton has two modes. In the **installed** mode the changes run over SSH. In the **no-install** mode Newton puts
 nothing on the router but one limited web-interface user, and the same protocol runs over the router's own web API.
 
-The change protocol is the whole product. The agent proposes a `uci batch`; Newton stages it, shows the diff, applies it under a rollback timer (60 to 600 seconds, 90 by default), verifies over **new** SSH connections that management and the network still work, and confirms only after three consecutive passing rounds. If anything fails, the router reverts on its own. The rollback timer lives on the router, so it still fires if the agent's session dies. That is the **installed** mode.
+The change protocol is the whole product. The agent proposes a `uci batch`; Newton stages it, shows the diff, applies it under a rollback timer (60 to 600 seconds, 90 by default), verifies over **new** SSH connections that management and the network still work, and confirms only after three consecutive passing rounds. If a check fails, or the change is not confirmed before the timer runs out, the router puts its settings (`/etc/config`) back on its own. The rollback timer lives on the router, so it still fires if the agent's session dies. That is the **installed** mode.
 
 In the **no-install** mode the writes go over HTTPS, pinned by the certificate the setup read over the admin lane. The
 undo is OpenWrt's own rpcd timer (in the router's RAM, 120 to 600 seconds, 180 by default), and a change is
 confirmed only when every mandatory check passes and the router's values read back as the staged ones.
 
-Newton also works on Active Directory, on the main branch ahead of its release (see [Active Directory](#active-directory)
-and [Status](#status)): a read-only audit of Windows Server AD and Samba AD domains with 48 checks, and a small set of
-account changes. For every change but an unlock, which has nothing to put back, the domain controller arms its own
-undo before it writes. You approve each AD change in your own terminal, and the domain controller checks that
-approval itself. Newton prints the setup scripts; you run them on each domain controller.
+On Active Directory (see [Active Directory](#active-directory) and [Status](#status)) Newton audits Windows
+Server AD and Samba AD domains, read-only, with 48 checks, and makes a small set of account changes. Newton prints
+the setup scripts; you run them on each domain controller.
 
 ## What Newton puts on your router
 
@@ -70,7 +78,7 @@ No package is installed and nothing is compiled: about 217 KB of shell in 6 file
 
   /usr/libexec/newton/newton-router     148 KB  the program Newton talks to
   /usr/libexec/newton/newton-safe-apply   25 KB  the change helper
-  /usr/libexec/newton-guard              31 KB  the rollback guard
+  /usr/libexec/newton-guard              32 KB  the rollback guard
   /etc/init.d/newton-guard               525 B  starts the guard at boot
   /usr/libexec/newton/newton-wan-health   11 KB  the dual-WAN health check
   /etc/init.d/newton-wan-health          641 B  starts the health check
@@ -93,13 +101,14 @@ router; and Newton's key may run Newton's program and nothing else.
 What protects you:
   - on the default prod profile every change needs your approval, and Newton
     only reads until you give one;
-  - a router you set to lab applies changes without asking, except the ones
-    Newton always asks about. Among them: SSH (dropbear), the web interface
-    (uhttpd), rpcd, a users or keys config, the management interface or zone,
-    opening more to the WAN, and options that run commands or write files
-    (22 rules in all, in the router program's leash). The inventory entry
-    has to say lab = true as well, or every change still needs your
-    approval;
+  - on a development checkout, a router you set to lab can apply changes
+    without asking, except the ones Newton always asks about. Among them: SSH
+    (dropbear), the web interface (uhttpd), rpcd, a users or keys config, the
+    management interface or zone, opening more to the WAN, and options that
+    run commands or write files (22 rules in all, in the router program's
+    leash). The inventory entry has to say lab = true and the server has to
+    run with NEWTON_LAB_APPROVAL_CARVEOUT=1, or every change still needs your
+    approval; an installed Newton always asks;
   - the guard keeps the last good settings on the router's own flash, and if a
     Newton change is still waiting for confirmation at boot, it puts them back;
   - the agent never gets a root shell through Newton's restricted key: once
@@ -203,8 +212,9 @@ Newton:  NEWTON RESULT: CONFIRMED  router1  3f9c2a1e  IoT network on VLAN 20
 - "Audit my Active Directory domain." / "Disable the account of the person who left." (on the main branch, see [Active Directory](#active-directory))
 
 Questions like "why is the Wi-Fi slow?" stay read-only. Newton changes nothing outside a plan. On the default prod
-profile you approve each plan, unless it falls inside a scoped grant you gave; a router you set to lab applies plans
-without asking, except the changes Newton always asks about.
+profile you approve each plan, unless it falls inside a scoped grant you gave. An installed Newton asks for every plan;
+only a development checkout with the lab carve-out turned on lets a router you set to lab apply plans without asking,
+except the changes Newton always asks about.
 
 ## Features
 
@@ -252,7 +262,7 @@ with no recorded run on a real router.
 - ✓ A reminder to clear your screen after typing a passphrase.
 - ✓ Approval tokens expire and are single-use; the Newton host enforces the single use. Each one is bound to the exact change and the router's current config, and an approval lasts at most 30 minutes. On an installed OpenWrt router the router program checks it again (its expiry and the length of its window); in the no-install mode and on VyOS, RouterOS and Junos only the Newton host checks it.
 - ✓ The leash: changes to Newton's own access, the management network, internet exposure, or options that run commands always need approval. On an installed router it runs in the router program (22 rules); in the no-install mode it is the Newton host's policy only.
-- ✓ A lab mode for test routers: a router applies changes without approval only when its inventory entry says `lab = true` and its profile is lab, and leash changes still ask. The code still marks this lab exception as provisional.
+- ✓ A lab mode for test routers: a router applies changes without approval only when its inventory entry says `lab = true` and its profile is lab, and the server runs from a source checkout with `NEWTON_LAB_APPROVAL_CARVEOUT=1`; leash changes still ask. An installed Newton never uses this lab exception.
 
 **Security**
 - ✓ The router keys belong to a separate `newton` account. The AI's user can't read them, and `newton-doctor` checks this. The launchers run only as `newton`, in a clean environment. Only `newton-mcp` runs without your password, and it takes no arguments; every other launcher asks for your sudo password each time, and the installer checks its sudoers file with `visudo`. The separation holds only if the AI's user has no passwordless sudo or other root path of its own: `newton-doctor` reports that, but cannot fix it.
@@ -301,10 +311,10 @@ with no recorded run on a real router.
 - ✓ **Experimental:** a serial console script for recovery when SSH is gone (probe, login, run, push; refuses the bootloader). It is a script, not an MCP tool: it has no undo timer and no owner approval, and its rules for commands like `uci commit`, `reboot` and `passwd` pass on an `--approved` flag the agent sets itself. Covered by unit tests and an OpenWrt console scenario on a virtual machine's serial socket; not tested on a physical console cable or a router UART. `SKILL.md` notes a first-boot serial bootstrap of RouterOS and VyOS in the virtual lab (2026-10-03); no log of that run is kept in this repository.
 - ✓ **Experimental:** a Linux host timed-undo recipe in the skill, verified on ifupdown2, netplan and NetworkManager. Full Linux support is planned for 1.6.
 
-**Proven, not claimed**
+**Lab and test evidence**
 - ✓ A virtual lab: a virtual OpenWrt router, a virtual ISP with two upstreams and test clients, reset to a snapshot for every scenario.
-- ✓ 96 scenarios in [`lab/scenarios`](lab/scenarios) for the virtual router, and a separate real-router suite in [`lab/scenarios-pulsar`](lab/scenarios-pulsar) (Wi-Fi included, through a USB adapter on the test client); its README lists which scenarios are ported. Its full run passed 97 of 97 scenarios on the Asus RT-AX57M (2026-10-23).
-- ✓ A lab isolation check: lab routers never leak DHCP or router adverts onto your home network.
+- ✓ 96 scenario files in [`lab/scenarios`](lab/scenarios) for the virtual router (no full run of them is recorded in this repository), and a separate real-router suite in [`lab/scenarios-pulsar`](lab/scenarios-pulsar) (Wi-Fi included, through a USB adapter on the test client); its README lists which scenarios are ported. Its full run passed 97 of 97 scenarios on the Asus RT-AX57M (2026-10-23).
+- ✓ A lab isolation check (`scripts/newton-lab-isolation`): it watches a home-network interface for DHCP server replies and IPv6 router adverts and fails on any from a source not on its allow list. Its allow list is by MAC address, so a lab device that spoofs an allowed address passes.
 - ✓ A support table generated from test results, with each device's undo method and what is untested.
 - ✓ Works with Claude Code, Codex, OpenCode, Claude Desktop and any MCP client.
 - ✓ On-demand reference docs for OpenWrt, nftables and networking concepts.
@@ -362,8 +372,9 @@ The wrapper takes **probe lists**, not a free-form shell check: lists of 19 fixe
 
 ### Approvals
 
-- On the default prod profile every change needs **your** approval, or a scoped grant you gave. A router you set to lab
-  applies changes without asking, except the ones Newton always asks about. The AI cannot approve for you: the dialog
+- On the default prod profile every change needs **your** approval, or a scoped grant you gave. An installed Newton
+  always asks; only a development checkout with the lab carve-out turned on lets a router you set to lab apply changes
+  without asking, except the ones Newton always asks about. The AI cannot approve for you: the dialog
   asks for your passphrase or an authenticator code, which the model is not given. A passphrase does pass through the
   Claude Code process, can reach its debug log, and an installed hook could read it; an authenticator code (offered by the setup in the installed mode only) keeps the reusable passphrase out of them, but the dialog is not confidential and a code that is still valid could be used by whoever sees it.
   See Known limits in [`SECURITY.md`](SECURITY.md).
@@ -402,7 +413,7 @@ applied and then undone on RouterOS and Junos, and an eighth scenario checks tha
 
 | Platform | Tested on | Undo method | Full features |
 |---|---|---|---|
-| OpenWrt 25.12 | a real Asus RT-AX57M (25.12.5) and a virtual router | timer on the router + reboot-safe guard | changes, hardening levels, undo after confirm, backups; the checkup and nmap scans are covered by tests with no recorded run on this router, and the Wi-Fi scan ran on it once (2026-10-24); maps are drawn by the agent |
+| OpenWrt 25.12 | a real Asus RT-AX57M (25.12.5), a real GL.iNet GL-MT3000 (25.12.6) and a virtual router | timer on the router + reboot-safe guard | changes, hardening levels, undo after confirm, backups; the checkup and nmap scans are covered by tests with no recorded run on this router, and the Wi-Fi scan ran on it once (2026-10-24); maps are drawn by the agent |
 | OpenWrt 25.12, no-install mode | the real Asus RT-AX57M (25.12.5) | OpenWrt's own `uci apply` rollback timer (no reboot-safe guard) | DHCP reservations and DNS entries; other changes as owner scripts |
 | VyOS (rolling), experimental | virtual image, in the lab | `commit-confirm`, reload mode | changes |
 | MikroTik RouterOS 7, experimental | CHR virtual image, in the lab | scheduled restore (undo is a reboot) | changes |
@@ -411,8 +422,9 @@ applied and then undone on RouterOS and Junos, and an eighth scenario checks tha
 | Samba AD 4.22, on main | a two-DC lab domain | undo timer on the domain controller | disable, enable, unlock, machine account quota; the audit is covered by tests |
 
 OpenWrt 25.12.6 changed where rpcd keeps its sessions; 1.1.3 fixes Newton for it, and that fix was tested end
-to end on a GL.iNet GL-MT3000 running vanilla OpenWrt 25.12.6 (the log of that run is not kept in this repository). The full 97-scenario hardware run predates router
-program 1.3.1 and OpenWrt 25.12.6, and the support table does not list the GL-MT3000 run yet.
+to end on a GL.iNet GL-MT3000 running vanilla OpenWrt 25.12.6 (the log of that run is not kept in this repository). The seven support
+scenarios pass on the GL-MT3000 in the installed mode (2026-11-16), and the support table lists that run. The full 97-scenario hardware run predates router
+program 1.3.1 and OpenWrt 25.12.6.
 
 OpenWrt is the supported platform. The other three router platforms are experimental: they pass their scenarios
 on virtual images only, so try them on a device you can reach by console before you trust them on one you can't. The
@@ -497,7 +509,7 @@ changes, and the installed AD launchers. [`CHANGELOG.md`](CHANGELOG.md) lists th
 Planned, with no dates:
 
 - **1.2:** network rules (rules like "the work laptop reaches the printer", re-checked on every change),
-  reviewed recipes for common jobs, a blast-radius view, a network map tool and a local dashboard.
+  reviewed recipes for common jobs, a blast-radius view and a network map tool.
 - **1.3:** release the read-only Active Directory audit that is on the main branch.
 - **1.4:** release the Active Directory changes that are on the main branch: each approved by you, with the undo armed
   on the domain controller until Newton confirms; a change is confirmed only when every domain controller with a write
@@ -506,9 +518,16 @@ Planned, with no dates:
   script you run yourself for the AD changes Newton will not make (deletes, password resets, krbtgt, trusts,
   privileged groups), and Group Policy edits.
 - **1.5:** Active Directory build mode, opt-in: a whole domain from one plan you approve. Not on the main branch.
+- **1.5.x:** the protocol contract: the change protocol written down as one contract every mode follows, a recovery
+  line for each mode in the approval text, running settings made to match after the router's guard restores a change
+  on its own (or a plain warning with the command that fixes it), and recorded runs that lose the controller in the
+  middle of a change.
 - **1.6:** Linux and Windows 11 hosts, with a gaming performance advisor for Windows 11.
-- **1.7:** more vendors: FortiGate, then Arista EOS and Cisco IOS XE.
-- **1.8:** a security engineer persona that reads Wazuh alerts.
+- **1.7:** a security engineer persona that reads Wazuh alerts.
+- **1.8:** more vendors, limited to OpenWrt, Asus and GL.iNet routers and to what the lab can test safely; other
+  vendors later.
+- Parked at the end of the backlog: a read-only local dashboard, a generic policy engine, maintenance windows,
+  orchestration across several systems and a kit for third-party adapters.
 
 [`docs/ROADMAP.md`](docs/ROADMAP.md) has the detail.
 
@@ -521,7 +540,7 @@ a terminal.
 ## How this got built
 
 The code was written by AI models under a review-and-prove discipline. Every change comes with a test. A different
-model reviews the work, the tests are re-run, and behaviour is proven in a lab rather than claimed.
+model reviews the work, the tests are re-run, and behaviour is tested in the lab where the lab can reach it.
 
 ## License
 

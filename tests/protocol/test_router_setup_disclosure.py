@@ -280,16 +280,21 @@ def test_the_block_says_why_and_what_protects_the_owner(setup_env):
 
 def test_the_block_says_the_approval_rule_is_per_profile(setup_env):
 	"""The approval rule is the policy's: every change needs the owner's
-	approval on the default prod profile, a lab router applies changes
-	without asking except the leash ones, and the leash list is the one
-	policy.py and ADR-015 name."""
+	approval on the default prod profile, a lab router on a development
+	checkout with the carve-out turned on applies changes without asking
+	except the leash ones, an installed Newton always asks, and the leash
+	list is the one policy.py and ADR-015 name."""
 	env = setup_env
 	seed_known_hosts(env)
 	r = env.run(env.device, "install", typed=(GOOD_PW, YES))
 	assert r.rc == 0, r.out
 	text = flat(r.out)
 	assert "on the default prod profile every change needs your approval" in text
-	assert "a router you set to lab applies changes without asking" in text
+	assert ("on a development checkout, a router you set to lab can apply"
+	        " changes without asking") in text
+	assert "NEWTON_LAB_APPROVAL_CARVEOUT=1" in text
+	assert "an installed Newton always asks" in text
+	assert "a router you set to lab applies changes without asking" not in text
 	for item in ("SSH (dropbear)", "the web interface", "rpcd",
 	             "the management interface or zone", "WAN"):
 		assert item in text, item

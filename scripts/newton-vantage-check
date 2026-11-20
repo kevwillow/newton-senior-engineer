@@ -39,6 +39,8 @@ ZL_NAMES=
 ZL_TARGETS=
 ZL_TARGET_COUNT=0
 ZL_TARGET_NAMES=
+ZL_CONTROLS=
+ZL_CONTROL_COUNT=0
 PL_IFACE=
 PL_NETNS=
 
@@ -338,6 +340,18 @@ target_seen() {
 	return 1
 }
 
+# control_port_of <ipv4>: print the port of the address's `control` line
+# and succeed, or fail when the allow-list lists no control for it.
+control_port_of() {
+	for control in $ZL_CONTROLS; do
+		if [ "${control%:*}" = "$1" ]; then
+			printf '%s\n' "${control#*:}"
+			return 0
+		fi
+	done
+	return 1
+}
+
 # load_allow_list: read the root-owned allow-list next to this script and
 # take the requested zone out of it.  A missing file, a malformed line or
 # an unknown zone is answered, never guessed.
@@ -395,6 +409,23 @@ load_allow_list() {
 				ZL_TARGET_NAMES="${ZL_TARGET_NAMES}$2
 "
 				ZL_TARGETS="${ZL_TARGETS}$2
+"
+				;;
+			control)
+				# control <ipv4> <port>: the port that proves the
+				# address is alive when a blocked probe of it times
+				# out.  One control per address.
+				if [ "$#" -ne 3 ] || ! valid_ipv4 "$2" || ! valid_port "$3" \
+					|| control_port_of "$2" >/dev/null; then
+					ZL_BAD=1
+					continue
+				fi
+				ZL_CONTROL_COUNT=$((ZL_CONTROL_COUNT + 1))
+				if [ "$ZL_CONTROL_COUNT" -gt 32 ]; then
+					ZL_BAD=1
+					continue
+				fi
+				ZL_CONTROLS="${ZL_CONTROLS}$2:$3
 "
 				;;
 			*)
@@ -606,6 +637,31 @@ tcp_port_allowed() {
 	return 1
 }
 
+# blocked_timeout_control <ipv4>: the positive control of a blocked
+# probe that timed out.  The control is the address's `control` line,
+# else the zone's canary when the target is the canary's own address.
+# Only a completed connect counts: a refused control could be the
+# change's own REJECT rule.
+blocked_timeout_control() {
+	if control_port=$(control_port_of "$1"); then
+		:
+	elif [ "$1" = "$ZONE_CANARY_IP" ]; then
+		control_port=$ZONE_CANARY_PORT
+	else
+		STATUS=NOTTESTED
+		WORD='no-control'
+		return 0
+	fi
+	if probe_tcp "$1" "$control_port" 6; then
+		STATUS=PASS
+		WORD=timeout
+		return 0
+	fi
+	STATUS=NOTTESTED
+	WORD='target-dead'
+	return 0
+}
+
 do_blocked() {
 	if ! in_targets "$1"; then
 		if [ "$1" != 1.1.1.1 ] && [ "$1" != 9.9.9.9 ]; then
@@ -629,8 +685,11 @@ do_blocked() {
 			WORD=open
 			;;
 		124)
-			STATUS=PASS
-			WORD=timeout
+			# Silence alone proves nothing: a target that is off,
+			# or a path the change broke, is silent too.  The
+			# timeout is a pass only when a control port of the
+			# same target answers in this same run.
+			blocked_timeout_control "$1"
 			;;
 		*)
 			case $PROBE_OUT in

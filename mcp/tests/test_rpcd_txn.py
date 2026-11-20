@@ -1013,6 +1013,64 @@ def test_a_transport_failure_before_the_apply_is_sent_is_not_sent(
     assert "before the change was applied" in result.reason
 
 
+def test_a_router_refusal_before_the_apply_is_not_called_a_link_failure(
+    engine, router
+) -> None:
+    """The router refused a call before ``uci apply``: still NOT_SENT, but
+    the reason says the router refused, not that the link failed."""
+    router.pending_listing_fails = True
+    result = engine.apply(_ops(), 30, CREDENTIALS)
+
+    assert result.state == txn.NOT_SENT
+    assert "link failed" not in result.reason
+    assert result.reason.startswith("the router refused a call before the change was applied")
+
+
+def test_a_transport_failure_before_the_apply_is_called_a_link_failure(
+    engine, router, monkeypatch
+) -> None:
+    original = router.call
+
+    def call(session, obj, called_fn, args=None):
+        if (obj, called_fn) == ("uci", "set"):
+            raise rpcd.RpcdTransportError("the router is gone", sent=False)
+        return original(session, obj, called_fn, args)
+
+    monkeypatch.setattr(router, "call", call)
+    result = engine.apply(_ops(), 30, CREDENTIALS)
+
+    assert result.state == txn.NOT_SENT
+    assert result.reason.startswith("the link failed before the change was applied")
+
+
+def test_a_refused_login_before_the_apply_is_not_called_a_link_failure(
+    engine, router, monkeypatch
+) -> None:
+    def login(*_args, **_kwargs):
+        raise rpcd.RpcdAccessDenied("the router refused the login")
+
+    monkeypatch.setattr(router, "login", login)
+    result = engine.apply(_ops(), 30, CREDENTIALS)
+
+    assert result.state == txn.NOT_SENT
+    assert "link failed" not in result.reason
+    assert result.reason.startswith("the router refused the login before the change was applied")
+
+
+def test_an_engine_refusal_before_the_apply_is_not_called_a_link_failure(
+    engine, router, monkeypatch
+) -> None:
+    def stage(session, ops):
+        raise txn.RpcdTxnError("a value Newton cannot stage")
+
+    monkeypatch.setattr(engine, "_stage", stage)
+    result = engine.apply(_ops(), 30, CREDENTIALS)
+
+    assert result.state == txn.NOT_SENT
+    assert "link failed" not in result.reason
+    assert result.reason.startswith("Newton stopped before the change was applied")
+
+
 def test_a_login_that_fails_in_the_apply_is_not_sent(
     engine, router, monkeypatch
 ) -> None:

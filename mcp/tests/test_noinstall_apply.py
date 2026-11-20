@@ -1775,3 +1775,88 @@ def test_a_stale_claim_whose_apply_proved_nothing_applied_can_be_aborted(
 
     assert result["result"] == "aborted", result
     assert not (state / "plans" / f"{sid}.json").exists()
+
+
+# ---- the record is bound to its device ------------------------------------
+
+
+def test_a_plan_record_of_another_device_on_the_same_host_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A plan made for one inventory name is not applied under another.
+
+    Two names for the same router (same host): the host and the session
+    of the record match, so only the device binding stops the apply,
+    before the approval is claimed or the router is contacted.
+    """
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    _approve(state, sid, _record(state, sid))
+    body = _no_install_body(tmp_path)
+    alias = body.replace("[devices.lab-r1]", "[devices.lab-r2]")
+    _write_inventory(tmp_path, monkeypatch, body + alias)
+    calls_before = len(router.calls)
+
+    with pytest.raises(_server.NewtonError) as caught:
+        noinstall_flow.apply(
+            _server.NewtonService(), "lab-r2", sid, now=clock, sleep=clock.advance
+        )
+
+    assert str(caught.value) == "no plan record for this device and session"
+    assert len(router.calls) == calls_before, router.calls[calls_before:]
+    approvals = state / "approvals"
+    assert (approvals / f"{sid}.json").is_file()
+    assert not (approvals / f"{sid}.claimed").exists()
+    assert not (approvals / f"{sid}.used").exists()
+
+
+# ---- a used approval is not replayed ----------------------------------------
+
+
+def test_a_used_approval_is_not_replayed_by_a_second_apply(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """One approval, one apply: the second call is refused, nothing staged."""
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    _approve(state, sid, _record(state, sid))
+    assert _apply(tmp_path, monkeypatch, router, clock, sid)["result"] == "confirmed"
+    approvals = state / "approvals"
+    assert (approvals / f"{sid}.used").is_file()
+    calls_before = len(router.calls)
+
+    message = _apply_error(tmp_path, monkeypatch, router, clock, sid)
+
+    assert message == "approval already used; ask the user to approve the plan again"
+    assert router.calls[calls_before:] == [], router.calls[calls_before:]
+    assert router.count("uci", "apply") == 1
+
+
+def test_a_copy_of_a_used_approval_put_back_does_not_apply_again(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The approval file of an applied plan, written back, applies nothing.
+
+    The host accepts the copy's fields again, so what stops the replay is
+    the router read: the router is not the router of the plan any more.
+    """
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    _approve(state, sid, _record(state, sid))
+    approvals = state / "approvals"
+    original = (approvals / f"{sid}.json").read_bytes()
+    assert _apply(tmp_path, monkeypatch, router, clock, sid)["result"] == "confirmed"
+    (approvals / f"{sid}.json").write_bytes(original)
+    os.chmod(approvals / f"{sid}.json", 0o600)
+
+    message = _apply_error(tmp_path, monkeypatch, router, clock, sid)
+
+    assert "changed since the plan" in message
+    assert router.count("uci", "apply") == 1, router.calls
+    assert router.count("uci", "confirm") == 1, router.calls

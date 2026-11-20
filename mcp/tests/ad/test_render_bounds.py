@@ -171,6 +171,76 @@ def test_the_findings_of_the_report_stay_inside_the_byte_budget() -> None:
         assert result["findings_truncated"] is True
 
 
+def _big_check(check_id: str, base: int) -> model.CheckResult:
+    """A check whose findings together pass the byte budget, each well inside it."""
+    evidence = "e" * 7000
+    return _result(
+        check_id,
+        tuple(
+            _finding(base + i, objects=3, evidence=evidence)
+            for i in range(render.MAX_FINDINGS_PER_CHECK)
+        ),
+    )
+
+
+def test_a_check_too_large_on_its_own_lists_the_findings_that_fit() -> None:
+    """Asked for alone, a check whose findings pass the budget together
+    still lists the ones that fit, not none, and says it is truncated."""
+    rendered = render.render(_report(_big_check("AD-TEST-01", 0)))
+
+    result = rendered["results"][0]
+    assert result["findings"], "a check asked for alone listed none of its findings"
+    assert len(result["findings"]) < render.MAX_FINDINGS_PER_CHECK
+    assert result["findings_truncated"] is True
+    assert result["findings_total"] == render.MAX_FINDINGS_PER_CHECK
+    assert len(json.dumps(result["findings"])) <= render.MAX_FINDINGS_BYTES
+    assert rendered["truncated"] is True
+
+
+def test_a_check_after_a_cut_check_still_lists_its_findings() -> None:
+    """The budget is spent in order, and a smaller check after one that was
+    cut still lists the findings that fit."""
+    rendered = render.render(
+        _report(_big_check("AD-TEST-01", 0), _result("AD-TEST-02", (_finding(900),)))
+    )
+
+    first, second = rendered["results"]
+    assert first["findings_truncated"] is True
+    assert len(second["findings"]) == 1
+    assert second["findings_truncated"] is False
+
+
+def test_the_note_says_a_finding_too_large_on_its_own_is_not_listed() -> None:
+    """One finding that alone passes the budget cannot be listed, whatever
+    `checks` holds: the note and the tool description say so."""
+    base = _finding(0)
+    huge = model.Finding(
+        check_id=base.check_id,
+        severity=base.severity,
+        title=base.title,
+        objects=tuple(
+            model.Affected(
+                sid=f"{BASE_SID}{7000 + one}",
+                name="n" * 10_000,
+                dn="CN=" + "d" * 10_000,
+                evidence="e" * 10_000,
+            )
+            for one in range(render.MAX_OBJECTS_PER_FINDING)
+        ),
+        maps_to=base.maps_to,
+        fix=base.fix,
+    )
+    rendered = render.render(_report(_result("AD-TEST-01", (huge,))))
+
+    assert rendered["results"][0]["findings"] == []
+    assert rendered["truncated"] is True
+    note = rendered["truncated_note"]
+    assert "a finding that alone passes the budget is never listed" in note
+    tool = server.mcp._tool_manager.get_tool("newton_ad_audit")
+    assert tool is not None
+    assert "a finding that alone passes the budget is never listed" in (tool.description or "")
+
+
 def test_a_small_report_is_not_marked_truncated() -> None:
     rendered = render.render(_report(_result("AD-TEST-01", (_finding(0),))))
 

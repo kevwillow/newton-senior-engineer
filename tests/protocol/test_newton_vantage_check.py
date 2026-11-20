@@ -19,6 +19,9 @@ Test IDs
   VC-19  reach (the inverse of blocked) and the wider port rule: any port
          1..65535 for a host inside check_targets, the fixed port list for
          the public resolvers, and never the public resolvers for reach.
+  VC-20  a blocked probe that times out is a pass only when a positive
+         control on the same target answers in the same run: no control
+         is NOTTESTED no-control, a dead control NOTTESTED target-dead.
 """
 
 import os
@@ -476,15 +479,203 @@ def test_vc06_blocked_open_fails(tmp_path):
     assert result.stdout == "RESULT FAIL open\n"
 
 
+# VC-20: a timeout is a pass only next to a live positive control.  A
+# silent port says nothing on its own: a target that is switched off, or
+# a path the change broke, times out the same way a DROP rule does.  The
+# control is a probe of the same target, in the same run, on a port the
+# root-owned allow-list lists for it (a `control` line, or the zone's
+# canary when the target is the canary's address).
+
+ALLOW_CONTROL = ALLOW_PLAIN + "control 192.168.1.1 443\n"
+
+
 def test_vc06_blocked_timeout_passes(tmp_path):
-    result, _names, _text = run_check(
+    # the control line answers, so the silent port is a pass
+    result, names, text = run_check(
         tmp_path,
         "check guest blocked 192.168.1.1 22",
+        allow=ALLOW_CONTROL,
         FAKE_TIMEOUT_TARGETS="192.168.1.1:22",
+        FAKE_OPEN_TARGETS="192.168.1.1:443",
     )
 
     assert result.returncode == 0
     assert result.stdout == "RESULT PASS timeout\n"
+    assert names.count("timeout") == 2
+    assert "ARG 443\n" in text
+
+
+def test_vc20_blocked_timeout_with_live_control_passes(tmp_path):
+    result, _names, _text = run_check(
+        tmp_path,
+        "check guest blocked 192.168.1.1 22",
+        allow=ALLOW_CONTROL,
+        FAKE_TIMEOUT_TARGETS="192.168.1.1:22",
+        FAKE_OPEN_TARGETS="192.168.1.1:443",
+    )
+
+    assert result.stdout == "RESULT PASS timeout\n"
+
+
+def test_vc20_blocked_timeout_with_no_control_is_not_tested(tmp_path):
+    result, names, _text = run_check(
+        tmp_path,
+        "check guest blocked 192.168.1.1 22",
+        FAKE_TIMEOUT_TARGETS="192.168.1.1:22",
+        FAKE_OPEN_TARGETS="192.168.1.1:443",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "RESULT NOTTESTED no-control\n"
+    assert names.count("timeout") == 1
+
+
+@pytest.mark.parametrize(
+    "dead",
+    [
+        pytest.param({"FAKE_TIMEOUT_TARGETS": "192.168.1.1:22,192.168.1.1:443"}, id="control-timeout"),
+        pytest.param({"FAKE_TIMEOUT_TARGETS": "192.168.1.1:22"}, id="control-refused"),
+        pytest.param(
+            {"FAKE_TIMEOUT_TARGETS": "192.168.1.1:22", "FAKE_UNREACHABLE_TARGETS": "192.168.1.1:443"},
+            id="control-unreachable",
+        ),
+    ],
+)
+def test_vc20_blocked_timeout_with_dead_target_is_not_tested(tmp_path, dead):
+    # only a completed connect proves the target is alive: a refused
+    # control could be the change's own REJECT rule
+    result, names, _text = run_check(
+        tmp_path,
+        "check guest blocked 192.168.1.1 22",
+        allow=ALLOW_CONTROL,
+        **dead,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "RESULT NOTTESTED target-dead\n"
+    assert names.count("timeout") == 2
+
+
+def test_vc20_a_control_for_another_address_is_no_control(tmp_path):
+    result, _names, _text = run_check(
+        tmp_path,
+        "check guest blocked 192.168.1.2 22",
+        allow=ALLOW_CONTROL,
+        FAKE_TIMEOUT_TARGETS="192.168.1.2:22",
+        FAKE_OPEN_TARGETS="192.168.1.1:443,192.168.1.2:443",
+    )
+
+    assert result.stdout == "RESULT NOTTESTED no-control\n"
+
+
+def test_vc20_the_canary_is_the_control_of_its_own_address(tmp_path):
+    allow = (
+        "zone guest src 192.0.2.50 canary 192.168.1.1 53\n"
+        "target 192.168.0.0/16\n"
+    )
+    result, _names, text = run_check(
+        tmp_path,
+        "check guest blocked 192.168.1.1 22",
+        allow=allow,
+        FAKE_TIMEOUT_TARGETS="192.168.1.1:22",
+        FAKE_OPEN_TARGETS="192.168.1.1:53",
+    )
+
+    assert result.stdout == "RESULT PASS timeout\n"
+    assert "ARG 53\n" in text
+
+
+def test_vc20_a_dead_canary_of_the_same_address_is_target_dead(tmp_path):
+    allow = (
+        "zone guest src 192.0.2.50 canary 192.168.1.1 53\n"
+        "target 192.168.0.0/16\n"
+    )
+    result, _names, _text = run_check(
+        tmp_path,
+        "check guest blocked 192.168.1.1 22",
+        allow=allow,
+        FAKE_TIMEOUT_TARGETS="192.168.1.1:22,192.168.1.1:53",
+    )
+
+    assert result.stdout == "RESULT NOTTESTED target-dead\n"
+
+
+def test_vc20_a_control_line_wins_over_the_canary(tmp_path):
+    allow = (
+        "zone guest src 192.0.2.50 canary 192.168.1.1 53\n"
+        "target 192.168.0.0/16\n"
+        "control 192.168.1.1 443\n"
+    )
+    result, _names, _text = run_check(
+        tmp_path,
+        "check guest blocked 192.168.1.1 22",
+        allow=allow,
+        FAKE_TIMEOUT_TARGETS="192.168.1.1:22",
+        FAKE_OPEN_TARGETS="192.168.1.1:53",
+    )
+
+    assert result.stdout == "RESULT NOTTESTED target-dead\n"
+
+
+def test_vc20_a_public_resolver_takes_a_control_line(tmp_path):
+    allow = ALLOW_PLAIN + "control 1.1.1.1 53\n"
+    result, _names, _text = run_check(
+        tmp_path,
+        "check guest blocked 1.1.1.1 443",
+        allow=allow,
+        FAKE_TIMEOUT_TARGETS="1.1.1.1:443",
+        FAKE_OPEN_TARGETS="1.1.1.1:53",
+    )
+
+    assert result.stdout == "RESULT PASS timeout\n"
+
+
+def test_vc20_a_refused_or_open_port_needs_no_control(tmp_path):
+    result, names, _text = run_check(
+        tmp_path, "check guest blocked 192.168.1.1 22", allow=ALLOW_CONTROL
+    )
+
+    assert result.stdout == "RESULT PASS refused\n"
+    assert names.count("timeout") == 1
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param("control 192.168.1.1\n", id="no-port"),
+        pytest.param("control 192.168.1.1 443 extra\n", id="extra-field"),
+        pytest.param("control 192.168.1.300 443\n", id="bad-ip"),
+        pytest.param("control 192.168.1.1 0\n", id="port-zero"),
+        pytest.param("control 192.168.1.1 0443\n", id="leading-zero-port"),
+        pytest.param("control 192.168.1.1 65536\n", id="port-too-big"),
+        pytest.param("control 192.168.1.0/24 443\n", id="cidr"),
+        pytest.param("control 192.168.1.1 443\ncontrol 192.168.1.1 80\n", id="duplicate-address"),
+        pytest.param(
+            "".join("control 10.0.0.%d 443\n" % index for index in range(1, 34)),
+            id="more-than-thirty-two",
+        ),
+    ],
+)
+def test_vc20_a_malformed_control_line_is_bad_config(tmp_path, line):
+    result, names, _text = run_check(
+        tmp_path, "check guest canary", allow=ALLOW_PLAIN + line
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "RESULT NOTTESTED bad-config\n"
+    assert names == []
+
+
+def test_vc20_thirty_two_control_lines_are_accepted(tmp_path):
+    lines = "".join("control 10.0.0.%d 443\n" % index for index in range(1, 33))
+    result, _names, _text = run_check(
+        tmp_path,
+        "check guest canary",
+        allow=ALLOW_PLAIN + lines,
+        FAKE_OPEN_TARGETS="192.0.2.1:53",
+    )
+
+    assert result.stdout == "RESULT PASS reached\n"
 
 
 def test_vc06_blocked_unreachable_is_not_tested(tmp_path):

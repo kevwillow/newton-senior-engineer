@@ -26,9 +26,12 @@ the report, not with the product of its strings and its commands.
 
 The report is bounded: a check lists at most ``MAX_FINDINGS_PER_CHECK``
 findings and a finding at most ``MAX_OBJECTS_PER_FINDING`` objects, each
-with its full count, and once the listed findings of the report reach
-``MAX_FINDINGS_BYTES`` the checks after them list none.  The report then
-says it is truncated and how to see the rest.
+with its full count, and the listed findings of the report take at most
+``MAX_FINDINGS_BYTES``.  The budget is spent in order, finding by
+finding: a finding that no longer fits is left out and the findings
+after it, in that check and in the later checks, are still listed when
+they fit.  A finding that alone passes the budget is never listed.  The
+report then says it is truncated and how to see the rest.
 """
 
 from __future__ import annotations
@@ -65,11 +68,12 @@ TRUNCATED_NOTE = (
     "Not every finding is listed: a check lists at most "
     f"{MAX_FINDINGS_PER_CHECK} findings and a finding at most "
     f"{MAX_OBJECTS_PER_FINDING} objects, and the listed findings of the "
-    f"report take at most {MAX_FINDINGS_BYTES} bytes, so a check whose "
-    "findings would pass that budget lists none (findings_truncated is true "
-    "on it). findings_total and objects_total hold the full counts; "
-    "pass `checks` with fewer check ids to list the findings of a check "
-    "that was left out for size."
+    f"report take at most {MAX_FINDINGS_BYTES} bytes: the findings that no "
+    "longer fit that budget are left out (findings_truncated is true on "
+    "their check). findings_total and objects_total hold the full counts; "
+    "pass `checks` with fewer check ids to list more of the findings of a "
+    "check that was cut for size; a finding that alone passes the budget "
+    "is never listed."
 )
 
 
@@ -322,17 +326,26 @@ def _truncated(rendered: dict[str, object]) -> bool:
 
 
 def _within_budget(results: list[dict[str, object]]) -> None:
-    """Empty the findings of the checks past the byte budget, in order."""
-    used = 0
+    """Leave out the findings past the byte budget, in order.
+
+    Each finding is measured on its own (with the separator a list
+    adds), so a check whose findings pass the budget together still
+    lists the ones that fit.
+    """
+    used = 2  # the brackets of a list
     for rendered in results:
-        if not rendered["findings"]:
-            continue
-        size = len(json.dumps(rendered["findings"], default=str))
-        if used + size > MAX_FINDINGS_BYTES:
-            rendered["findings"] = []
+        findings = rendered["findings"]
+        assert isinstance(findings, list)
+        kept = []
+        for finding in findings:
+            size = len(json.dumps(finding, default=str)) + 2
+            if used + size > MAX_FINDINGS_BYTES:
+                continue
+            used += size
+            kept.append(finding)
+        if len(kept) < len(findings):
+            rendered["findings"] = kept
             rendered["findings_truncated"] = True
-            continue
-        used += size
 
 
 def render(report: AuditReport) -> dict[str, object]:

@@ -2195,3 +2195,85 @@ def test_the_rollback_of_the_live_export_is_a_rollback() -> None:
     # the leftovers of the revert are gone
     assert device.scheduler_present is False
     assert device.backup_present is False
+
+
+# The hash of the change leaves Newton's own revert entry out.  A CHR
+# lists its /system scheduler entries in the /export, so the export read
+# while the revert is armed carries the newton-revert entry and the
+# export read after the confirm does not.  The comparison after the
+# confirm uses this hash; the owner's entries stay in it.
+
+_REVERT_ENTRY = "\n".join(
+    [
+        'add interval=0s name=newton-revert on-event="/system backup load '
+        'name=newton-revert; :log info \\"newton\\"" \\',
+        "    policy=ftp,reboot,read,write,policy,test,password,sniff,sensitive,"
+        "romon \\",
+        "    start-date=2026-10-24 start-time=23:31:23",
+    ]
+)
+_OWNER_ENTRY = 'add interval=1d name=nightly on-event="/log info nightly" start-time=03:00:00'
+_IDENTITY = "/system identity\nset name=chr-baseline"
+
+
+def test_the_change_hash_leaves_the_armed_revert_out() -> None:
+    armed = "\n".join([_IDENTITY, "/system scheduler", _REVERT_ENTRY])
+    assert rw.change_hash(armed) == rw.change_hash(_IDENTITY)
+    assert rw.change_hash(_IDENTITY) == rw.config_hash(_IDENTITY)
+    # the config hash itself still sees the entry
+    assert rw.config_hash(armed) != rw.config_hash(_IDENTITY)
+
+
+def test_the_change_hash_keeps_the_owner_entries() -> None:
+    with_owner = "\n".join([_IDENTITY, "/system scheduler", _OWNER_ENTRY])
+    armed = "\n".join(
+        [_IDENTITY, "/system scheduler", _OWNER_ENTRY, _REVERT_ENTRY]
+    )
+    armed_first = "\n".join(
+        [_IDENTITY, "/system scheduler", _REVERT_ENTRY, _OWNER_ENTRY]
+    )
+    assert rw.change_hash(armed) == rw.change_hash(with_owner)
+    assert rw.change_hash(armed_first) == rw.change_hash(with_owner)
+    assert rw.change_hash(with_owner) != rw.change_hash(_IDENTITY)
+    moved = with_owner.replace("03:00:00", "04:00:00")
+    assert rw.change_hash(moved) != rw.change_hash(with_owner)
+
+
+def test_the_change_hash_keeps_the_sections_after_the_scheduler() -> None:
+    after = "/ip dns\nset servers=192.0.2.53"
+    armed = "\n".join([_IDENTITY, "/system scheduler", _REVERT_ENTRY, after])
+    plain = "\n".join([_IDENTITY, after])
+    assert rw.change_hash(armed) == rw.change_hash(plain)
+    changed = plain.replace("192.0.2.53", "192.0.2.54")
+    assert rw.change_hash(armed) != rw.change_hash(changed)
+
+
+def test_an_owner_entry_that_names_the_revert_in_a_value_stays() -> None:
+    """Only the name of the entry counts, not a value that mentions it."""
+    owner = (
+        'add interval=1d name=loader on-event="/system backup load '
+        'name=newton-revert password=x" start-time=03:00:00'
+    )
+    with_owner = "\n".join([_IDENTITY, "/system scheduler", owner])
+    assert rw.change_hash(with_owner) != rw.change_hash(_IDENTITY)
+
+
+def test_the_revert_entry_outside_the_scheduler_section_stays() -> None:
+    """A line outside /system scheduler is configuration, whatever it says."""
+    other = "/interface list\nadd name=newton-revert"
+    text = "\n".join([_IDENTITY, other])
+    assert rw.change_hash(text) != rw.change_hash(_IDENTITY)
+
+
+def test_the_routeros_ops_offer_the_change_hash() -> None:
+    assert rw.RouterosOps().change_hash("x") == rw.change_hash("x")
+
+
+def test_an_escaped_quote_does_not_end_the_owner_value() -> None:
+    """The name inside a value with escaped quotes is still a value."""
+    owner = (
+        'add interval=1d name=loader on-event=":log info \\"a name=newton-revert b\\"" '
+        "start-time=03:00:00"
+    )
+    with_owner = "\n".join([_IDENTITY, "/system scheduler", owner])
+    assert rw.change_hash(with_owner) != rw.change_hash(_IDENTITY)

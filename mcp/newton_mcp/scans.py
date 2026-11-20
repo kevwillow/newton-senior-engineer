@@ -359,6 +359,36 @@ def _check_target_rows(name: str, raw: Any) -> tuple[str, ...]:
     return tuple(rows)
 
 
+def _check_control_rows(name: str, raw: Any) -> None:
+    """Validate ``check_controls``: at most 32 ``"<ipv4>:<port>"``, one per
+    address.  The server never probes them; ``newton-vantage-setup`` puts
+    them into the vantage's allow-list, where the forced command uses each
+    one as the positive control of a blocked probe that times out.  The
+    loader refuses what the setup tool refuses, so one inventory never
+    satisfies one of them and not the other."""
+    if raw is None:
+        return
+    message = (
+        f"vantage {name}: check_controls must be a list of at most "
+        f"{MAX_CHECK_TARGETS} \"<ipv4>:<port>\" strings, one per address"
+    )
+    if not isinstance(raw, list) or len(raw) > MAX_CHECK_TARGETS:
+        raise ScanError(message)
+    seen: set[str] = set()
+    for entry in raw:
+        if not isinstance(entry, str) or entry.count(":") != 1:
+            raise ScanError(message)
+        address, port = entry.split(":")
+        if (
+            not _is_ipv4(address)
+            or address in seen
+            or re.fullmatch(r"[1-9][0-9]{0,4}", port) is None
+            or int(port) > 65535
+        ):
+            raise ScanError(message)
+        seen.add(address)
+
+
 def load_vantages(path: Path | None = None) -> dict[str, Vantage]:
     """Load and strictly validate ``[vantages.<name>]`` inventory entries."""
     inventory = path or _inventory_path()
@@ -392,6 +422,7 @@ def load_vantages(path: Path | None = None) -> dict[str, Vantage]:
         "admin_password_file",
         "zones",
         "check_targets",
+        "check_controls",
     }
     result: dict[str, Vantage] = {}
     for name, raw in raw_vantages.items():
@@ -459,6 +490,7 @@ def load_vantages(path: Path | None = None) -> dict[str, Vantage]:
             zones=_zone_rows(name, raw["zones"]) if "zones" in raw else (),
             check_targets=_check_target_rows(name, raw.get("check_targets")),
         )
+        _check_control_rows(name, raw.get("check_controls"))
     return result
 
 

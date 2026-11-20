@@ -13,6 +13,7 @@ import pytest
 import newton_mcp.approve as approve
 import newton_mcp.elicit_approval as elicit_approval
 import newton_mcp.grants as grants
+import newton_mcp.policy as policy
 import newton_mcp.server as server
 from newton_mcp.plan import compute_plan_hash
 from test_elicit_approval import (  # noqa: E402  (tests dir is on sys.path)
@@ -228,6 +229,70 @@ def test_a_grant_never_approves_a_critical_plan(clock):
     assert outcome.grant_used is False, outcome
     assert outcome.status != "approved", outcome
     assert not _approval_path().exists()
+
+
+CRITICAL_REASON = (
+    "mgmt-zone: a change of the management zone requires approval: "
+    "firewall.lan.input='ACCEPT'"
+)
+
+
+def test_a_grant_never_covers_a_record_whose_risk_was_edited_to_low(clock):
+    """The risk word is outside the plan hash; the reasons are inside it.
+
+    A record planned as critical whose ``risk`` was edited to ``low`` on
+    disk still verifies, so the grant must read critical from the hashed
+    reasons and refuse to cover it.
+    """
+    _open_grant()
+    record = _grantable_plan()
+    record["reasons"] = [policy.PROD_REASON, CRITICAL_REASON]
+    record["risk"] = "critical"
+    record["plan_hash"] = compute_plan_hash(record)
+    record["risk"] = "low"
+    assert compute_plan_hash(record) == record["plan_hash"]
+    _write_plan(record)
+
+    ctx = _ResponseContext(clock, [])
+    outcome = _run(ctx)
+
+    assert outcome.grant_used is False, outcome
+    assert outcome.status != "approved", outcome
+    assert not _approval_path().exists()
+
+
+@pytest.mark.parametrize("reasons", [[], ["profile 'prod': every write requires approval"]])
+def test_a_record_with_no_critical_reason_stays_grant_eligible(
+    configured_newton, clock, reasons
+):
+    _open_grant()
+    record = _grantable_plan()
+    record["reasons"] = reasons
+    record["risk"] = "low"
+    record["plan_hash"] = compute_plan_hash(record)
+    _write_plan(record)
+
+    outcome = _run(_ResponseContext(clock, [], capability=None))
+
+    assert outcome.status == "approved", outcome
+    assert outcome.grant_used is True
+
+
+@pytest.mark.parametrize(
+    "reasons, critical",
+    [
+        ([], False),
+        ([policy.PROD_REASON], False),
+        ([policy.PROD_REASON, CRITICAL_REASON], True),
+        ([CRITICAL_REASON], True),
+        (["profile 'prod'"], True),
+        ("not a list", True),
+        (None, True),
+        ([None], True),
+    ],
+)
+def test_critical_is_read_from_the_reasons(reasons, critical):
+    assert elicit_approval.critical_from_reasons(reasons) is critical
 
 
 def test_a_grant_does_not_cover_a_plan_with_one_unlisted_line(clock):
@@ -918,6 +983,36 @@ def test_a_held_grant_approved_apply_keeps_the_grant(configured_newton, monkeypa
     assert grants.load_live_grant(DEVICE) is not None
 
 
+def test_a_held_apply_whose_record_cannot_be_kept_says_the_grant_ended(
+    configured_newton, monkeypatch
+):
+    """A held change with no confirm_by leaves nothing to settle later, so
+    the grant ends now; the line says so and no grant notice is shown."""
+    _write_plan(_grantable_plan())
+    _open_grant()
+
+    async def collect(ctx, device, session_id):
+        return elicit_approval.Outcome(
+            "approved",
+            "approved by your easy grant",
+            grant_used=True,
+            grant_note="EASY GRANT: DHCP reservations until 16:40",
+        )
+
+    monkeypatch.setattr(server.elicit_approval, "collect_approval", collect)
+    monkeypatch.setattr(
+        server,
+        "newton_apply_change",
+        lambda device, session_id, hold=False: {"result": "held", "confirm_by": None},
+    )
+
+    result = asyncio.run(server._apply_change_tool(DEVICE, SID, object(), hold=True))
+
+    assert grants.load_live_grant(DEVICE) is None
+    assert "EASY GRANT ENDED." in result["newton_result"]
+    assert "grant_notice" not in result
+
+
 def _fake_script(stdout: str, rc: int = 0):
     import subprocess
 
@@ -1021,3 +1116,158 @@ def test_a_status_of_a_live_held_change_keeps_the_grant(configured_newton, monke
     server.newton_change_status(DEVICE, SID)
 
     assert grants.load_live_grant(DEVICE) is not None
+
+
+# ---- a held change nobody looks at again still ends the grant when its window passes ----
+
+
+def _held_apply_under_grant(monkeypatch, confirm_by: int) -> None:
+    """An apply the grant approved that ends held, until confirm_by."""
+
+    async def collect(ctx, device, session_id):
+        return elicit_approval.Outcome(
+            "approved",
+            "approved by your easy grant",
+            grant_used=True,
+            grant_note="EASY GRANT: DHCP reservations until 16:40",
+        )
+
+    monkeypatch.setattr(server.elicit_approval, "collect_approval", collect)
+    monkeypatch.setattr(
+        server,
+        "newton_apply_change",
+        lambda device, session_id, hold=False: {"result": "held", "confirm_by": confirm_by},
+    )
+    asyncio.run(server._apply_change_tool(DEVICE, SID, object(), hold=True))
+
+
+def test_a_held_change_whose_window_passed_unobserved_ends_the_grant_at_the_next_plan(
+    configured_newton, monkeypatch
+):
+    """Nobody called status, confirm or abort: the router rolled the held
+    change back on its own when its window ended.  The next plan under the
+    grant learns the window passed unconfirmed and ends the grant."""
+    _write_plan(_grantable_plan())
+    _open_grant()
+    _held_apply_under_grant(monkeypatch, confirm_by=int(time.time()) - 1)
+
+    assert server._grant_can_waive_chat(DEVICE) is False
+    assert grants.load_live_grant(DEVICE) is None
+
+
+def test_a_held_change_whose_window_passed_unobserved_is_not_grant_waived(
+    configured_newton, monkeypatch
+):
+    _write_plan(_grantable_plan())
+    _open_grant()
+    _held_apply_under_grant(monkeypatch, confirm_by=int(time.time()) - 1)
+
+    assert server._grant_waives_chat(DEVICE, "set dhcp.host1.ip='192.0.2.21'", False) is False
+    assert grants.load_live_grant(DEVICE) is None
+
+
+def test_a_held_change_whose_window_passed_unobserved_ends_the_grant_before_the_next_apply(
+    configured_newton, monkeypatch
+):
+    """The approval of the next apply never sees the grant that the
+    unobserved rollback ended."""
+    _write_plan(_grantable_plan())
+    _open_grant()
+    _held_apply_under_grant(monkeypatch, confirm_by=int(time.time()) - 1)
+    seen: list[Any] = []
+
+    async def collect(ctx, device, session_id):
+        seen.append(grants.load_live_grant(device))
+        return elicit_approval.Outcome("fallback", "no approval")
+
+    monkeypatch.setattr(server.elicit_approval, "collect_approval", collect)
+    monkeypatch.setattr(
+        server, "newton_apply_change",
+        lambda device, session_id, hold=False: {"error": "not approved"},
+    )
+    asyncio.run(server._apply_change_tool(DEVICE, SID, object()))
+
+    assert seen == [None]
+
+
+def test_a_held_change_whose_window_passed_unobserved_is_not_shown_as_a_live_grant(
+    configured_newton, monkeypatch
+):
+    _write_plan(_grantable_plan())
+    _open_grant()
+    _held_apply_under_grant(monkeypatch, confirm_by=int(time.time()) - 1)
+
+    devices = server.newton_list_devices()["devices"]
+
+    assert [d["easy_grant"] for d in devices if d["name"] == DEVICE] == [None]
+
+
+def test_a_held_change_still_in_its_window_keeps_the_grant(configured_newton, monkeypatch):
+    _write_plan(_grantable_plan())
+    _open_grant()
+    _held_apply_under_grant(monkeypatch, confirm_by=int(time.time()) + 600)
+
+    assert server._grant_can_waive_chat(DEVICE) is True
+    assert grants.load_live_grant(DEVICE) is not None
+
+
+def test_a_held_change_confirmed_in_its_window_keeps_the_grant_after_it(
+    configured_newton, monkeypatch
+):
+    _write_plan(_grantable_plan())
+    _open_grant()
+    confirm_by = int(time.time()) + 600
+    _held_apply_under_grant(monkeypatch, confirm_by=confirm_by)
+    monkeypatch.setattr(
+        server.NewtonService, "run_script",
+        _fake_script(f"CONFIRMED session={SID} (verify passed)\n"),
+    )
+    assert server.newton_confirm_change(DEVICE, SID)["result"] == "confirmed"
+    monkeypatch.setattr(server.time, "time", lambda: confirm_by + 60.0)
+
+    assert server._grant_on_disk(DEVICE) is True
+
+
+def test_a_held_change_under_an_earlier_grant_does_not_end_a_new_grant(
+    configured_newton, monkeypatch
+):
+    """The held change ran under a grant that has since ended; a grant the
+    owner opened after it is not ended by that change's window."""
+    _write_plan(_grantable_plan())
+    _open_grant(now=time.time() - 30)
+    _held_apply_under_grant(monkeypatch, confirm_by=int(time.time()) - 1)
+    grants.revoke_grant(DEVICE)
+    _open_grant()
+
+    assert server._grant_on_disk(DEVICE) is True
+
+
+def test_a_held_change_the_router_confirmed_after_a_lost_answer_keeps_the_grant(
+    configured_newton, monkeypatch
+):
+    """A status that reads the router's confirmed state (the confirm's answer
+    was lost) clears the held change: its window passing is no failure."""
+    _write_plan(_grantable_plan())
+    _open_grant()
+    confirm_by = int(time.time()) + 600
+    _held_apply_under_grant(monkeypatch, confirm_by=confirm_by)
+    monkeypatch.setattr(
+        server.NewtonService, "run_script",
+        _fake_script(f"CONFIRMED session={SID} (reconciled: the router's status says confirmed)\n"),
+    )
+    server.newton_change_status(DEVICE, SID)
+    monkeypatch.setattr(server.time, "time", lambda: confirm_by + 60.0)
+
+    assert server._grant_on_disk(DEVICE) is True
+
+
+def test_an_unreadable_held_change_record_ends_the_grant(configured_newton, monkeypatch):
+    """Whether the held change was confirmed cannot be read: unknown is not
+    confirmed, so the grant ends."""
+    _write_plan(_grantable_plan())
+    _open_grant()
+    _held_apply_under_grant(monkeypatch, confirm_by=int(time.time()) + 600)
+    server._held_under_grant_path(DEVICE).write_text("{not json", encoding="utf-8")
+
+    assert server._grant_on_disk(DEVICE) is False
+    assert grants.load_live_grant(DEVICE) is None

@@ -14,6 +14,8 @@ ZONE_RECORDS=
 ZONE_COUNT=0
 TARGET_RECORDS=
 TARGET_COUNT=0
+CONTROL_RECORDS=
+CONTROL_COUNT=0
 
 cleanup() {
 	[[ -z $ASKPASS ]] || rm -f -- "$ASKPASS"
@@ -89,6 +91,7 @@ if not isinstance(entry, dict):
 allowed = {
     "host", "user", "key_file", "known_hosts", "proxy_command", "role",
     "devices", "admin_key", "admin_password_file", "zones", "check_targets",
+    "check_controls",
 }
 unknown = sorted(set(entry) - allowed)
 if unknown:
@@ -224,6 +227,22 @@ for target in check_targets:
     if not valid_cidr(target):
         fail("bad check_targets for {}".format(name))
 
+# check_controls: "<ipv4>:<port>" per address, the port that proves the
+# address is alive when a blocked probe of it times out.
+check_controls = entry.get("check_controls", [])
+if not isinstance(check_controls, list) or len(check_controls) > 32:
+    fail("bad check_controls for {}".format(name))
+control_addrs = set()
+for control in check_controls:
+    if not isinstance(control, str) or control.count(":") != 1:
+        fail("bad check_controls for {}".format(name))
+    control_ip, control_port = control.split(":")
+    if not valid_ipv4(control_ip) or control_ip in control_addrs:
+        fail("bad check_controls for {}".format(name))
+    if not re.fullmatch(r"[1-9][0-9]{0,4}", control_port) or int(control_port) > 65535:
+        fail("bad check_controls for {}".format(name))
+    control_addrs.add(control_ip)
+
 print("zone_count={}".format(len(zones)))
 for zone in zones:
     canary_ip, canary_port = zone["canary"].split(":")
@@ -238,6 +257,9 @@ for zone in zones:
 print("target_count={}".format(len(check_targets)))
 for target in check_targets:
     print("target={}".format(target))
+print("control_count={}".format(len(check_controls)))
+for control in check_controls:
+    print("control={}".format(control.replace(":", "|")))
 PYEOF
 	); then
 		exit 2
@@ -260,6 +282,9 @@ PYEOF
 			target) TARGET_RECORDS="${TARGET_RECORDS}${value}
 " ;;
 			target_count) TARGET_COUNT=$value ;;
+			control) CONTROL_RECORDS="${CONTROL_RECORDS}${value}
+" ;;
+			control_count) CONTROL_COUNT=$value ;;
 			*) die "inventory parser returned an unknown field" ;;
 		esac
 	done <<<"$out"
@@ -734,7 +759,8 @@ action_check() {
 # a newline into the file.
 compose_allow_list() {
 	local out='' record name src canary_ip canary_port iface netns target
-	local zones=0 targets=0
+	local control_ip control_port
+	local zones=0 targets=0 controls=0
 	while IFS= read -r record; do
 		[[ -n $record ]] || continue
 		IFS='|' read -r name src canary_ip canary_port iface netns <<<"$record"
@@ -749,10 +775,18 @@ compose_allow_list() {
 		out+="target ${target}"$'\n'
 		targets=$((targets + 1))
 	done <<<"$TARGET_RECORDS"
+	while IFS= read -r record; do
+		[[ -n $record ]] || continue
+		IFS='|' read -r control_ip control_port <<<"$record"
+		out+="control ${control_ip} ${control_port}"$'\n'
+		controls=$((controls + 1))
+	done <<<"$CONTROL_RECORDS"
 	[[ $zones -eq ${ZONE_COUNT:-0} ]] \
 		|| die "the inventory loader returned an inconsistent zone count"
 	[[ $targets -eq ${TARGET_COUNT:-0} ]] \
 		|| die "the inventory loader returned an inconsistent check_targets count"
+	[[ $controls -eq ${CONTROL_COUNT:-0} ]] \
+		|| die "the inventory loader returned an inconsistent check_controls count"
 	printf '%s' "$out"
 }
 

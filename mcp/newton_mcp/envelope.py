@@ -72,7 +72,21 @@ def envelope(source: str, text: str) -> dict[str, str]:
     catalog-first redactor to every string it finds, so redaction still
     applies to `text` (and to `source`, though `source` is server-controlled
     and has no secrets of its own).
+
+    The envelope also sanitises ``text`` itself, so a bare call cannot
+    carry hostile device bytes to the model: control bytes and ANSI
+    sequences are stripped, the envelope delimiters are escaped, and a
+    line that imitates a Newton field is flagged.  Each step leaves text
+    that ``sanitise`` already produced unchanged (a line that already
+    carries FLAG_PREFIX is not flagged twice), so wrapping sanitised text
+    adds nothing.
     """
+    text = escape_delimiters(_strip_controls(text))
+    lines = text.split("\n")
+    text = "\n".join(
+        line if line.startswith(FLAG_PREFIX) else _flag_lines(line)
+        for line in lines
+    )
     return {"kind": ENVELOPE_KIND, "source": source, "text": text}
 
 
@@ -125,8 +139,8 @@ _NEWTON_RE = re.compile(r"\bnewton\b", re.IGNORECASE)
 # not match (`base=` does not directly follow `data`), and the literal
 # `"..."` quotes in (a) make `datapath` not match.
 _FIELD_ANCHOR_RE = re.compile(
-    r'"(?:kind|getter|tier|caveat|certified|source|text|status|truncated|data|device_role_enforced)"\s*:'
-    r'|^\s*"?(?:kind|getter|tier|caveat|certified|source|text|status|truncated|data|device_role_enforced)"?\s*[:=]',
+    r'"(?:kind|getter|tier|caveat|certified|source|text|status|truncated|data|device_role_enforced|approval)"\s*:'
+    r'|^\s*"?(?:kind|getter|tier|caveat|certified|source|text|status|truncated|data|device_role_enforced|approval)"?\s*[:=]',
     re.IGNORECASE | re.MULTILINE,
 )
 

@@ -1,6 +1,6 @@
 ---
 name: newton
-description: "Newton, the network engineer. Configure, troubleshoot and design small-to-large networks from an AI agent over SSH or a serial console, with safety rails that prevent lockouts and destructive commands. Primary platform: OpenWrt 25.12+ routers (uci, ubus, fw4/nftables, DSA VLANs, dnsmasq/odhcpd, wifi, apk), driven through a tested apply-with-automatic-rollback protocol. Ships as a skill and as an MCP server (newton-mcp) so any MCP client can use the same protocol. Also covers Linux host networking (Proxmox bridges, NetworkManager) and network design (subnetting, VLANs, DHCP/DNS, dual-WAN). Use when the user says 'configure the router', 'add a port forward', 'set up a VLAN', 'change the wifi', 'reserve an IP', 'why is the network slow', 'how fast is my internet', 'run a speed test', 'test the wifi speed', 'open a port', 'set up dual WAN', 'segment the network', or any task touching uci, ubus, nft, fw4, dnsmasq, odhcpd, wifi, iwinfo, apk/opkg on an OpenWrt device, or network config on a Linux host. Primary use: the owner types /newton (or /network-engineer) to enter Network-engineer mode; every network request runs through that mode's flow."
+description: "Newton, the network engineer. Configure, troubleshoot and design small-to-large networks from an AI agent over SSH or a serial console, with safety rails that make lockouts and destructive commands less likely. Primary platform: OpenWrt 25.12+ routers (uci, ubus, fw4/nftables, DSA VLANs, dnsmasq/odhcpd, wifi, apk), driven through a tested apply-with-automatic-rollback protocol. Ships as a skill and as an MCP server (newton-mcp) so any MCP client can use the same protocol. Also covers Linux host networking (Proxmox bridges, NetworkManager) and network design (subnetting, VLANs, DHCP/DNS, dual-WAN). Use when the user says 'configure the router', 'add a port forward', 'set up a VLAN', 'change the wifi', 'reserve an IP', 'why is the network slow', 'how fast is my internet', 'run a speed test', 'test the wifi speed', 'open a port', 'set up dual WAN', 'segment the network', or any task touching uci, ubus, nft, fw4, dnsmasq, odhcpd, wifi, iwinfo, apk/opkg on an OpenWrt device, or network config on a Linux host. Primary use: the owner types /newton (or /network-engineer) to enter Network-engineer mode; every network request runs through that mode's flow."
 version: 1.1.3
 author: Kev
 license: MIT (scripts, SKILL.md); see references/README.md for reference-doc licenses
@@ -202,7 +202,9 @@ rollback" unless it is in group A.
 > recovery is `<recovery path, e.g. wired client + LuCI backup restore / failsafe mode>`. Reply `yes` to run it."
 
 **Never run a group-B action while a change-protocol transaction is open** (staged or applied,
-unconfirmed): a reboot wipes the rollback state in tmpfs while the applied config stays on disk.
+unconfirmed). In no-install mode the only rollback is rpcd's, held in RAM: a reboot wipes it while
+the applied config stays on flash. With the guard installed, a reboot restores the last-known-good
+config at boot, but the other group-B actions can still replace the config or remove the guard.
 
 ### Read-only by default
 
@@ -342,6 +344,10 @@ A change whose apply reloads or restarts rpcd cannot be confirmed through Newton
 pending rollback, and the router gives the same answer for that lost session as for an unknown one, so
 Newton cannot tell the two apart. The guard rolls such a change back (`rolled back by the guard: rpcd
 lost its rollback`). Make it by hand on the console or admin path.
+
+A guard-only restore puts the files back; running firewall, network and rpcd settings can stay
+changed until a reboot, and the wrapper's firewall/logd repairs do not run if the wrapper is gone.
+This limit goes when the contract release ships the guard's reload events and loud warnings.
 
 `newton_change_status` after a rolled-back window now names the real restorer on the `guard=` field:
 `restored:rpcd` (rpcd's rollback restored it during abort), `restored:guard` (the guard restored it),
@@ -561,7 +567,9 @@ Every change needs the owner's out-of-band approval with `newton-approve`, whate
 The one exception is the lab carve-out (confirmed by the owner, ADR-018; see `approval_gate.py`): a
 device that sets BOTH `profile = "lab"` and `lab = true` in the inventory keeps the older rule, so
 automated lab scenarios run; there approval is required only for leash operations or when the router
-says so. A `profile = "lab"` device without `lab = true` needs approval for every change, and the
+says so. The carve-out is off unless the server runs from a source checkout with
+`NEWTON_LAB_APPROVAL_CARVEOUT=1` set; an installed Newton never applies it, and a plan it frees says
+`approval: lab carve-out` in its result. A `profile = "lab"` device without `lab = true` needs approval for every change, and the
 default profile `prod` always does. The leash operations include `path-option` (deletions whose values cannot be read back), `mgmt-zone`/
 `mgmt-interface`/`mgmt-config` (the management zone, interface or access service), `wan-zone`/
 `wan-rule`/`wan-redirect`/`wan-forwarding` (WAN exposure), `unknown-package`, `exec-option`/
@@ -591,7 +599,8 @@ user = "root"
 auth = "password"                          # or "key"
 password_file = "~/.config/newton/quasar.pw" # mode 600, no trailing newline needed
 # A lab router (never production) may add: profile = "lab" and lab = true. Both are needed for the
-# lab approval carve-out; with only one of them every change needs newton-approve.
+# lab approval carve-out (a source checkout run with NEWTON_LAB_APPROVAL_CARVEOUT=1 only; an installed
+# Newton never applies it); with only one of them every change needs newton-approve.
 ```
 
 ```bash
@@ -616,7 +625,7 @@ survive a reboot or a cut link, and for a restricted key that may run Newton's p
 `swap-key` or `add-key` has written it, the agent never gets a root shell through it; until then every key already on
 the router stays as it is, and the setup tool's own root login (the owner's password or admin key) is never the
 agent's. On the default `prod` profile every change needs the owner's approval and Newton only reads until they give
-one; a router set to `lab` (with `lab = true` in the inventory, see the carve-out above) applies changes without asking,
+one; on a source checkout run with the lab switch, a router set to `lab` (with `lab = true` in the inventory, see the carve-out above) applies changes without asking,
 except the leash ones (22 rules; among them SSH, the web interface, rpcd, a users or keys config, the management
 interface or zone, opening more to the WAN, and options that run commands or write files). The guard keeps the
 last good settings on the router's own flash, and if a Newton change is still waiting for confirmation at boot, it puts

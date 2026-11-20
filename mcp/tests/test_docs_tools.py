@@ -234,3 +234,146 @@ def test_setup_clients_tool_count_matches_the_server() -> None:
     assert counts <= {"twenty-four"}, (
         f"docs/SETUP-CLIENTS.md says {sorted(counts)} tools; the server has twenty-four"
     )
+
+
+# ---- owner-facing claims: no unscoped guarantee, the evidence named as it is --------------
+
+SECURITY_MD = REPO_ROOT / "SECURITY.md"
+SUPPORT_MD = REPO_ROOT / "docs" / "SUPPORT.md"
+CHANGELOG_MD = REPO_ROOT / "CHANGELOG.md"
+PRIVATE_ROADMAP = REPO_ROOT / "docs" / "ROADMAP.md"
+PUBLIC_ROADMAP_SRC = REPO_ROOT / "docs" / "release" / "ROADMAP-public.md"
+
+# Exact strings, not patterns: each is a guarantee these files once made
+# with no mode or condition, so a scoped rewording cannot match by
+# accident.
+FORBIDDEN_CLAIMS = (
+    "prevent lockouts",
+    "the safe way",
+    "never leak",
+    "proven rather than",
+    "rather than claimed",
+    "Proven, not claimed",
+    "Every write arms",
+    "undoes itself if something breaks",
+    "If anything fails, the router reverts on its own",
+    "There is no tool that runs arbitrary commands",
+)
+
+
+def _owner_docs() -> list[Path]:
+    docs = [README_MD, SECURITY_MD, SKILL_MD]
+    if PRIVATE_LAYOUT:
+        docs.append(RELEASE_README)
+    return docs
+
+
+def test_owner_docs_make_no_unscoped_guarantee() -> None:
+    hits = [
+        (path.relative_to(REPO_ROOT).as_posix(), phrase)
+        for path in _owner_docs()
+        for phrase in FORBIDDEN_CLAIMS
+        if phrase in path.read_text(encoding="utf-8")
+    ]
+    assert hits == []
+
+
+GUARD_README = REPO_ROOT / "device" / "openwrt" / "newton-guard" / "README.md"
+GUARD_ONLY_LIMIT = (
+    "running firewall, network and rpcd settings can stay changed until a reboot"
+)
+
+
+def test_the_guard_only_restore_limit_is_stated() -> None:
+    """The guard restores files and runs a bare reload_config, which sends no
+    reload events when the restored files match its snapshot; until the guard
+    sends them, SKILL.md and the guard README say so."""
+    for path in (SKILL_MD, GUARD_README):
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        assert GUARD_ONLY_LIMIT in text, path.relative_to(REPO_ROOT).as_posix()
+
+
+def test_the_audit_adr_says_it_is_not_built() -> None:
+    """No hash-chained journal exists in the code; ADR-012 says so in its status."""
+    text = (REPO_ROOT / "docs" / "design" / "11-ADRS.md").read_text(encoding="utf-8")
+    adr = text.split("## ADR-012", 1)[1].split("\n## ", 1)[0]
+    assert "**Status:** Accepted, not built (2026-11-19)" in adr
+
+
+def _scenario_files(folder: str) -> int:
+    return len(list((REPO_ROOT / folder).rglob("*.toml")))
+
+
+def test_the_release_readme_counts_scenario_files_not_runs() -> None:
+    """The virtual-lab figure is a count of scenario files; no full run of
+    them is recorded, so the README says files and keeps them out of a
+    "proven" heading."""
+    text = _release_readme().read_text(encoding="utf-8")
+    n = _scenario_files("lab/scenarios")
+    assert f"{n} scenario files in [`lab/scenarios`](lab/scenarios)" in text
+    line = next(line for line in text.splitlines() if "scenario files in [`lab/scenarios`]" in line)
+    assert "no full run of them is recorded" in line, line
+
+
+def test_the_release_readme_lists_the_beryl_when_the_support_table_does() -> None:
+    support = SUPPORT_MD.read_text(encoding="utf-8")
+    if "GL-MT3000" not in support:
+        pytest.skip("the support table has no GL-MT3000 row")
+    text = _release_readme().read_text(encoding="utf-8")
+    assert "does not list the GL-MT3000" not in text
+    row = next(line for line in text.splitlines() if line.startswith("| OpenWrt 25.12 |"))
+    assert "GL-MT3000" in row, row
+
+
+def test_security_states_each_approval_and_command_boundary() -> None:
+    text = SECURITY_MD.read_text(encoding="utf-8")
+    model = text[text.index("## Security model in brief"):text.index("## Known limits")]
+    for needle in (
+        "No MCP tool runs arbitrary commands",
+        "the domain controller checks the approval token itself",
+        "only the Newton host checks it",
+        "`exec-option`, `exec-config` and `exec-include`",
+        "run code as root on the router",
+        "the Newton host keeps the router's approval key",
+        "a guard rail, not a sandbox",
+    ):
+        assert needle in model, needle
+
+
+def _latest_release() -> str:
+    m = re.search(r"^## \[(\d+\.\d+\.\d+)\]", CHANGELOG_MD.read_text(encoding="utf-8"), re.M)
+    assert m
+    return m.group(1)
+
+
+@pytest.mark.skipif(not PUBLIC_ROADMAP_SRC.exists(), reason="the private roadmap is not in the release build")
+def test_the_roadmap_says_where_newton_is_now() -> None:
+    text = PRIVATE_ROADMAP.read_text(encoding="utf-8")
+    heading = next(line for line in text.splitlines() if line.startswith("## Where Newton is"))
+    assert f"v{_latest_release()}" in heading, heading
+
+
+def _planned_rows() -> list[str]:
+    path = PUBLIC_ROADMAP_SRC if PUBLIC_ROADMAP_SRC.exists() else PRIVATE_ROADMAP
+    text = path.read_text(encoding="utf-8")
+    table = text[text.index("## Planned"):]
+    return [line for line in table.splitlines() if line.startswith("| ") and not line.startswith("| Release")]
+
+
+def test_the_roadmap_plans_hosts_and_the_persona_before_more_vendors() -> None:
+    """The maintainer's order (2026-11-19): AD build mode, the protocol
+    contract, hosts, the security engineer persona, then more vendors;
+    the read-only dashboard is parked at the end of the backlog."""
+    rows = _planned_rows()
+
+    def index(needle: str) -> int:
+        found = [i for i, row in enumerate(rows) if needle in row]
+        assert len(found) == 1, (needle, rows)
+        return found[0]
+
+    order = [index(n) for n in ("build mode", "protocol contract", "Hosts:", "security engineer persona", "More vendors")]
+    assert order == sorted(order), order
+    assert "dashboard" not in rows[index("Network rules")]
+    backlog = rows[index("| Backlog |")]
+    for needle in ("read-only local dashboard", "policy engine", "maintenance windows"):
+        assert needle in backlog, needle

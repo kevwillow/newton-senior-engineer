@@ -86,6 +86,11 @@ planes.** Only `newton-ctl` can reach them (enforced by the lab firewall, see `0
 
 ## Transaction state machine
 
+> **Not built (2026-11-19).** This diagram is the design. No host transaction engine or state machine
+> exists, and UT-SM-01 is unbuilt. Each mode keeps its state where the change is made (the guard and
+> rpcd on an installed router, rpcd on a no-install router, the platform's own confirm or scheduled
+> restore on VyOS, RouterOS and Junos, the PDC for AD), and the host reads it back from there.
+
 ```mermaid
 stateDiagram-v2
   [*] --> DRAFT

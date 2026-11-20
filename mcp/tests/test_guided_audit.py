@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from newton_mcp import envelope as envelope_mod
 from newton_mcp import server
 
 
@@ -159,7 +160,9 @@ def test_injection_shaped_device_text_only_occurs_inside_envelopes(
                 walk(child, value)
         elif isinstance(value, str):
             for payload in payloads:
-                if payload in value:
+                # The envelope escapes its own delimiters, so a forged
+                # closing tag arrives as ``< /untrusted-device-data>``.
+                if envelope_mod.escape_delimiters(payload) in value:
                     seen[payload] += 1
                     assert isinstance(parent, dict)
                     assert parent.get("kind") == "untrusted-device-data"
@@ -167,6 +170,7 @@ def test_injection_shaped_device_text_only_occurs_inside_envelopes(
 
     walk(result)
     assert all(count >= 1 for count in seen.values()), seen
+    assert "</untrusted-device-data>" not in json.dumps(result)
 
 
 def test_wireless_secrets_are_redacted_by_the_public_tool(

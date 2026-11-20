@@ -3,9 +3,11 @@
 
 A network rule is a short statement the owner writes about a device's
 network that must stay true, e.g. "from the iot zone, the router admin
-is blocked".  Newton adds every rule of a device to every change it
-plans on that device as a client-vantage check, so a rule that fails
-(or cannot be tested) blocks the confirm and the router rolls back.
+is blocked".  The plan does not read the rules yet: today this tool
+only stores them, and a rule changes nothing.  When the 1.2 wiring
+lands, Newton will add every rule of a device to every change it plans
+on that device as a client-vantage check, so a rule that fails (or
+cannot be tested) will block the confirm and the router will roll back.
 
 Only the owner runs this tool (as the newton user, like newton-enrol):
 rules live in ``rules.toml`` next to the inventory ``devices.toml`` --

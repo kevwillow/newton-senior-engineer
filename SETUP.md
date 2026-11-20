@@ -141,7 +141,7 @@ No package is installed and nothing is compiled: about 217 KB of shell in 6 file
 
   /usr/libexec/newton/newton-router     148 KB  the program Newton talks to
   /usr/libexec/newton/newton-safe-apply   25 KB  the change helper
-  /usr/libexec/newton-guard              31 KB  the rollback guard
+  /usr/libexec/newton-guard              32 KB  the rollback guard
   /etc/init.d/newton-guard               525 B  starts the guard at boot
   /usr/libexec/newton/newton-wan-health   11 KB  the dual-WAN health check
   /etc/init.d/newton-wan-health          641 B  starts the health check
@@ -164,13 +164,14 @@ router; and Newton's key may run Newton's program and nothing else.
 What protects you:
   - on the default prod profile every change needs your approval, and Newton
     only reads until you give one;
-  - a router you set to lab applies changes without asking, except the ones
-    Newton always asks about. Among them: SSH (dropbear), the web interface
-    (uhttpd), rpcd, a users or keys config, the management interface or zone,
-    opening more to the WAN, and options that run commands or write files
-    (22 rules in all, in the router program's leash). The inventory entry
-    has to say lab = true as well, or every change still needs your
-    approval;
+  - on a development checkout, a router you set to lab can apply changes
+    without asking, except the ones Newton always asks about. Among them: SSH
+    (dropbear), the web interface (uhttpd), rpcd, a users or keys config, the
+    management interface or zone, opening more to the WAN, and options that
+    run commands or write files (22 rules in all, in the router program's
+    leash). The inventory entry has to say lab = true and the server has to
+    run with NEWTON_LAB_APPROVAL_CARVEOUT=1, or every change still needs your
+    approval; an installed Newton always asks;
   - the guard keeps the last good settings on the router's own flash, and if a
     Newton change is still waiting for confirmation at boot, it puts them back;
   - the agent never gets a root shell through Newton's restricted key: once

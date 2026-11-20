@@ -421,6 +421,81 @@ def test_install_client_checks_uses_the_inventory_check_targets(tmp_path):
     assert "target 10.0.0.0/8\n" not in text
 
 
+def test_install_client_checks_writes_the_inventory_check_controls(tmp_path):
+    # VC-20: the positive controls of the blocked probes travel into the
+    # root-owned allow-list as `control <ipv4> <port>` lines.
+    write_inventory(
+        tmp_path, extra='check_controls = [ "192.168.1.1:443", "1.1.1.1:53" ]\n'
+    )
+    env, log = fake_tools(tmp_path)
+
+    result = run_setup(env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    allow = (
+        vantage_home(tmp_path)
+        / ".local"
+        / "libexec"
+        / "newton-vantage-check.allow"
+    )
+    assert allow.read_text() == (
+        ALLOW_EXPECTED + "control 192.168.1.1 443\n" + "control 1.1.1.1 53\n"
+    )
+
+
+def test_install_client_checks_without_check_controls_writes_no_control_line(tmp_path):
+    write_inventory(tmp_path)
+    env, log = fake_tools(tmp_path)
+
+    result = run_setup(env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    allow = (
+        vantage_home(tmp_path)
+        / ".local"
+        / "libexec"
+        / "newton-vantage-check.allow"
+    )
+    assert "control" not in allow.read_text()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '"192.168.1.1:443"',
+        '7',
+        '[ "192.168.1.1" ]',
+        '[ "192.168.1.1:0" ]',
+        '[ "192.168.1.1:0443" ]',
+        '[ "192.168.1.1:65536" ]',
+        '[ "192.168.1.300:443" ]',
+        '[ "192.168.1.0/24:443" ]',
+        '[ 443 ]',
+        '[ "192.168.1.1:443", "192.168.1.1:80" ]',
+        "[ " + ", ".join('"10.0.0.%d:443"' % index for index in range(1, 34)) + " ]",
+    ],
+)
+def test_inventory_refuses_bad_check_controls_before_any_external_call(tmp_path, value):
+    write_inventory(tmp_path, extra=f"check_controls = {value}\n")
+    env, log = fake_tools(tmp_path)
+
+    result = run_setup(env)
+
+    assert result.returncode == 2
+    assert "bad check_controls" in result.stderr
+    assert not log.exists()
+
+
+def test_inventory_accepts_thirty_two_check_controls(tmp_path):
+    value = "[ " + ", ".join('"10.0.0.%d:443"' % index for index in range(1, 33)) + " ]"
+    write_inventory(tmp_path, extra=f"check_controls = {value}\n")
+    env, log = fake_tools(tmp_path)
+
+    result = run_setup(env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_install_client_checks_refuses_a_vantage_without_zones(tmp_path):
     write_inventory(tmp_path, zones=None)
     env, log = fake_tools(tmp_path)

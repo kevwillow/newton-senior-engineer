@@ -207,7 +207,9 @@ The procd instance is named `timer`, uses `respawn 3600 1 5`, polls once per
 second, and stops itself after pending state clears or failure is recorded.
 The init script uses `START=09`: S09 runs after S00 but before S10boot, so the
 LKG is restored before Wi-Fi detection, uci-defaults, boot's `reload_config`
-snapshot, and every service that reads `/etc/config`.
+snapshot, and every service that reads `/etc/config`. A restore outside boot
+(`tick`, `restore`) calls a bare `reload_config`, which sends no reload events
+when the restored files match its md5 snapshot; see Limits.
 
 ## Tests
 
@@ -243,6 +245,10 @@ failure controls. Every wrapper logs its calls to
   files are retained in quarantine.
 - A uci or LuCI commit that lands while restore is running is overwritten,
   and no copy of it is kept.
+- A guard-only restore puts the files back; running firewall, network and
+  rpcd settings can stay changed until a reboot, and the controller's
+  firewall/logd repairs do not run if the controller is gone. This limit goes
+  when the contract release ships the reload events and loud warnings.
 - Names matching `.newton-tmp.*` in `/etc/config` are reserved for the guard
   and are deleted by restore and boot.
 - A root process can still wedge the guard until reboot by swapping a config

@@ -61,7 +61,8 @@ APPLIED_PENDING = "APPLIED_PENDING"
 BUSY = "BUSY"
 REFUSED = "REFUSED"
 LOST = "LOST"
-#: The link failed before ``uci apply`` was sent: the router holds
+#: ``uci apply`` was never sent (the link failed, or the router or Newton
+#: refused a step before it): the router holds
 #: nothing of the change (what was staged dies with the spent session).
 NOT_SENT = "NOT_SENT"
 
@@ -419,8 +420,19 @@ def _holds_any(
 
 
 def _not_sent(exc: Exception) -> str:
-    """The reason of an apply that never reached ``uci apply``."""
-    return f"the link failed before the change was applied: {exc}"
+    """The reason of an apply that never reached ``uci apply``.
+
+    Nothing was applied whatever the cause, but the cause is named: a
+    link that failed, a router that refused the login or a call, or a
+    refusal of Newton's own engine.
+    """
+    if isinstance(exc, RpcdTransportError):
+        return f"the link failed before the change was applied: {exc}"
+    if isinstance(exc, rpcd.RpcdAccessDenied):
+        return f"the router refused the login before the change was applied: {exc}"
+    if isinstance(exc, RpcdCallFailed):
+        return f"the router refused a call before the change was applied: {exc}"
+    return f"Newton stopped before the change was applied: {exc}"
 
 
 

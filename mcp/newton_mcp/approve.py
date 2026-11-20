@@ -1274,7 +1274,26 @@ def _print_ad_plan(plan: dict[str, Any]) -> None:
             )
             print(f"{label.capitalize()}: {shown}")
     print(f"Risk: {_sanitize_terminal_value(plan.get('risk', ''))}")
-    print(f"Window: {_sanitize_terminal_value(plan.get('window', ''))}s")
+    verb = plan.get("verb")
+    if verb == "unlock":
+        # An unlock arms no undo; its window field is fixed and unused,
+        # so no Window line suggests it could be put back.
+        print("Undo: none, this stays written")
+        return
+    window = _sanitize_terminal_value(plan.get("window", ""))
+    reverse = (
+        " (none for this verb)" if verb in ("uac-clear", "user-create") else ""
+    )
+    print(
+        f"Undo: the PDC puts it back {window}s after the apply unless Newton "
+        f"confirms; after a confirm only a reverse plan{reverse}"
+    )
+    print(
+        "The undo runs on the PDC only. A change made meanwhile on another DC, "
+        "or a PDC role move while armed, is not covered. The undo time is "
+        "wall-clock on the DC."
+    )
+    print(f"Window: {window}s")
 
 
 def _print_ad_password(plan: dict[str, Any], first: bool) -> None:

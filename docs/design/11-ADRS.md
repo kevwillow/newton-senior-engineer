@@ -126,12 +126,16 @@ enrichment; don't fork NetClaw [V-01]. Revisit at P7 (contribute upstream or int
 copyright), and data-egress strictness.
 
 ## ADR-012 — Audit and evidence
-**Status:** Accepted
+**Status:** Accepted, not built (2026-11-19). The code writes a plain audit log; no hash chain or anchor
+exists, and `newton-doctor` checks no chain.
 **Decision:** Hash-chained JSONL journal with periodic anchors to a separate sink; per-device git of
 redacted config snapshots, one commit per CONFIRMED txn; evidence bundle per txn (pre/post snapshot
 hashes, check results, console excerpt hash).
 **Consequences:** `newton doctor` verifies the chain; tests AU-01…03 and RD-xx enforce integrity and
 secret-free storage.
+**Later check:** the first check to be built will be a link from each receipt to the previous one's hash, called an
+accidental-corruption check: the newton user and root can rewrite the whole chain, so it is
+tamper-evident only once its head is also copied to an off-host sink.
 
 ---
 

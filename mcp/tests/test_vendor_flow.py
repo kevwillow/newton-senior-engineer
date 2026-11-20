@@ -690,3 +690,26 @@ def test_the_status_exit_code_is_one_when_the_device_does_not_answer(
 
     assert status["exit_code"] == 1
     assert json.loads(status["log"]["text"])["pending"] == "unknown"
+
+
+def test_a_record_bound_to_another_device_is_refused(
+    vendor_lab: VendorLab,
+) -> None:
+    """A plan record names its device: another name is refused.
+
+    The record is rebound to another device name and its hash recomputed,
+    so only the device-binding check can refuse it, before any device call.
+    """
+    planned = _plan(vendor_lab)
+    record = _record(vendor_lab, planned["session_id"])
+    _write_approval(vendor_lab, planned["session_id"], record)
+    record["device"] = "vy2"
+    record["plan_hash"] = compute_plan_hash(record)
+    path = vendor_lab.state / "plans" / f"{planned['session_id']}.json"
+    path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+    vendor_lab.runner.calls.clear()
+
+    with pytest.raises(server.NewtonError, match="no plan record for this device"):
+        vendor_lab.service.apply("vy1", planned["session_id"])
+
+    assert vendor_lab.runner.calls == []

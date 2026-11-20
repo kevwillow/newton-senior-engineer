@@ -592,3 +592,79 @@ def test_spaces_around_the_confirmation_are_ignored(
     ok, refusal = _approve(plan_id, monkeypatch, confirmation=f" approve {plan_id[:8]} ")
 
     assert ok, refusal
+
+
+_SCOPE_LINE = (
+    "The undo runs on the PDC only. A change made meanwhile on another DC, "
+    "or a PDC role move while armed, is not covered. The undo time is "
+    "wall-clock on the DC."
+)
+
+
+def test_the_approval_of_an_unlock_says_it_has_no_undo_and_no_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unlock arms no undo: the owner reads that it stays written, and
+    no Window line suggests a time in which it could be put back."""
+    lab = harness.Lab()
+    lab.add_user(uac=512, lockout=5)
+    planned = _make_plan(lab, "unlock", value=None)
+    _write_fingerprint(harness.DOMAIN)
+
+    ok, refusal = _approve(str(planned["plan_id"]), monkeypatch)
+
+    assert ok, refusal
+    out = capsys.readouterr().out
+    assert "Undo: none, this stays written" in out
+    assert "Window:" not in out
+    assert "puts it back" not in out
+    assert _SCOPE_LINE not in out
+
+
+def test_the_approval_of_a_uac_clear_names_the_undo_and_its_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A verb with an undo names when the PDC puts it back, what is left
+    after a confirm, and the PDC-only scope of that undo."""
+    lab = harness.Lab()
+    lab.add_user(uac=4260352)
+    planned = _make_plan(lab)
+    _write_fingerprint(harness.DOMAIN)
+
+    ok, refusal = _approve(str(planned["plan_id"]), monkeypatch)
+
+    assert ok, refusal
+    out = capsys.readouterr().out
+    assert (
+        "Undo: the PDC puts it back 600s after the apply unless Newton "
+        "confirms; after a confirm only a reverse plan (none for this verb)"
+    ) in out
+    assert _SCOPE_LINE in out
+    assert "Window: 600s" in out
+    assert "Undo: none" not in out
+
+
+@pytest.mark.parametrize(
+    "verb", [verb for verb in request.VERBS if verb != "unlock"]
+)
+def test_every_verb_with_an_undo_prints_the_undo_and_scope_lines(
+    verb: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every AD verb but unlock prints the undo line, the PDC-only scope
+    line and the window; the reverse plan is named only where Newton has
+    a reverse verb."""
+    approve._print_ad_plan(
+        {"plan_id": "0" * 32, "device": "dc", "verb": verb, "risk": "LOW",
+         "window": 600}
+    )
+
+    out = capsys.readouterr().out
+    assert "Undo: the PDC puts it back 600s after the apply unless Newton confirms" in out
+    assert _SCOPE_LINE in out
+    assert "Window: 600s" in out
+    assert "Undo: none" not in out
+    if verb in ("uac-clear", "user-create"):
+        assert "only a reverse plan (none for this verb)" in out
+    else:
+        assert "only a reverse plan (none for this verb)" not in out
+        assert "after a confirm only a reverse plan" in out

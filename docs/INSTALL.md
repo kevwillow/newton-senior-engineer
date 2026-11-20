@@ -311,7 +311,7 @@ No package is installed and nothing is compiled: about 217 KB of shell in 6 file
 
   /usr/libexec/newton/newton-router     148 KB  the program Newton talks to
   /usr/libexec/newton/newton-safe-apply   25 KB  the change helper
-  /usr/libexec/newton-guard              31 KB  the rollback guard
+  /usr/libexec/newton-guard              32 KB  the rollback guard
   /etc/init.d/newton-guard               525 B  starts the guard at boot
   /usr/libexec/newton/newton-wan-health   11 KB  the dual-WAN health check
   /etc/init.d/newton-wan-health          641 B  starts the health check
@@ -334,13 +334,14 @@ router; and Newton's key may run Newton's program and nothing else.
 What protects you:
   - on the default prod profile every change needs your approval, and Newton
     only reads until you give one;
-  - a router you set to lab applies changes without asking, except the ones
-    Newton always asks about. Among them: SSH (dropbear), the web interface
-    (uhttpd), rpcd, a users or keys config, the management interface or zone,
-    opening more to the WAN, and options that run commands or write files
-    (22 rules in all, in the router program's leash). The inventory entry
-    has to say lab = true as well, or every change still needs your
-    approval;
+  - on a development checkout, a router you set to lab can apply changes
+    without asking, except the ones Newton always asks about. Among them: SSH
+    (dropbear), the web interface (uhttpd), rpcd, a users or keys config, the
+    management interface or zone, opening more to the WAN, and options that
+    run commands or write files (22 rules in all, in the router program's
+    leash). The inventory entry has to say lab = true and the server has to
+    run with NEWTON_LAB_APPROVAL_CARVEOUT=1, or every change still needs your
+    approval; an installed Newton always asks;
   - the guard keeps the last good settings on the router's own flash, and if a
     Newton change is still waiting for confirmation at boot, it puts them back;
   - the agent never gets a root shell through Newton's restricted key: once
@@ -408,8 +409,9 @@ It asks you to type `rotate router1`, then for the new passphrase. Set the authe
 
 ## 8. How an approval works
 
-On the default prod profile every change needs your approval, or a scoped grant you gave. A router you set to lab applies
-changes without asking, except the ones Newton always asks about. The assistant plans the change, shows you what it would do, and asks.
+On the default prod profile every change needs your approval, or a scoped grant you gave. An installed Newton always asks:
+only a development checkout with the lab carve-out turned on lets a router you set to lab apply changes without asking,
+except the ones Newton always asks about. The assistant plans the change, shows you what it would do, and asks.
 
 - The dialog appears in the terminal where your assistant runs. It asks for your passphrase, or for the 6 digit
   code from your authenticator app. You type the answer there. The model is not shown it, but a passphrase passes through the Claude Code process, can be
@@ -592,6 +594,13 @@ iface = "eth0"
   `src` the client's own address in it, `canary` the router's address in that zone with a port that answers there
   (53 for DNS), `iface` the client's interface for the DHCP check; `netns`, a network namespace, is optional.
 - `check_targets` (optional): the ranges the check command may probe; without it, the private ranges.
+- `check_controls` (optional): `"<ipv4>:<port>"` pairs, one per address, at most 32, each a port that answers on that
+  address from this client. A check that a port is blocked counts a timeout as blocked only when the control port of
+  the same address connects in the same run; the zone's `canary` serves as the control for its own address. Without
+  a control a timeout is "not tested" and the change rolls back, so a blocked check on an address that drops packets
+  (rather than refusing them) needs one, for example `check_controls = ["192.168.1.10:443"]` for a check that port 22
+  of that host is blocked. A change that blocks every port of an address from this client cannot pass such a check
+  on a timeout, because its control is blocked too.
 
 **11d.** Add the entry to the inventory, as in 7b:
 

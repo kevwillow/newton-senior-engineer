@@ -28,6 +28,55 @@ def _isolate_state_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _lab_approval_switch(monkeypatch):
+    """The suite runs as the lab does: the approval carve-out switch is on.
+
+    The carve-out is off unless ``NEWTON_LAB_APPROVAL_CARVEOUT=1`` is set
+    and the server runs from a source checkout (``approval_gate``).  Many
+    tests plan on a ``lab = true`` / ``profile = "lab"`` fake device and
+    rely on it, as the lab does.  The tests of the switch itself
+    (``test_approval_gate.py``, ``test_explanation_plan.py``) unset it.
+    """
+    monkeypatch.setenv("NEWTON_LAB_APPROVAL_CARVEOUT", "1")
+
+
+@pytest.fixture(autouse=True)
+def _critical_parity(monkeypatch, request):
+    """Every policy verdict the suite computes must read back the same.
+
+    The grant decision reads "critical" from a plan record's hashed
+    ``reasons`` (``elicit_approval.critical_from_reasons``), not from the
+    unhashed ``risk`` word.  The check wraps ``policy.classify`` and the
+    copies of it that were imported by name: the one in
+    ``newton_mcp.server`` and the one in the running test module (the
+    policy test vectors import it that way).  A copy bound under another
+    name or in another module is not checked.
+    """
+    import functools
+    import sys
+
+    import newton_mcp.elicit_approval as _elicit
+    import newton_mcp.policy as _policy
+
+    original = _policy.classify
+
+    @functools.wraps(original)
+    def checked(*args, **kwargs):
+        result = original(*args, **kwargs)
+        derived = _elicit.critical_from_reasons(result["reasons"])
+        assert derived is (result["risk"] == _policy.RISK_CRITICAL), (
+            "critical_from_reasons disagrees with policy.classify",
+            result,
+        )
+        return result
+
+    monkeypatch.setattr(_policy, "classify", checked)
+    for module in (sys.modules.get("newton_mcp.server"), getattr(request, "module", None)):
+        if module is not None and getattr(module, "classify", None) is original:
+            monkeypatch.setattr(module, "classify", checked)
+
+
+@pytest.fixture(autouse=True)
 def _clear_ssh_path_cache():
     """Drop the ssh_path resolve cache between tests.
 

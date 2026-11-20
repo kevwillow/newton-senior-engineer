@@ -821,6 +821,118 @@ def config_hash(text: str) -> str:
     return hashlib.sha256(normalise_export(text).encode()).hexdigest()
 
 
+# The header of the section that holds the armed revert in the export.
+_SCHEDULER_HEADER = "/system scheduler"
+# The words that name the armed revert in an item of that section.
+_REVERT_NAME_WORDS = frozenset({f"name={REVERT_NAME}", f'name="{REVERT_NAME}"'})
+
+
+def _item_words(lines: Sequence[str]) -> list[str]:
+    """The words of one export item, split outside double quotes.
+
+    The continuation backslash at the end of a line goes first, so the
+    item reads as one line.  A backslash inside a quoted value escapes
+    the next character, so an escaped quote does not end the value.
+    """
+    parts = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.endswith("\\"):
+            stripped = stripped[:-1]
+        parts.append(stripped)
+    text = " ".join(parts)
+    words: list[str] = []
+    current: list[str] = []
+    quoted = False
+    escaped = False
+    for char in text:
+        if quoted:
+            current.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+            continue
+        if char == '"':
+            quoted = True
+            current.append(char)
+        elif char.isspace():
+            if current:
+                words.append("".join(current))
+                current = []
+        else:
+            current.append(char)
+    if current:
+        words.append("".join(current))
+    return words
+
+
+def _without_scheduler_revert(section: list[str]) -> list[str]:
+    """The lines of a /system scheduler section without the armed revert.
+
+    An item is a line and the lines that continue it (the line above ends
+    with a backslash).  The item that names the revert goes; every other
+    item stays as it is.  A section that holds nothing else goes as a
+    whole, as the export of a device without any entry has no section.
+    """
+    items: list[list[str]] = []
+    for line in section:
+        if items and items[-1][-1].rstrip().endswith("\\"):
+            items[-1].append(line)
+        else:
+            items.append([line])
+    kept = [
+        item
+        for item in items
+        if not _REVERT_NAME_WORDS.intersection(_item_words(item))
+    ]
+    return [line for item in kept for line in item]
+
+
+def without_armed_revert(text: str) -> str:
+    """The export without Newton's own armed revert entry.
+
+    A CHR lists its /system scheduler entries in the /export, so the
+    export read while the revert is armed carries the newton-revert entry
+    and the export read after the confirm removed it does not.  Only the
+    item named newton-revert in the /system scheduler section goes: the
+    owner's entries and every other section stay.
+    """
+    kept: list[str] = []
+    lines = _export_lines(text)
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        if " ".join(line.split()).lower() != _SCHEDULER_HEADER:
+            kept.append(line)
+            continue
+        section: list[str] = []
+        while index < len(lines) and not lines[index].startswith("/"):
+            section.append(lines[index])
+            index += 1
+        rest = _without_scheduler_revert(section)
+        if any(item.strip() and not item.startswith("#") for item in rest):
+            kept.append(line)
+            kept.extend(rest)
+    return "\n".join(kept)
+
+
+def change_hash(text: str) -> str:
+    """The hash of an export without Newton's own armed revert entry.
+
+    The driver compares the export read after the confirm with the export
+    read while the revert was still armed.  The confirm removes the
+    revert entry, so the two exports differ by that entry even when the
+    change is still on the device; this hash leaves the entry out of both
+    sides.  The confirm itself reads the scheduler back and proves the
+    entry is gone, so the entry is not lost from the proof.
+    """
+    return config_hash(without_armed_revert(text))
+
+
 def parse_count(text: str) -> int | None:
     """The number a count-only print answered, or None when it did not."""
     for line in text.splitlines():
@@ -1060,6 +1172,10 @@ class RouterosOps:
             saved_clean=True,
             pending=pending,
         )
+
+    def change_hash(self, text: str) -> str:
+        """The hash the driver compares after the confirm (see ``change_hash``)."""
+        return change_hash(text)
 
     def stage(self, run: Run, stmts: list[list[str]]) -> StageResult:
         """Return the lines of the change as the diff of the candidate.

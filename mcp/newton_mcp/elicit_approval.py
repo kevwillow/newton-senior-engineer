@@ -26,6 +26,7 @@ from . import change_classes
 from . import grants
 from . import owner_records
 from . import plan as _plan
+from . import policy as _policy
 
 
 OutcomeStatus = Literal["skip", "approved", "fallback", "declined", "wrong", "locked"]
@@ -358,6 +359,19 @@ def _types_of_record(plan: dict[str, Any]) -> dict[tuple[str, str], str] | None:
     return change_classes.types_of_record(plan)
 
 
+def critical_from_reasons(reasons: Any) -> bool:
+    """True when a plan record's hashed ``reasons`` make the plan critical.
+
+    ``policy.classify`` calls a plan critical exactly when it gives a
+    reason other than the prod-profile reason.  Anything that is not a
+    list of strings is read as critical: a record that cannot be read is
+    never covered by a grant.
+    """
+    if not isinstance(reasons, list):
+        return True
+    return any(reason != _policy.PROD_REASON for reason in reasons)
+
+
 async def collect_approval(
     ctx: Context,
     device_name: str,
@@ -399,8 +413,12 @@ async def collect_approval(
         str(plan.get("uci_batch", "")),
         types=_types_of_record(plan),
     )
+    # The risk word is outside the plan hash; the reasons are inside it.
+    # Critical is read from the hashed reasons, so a record whose risk
+    # was edited on disk cannot lend a critical plan to a grant.
     high = (
         classification.high
+        or critical_from_reasons(plan.get("reasons"))
         or plan.get("risk") == "critical"
         or owner_records.is_owner_record(plan)
     )

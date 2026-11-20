@@ -26,6 +26,10 @@ SYNC=${R:+$R/bin/}sync
 RM=${R:+$R/bin/}rm
 MKTEMP=${R:+$R/bin/}mktemp
 SLEEP=${R:+$R/bin/}sleep
+# The wall clock only stamps log lines and recover directory names; deadlines
+# run on uptime. A test root may supply its own date to move the wall clock.
+DATE="date"
+if [ -n "$R" ] && [ -x "$R/bin/date" ]; then DATE=$R/bin/date; fi
 CRASH_COUNT=0
 CRASH_TARGET=${NEWTON_GUARD_CRASH_AT:-}
 BOOT_MODE=0
@@ -204,7 +208,7 @@ log_event() {
 	local level="$1" message="$2" size
 	mkdir -p "$NG"
 	uptime_read
-	printf '%s %s %s\n' "$UP_RAW" "$(date +%Y-%m-%dT%H:%M:%S)" "$message" >> "$NG/guard.log"
+	printf '%s %s %s\n' "$UP_RAW" "$("$DATE" +%Y-%m-%dT%H:%M:%S)" "$message" >> "$NG/guard.log"
 	size=$(wc -c < "$NG/guard.log")
 	if [ "$size" -gt 16384 ]; then
 		tail -n 100 "$NG/guard.log" > "$NG/.guard.log.tmp"
@@ -1208,7 +1212,7 @@ timer_cmd() {
 
 quarantine_recover() {
 	local base name suffix=0 item
-	base=recover-$(date +%Y%m%dT%H%M%S)
+	base=recover-$("$DATE" +%Y%m%dT%H%M%S)
 	name=$base
 	while [ -e "$NG/quarantine/$name" ] || [ -L "$NG/quarantine/$name" ]; do
 		suffix=$((suffix + 1))

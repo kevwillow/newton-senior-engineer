@@ -503,3 +503,42 @@ def test_installed_guided_recommend_builds_report_from_home_manifest(installed_v
         f"{sorted(missing)}. The recommendation table references ids "
         f"the manifest lost."
     )
+
+
+# ---- the lab approval carve-out is refused by an installed build ------------
+
+
+def test_installed_build_refuses_the_lab_approval_carve_out(installed_venv):
+    """An installed (non-editable) server never skips newton-approve for a
+    lab device, even when the lab's switch is set in its environment.
+
+    The positive control runs the same probe in the dev venv (a source
+    checkout), where the switch does turn the carve-out on: so the
+    installed answer is the build's refusal, not a broken probe.
+    """
+    base, venv, home = (
+        installed_venv["base"], installed_venv["venv"], installed_venv["home"],
+    )
+    body = (
+        "from types import SimpleNamespace;"
+        " import newton_mcp.approval_gate as g;"
+        " d = SimpleNamespace(lab=True, profile='lab');"
+        " print(g.running_from_source_checkout(), g.lab_carve_out_applies(d),"
+        " g.plan_requires_approval(d, router_requires=False, policy_requires=False))"
+    )
+    env = _isolated_env(home)
+    env["NEWTON_LAB_APPROVAL_CARVEOUT"] = "1"
+
+    installed = _run(venv, env, base, body)
+    assert installed.returncode == 0, installed.stderr
+    assert installed.stdout.split() == ["False", "False", "True"], installed.stdout
+
+    dev = subprocess.run(
+        [sys.executable, "-c", body],
+        env=env,
+        cwd=str(base),
+        capture_output=True,
+        text=True,
+    )
+    assert dev.returncode == 0, dev.stderr
+    assert dev.stdout.split() == ["True", "True", "False"], dev.stdout

@@ -549,7 +549,16 @@ plan)
 		busy_next=
 		first=; IFS= read -r first < "$TMPD/stage.err" || true
 		if [[ $first =~ ^error\ busy\ ([^\ ]+)\ ([0-9a-f]{32})$ && ${BASH_REMATCH[1]} == "${HELLO_CALLER-}" ]]; then
-			busy_next="session ${BASH_REMATCH[2]} of this login is still open on the router; apply it ($0 apply $ROUTER ${BASH_REMATCH[2]} <its planned timeout>) or abort it ($0 abort $ROUTER ${BASH_REMATCH[2]}), then plan again; an open session left alone expires on the router after about 45 minutes"
+			bsid=${BASH_REMATCH[2]}
+			# an applied session is not staged: apply again is refused as
+			# already applied, and the router rolls it back at its window end
+			if [[ -e $PLANS/$bsid.held ]]; then
+				busy_next="session $bsid of this login is applied and held on the router, not confirmed; confirm it ($0 confirm $ROUTER $bsid) or abort it ($0 abort $ROUTER $bsid), then plan again; left alone, the router rolls it back when its window ends"
+			elif [[ -r $AUDIT ]] && grep -qE -- " APPLYING session=$bsid\$" "$AUDIT"; then
+				busy_next="session $bsid of this login was applied and its window is still open; wait for that apply to end or abort it ($0 abort $ROUTER $bsid), then plan again; unless it is confirmed, the router rolls it back when its window ends"
+			else
+				busy_next="session $bsid of this login is still open on the router; apply it ($0 apply $ROUTER $bsid <its planned timeout>) or abort it ($0 abort $ROUTER $bsid), then plan again; an open session left alone expires on the router after about 45 minutes"
+			fi
 		elif [[ $first =~ ^error\ busy\ ([^\ ]+)\  ]]; then
 			busy_next="another login ($(oneline "${BASH_REMATCH[1]}")) has a change open on the router; wait until it is applied or aborted (an open session left alone expires after about 45 minutes), then plan again"
 		fi

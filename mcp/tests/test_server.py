@@ -1102,3 +1102,82 @@ def test_the_session_tools_still_name_session_id(configured_lab, monkeypatch):
         assert tool("quasar", "nope") == {
             "error": "session_id must be 32 lowercase hexadecimal characters"
         }, tool
+
+
+def test_apply_refuses_a_plan_record_of_another_device_on_the_same_host(tmp_path, monkeypatch):
+    """The plan record is bound to the device it was planned for.
+
+    Two inventory names for the same router (same host): a plan made
+    for one, with its approval, is not applied under the other name.
+    The host and the session match, so only the device binding stops it,
+    before the approval is claimed or the router is contacted.
+    """
+    inventory = tmp_path / "devices.toml"
+    inventory.write_text(
+        '[devices.quasar]\nplatform = "openwrt"\nhost = "192.0.2.1"\nuser = "root"\n'
+        '[devices.alias]\nplatform = "openwrt"\nhost = "192.0.2.1"\nuser = "root"\n'
+    )
+    monkeypatch.setenv("NEWTON_INVENTORY", str(inventory))
+    monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
+    record = _record(approval=True)
+    _write_plan(tmp_path, record)
+    _write_approval(tmp_path, record)
+    monkeypatch.setattr(server.NewtonService, "run_script", lambda *a, **k: pytest.fail("must not run"))
+
+    result = server.newton_apply_change("alias", SID)
+
+    assert result["error"] == "no plan record for this device and session", result
+    approvals = tmp_path / "state" / "approvals"
+    assert (approvals / f"{SID}.json").is_file()
+    assert not (approvals / f"{SID}.claimed").exists()
+    assert not (approvals / f"{SID}.used").exists()
+
+
+def test_two_concurrent_consume_approval_calls_exactly_one_wins(configured, monkeypatch):
+    """Two applies claim one approval at the same moment: one wins.
+
+    Both calls are held until each has read and checked the approval
+    file, so both reach the claim; the rename lets exactly one through
+    and the other is refused, never handed the token as well.
+    """
+    import threading
+
+    record = _record(approval=True)
+    _write_plan(configured, record)
+    _write_approval(configured, record)
+    barrier = threading.Barrier(2, timeout=10)
+    original_loads = server.json.loads
+
+    def loads(text, *args, **kwargs):
+        value = original_loads(text, *args, **kwargs)
+        if threading.current_thread().name.startswith("consume-"):
+            barrier.wait()
+        return value
+
+    monkeypatch.setattr(server.json, "loads", loads)
+    results: dict[str, object] = {}
+
+    def consume(name: str) -> None:
+        try:
+            results[name] = server.NewtonService().consume_approval("quasar", SID, record)
+        except server.NewtonError as exc:
+            results[name] = exc
+
+    threads = [
+        threading.Thread(target=consume, args=(f"consume-{i}",), name=f"consume-{i}")
+        for i in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+    assert not any(thread.is_alive() for thread in threads)
+
+    grants = [r for r in results.values() if isinstance(r, server.ApprovalGrant)]
+    refusals = [r for r in results.values() if isinstance(r, server.NewtonError)]
+    assert len(grants) == 1 and len(refusals) == 1, results
+    assert grants[0].token == "e" * 64
+    assert "in use by an apply in progress" in str(refusals[0])
+    approvals = configured / "state" / "approvals"
+    assert (approvals / f"{SID}.claimed").is_file()
+    assert not (approvals / f"{SID}.json").exists()

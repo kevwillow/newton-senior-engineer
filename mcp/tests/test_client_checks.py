@@ -652,6 +652,43 @@ def test_vc12_05_check_targets_are_loaded_when_given(tmp_path, monkeypatch):
     assert scans.load_vantages()["inside-a"].check_targets == ("10.1.0.0/16",)
 
 
+def test_vc20_check_controls_are_accepted_by_the_loader(tmp_path, monkeypatch):
+    # VC-20: the positive controls of the blocked probes are an inventory
+    # key the setup tool reads; the server's loader must accept the same
+    # shape and refuse the same mistakes.
+    write_inventory(
+        tmp_path, monkeypatch, extra='\ncheck_controls = ["192.168.1.1:443", "1.1.1.1:53"]\n'
+    )
+    assert "inside-a" in scans.load_vantages()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '"192.168.1.1:443"',
+        '7',
+        '["192.168.1.1"]',
+        '["192.168.1.1:0"]',
+        '["192.168.1.1:0443"]',
+        '["192.168.1.1:65536"]',
+        '["192.168.1.300:443"]',
+        '[443]',
+        '["192.168.1.1:443", "192.168.1.1:80"]',
+        "[" + ", ".join('"10.0.0.%d:443"' % index for index in range(1, 34)) + "]",
+    ],
+)
+def test_vc20_bad_check_controls_are_refused_by_the_loader(tmp_path, monkeypatch, value):
+    write_inventory(tmp_path, monkeypatch, extra=f"\ncheck_controls = {value}\n")
+    with pytest.raises(scans.ScanError, match="check_controls"):
+        scans.load_vantages()
+
+
+def test_vc20_thirty_two_check_controls_are_accepted_by_the_loader(tmp_path, monkeypatch):
+    value = "[" + ", ".join('"10.0.0.%d:443"' % index for index in range(1, 33)) + "]"
+    write_inventory(tmp_path, monkeypatch, extra=f"\ncheck_controls = {value}\n")
+    assert "inside-a" in scans.load_vantages()
+
+
 def test_vc12_06_the_check_key_is_a_second_key_beside_the_scan_key(tmp_path, monkeypatch):
     write_inventory(tmp_path, monkeypatch)
     vantage = scans.load_vantages()["inside-a"]

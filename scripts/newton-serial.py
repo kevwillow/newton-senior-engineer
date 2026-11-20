@@ -727,17 +727,24 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"backup: {backup}")
             else:
                 print(f"no earlier {args.remote}; nothing to back up")
-            # once the heredoc starts the target is overwritten: every failure from here says so
+            # until the line that writes the target is sent, the target is untouched
             if exists_rc == 0:
-                overwritten = f"{args.remote} was already overwritten; the old file is in {backup}"
+                overwritten = f"{args.remote} was not written; a copy of it is in {backup}"
             else:
-                overwritten = f"{args.remote} was already written; there was no earlier file"
+                overwritten = f"{args.remote} was not written; there was no earlier file"
+            cut_short = ""
             token = os.urandom(4).hex()
             delim = f"__NEWTON_EOF_{token}__"
             try:
                 session.write("\x03")
                 session.settle()
                 session.write(f"cat > {args.remote} <<'{delim}'\r")
+                # once the heredoc starts the target is overwritten: every failure from here says so
+                if exists_rc == 0:
+                    overwritten = f"{args.remote} was already overwritten; the old file is in {backup}"
+                else:
+                    overwritten = f"{args.remote} was already written; there was no earlier file"
+                cut_short = ", possibly cut short"
                 for line in push_text.splitlines():
                     session.write(line + "\r")
                 session.write(delim + "\r")
@@ -755,7 +762,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"device entered its bootloader; a human must decide what to do; {overwritten}", file=sys.stderr)
                 return 4
             except serial.SerialException as exc:
-                print(f"serial line failed during push ({exc}); {overwritten}, possibly cut short", file=sys.stderr)
+                print(f"serial line failed during push ({exc}); {overwritten}{cut_short}", file=sys.stderr)
                 return 7
             wanted_sum = hashlib.md5(push_text.encode()).hexdigest()
             fields = out.strip().splitlines()[-1].split() if out.strip() else []

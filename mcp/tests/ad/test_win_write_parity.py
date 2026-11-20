@@ -8,7 +8,8 @@ contract, or the two helpers disagree about what the owner approved.
 One pwsh process answers every case: the harness dot-sources the helper and
 walks the cases of one JSON file.
 
-The tests are skipped, with a reason, when PowerShell 7.4 is not installed.
+The tests fail when PowerShell 7.4 is not installed: this is a release gate.
+A dev box without it sets ``NEWTON_PWSH_SKIP=1`` to skip them instead.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from typing import Any
 import pytest
 
 from newton_mcp.ad.write import request
-from pwsh_path import PWSH
+from pwsh_path import PWSH, require_pwsh
 
 
 AD_DIR = Path(__file__).resolve().parent
@@ -585,13 +586,8 @@ def _cases() -> list[dict[str, Any]]:
 
 
 def _pwsh() -> str:
-    """The shell of the tests, or a skip."""
-    if not PWSH.is_file():
-        pytest.skip(
-            f"PowerShell 7.4 is not installed at {PWSH}: the Windows write "
-            "helper cannot be exercised"
-        )
-    return str(PWSH)
+    """The shell of the tests, or a failure (a skip only with NEWTON_PWSH_SKIP=1)."""
+    return require_pwsh(PWSH, "the Windows write helper")
 
 
 def _run(cases: list[dict[str, Any]], tmp_path: Path) -> dict[str, dict[str, Any]]:
@@ -739,3 +735,50 @@ def test_the_helper_is_where_the_tests_expect_it() -> None:
     """The helper the tests drive is the one the package ships."""
     assert HELPER.is_file()
     assert HARNESS.is_file()
+
+
+
+def _gate_outcome() -> str:
+    """What the gate does: 'fail', 'skip' or 'ok' (a skip is caught here so
+    a gate that skips cannot pass for one that fails)."""
+    try:
+        _pwsh()
+    except pytest.fail.Exception:
+        return "fail"
+    except pytest.skip.Exception:
+        return "skip"
+    return "ok"
+
+
+def test_the_gate_fails_when_powershell_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The parity gate is a release gate: a machine without PowerShell 7.4
+    fails it instead of skipping it, so a green run never hides it."""
+    monkeypatch.setitem(globals(), "PWSH", tmp_path / "no-pwsh")
+    monkeypatch.delenv("NEWTON_PWSH_SKIP", raising=False)
+
+    assert _gate_outcome() == "fail"
+    with pytest.raises(pytest.fail.Exception, match="NEWTON_PWSH_SKIP=1"):
+        _pwsh()
+
+
+@pytest.mark.parametrize("value", ["", "0", "yes", "true"])
+def test_only_the_explicit_opt_out_turns_the_failure_into_a_skip(
+    value: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any value but 1 leaves the gate failing."""
+    monkeypatch.setitem(globals(), "PWSH", tmp_path / "no-pwsh")
+    monkeypatch.setenv("NEWTON_PWSH_SKIP", value)
+
+    assert _gate_outcome() == "fail"
+
+
+def test_the_explicit_opt_out_skips_the_gate_on_a_dev_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NEWTON_PWSH_SKIP=1 is the one way a dev box without PowerShell skips."""
+    monkeypatch.setitem(globals(), "PWSH", tmp_path / "no-pwsh")
+    monkeypatch.setenv("NEWTON_PWSH_SKIP", "1")
+
+    assert _gate_outcome() == "skip"

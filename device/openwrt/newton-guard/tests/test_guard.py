@@ -4,6 +4,7 @@ import shutil
 import stat
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -357,6 +358,52 @@ def test_tick_deadline_and_reboot(router):
     assert run_guard(router, "tick").stdout == "restored txn-0002 reboot\n"
     assert snapshot(router) == original
     assert calls(router, "reload") == ["reload", "reload"]
+
+
+def set_wall_clock(root, epoch):
+    (root / "control/date-epoch").write_text(f"{epoch}\n")
+
+
+def wall_stamp(epoch):
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def test_wall_clock_jumps_do_not_move_the_deadline(router):
+    """GUARD-CLOCK-01: the deadline runs on uptime. Moving the wall clock a
+    year back or ten years forward inside the window neither expires the
+    change early nor stretches it; the guard log shows it saw each clock."""
+    original = snapshot(router)
+    now = 1_800_000_000
+    back = now - 365 * 86400
+    forward = now + 10 * 365 * 86400
+    set_wall_clock(router, now)
+    arm(router)
+    pending = router / "etc/newton/pending"
+    assert pending.read_text() == "txn-0001 161 boot-one\n"
+    change_config(router)
+    changed = snapshot(router)
+
+    set_wall_clock(router, forward)
+    assert run_guard(router, "tick").stdout == "pending txn-0001 61\n"
+    assert run_guard(router, "status").stdout == "pending txn-0001 61\n"
+    set_uptime(router, 130)
+    assert run_guard(router, "tick").stdout == "pending txn-0001 31\n"
+    assert snapshot(router) == changed
+
+    set_wall_clock(router, back)
+    assert run_guard(router, "tick").stdout == "pending txn-0001 31\n"
+    assert pending.read_text() == "txn-0001 161 boot-one\n"
+    assert snapshot(router) == changed
+    set_uptime(router, 160)
+    assert run_guard(router, "tick").stdout == "pending txn-0001 1\n"
+    assert snapshot(router) == changed
+
+    set_uptime(router, 161)
+    assert run_guard(router, "tick").stdout == "restored txn-0001 deadline\n"
+    assert snapshot(router) == original
+    log = (router / "etc/newton/guard.log").read_text()
+    assert f"100.00 {wall_stamp(now)} armed txn=txn-0001 deadline=161" in log
+    assert f"161.00 {wall_stamp(back)} " in log
 
 
 def test_timer_immediate_and_waiting(router):

@@ -27,12 +27,19 @@ is not the candidate is a partial commit or a concurrent change, and the
 driver takes the revert.  The ops without a candidate do not have the
 attribute, so the check is skipped for them.
 
-The same candidate is the proof after the confirm.  The armed revert can
-fire between the verify and the confirm, and the device then holds the
-base configuration again while the confirm still says that the commit
-went through.  The driver reads a fresh snapshot after the confirm and
-compares it with the candidate: a device that differs from the verified
-change is ``unknown`` and never ``confirmed``.
+The armed revert can fire between the verify and the confirm, and the
+device then holds the base configuration again while the confirm still
+says that the commit went through.  The driver reads a fresh snapshot
+after the confirm for every vendor and compares it with the change it
+verified: the candidate hash where the ops have one (Junos), else the
+hash of the verify snapshot (VyOS, RouterOS).  A device that differs from
+the verified change (one that went back to its base, say) is ``unknown``
+and never ``confirmed``.
+
+The confirm is not sent when less than ``CONFIRM_MARGIN_S`` of the revert
+window is left: the window is the plan timeout, counted from before the
+apply, and a confirm that races the timer is the case above.  The driver
+takes the revert instead.
 
 A session that died while it held the exclusive lock of a device leaves
 the configuration database of that device locked, and every session after
@@ -176,6 +183,13 @@ _NOT_SAVED_LOG = (
 _PENDING_NOT_IDLE = "the device did not report an idle commit-confirm timer"
 _NOT_SAVED_TEXT = "not saved: lost on reboot"
 _DIFFERS_AFTER_CONFIRM = "the device differs from the verified change after the confirm"
+_WINDOW_ENDING = "the revert window was about to end, so the confirm was not sent"
+
+# The confirm is sent only while at least this much of the revert window
+# is left.  The window is the plan timeout counted from before the apply;
+# every vendor arms at least that long (VyOS and Junos round up to the
+# minute, a CHR never less than two minutes).
+CONFIRM_MARGIN_S = 15
 
 # The messages a device prints when it refuses a session because its
 # configuration database is locked.  A session that died while it held
@@ -370,6 +384,7 @@ def _recover(
     failed_probe: list[str] | None,
     wait: Callable[[float], None],
     recover_wait_s: int,
+    restored_log: str = "the device restored the base configuration",
 ) -> ApplyOutcome:
     try:
         aborted = _abort_with_retry(ops, run, wait, recover_wait_s)
@@ -408,7 +423,7 @@ def _recover(
         return _unknown("the rollback state is unknown", failed_probe)
     return ApplyOutcome(
         result="rolled_back",
-        log="the device restored the base configuration",
+        log=restored_log,
         failed_probe=failed_probe,
         lost_out_of_band=False,
         saved=None,
@@ -483,6 +498,7 @@ def apply_plan(
     *,
     wait: Callable[[float], None] = time.sleep,
     recover_wait_s: int = 150,
+    now: Callable[[], float] = time.monotonic,
 ) -> ApplyOutcome:
     """Apply a stored plan with preflight, fresh verify and safe recovery."""
     try:
@@ -515,6 +531,9 @@ def apply_plan(
             saved=None,
         )
 
+    # The revert window starts at the apply at the latest, so the clock
+    # is read before it: the time left is never overstated.
+    applied_at = now()
     apply_run = _Recorder(run)
     applied = ops.apply(apply_run, statements, timeout_s)
     if applied == "armed_failed":
@@ -613,6 +632,17 @@ def apply_plan(
                 recover_wait_s,
             )
 
+    if now() - applied_at > timeout_s - CONFIRM_MARGIN_S:
+        return _recover(
+            ops,
+            run,
+            base_hash,
+            None,
+            wait,
+            recover_wait_s,
+            restored_log=_WINDOW_ENDING,
+        )
+
     confirm_run = _Recorder(run)
     confirmed = ops.confirm(confirm_run)
     if not confirmed or not confirm_run.ok:
@@ -628,23 +658,40 @@ def apply_plan(
     # The confirm does not prove that the change is still on the device:
     # the armed revert can fire between the verify and the confirm, and
     # the device then holds the base configuration again while the
-    # confirm still says that the commit went through.  The ops that
-    # stage a candidate know the hash of that candidate, so the
-    # configuration that comes back after the confirm is read in a
-    # fresh session and compared with it.
-    if expected_hash is not None:
-        after_run = _Recorder(run)
-        try:
-            after = ops.snapshot(after_run)
-        except Exception:
-            after = None
-        if (
-            after is None
-            or not after_run.ok
-            or after.base_hash != expected_hash
-            or after.pending != "idle"
-        ):
-            return _unknown(_DIFFERS_AFTER_CONFIRM, None)
+    # confirm still says that the commit went through.  The configuration
+    # that comes back after the confirm is read in a fresh session and
+    # compared with the verified change: the candidate hash where the ops
+    # stage one (Junos), else the hash of the verify snapshot (VyOS,
+    # RouterOS), so a device that went back to its base after the verify
+    # is never confirmed.  The pending state is part of the proof only with a candidate: the other
+    # ops settle their timer in the bounded read below.
+    #
+    # The ops whose revert lives in the configuration itself (RouterOS:
+    # the newton-revert scheduler entry shows in the /export while it is
+    # armed, and the confirm removes it) offer ``change_hash``, the hash
+    # of a snapshot text without that entry, and both sides of the
+    # comparison use it.  Without it every confirmed change would differ
+    # by the entry the confirm removed.
+    change_hash: Callable[[str], str] | None = getattr(ops, "change_hash", None)
+
+    def _hash_of(snapshot: Snapshot) -> str:
+        if expected_hash is None and change_hash is not None:
+            return change_hash(snapshot.text)
+        return snapshot.base_hash
+
+    verified_hash = expected_hash or _hash_of(verify_snapshot)
+    after_run = _Recorder(run)
+    try:
+        after = ops.snapshot(after_run)
+    except Exception:
+        after = None
+    if (
+        after is None
+        or not after_run.ok
+        or _hash_of(after) != verified_hash
+        or (expected_hash is not None and after.pending != "idle")
+    ):
+        return _unknown(_DIFFERS_AFTER_CONFIRM, None)
 
     pending_note = _pending_after_confirm(ops, run, wait, recover_wait_s)
 

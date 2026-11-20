@@ -592,9 +592,9 @@ def plan(
         "restore_plan_hash": restore_record["plan_hash"],
         "script_sha256": apply_sha,
         "restore_script_sha256": restore_sha,
-        "script": envelope.envelope(f"{device_name}:owner-script", apply_bytes.decode("utf-8")),
-        "restore_script": envelope.envelope(
-            f"{device_name}:owner-restore-script", restore_bytes.decode("utf-8")
+        "script": _script_envelope(f"{device_name}:owner-script", apply_bytes),
+        "restore_script": _script_envelope(
+            f"{device_name}:owner-restore-script", restore_bytes
         ),
         "what_this_does": consequences.describe(uci_batch),
         "reasons": reasons,
@@ -603,6 +603,18 @@ def plan(
         "not_verified": apply_record["not_verified"],
         "next_step": next_step(device_name, sid),
     }
+
+
+def _script_envelope(source: str, data: bytes) -> dict[str, str]:
+    """The owner script in the envelope shape, byte for byte.
+
+    The owner approves and runs exactly these bytes (their sha256 is in
+    the plan), so the text shown must be the script itself.
+    ``envelope.envelope`` flags every line that names Newton and would
+    turn ``die`` lines into lines a copied script skips; the script is
+    Newton's own template with shell-quoted values, not a device reply.
+    """
+    return {"kind": envelope.ENVELOPE_KIND, "source": source, "text": data.decode("utf-8")}
 
 
 def section_facts(backup: Any) -> dict[tuple[str, str], tuple[str | None, str | None]]:

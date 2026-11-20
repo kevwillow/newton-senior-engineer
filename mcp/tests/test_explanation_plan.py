@@ -291,12 +291,49 @@ def test_a_profile_lab_device_without_the_lab_flag_now_requires_approval(env):
     assert result["requires_approval"] is True
 
 
-def test_a_lab_flagged_lab_profile_device_keeps_the_router_and_leash_rule(env):
+@pytest.fixture
+def lab_switch(monkeypatch):
+    """The lab's explicit switch for the approval carve-out."""
+    monkeypatch.setenv("NEWTON_LAB_APPROVAL_CARVEOUT", "1")
+
+
+def test_a_lab_flagged_lab_profile_device_keeps_the_router_and_leash_rule(env, lab_switch):
     result = plan_call("lab1", **explained(BATCH))
     assert result["requires_approval"] is False
 
 
-def test_lab_carve_out_still_requires_approval_when_the_router_says_so(env, monkeypatch):
+def test_a_plan_the_carve_out_frees_says_so_in_its_result(env, lab_switch):
+    result = plan_call("lab1", **explained(BATCH))
+    assert result["requires_approval"] is False
+    assert result["approval_note"] == "approval: lab carve-out"
+
+
+def test_a_plan_that_needs_approval_carries_no_carve_out_note(env, lab_switch):
+    assert "approval_note" not in plan_call("quasar", **explained(BATCH))
+
+
+def test_without_the_lab_switch_a_lab_flagged_device_requires_approval(env, monkeypatch):
+    monkeypatch.delenv("NEWTON_LAB_APPROVAL_CARVEOUT", raising=False)
+    result = plan_call("lab1", **explained(BATCH))
+    assert result["requires_approval"] is True
+    assert "approval_note" not in result
+
+
+def test_without_the_lab_switch_apply_refuses_a_lab_record_that_says_no_approval(
+    env, monkeypatch
+):
+    tmp, calls = env
+    monkeypatch.setenv("NEWTON_LAB_APPROVAL_CARVEOUT", "1")
+    assert "error" not in plan_call("lab1", **explained(BATCH))
+    assert stored(tmp)["requires_approval"] is False
+    monkeypatch.delenv("NEWTON_LAB_APPROVAL_CARVEOUT")
+    calls.clear()
+    result = server.newton_apply_change("lab1", SID)
+    assert "approval" in result["error"]
+    assert calls == []
+
+
+def test_lab_carve_out_still_requires_approval_when_the_router_says_so(env, lab_switch, monkeypatch):
     monkeypatch.setattr(
         server.NewtonService, "run_script",
         lambda self, device, *a, **k: subprocess.CompletedProcess(a, 0, plan_output(router_requires=True), ""),
@@ -304,12 +341,12 @@ def test_lab_carve_out_still_requires_approval_when_the_router_says_so(env, monk
     assert plan_call("lab1", **explained(BATCH))["requires_approval"] is True
 
 
-def test_the_carve_out_is_one_switch_and_turning_it_off_makes_lab_require_approval(env, monkeypatch):
+def test_the_carve_out_is_one_switch_and_turning_it_off_makes_lab_require_approval(env, lab_switch, monkeypatch):
     monkeypatch.setattr(approval_gate, "LAB_APPROVAL_CARVEOUT", False)
     assert plan_call("lab1", **explained(BATCH))["requires_approval"] is True
 
 
-def test_gate_unit_cases():
+def test_gate_unit_cases(lab_switch):
     class D:
         def __init__(self, lab, profile):
             self.lab, self.profile = lab, profile
@@ -335,7 +372,7 @@ def test_apply_refuses_a_non_lab_record_that_says_no_approval_needed(env):
     assert calls == []
 
 
-def test_apply_on_a_lab_flagged_device_without_approval_still_runs(env):
+def test_apply_on_a_lab_flagged_device_without_approval_still_runs(env, lab_switch):
     tmp, calls = env
     assert "error" not in plan_call("lab1", **explained(BATCH))
     calls.clear()

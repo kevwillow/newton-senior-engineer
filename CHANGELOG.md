@@ -213,13 +213,55 @@ Two version numbers exist and are separate:
   functional levels or Group Policy, and there is no owner-script tool for Active Directory yet.
 
 ### Fixed
+- A client check that a port is blocked no longer passes on silence alone. A probe that times out counts as blocked
+  only when, in the same run, a control port of the same address connects: the vantage's new inventory key
+  `check_controls` (`"<ipv4>:<port>"`, one per address, at most 32), or the zone's canary when the address is the
+  canary's own. No control is "not tested" (`no-control`), a control that does not connect is "not tested"
+  (`target-dead`), and either one blocks the confirm, so the router rolls back. A refused or open port answers as
+  before. Run `newton-vantage-setup <vantage> install-client-checks` again to put the new check command and its
+  controls on the vantage.
+- The `newton-rules` description no longer says that Newton checks every rule with each change: the rules are
+  stored, and the plan does not read them yet.
+- The lab approval carve-out is off unless the lab turns it on: a `lab = true`, `profile = "lab"` device skips
+  `newton-approve` only when the server runs from a source checkout with `NEWTON_LAB_APPROVAL_CARVEOUT=1` set. An
+  installed Newton never applies it, so every change on it needs approval, lab or not. A plan the carve-out frees says
+  `approval: lab carve-out` in its result.
+- An easy grant reads whether a plan is critical from the plan's reasons, which the plan hash covers, and no longer
+  from the risk word alone, which it does not: a stored plan whose risk was edited from critical to low is not covered
+  by a grant. Stored plans, approvals and grants stay valid.
+- Router text wrapped in the untrusted-device-data envelope is now cleaned by the envelope itself on every path
+  (plan diff, apply, status, confirm and abort logs, the error result): control bytes and ANSI codes are removed, a
+  closing `</untrusted-device-data>` tag is escaped, and a line that imitates a Newton field (now including
+  `approval:`) is flagged. Text the read path already cleaned is not flagged twice. The owner script is still shown
+  byte for byte, as the owner runs it.
+- VyOS and RouterOS changes are no longer reported `confirmed` when the device reverted before the confirm: Newton
+  reads the configuration again after the confirm and reports `unknown` unless it is still the change it verified (a
+  Junos change already had this check). On RouterOS the comparison leaves out Newton's own `newton-revert` scheduler
+  entry, which the `/export` lists while it is armed and the confirm removes; the owner's scheduler entries stay in
+  it. The confirm is not sent when less than 15 seconds of the revert window are left; Newton takes the revert
+  instead and says so.
+- The Windows write parity tests are a release gate: a machine without PowerShell 7.4 now fails them instead of
+  skipping them, unless `NEWTON_PWSH_SKIP=1` is set on purpose on a dev box. A new test runs the real `Register`
+  method of the Windows undo task with the COM scheduler replaced by a local object and pins `StartWhenAvailable`, so
+  a DC that was off or busy at `undo_at` still runs the undo once it can.
+- The approval of an Active Directory change names its undo: an `unlock` says "Undo: none, this stays written" and
+  no longer prints a Window line; every other verb says the PDC puts it back the window after the apply unless Newton
+  confirms, that after a confirm only a reverse plan remains (none for `uac-clear` and `user-create`), and that the
+  undo runs on the PDC only, does not cover a change made meanwhile on another DC or a PDC role move, and runs on the
+  DC's wall clock.
+- The guard's deadline is pinned against wall-clock jumps: a test moves the clock a year back and ten years forward
+  inside the window, and the change still expires at the same uptime, neither early nor late. The guard runs `date`
+  only to stamp log lines and recover directory names; a test root may now supply that `date`.
 - AD audit and AD write follow-ups:
   - `newton_ad_audit` renders a large domain in seconds: the proof that no directory string reached a fix command
     strips each string once, so its cost no longer grows with findings times strings (1000 affected accounts took
     over 100 s). The tool runs off the event loop, so a long audit no longer blocks a confirm or an abort.
   - The audit report is bounded: a check lists at most 10 findings and a finding at most 10 objects, with the full
     counts in `findings_total` and `objects_total`, and the listed findings take at most 60000 bytes. A report that
-    leaves anything out says `truncated` and carries a note; the tool description states the caps.
+    leaves anything out says `truncated` and carries a note; the tool description states the caps. The budget is
+    spent finding by finding, so a check whose findings pass it together still lists the ones that fit (asked for
+    alone, it lists as many as fit); a single finding that alone passes the budget is never listed, and the note says
+    so.
   - `newton_ad_plan_change` against a DC that does not answer names the DC, the reason, that nothing was written and
     where to look (`devices.toml`, `newton-ad-setup`), instead of "internal server error".
   - `newton_ad_apply_change` with a malformed plan id answers "the plan record is not found or is invalid", as status
@@ -245,9 +287,20 @@ Two version numbers exist and are separate:
   true` and a note) that every secret in the saved copy is replaced with `<redacted>`, so it is a reference copy, not a
   backup to restore.
 - A held change (`hold=true`) no longer ends the easy grant when it is applied: a held change has not failed. The
-  grant ends when that change later fails: a confirm that does not confirm, an abort, or a status that finds it rolled
-  back (a confirm that returns a result other than confirmed says `EASY GRANT ENDED.`, and an abort sets
-  `easy_grant: "ended"`; a confirm refused on this host and a status end the grant without saying so).
+  grant ends when that change later fails: a confirm that returns a result other than confirmed (it says
+  `EASY GRANT ENDED.`), an abort (it sets `easy_grant: "ended"`), or a status, or a confirm refused on this host, that
+  finds the router rolled it back (these end the grant without saying so; a confirm refused for another reason, such as
+  no held apply on this host or an unreadable hold record, leaves the grant as it was). When nobody asks and its window
+  passes unconfirmed, the next apply or device list ends the grant, and so does the next plan that would lean on the
+  grant (a plan the owner confirmed in chat, or one made with `NEWTON_GRANT_SKIPS_CHAT=0`, leaves it to the apply).
+  A held apply whose hold record cannot be written ends the grant at once: its result says `EASY GRANT ENDED.` and
+  carries no grant notice.
+- A no-install apply that stopped before `uci apply` names its cause: the link failed, the router refused the login or
+  a call, or Newton stopped. Each was called a link failure. It is still NOT APPLIED and the owner's yes is kept.
+- A plan refused because this login's own session is busy on the router says what to do with an applied session: a
+  held one is confirmed or aborted, and one applied from this host is waited for or aborted; either is rolled back
+  when its window ends unless it is confirmed. It said to apply the session again, which is refused as already
+  applied, and that it expires after about 45 minutes, which holds only for a staged session.
 - Clearer errors (router program 1.3.3):
   - `owrt-safe-apply.sh abort` of a session that rpcd no longer has no longer prints `ABORTED.`: it says whether the
     change was rolled back is not known from there, and exits 3. `owrt-change.sh abort` says the same for a `gone`
@@ -288,7 +341,8 @@ Two version numbers exist and are separate:
   - Serial `push` checks the file's md5 after the byte count, so a garbled line that keeps the length is no longer
     reported `PUSHED`; every failure after the write starts says the target is already overwritten and names the
     `.newton-bak` backup (or that there was no earlier file), and a dropped serial line during a push is reported with
-    exit 7 instead of a traceback.
+    exit 7 instead of a traceback. A line that drops before the line that writes the target is sent says the target
+    was not written.
   - AD: a conflict whose live value is already the plan's after-image says the target holds the planned value and
     nothing needs applying, instead of telling the owner to plan the change again.
   - The release README describes the apply with hold, `newton_confirm_change` and the refused abort of a confirmed
@@ -319,6 +373,19 @@ Two version numbers exist and are separate:
   dialog's (the terminal `newton-approve` fallback for a router change has neither). `SECURITY.md` names the AD
   write path, `newton-enrol`, the vantage scripts and the serial script in scope, and the writes that arm no undo. The
   lab example's header says lab/lab.toml is kept out of every published copy. A test ties each claim to the tree.
+- Owner-facing guarantees are scoped: the READMEs and `SECURITY.md` no longer say "the safe way", "prevent
+  lockouts", "never leak" or "proven rather than claimed"; the undo is described as putting the router's settings
+  back when a check fails or the change is not confirmed in time; the 96 virtual-lab scenarios are counted as files
+  with no full recorded run; the lab isolation check says what it watches and what it cannot see; and the release
+  README lists the GL.iNet GL-MT3000 that the support table lists. `SECURITY.md` adds the domain controller's own
+  approval check, what the authenticator level and a grant leave on the Newton host, that an approved change can run
+  root code on the router, and the serial console script's guard rail; "no tool runs arbitrary commands" now says no
+  MCP tool. A test fails on each of those phrases, on the scenario file count, on the GL-MT3000 row, on the
+  `SECURITY.md` additions and on the roadmap order.
+- The roadmap order: 1.5 AD build mode, then the protocol contract (1.5.x), hosts (1.6), the security engineer persona
+  (1.7) and more vendors (1.8, limited to OpenWrt, Asus, GL.iNet and what the lab can test safely). The read-only
+  dashboard, a generic policy engine, maintenance windows, orchestration across systems and a third-party adapter kit
+  are parked at the end of the backlog; passkey approvals get their own small approval page.
 - An abort of a session that was already confirmed is refused and points to `newton_plan_undo`, instead of reporting
   success while the change stays live: the router refuses while its last session is that one (`refused <SID>
   confirmed`), and when a later session has replaced that line and the router answers `gone`, the host refuses if its

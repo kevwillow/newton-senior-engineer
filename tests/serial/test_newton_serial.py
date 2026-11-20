@@ -639,6 +639,53 @@ def test_push_reports_a_dropped_line_instead_of_a_traceback(tmp_path):
     assert result.returncode == 7, (result.returncode, result.stderr)
     assert "Traceback" not in result.stderr
     assert "serial line failed" in result.stderr
+    assert "already overwritten" in result.stderr and "possibly cut short" in result.stderr
+    assert "/etc/config/x.newton-bak" in result.stderr
+
+
+class _DropAtCtrlCConsole(_UnplugConsole):
+    """Drops the line at the push's own Ctrl-C, the first one after the
+    backup, before the line that writes the target is sent: the target is
+    untouched."""
+
+    backed_up = False
+
+    def _readline(self):
+        data = bytearray()
+        while not self.stop.is_set():
+            try:
+                item = os.read(self.master, 1)
+            except (OSError, TypeError):
+                return None
+            if not item:
+                return None
+            if item == b"\x03" and self.backed_up:
+                os.close(self.master)
+                self.master = None
+                return None
+            self.received += item
+            if item in b"\r\n":
+                line = data.decode(errors="replace")
+                self.backed_up = self.backed_up or "cp -p " in line
+                return line
+            data += item
+        return None
+
+
+def test_push_dropped_before_the_target_is_written_says_it_is_untouched(tmp_path):
+    f = tmp_path / "x.txt"; f.write_text("new\n")
+    console = _DropAtCtrlCConsole("shell", answers={"test -e /etc/config/x": ("", 0),
+                                                    "test -e /etc/config/x.newton-bak": ("", 1)}).start()
+    try:
+        result = invoke(console, tmp_path, "push", str(f), "/etc/config/x")
+    finally:
+        console.close()
+    assert result.returncode == 7, (result.returncode, result.stderr)
+    assert "Traceback" not in result.stderr
+    assert "serial line failed" in result.stderr
+    assert "already overwritten" not in result.stderr
+    assert "/etc/config/x was not written" in result.stderr
+    assert "cut short" not in result.stderr
     assert "/etc/config/x.newton-bak" in result.stderr
 
 

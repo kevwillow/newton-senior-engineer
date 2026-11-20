@@ -610,6 +610,12 @@ def test_wifi_run_escapes_the_envelope_delimiters_in_an_ssid(
         lowered = text.lower()
         assert "</untrusted-device-data>" not in lowered
         assert "</untrusted>" not in lowered
+        # The envelope escapes the delimiter; a line that names the
+        # envelope is also flagged.
+        prefix = envelope.FLAG_PREFIX.lower()
+        if "untrusted-device-data" in lowered:
+            assert lowered.startswith(prefix)
+            lowered = lowered[len(prefix):]
         assert lowered.startswith("< /untrusted")
     assert payload not in json.dumps(result)
 

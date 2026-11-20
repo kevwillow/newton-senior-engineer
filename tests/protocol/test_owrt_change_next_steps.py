@@ -130,6 +130,45 @@ def test_a_plan_refused_busy_with_this_logins_session_names_it_and_the_next_step
     assert "then plan again" in final
 
 
+def test_a_plan_refused_busy_with_this_logins_held_session_says_to_confirm_or_abort_it(protocol, tmp_path):
+    """A held apply of this host is applied, not staged: applying it again is
+    refused as already applied, and the router rolls it back when its window
+    ends, not after about 45 minutes."""
+    other = "f" * 32
+    held = protocol["root"] / "state" / "network-agent" / "plans" / f"{other}.held"
+    held.parent.mkdir(parents=True, exist_ok=True)
+    held.write_text("0 0 1794000000\n")
+    _prepare_state_dirs(protocol)
+    set_router_state(protocol, stage_fail={"rc": 3, "stderr": f"error busy root {other}\n"})
+    result = protocol["run_plan"](write_changes(tmp_path))
+    assert result.returncode == 1
+    final = _final(result)
+    assert f"session {other} of this login is applied and held on the router, not confirmed" in final
+    assert f"{SCRIPT} confirm {ROUTER} {other}" in final
+    assert f"{SCRIPT} abort {ROUTER} {other}" in final
+    assert "rolls it back when its window ends" in final
+    assert f"{SCRIPT} apply {ROUTER} {other}" not in final
+    assert "45 minutes" not in final
+
+
+def test_a_plan_refused_busy_with_this_logins_applied_session_says_it_rolls_back_at_window_end(
+    protocol, tmp_path
+):
+    """An apply this host started is in its window: it is not applied again,
+    and unless it is confirmed the router rolls it back when that window ends."""
+    other = "f" * 32
+    protocol["audit"].write_text(f"2026-11-19T10:00:00+00:00 {ROUTER} APPLYING session={other}\n")
+    set_router_state(protocol, stage_fail={"rc": 3, "stderr": f"error busy root {other}\n"})
+    result = protocol["run_plan"](write_changes(tmp_path))
+    assert result.returncode == 1
+    final = _final(result)
+    assert f"session {other} of this login was applied and its window is still open" in final
+    assert f"{SCRIPT} abort {ROUTER} {other}" in final
+    assert "rolls it back when its window ends" in final
+    assert f"{SCRIPT} apply {ROUTER} {other}" not in final
+    assert "45 minutes" not in final
+
+
 @pytest.mark.parametrize("shown", ["ffffffff", "f" * 32], ids=["short-id", "full-id-shown-to-root"])
 def test_a_plan_refused_busy_with_another_logins_session_says_to_wait(protocol, tmp_path, shown):
     """The router shows root the full id of anyone's session: the owner, not

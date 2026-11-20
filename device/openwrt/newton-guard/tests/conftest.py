@@ -112,11 +112,33 @@ exec /usr/bin/sync "$@"
 """
     elif tool == "sleep":
         tail = """
+# sleep-hold: its first line is a call count. From that call on, the sleep
+# touches control/sleep-held and waits while sleep-hold exists, so a test can
+# change the fake root while the guard is between ticks, not inside one.
+hold="$NEWTON_GUARD_ROOT/control/sleep-hold"
+if [ -f "$hold" ]; then
+    IFS= read -r hold_at < "$hold" || hold_at=
+    made=$(wc -l < "$NEWTON_GUARD_ROOT/control/sleep.calls")
+    if [ -n "$hold_at" ] && [ "$made" -ge "$hold_at" ]; then
+        touch "$NEWTON_GUARD_ROOT/control/sleep-held"
+        while [ -f "$hold" ]; do /usr/bin/sleep 0.05; done
+    fi
+fi
 # Skip long sleeps (two or more leading digits, e.g. 15) so tests never wait for the retry gap.
 case "${1:-}" in
     [0-9][0-9]*) exit 0 ;;
 esac
 exec /usr/bin/sleep "$@"
+"""
+    elif tool == "date":
+        tail = """
+# date-epoch: the fake wall clock. Its first line is a Unix time the date
+# command reports as now (UTC); without it the host clock is used.
+if [ -f "$NEWTON_GUARD_ROOT/control/date-epoch" ]; then
+    IFS= read -r epoch < "$NEWTON_GUARD_ROOT/control/date-epoch"
+    exec /usr/bin/date -u -d "@$epoch" "$@"
+fi
+exec /usr/bin/date "$@"
 """
     else:
         tail = f'exec /usr/bin/{tool} "$@"\n'
@@ -200,7 +222,7 @@ echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'
 echo "fake 1000000 1 $avail 1% /"
 """,
     )
-    for tool in ("cp", "mv", "sync", "rm", "mktemp", "sleep"):
+    for tool in ("cp", "mv", "sync", "rm", "mktemp", "sleep", "date"):
         install_io_wrapper(root, tool)
     return root
 

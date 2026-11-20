@@ -1199,8 +1199,6 @@ class NewtonService:
         )
 
     def list_devices(self) -> dict[str, Any]:
-        from . import grants
-
         devices: list[dict[str, Any]] = []
         for device in self.devices.values():
             caps = self.device_capabilities(device)
@@ -1249,7 +1247,7 @@ class NewtonService:
                         if device.access == "no-install" and device.installed_offer
                         else {}
                     ),
-                    "easy_grant": grants.grant_summary(device.name),
+                    "easy_grant": _live_grant_summary(device.name),
                 }
             )
         return {"devices": devices}
@@ -2490,7 +2488,7 @@ class NewtonService:
             f"intent_sha256={hashlib.sha256(intent_text.encode('utf-8')).hexdigest()[:12]}"
         )
         write_audit("newton_explanation", device_name, audit_line)
-        return {
+        result: dict[str, Any] = {
             "session_id": parsed["session_id"],
             "plan_hash": record["plan_hash"],
             "base_hash": parsed["base_hash"],
@@ -2509,6 +2507,10 @@ class NewtonService:
             "diff": _envelope.envelope(f"{device_name}:plan", parsed["diff"]),
             "backup_path": _envelope.envelope(f"{device_name}:plan", parsed["backup_path"]),
         }
+        if approval is not True:
+            # only the lab carve-out lets a plan go without approval
+            result["approval_note"] = _gate.CARVE_OUT_NOTE
+        return result
 
     def plan_undo(
         self,
@@ -3260,6 +3262,8 @@ class NewtonService:
         lines = [line.removesuffix("\r") for line in stdout.split("\n")]
         if not any(line.startswith(marker) for line in lines):
             return
+        # the router confirmed it: its window passing is no failure
+        _forget_held_under_grant(device_name, session_id)
         record = self._plan_record_for(device_name, session_id)
         if record is None:
             return
@@ -3354,6 +3358,7 @@ class NewtonService:
             if record is not None:
                 self._write_change_receipt(device_name, record, result, log)
             if result == "confirmed":
+                _forget_held_under_grant(device_name, session_id)
                 try:
                     _undo_plan.record_after_hash(self.state, session_id, confighash_text)
                 except Exception:
@@ -3434,12 +3439,136 @@ def _end_grant_after_a_failed_change(device_name: str) -> bool:
     after the apply left the grant open.  A record that is expired or
     malformed was never a live grant, so nothing is claimed for it.
     """
+    _forget_held_under_grant(device_name)
     try:
         if _grants.load_live_grant(device_name) is not None:
             return _grants.revoke_grant(device_name)
     except (OSError, ValueError):
         pass
     return False
+
+
+# A held change a grant approved, kept until it is confirmed or the grant
+# ends: when its window passes unconfirmed and nobody asked, the router
+# rolled it back on its own, and the grant must end then too.
+_HELD_UNDER_GRANT_DIR = "grant-holds"
+
+
+def _held_under_grant_path(device_name: str) -> Path:
+    from . import approval_proof, approve
+
+    approval_proof._check_device(device_name)
+    return approve.state_dir() / _HELD_UNDER_GRANT_DIR / f"{device_name}.json"
+
+
+def _remember_held_under_grant(device_name: str, session_id: str, confirm_by: Any) -> bool:
+    """Record a held change the live grant approved, until its confirm_by.
+
+    A record that cannot be written leaves nothing to settle later, so
+    the grant ends now: a held change whose end nobody would see must not
+    leave a grant open past it.  The answer is True when this call ended
+    the grant, so the result can say so.
+    """
+    from . import approval_proof, approve
+
+    try:
+        live = _grants.load_live_grant(device_name)
+        if live is None:
+            return False
+        if isinstance(confirm_by, bool) or not isinstance(confirm_by, int):
+            raise ValueError("no confirm_by")
+        directory = approval_proof._state_subdir(_HELD_UNDER_GRANT_DIR)
+        approve._atomic_write(
+            directory / f"{device_name}.json",
+            {
+                "session_id": session_id,
+                "confirm_by": confirm_by,
+                "granted_at": live["granted_at"],
+            },
+        )
+    except (OSError, ValueError, TypeError):
+        try:
+            return bool(_grants.revoke_grant(device_name))
+        except (OSError, ValueError):
+            return False
+    return False
+
+
+def _forget_held_under_grant(device_name: str, session_id: str | None = None) -> None:
+    """Drop the held-change record (of *session_id* only, when given)."""
+    try:
+        path = _held_under_grant_path(device_name)
+        if session_id is not None:
+            try:
+                held = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return
+            except (OSError, ValueError):
+                held = None
+            if isinstance(held, dict) and held.get("session_id") != session_id:
+                return
+        path.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass
+
+
+def _live_grant_summary(device_name: str) -> dict[str, Any] | None:
+    """The grant summary, after a held change past its window ended the grant."""
+    _settle_held_under_grant(device_name)
+    return _grants.grant_summary(device_name)
+
+
+def _settle_held_under_grant(device_name: str) -> None:
+    """End the grant when a held change it approved passed its window unconfirmed.
+
+    A confirm clears the record, so a record whose confirm_by has passed
+    is a change the router rolled back on its own: it failed, and the
+    grant ends even though no status, confirm or abort saw it.  A record
+    of a grant that has since ended or been replaced is dropped.  A
+    record that cannot be read ends the grant: unknown is not "confirmed".
+    """
+    try:
+        path = _held_under_grant_path(device_name)
+    except ValueError:
+        return
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return
+    except OSError:
+        raw = ""
+    try:
+        held = json.loads(raw)
+    except ValueError:
+        held = None
+    try:
+        live = _grants.load_live_grant(device_name)
+    except (OSError, ValueError):
+        live = None
+    if live is None:
+        _forget_held_under_grant(device_name)
+        return
+    well_formed = (
+        isinstance(held, dict)
+        and isinstance(held.get("confirm_by"), int)
+        and not isinstance(held.get("confirm_by"), bool)
+        and isinstance(held.get("granted_at"), (int, float))
+    )
+    if well_formed and held["granted_at"] != live["granted_at"]:
+        # the grant that approved the held change is not this one
+        _forget_held_under_grant(device_name)
+        return
+    if well_formed and time.time() < held["confirm_by"]:
+        return
+    _forget_held_under_grant(device_name)
+    try:
+        if _grants.revoke_grant(device_name):
+            write_audit(
+                "newton_grant", device_name,
+                "easy grant ended: a held change it approved passed its window unconfirmed",
+            )
+    except (OSError, ValueError):
+        pass
 
 
 def require_session(session_id: str, name: str = "session_id") -> None:
@@ -3643,6 +3772,7 @@ def _grant_waives_chat(
         # The kill switch: a grant never waives the chat yes.
         return False
     try:
+        _settle_held_under_grant(device_name)
         classification = _change_classes.classify(uci_batch, types=types)
         return _grants.covers(device_name, classification) is not None
     except (OSError, RuntimeError, ValueError):
@@ -3658,6 +3788,7 @@ def _grant_on_disk(device_name: str) -> bool:
     device without a grant never gets that read.
     """
     try:
+        _settle_held_under_grant(device_name)
         return _grants.load_live_grant(device_name) is not None
     except (OSError, RuntimeError, ValueError):
         return False
@@ -4015,6 +4146,13 @@ async def _apply_change_tool(
                 ended = False
             if ended:
                 result["newton_result"] += "  EASY GRANT ENDED."
+        if grant_ended and result.get("result") == "held":
+            # held under the grant: if its window passes unconfirmed and
+            # nobody asks, the next plan or apply ends the grant
+            if _remember_held_under_grant(device, session_id, result.get("confirm_by")):
+                # no record to settle later, so the grant ended now
+                result["newton_result"] += "  EASY GRANT ENDED."
+                return result
         if outcome.grant_note:
             result["grant_notice"] = outcome.grant_note
         return result
@@ -4025,6 +4163,9 @@ async def _apply_change_tool(
             {"error": "invalid device name"},
             elicit_approval.Outcome("fallback", "invalid device name"),
         )
+    # a held change this grant approved whose window passed unconfirmed
+    # ends the grant before it can approve this apply
+    _settle_held_under_grant(device)
     try:
         outcome = await elicit_approval.collect_approval(ctx, device, session_id)
     except Exception:
@@ -4281,9 +4422,10 @@ def newton_list_getters(device: str) -> dict[str, Any]:
     f"a finding at most {_ad_audit_render.MAX_OBJECTS_PER_FINDING} objects, "
     "with the full counts in findings_total and objects_total, and the "
     "listed findings take at most "
-    f"{_ad_audit_render.MAX_FINDINGS_BYTES} bytes: a check whose findings would pass that budget "
-    "lists none (findings_truncated is true on it), `truncated` is true and `truncated_note` says so; pass "
-    "`checks` with fewer ids to list them. This tool changes nothing."
+    f"{_ad_audit_render.MAX_FINDINGS_BYTES} bytes: the findings that no longer fit that budget are "
+    "left out (findings_truncated is true on their check), `truncated` is true and `truncated_note` says "
+    "so; pass `checks` with fewer ids to list more of them; a finding that alone passes the budget is "
+    "never listed. This tool changes nothing."
 ))
 async def _ad_audit_tool(
     device: str,
