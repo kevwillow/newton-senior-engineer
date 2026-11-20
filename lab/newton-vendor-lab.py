@@ -1476,6 +1476,22 @@ def main(argv: list[str] | None = None, *,
             print(f"{shape.id}  {shape.expect}  {shape.description}")
         return 0
 
+    # Past this point the run touches the lab (the tunnel, the VM
+    # rollbacks), so it holds the lab lock lab/newton-lab-test.py holds,
+    # for its whole length, and refuses while another run holds it.
+    lock_fd, lock_error = nl.take_lab_lock()
+    if lock_fd is None:
+        print(f"newton-vendor-lab: {lock_error}", file=sys.stderr)
+        return 2
+    try:
+        return _main_locked(args, lab, shapes, shapes_path, device, factory)
+    finally:
+        os.close(lock_fd)
+
+
+def _main_locked(args: argparse.Namespace, lab: Any, shapes: dict[str, Any],
+                 shapes_path: Path, device: Any,
+                 factory: Callable[[Any], Any] | None) -> int:
     try:
         context = build_context(
             lab,

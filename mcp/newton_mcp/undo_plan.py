@@ -289,7 +289,12 @@ def _require_confirmed(change_id: str) -> None:
 
 
 def _require_receipt(state: Path, device: str, change_id: str) -> Path:
-    """The one receipt of the change, when it says the change was confirmed."""
+    """The one receipt of the change that says the change was confirmed.
+
+    A held apply writes an UNKNOWN receipt and its confirm a CONFIRMED
+    one, so UNKNOWN receipts followed by one CONFIRMED receipt are one
+    confirmed change; any other set of several receipts is refused.
+    """
     found = [
         path
         for path in _device_receipts(state, device)
@@ -297,16 +302,26 @@ def _require_receipt(state: Path, device: str, change_id: str) -> Path:
     ]
     if not found:
         raise UndoRefused("no receipt for this change")
-    if len(found) > 1:
+    says: list[set[str]] = []
+    for path in found:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            raise UndoRefused("no receipt for this change") from None
+        says.append({line.strip() for line in text.splitlines()}
+                    & {"Outcome: CONFIRMED", "Outcome: UNKNOWN"})
+    # A held apply, or one whose confirm answer was lost, writes an UNKNOWN
+    # receipt first; its confirm (or a status that found the router
+    # confirmed it) writes the CONFIRMED one later. Only that shape of
+    # several receipts is one change; any other is refused.
+    if len(found) > 1 and (
+        any(said != {"Outcome: UNKNOWN"} for said in says[:-1])
+        or says[-1] != {"Outcome: CONFIRMED"}
+    ):
         raise UndoRefused("more than one receipt for this change")
-    path = found[0]
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        raise UndoRefused("no receipt for this change") from None
-    if not any(line.strip() == "Outcome: CONFIRMED" for line in text.splitlines()):
+    if "Outcome: CONFIRMED" not in says[-1]:
         raise UndoRefused("the receipt of this change does not say it was confirmed")
-    return path
+    return found[-1]
 
 
 def _require_backup_copy(state: Path, change_id: str, receipt: Path) -> Path:

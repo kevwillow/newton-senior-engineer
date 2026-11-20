@@ -215,3 +215,35 @@ def test_vantage_puts_a_double_dash_before_the_destination(tmp_path, monkeypatch
     separator = argv.index("--")
     assert argv[separator + 1] == "newton@scan.example.invalid"
     assert argv[separator - 1] != "--"
+
+
+# ---- the refusals say the rule ---------------------------------------
+
+
+@pytest.mark.parametrize("host", ["https://192.0.2.1", "root@192.0.2.1", "router test"])
+def test_a_bad_host_refusal_states_the_host_rule(tmp_path, monkeypatch, host):
+    _inventory(tmp_path, monkeypatch, host=host)
+    with pytest.raises(server.NewtonError) as caught:
+        server.load_inventory()
+    assert str(caught.value) == (
+        "device quasar: host fails the hostname grammar: " + server.HOST_RULE
+    )
+    assert "URL scheme" in server.HOST_RULE and "user@" in server.HOST_RULE
+
+
+def test_a_bad_device_name_refusal_states_the_name_rule(tmp_path, monkeypatch):
+    path = tmp_path / "devices.toml"
+    path.write_text(
+        '[devices.quasar]\nplatform = "openwrt"\nhost = "192.0.2.1"\nuser = "root"\n\n'
+        '[devices.Bad]\nplatform = "openwrt"\nhost = "192.0.2.2"\nuser = "root"\n'
+    )
+    path.chmod(0o644)
+    monkeypatch.setenv("NEWTON_INVENTORY", str(path))
+    monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
+    with pytest.raises(server.NewtonError) as caught:
+        server.load_inventory()
+    assert str(caught.value) == (
+        "invalid device name in inventory: Bad: a device name is lowercase letters, "
+        "digits and hyphens, starts with a letter and has at most 32 characters; "
+        "Newton loads no device until that entry is fixed or removed"
+    )

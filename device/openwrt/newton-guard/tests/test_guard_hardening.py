@@ -450,7 +450,8 @@ def test_g3_wrong_seal_refused(router, mutate):
     elif mutate == "rename":
         seal = f"{sha} {count} {names.replace('dhcp', 'dhcx', 1)}"
     else:
-        seal = f"{sha} {count} {names.rstrip('\n')} extra\n"
+        trimmed = names.rstrip('\n')
+        seal = f"{sha} {count} {trimmed} extra\n"
     seal_of(router).write_text(seal)
     assert_lkg_refusal_untouched(router, run_guard(router, "restore", "manual"), "lkg-corrupt")
     assert snapshot(router) == changed

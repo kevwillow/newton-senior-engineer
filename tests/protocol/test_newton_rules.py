@@ -234,6 +234,40 @@ def test_nr20_10_a_zone_without_an_inside_vantage_is_refused(tmp_path):
     assert "newton-rules: rule r-one has no vantage for zone guest" in result.stderr
 
 
+def test_nr20_10b_the_refusal_names_the_zones_and_the_setup_tool(tmp_path):
+    """A zone with no inside vantage (or a typo of one) names the zones the
+    device's inside vantages do carry and points at newton-vantage-setup.
+    The outside vantage's zones are not offered: only an inside vantage
+    runs a client check."""
+    inventory = write_inventory(
+        tmp_path, text=INVENTORY.replace(
+            'zones = [{ name = "iot", src = "10.0.0.50", canary = "10.0.0.1:53" }]',
+            'zones = [{ name = "iot", src = "10.0.0.50", canary = "10.0.0.1:53" },'
+            ' { name = "lan", src = "10.1.0.50", canary = "10.1.0.1:53" }]',
+        ).replace('zones = [{ name = "iot", src = "198.51.100.50"',
+                  'zones = [{ name = "wan", src = "198.51.100.50"'))
+    result = add(tmp_path, "pulsar", "r-one", "iott", "blocked", "router",
+                 inventory=inventory)
+    assert result.returncode == 1
+    assert result.stderr.strip() == (
+        "newton-rules: rule r-one has no vantage for zone iott; zones with "
+        "an inside vantage for pulsar: iot, lan (set a vantage up for "
+        "another zone with newton-vantage-setup)")
+    assert not rules_path(tmp_path).exists()
+
+
+def test_nr20_10c_a_device_with_no_inside_vantage_says_so(tmp_path):
+    inventory = write_inventory(
+        tmp_path, text=INVENTORY.replace('devices = ["pulsar"]\nzones = [{ name = "iot", src = "10.0.0.50"',
+                                         'devices = []\nzones = [{ name = "iot", src = "10.0.0.50"'))
+    result = add(tmp_path, "pulsar", "r-one", "iot", "blocked", "router",
+                 inventory=inventory)
+    assert result.returncode == 1
+    assert result.stderr.strip() == (
+        "newton-rules: rule r-one has no vantage for zone iot; pulsar has "
+        "no inside vantage yet (set one up with newton-vantage-setup)")
+
+
 def test_nr20_11_an_outside_vantage_is_not_an_inside_vantage(tmp_path):
     # outside-o lists the device and the zone, but only role inside serves
     # a client check; the answer is the same refusal.

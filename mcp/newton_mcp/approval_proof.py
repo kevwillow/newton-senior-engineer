@@ -83,6 +83,7 @@ BASE32_RE = re.compile(r"^[A-Z2-7]+$")
 PASS_OK = "ok"
 PASS_WRONG = "wrong"
 PASS_NO_FINGERPRINT = "no-fingerprint"
+PASS_DAMAGED = "damaged-fingerprint"
 PASS_BAD_INPUT = "bad-input"
 
 
@@ -395,7 +396,9 @@ def key_is_stale(device: str, k_hex: str) -> bool:
         approve.state_dir() / "approval-fp" / device,
         approve.approval_fingerprint(k_hex),
     )
-    return status == approve.APPROVAL_FP_MISMATCH
+    # a damaged file is taken as stale too: it proves no key, so the
+    # dialog stops early, as it did when it counted as a mismatch
+    return status in (approve.APPROVAL_FP_MISMATCH, approve.APPROVAL_FP_DAMAGED)
 
 
 # --- the passphrase proof ----------------------------------------------------
@@ -411,8 +414,9 @@ def verify_passphrase(device: str, passphrase: str) -> tuple[str, str | None]:
 
     Returns ``("ok", k)``, ``("wrong", None)`` for a passphrase that
     does not match, ``("no-fingerprint", None)`` when the device has no
-    fingerprint on record, and ``("bad-input", None)`` for an empty
-    passphrase.
+    fingerprint on record, ``("damaged-fingerprint", None)`` when the
+    fingerprint file is there but unreadable or not a v1 line (never a
+    wrong answer), and ``("bad-input", None)`` for an empty passphrase.
     """
     _check_device(device)
     if not isinstance(passphrase, str) or passphrase == "":
@@ -429,6 +433,8 @@ def verify_passphrase(device: str, passphrase: str) -> tuple[str, str | None]:
         return (PASS_OK, k_hex)
     if status == approve.APPROVAL_FP_MISMATCH:
         return (PASS_WRONG, None)
+    if status == approve.APPROVAL_FP_DAMAGED:
+        return (PASS_DAMAGED, None)
     return (PASS_NO_FINGERPRINT, None)
 
 

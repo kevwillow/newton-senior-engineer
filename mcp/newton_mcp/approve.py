@@ -160,6 +160,7 @@ def approval_fingerprint(k_hex: str) -> str:
 APPROVAL_FP_MISSING = "missing"
 APPROVAL_FP_MATCH = "match"
 APPROVAL_FP_MISMATCH = "mismatch"
+APPROVAL_FP_DAMAGED = "damaged"
 FINGERPRINT_LINE_RE = re.compile(r"^v1 [0-9a-f]{64}$")
 
 
@@ -168,10 +169,12 @@ def check_approval_fingerprint(path: Path, expected_hex: str) -> str:
 
     Returns ``APPROVAL_FP_MATCH`` (file present and matches), ``APPROVAL_FP_MISSING``
     (file absent -- the operator may not have run setup approval-key yet,
-    or the state dir is different from the one setup used), or
-    ``APPROVAL_FP_MISMATCH`` (file present but wrong, or malformed -- a
-    malformed file is treated like a mismatch so a one-line edit can't
-    disable the check).
+    or the state dir is different from the one setup used),
+    ``APPROVAL_FP_MISMATCH`` (a v1 fingerprint that differs: a wrong
+    passphrase), or ``APPROVAL_FP_DAMAGED`` (the file is there but cannot
+    be read or is not a v1 line).  A damaged file never approves, so a
+    one-line edit cannot disable the check, and it is not a wrong answer:
+    the callers name it and count no failure.
     """
     try:
         text = path.read_text(encoding="ascii")
@@ -180,17 +183,39 @@ def check_approval_fingerprint(path: Path, expected_hex: str) -> str:
     except (OSError, ValueError):
         # ValueError covers UnicodeDecodeError, raised when the file
         # holds a non-ASCII byte (read_text(encoding='ascii') is a
-        # ValueError, not an OSError).  Treat them as a mismatch so a
+        # ValueError, not an OSError).  A damaged file refuses, so a
         # one-byte corruption can't disable the check by raising a
         # traceback AFTER the passphrase prompt.
-        return APPROVAL_FP_MISMATCH
+        return APPROVAL_FP_DAMAGED
     line = text.strip()
     if not FINGERPRINT_LINE_RE.fullmatch(line):
-        return APPROVAL_FP_MISMATCH
+        return APPROVAL_FP_DAMAGED
     stored_hex = line.split(" ", 1)[1]
     return (APPROVAL_FP_MATCH
             if hmac.compare_digest(stored_hex, expected_hex)
             else APPROVAL_FP_MISMATCH)
+
+
+def _confirm_typed(expected: str) -> str | None:
+    """Ask the owner to type ``expected``; None when they did, else the refusal.
+
+    Spaces around the answer are ignored (a pasted line often carries a
+    trailing one).  Ctrl-C or the end of input at the prompt is a refusal
+    of its own, never a traceback, and a wrong answer names what to type.
+    The caller appends what was not created.
+    """
+    print(f"Type {expected!r} to approve: ", end="", flush=True)
+    try:
+        line = sys.stdin.readline()
+    except (KeyboardInterrupt, OSError, ValueError):
+        print(file=sys.stderr)
+        return "confirmation could not be read"
+    if not line:
+        print(file=sys.stderr)
+        return "confirmation could not be read"
+    if line.strip() != expected:
+        return f"confirmation did not match: type {expected!r} exactly"
+    return None
 
 
 def _sanitize_terminal_value(value: object) -> str:
@@ -910,10 +935,9 @@ def _approve_scan(request_id: str) -> int:
     print(f"Kept: {_sanitize_terminal_value(request['kept'])}")
     print(f"Request hash: {_sanitize_terminal_value(str(request['request_hash'])[:12])}")
     expected = f"approve {request_id[:8]}"
-    print(f"Type {expected!r} to approve: ", end="", flush=True)
-    confirmation = sys.stdin.readline().rstrip("\r\n")
-    if confirmation != expected:
-        print("newton-approve: confirmation did not match; consent not created", file=sys.stderr)
+    refusal = _confirm_typed(expected)
+    if refusal is not None:
+        print(f"newton-approve: {refusal}; consent not created", file=sys.stderr)
         return 1
     try:
         passphrase = _getpass(
@@ -949,6 +973,15 @@ def _approve_scan(request_id: str) -> int:
             file=sys.stderr,
         )
         return 1
+    if fingerprint_status == APPROVAL_FP_DAMAGED:
+        print(
+            "newton-approve: the approval fingerprint file for "
+            f"{_sanitize_terminal_value(device)} is damaged; run "
+            "sudo -u newton /usr/local/bin/newton-router-setup "
+            f"{_sanitize_terminal_value(device)} approval-key again; consent not created",
+            file=sys.stderr,
+        )
+        return 1
     if fingerprint_status == APPROVAL_FP_MISSING:
         print(
             "newton-approve: no approval fingerprint on record for "
@@ -956,6 +989,10 @@ def _approve_scan(request_id: str) -> int:
             f"{_sanitize_terminal_value(device)} approval-key first; consent not created",
             file=sys.stderr,
         )
+        return 1
+    if fingerprint_status != APPROVAL_FP_MATCH:
+        # fail closed on any other answer
+        print("newton-approve: the approval fingerprint could not be checked; consent not created", file=sys.stderr)
         return 1
     created = datetime.now(timezone.utc)
     consent = {
@@ -988,6 +1025,20 @@ def _lock_remaining(device: str) -> int:
         return approval_proof.lock_remaining(device)
     except Exception:
         return 0
+
+
+def _record_success(device: str) -> None:
+    """Clear the wrong-answer count of the device after a correct proof.
+
+    Best effort: a count that cannot be cleared never refuses an approval
+    the owner proved (the next wrong answer still counts).
+    """
+    from . import approval_proof
+
+    try:
+        approval_proof.record_success(device)
+    except Exception:
+        return
 
 
 def _record_failure(device: str) -> int:
@@ -1068,11 +1119,20 @@ def _ask_proof(
     # is best effort -- none of them is ever printed, logged or written.
     del passphrase
     if status == approval_proof.PASS_OK and key is not None:
+        # clears the count on every path, as the TOTP branch does: the
+        # terminal path counts nothing but a correct answer there is proof
+        _record_success(device)
         return key, None
     if status == approval_proof.PASS_NO_FINGERPRINT:
         return None, (
             f"no approval fingerprint on record for {safe_device}; run "
             f"newton-router-setup {safe_device} approval-key first; "
+            "approval not created"
+        )
+    if status == approval_proof.PASS_DAMAGED:
+        return None, (
+            f"the approval fingerprint file for {safe_device} is damaged; run "
+            f"sudo -u newton /usr/local/bin/newton-router-setup {safe_device} approval-key again; "
             "approval not created"
         )
     if status == approval_proof.PASS_BAD_INPUT:
@@ -1125,10 +1185,9 @@ def approve_plan(
         return False, str(exc)
 
     expected = f"approve {plan_id[:8]}"
-    print(f"Type {expected!r} to approve: ", end="", flush=True)
-    confirmation = sys.stdin.readline().rstrip("\r\n")
-    if confirmation != expected:
-        return False, "confirmation did not match; approval not created"
+    refusal = _confirm_typed(expected)
+    if refusal is not None:
+        return False, f"{refusal}; approval not created"
 
     if lockout:
         remaining = _lock_remaining(device)
@@ -1286,10 +1345,9 @@ def approve_ad_change(
             print(f"  - {_sanitize_terminal_value(reason)}")
 
     expected = f"approve {plan_id[:8]}"
-    print(f"Type {expected!r} to approve: ", end="", flush=True)
-    confirmation = sys.stdin.readline().rstrip("\r\n")
-    if confirmation != expected:
-        return False, "confirmation did not match; approval not created"
+    refusal = _confirm_typed(expected)
+    if refusal is not None:
+        return False, f"{refusal}; approval not created"
 
     remaining = _lock_remaining(device)
     if remaining > 0:
@@ -1318,16 +1376,43 @@ def approve_ad_change(
     if status == APPROVAL_FP_MISMATCH:
         del k_hex
         return False, _wrong_text(_record_failure(device))
+    if status == APPROVAL_FP_DAMAGED:
+        # never approves, and is not a wrong answer: no failure is counted
+        del k_hex
+        safe = _sanitize_terminal_value(device)
+        if os.environ.get("NEWTON_HOME"):
+            setup = f"sudo -u newton /usr/local/bin/newton-ad-setup approval-key {safe} again on the Newton host"
+        else:
+            setup = f"scripts/newton-ad-setup approval-key {safe} again from this source tree"
+        return False, (
+            f"the approval fingerprint file for {safe} is damaged; run "
+            f"{setup}; approval not created"
+        )
     if status == APPROVAL_FP_MISSING:
         del k_hex
+        safe = _sanitize_terminal_value(device)
+        if os.environ.get("NEWTON_HOME"):
+            # the installed launcher: the source-tree form would store the
+            # fingerprint in the caller's own state directory, never read here
+            return False, (
+                f"no approval fingerprint on record for {safe}; "
+                "run sudo -u newton /usr/local/bin/newton-ad-setup approval-key "
+                f"{safe} on the Newton host first; approval not created"
+            )
         return False, (
-            f"no approval fingerprint on record for {_sanitize_terminal_value(device)}; "
-            "run sudo -u newton /usr/local/bin/newton-ad-setup approval-key "
-            f"{_sanitize_terminal_value(device)} on the Newton host first "
-            "(from a source tree: scripts/newton-ad-setup approval-key "
-            f"{_sanitize_terminal_value(device)}); approval not created"
+            f"no approval fingerprint on record for {safe}; run "
+            f"scripts/newton-ad-setup approval-key {safe} from this source tree first "
+            "(an installed Newton: sudo -u newton /usr/local/bin/newton-ad-setup "
+            f"approval-key {safe}, then sudo -u newton /usr/local/bin/newton-approve); "
+            "approval not created"
         )
+    if status != APPROVAL_FP_MATCH:
+        # fail closed on any other answer
+        del k_hex
+        return False, "the approval fingerprint could not be checked; approval not created"
 
+    # the proof matched: a correct answer clears the wrong-answer count
+    _record_success(device)
     created = datetime.now(timezone.utc) if now is None else now
     not_before = int(created.timestamp())
     not_after = not_before + 1800
@@ -1405,3 +1490,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"newton-approve: {refusal}", file=sys.stderr)
         return 1
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

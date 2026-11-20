@@ -352,16 +352,92 @@ def test_a_missing_fingerprint_is_refused(
     lab.add_user(uac=4260352)
     planned = _make_plan(lab)
 
+    monkeypatch.setenv("NEWTON_HOME", "/opt/newton")
     ok, refusal = _approve(str(planned["plan_id"]), monkeypatch)
 
     assert not ok
     assert (
         "no approval fingerprint on record for win-dc1; "
         "run sudo -u newton /usr/local/bin/newton-ad-setup approval-key "
-        "win-dc1 on the Newton host first (from a source tree: "
-        "scripts/newton-ad-setup approval-key win-dc1); approval not created"
+        "win-dc1 on the Newton host first; approval not created"
     ) in refusal
     assert "newton-router-setup" not in refusal
+    # the source-tree form stores the fingerprint where an installed
+    # newton-approve never reads it, so an installed run never offers it
+    assert "scripts/newton-ad-setup" not in refusal
+
+
+def test_a_missing_fingerprint_from_a_source_tree_names_the_source_tree_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A source-tree newton-approve reads the caller's own state directory,
+    so its refusal names the source-tree form, and says the installed form
+    goes with the installed newton-approve."""
+    lab = harness.Lab()
+    lab.add_user(uac=4260352)
+    planned = _make_plan(lab)
+
+    monkeypatch.delenv("NEWTON_HOME", raising=False)
+    ok, refusal = _approve(str(planned["plan_id"]), monkeypatch)
+
+    assert not ok
+    assert (
+        "no approval fingerprint on record for win-dc1; run "
+        "scripts/newton-ad-setup approval-key win-dc1 from this source tree first "
+        "(an installed Newton: sudo -u newton /usr/local/bin/newton-ad-setup "
+        "approval-key win-dc1, then sudo -u newton /usr/local/bin/newton-approve); "
+        "approval not created"
+    ) in refusal
+
+
+@pytest.mark.parametrize("content", [b"garbage\n", b"v1 \xff\n", b""])
+def test_a_damaged_fingerprint_file_is_named_and_not_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: bytes
+) -> None:
+    """A fingerprint file that is not a v1 line never approves, is reported
+    as damaged with the approval-key step, and counts no wrong answer (no
+    lockout grows from a broken file)."""
+    from newton_mcp import approval_proof
+
+    lab = harness.Lab()
+    lab.add_user(uac=4260352)
+    planned = _make_plan(lab)
+    path = store.state_dir() / "approval-fp" / harness.DOMAIN
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.write_bytes(content)
+    monkeypatch.setenv("NEWTON_HOME", "/opt/newton")
+
+    for _ in range(4):
+        ok, refusal = _approve(str(planned["plan_id"]), monkeypatch)
+        assert not ok
+        assert "wrong approval" not in refusal
+        assert (
+            f"the approval fingerprint file for {harness.DOMAIN} is damaged; run "
+            "sudo -u newton /usr/local/bin/newton-ad-setup approval-key "
+            f"{harness.DOMAIN} again on the Newton host; approval not created"
+        ) in refusal
+    record, _ = approval_proof._load_lockout(harness.DOMAIN)
+    assert record is None or record.get("misses", 0) == 0
+    assert approval_proof.lock_remaining(harness.DOMAIN) == 0
+    assert not store.approval_path(str(planned["plan_id"])).exists()
+
+
+def test_an_unknown_fingerprint_answer_never_approves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed: a fingerprint check answer that is none of the known
+    ones never approves."""
+    lab = harness.Lab()
+    lab.add_user(uac=4260352)
+    planned = _make_plan(lab)
+    _write_fingerprint(harness.DOMAIN)
+    monkeypatch.setattr(approve, "check_approval_fingerprint", lambda path, fp: "unexpected")
+
+    ok, refusal = _approve(str(planned["plan_id"]), monkeypatch)
+
+    assert not ok
+    assert "approval not created" in refusal
+    assert not store.approval_path(str(planned["plan_id"])).exists()
 
 
 def test_a_wrong_confirmation_is_refused(
@@ -432,3 +508,87 @@ def test_the_ad_tools_name_the_installed_approve_command() -> None:
     for name in ("newton_ad_plan_change", "newton_ad_apply_change"):
         description = tools[name].description or ""
         assert command in " ".join(description.split()), name
+
+
+def test_a_correct_passphrase_clears_the_wrong_answer_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two typos, then the right passphrase, and the count is cleared, so two
+    more typos on a later plan do not lock the domain."""
+    from newton_mcp import approval_proof
+
+    lab = harness.Lab()
+    lab.add_user(uac=4260352)
+    planned = _make_plan(lab)
+    plan_id = str(planned["plan_id"])
+    _write_fingerprint(harness.DOMAIN)
+
+    for _ in range(2):
+        ok, _ = _approve(plan_id, monkeypatch, passphrase="wrong passphrase")
+        assert not ok
+    record, _ = approval_proof._load_lockout(harness.DOMAIN)
+    assert record is not None and record["misses"] == 2
+
+    ok, refusal = _approve(plan_id, monkeypatch)
+    assert ok, refusal
+    record, unreadable = approval_proof._load_lockout(harness.DOMAIN)
+    assert not unreadable
+    assert record is None or record["misses"] == 0
+    assert approval_proof.lock_remaining(harness.DOMAIN) == 0
+
+
+def test_ctrl_c_at_the_confirmation_creates_no_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl-C at the confirmation prompt is a refusal, not a traceback."""
+    lab = harness.Lab()
+    lab.add_user(uac=4260352)
+    planned = _make_plan(lab)
+    _write_fingerprint(harness.DOMAIN)
+
+    class Interrupted(io.StringIO):
+        def readline(self, *args: object) -> str:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(approve, "_getpass", lambda prompt: pytest.fail("no passphrase"))
+    monkeypatch.setattr("sys.stdin", Interrupted())
+    ok, refusal = approve.approve_ad_change(
+        str(planned["plan_id"]), now=datetime(2027, 1, 1, tzinfo=timezone.utc)
+    )
+
+    assert not ok
+    assert refusal == "confirmation could not be read; approval not created"
+
+
+def test_a_wrong_confirmation_says_what_to_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal names the exact text the prompt wanted."""
+    lab = harness.Lab()
+    lab.add_user(uac=4260352)
+    planned = _make_plan(lab)
+    _write_fingerprint(harness.DOMAIN)
+    plan_id = str(planned["plan_id"])
+
+    ok, refusal = _approve(plan_id, monkeypatch, confirmation="approve")
+
+    assert not ok
+    assert refusal == (
+        f"confirmation did not match: type 'approve {plan_id[:8]}' exactly; "
+        "approval not created"
+    )
+
+
+def test_spaces_around_the_confirmation_are_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pasted confirmation with a trailing space still matches."""
+    lab = harness.Lab()
+    lab.add_user(uac=4260352)
+    planned = _make_plan(lab)
+    _write_fingerprint(harness.DOMAIN)
+    plan_id = str(planned["plan_id"])
+
+    ok, refusal = _approve(plan_id, monkeypatch, confirmation=f" approve {plan_id[:8]} ")
+
+    assert ok, refusal

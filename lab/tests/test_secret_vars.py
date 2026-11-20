@@ -48,6 +48,7 @@ key = "~/.ssh/key"
 
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
 snapshot = "baseline"

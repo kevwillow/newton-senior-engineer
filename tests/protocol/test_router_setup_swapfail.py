@@ -34,7 +34,8 @@ def install_pulsar(env, program="ok"):
 
 def swap(env, *extra):
 	"""swap-key pulsar via the plain-key admin path; no typed input."""
-	return env.run("--plain-key", env.plain_key, "pulsar", "swap-key", *extra)
+	return env.run("--plain-key", env.plain_key, "pulsar", "swap-key",
+	               "--remove-plain-key", *extra)
 
 
 def plain_key_works(env):

@@ -674,6 +674,41 @@ def test_status_abort_and_audit(configured, monkeypatch):
     assert "newton_change_status" in audit and "newton_abort_change" in audit
 
 
+def test_abort_of_a_confirmed_session_says_it_stays_live(configured, monkeypatch):
+    """The wrapper's exact refusal line for a confirmed SID becomes a bare,
+    server-side result: refused, the change stays live, undo with
+    newton_plan_undo.  The log stays enveloped."""
+    line = (
+        f"ERROR: abort refused: session {SID} was already confirmed; the change "
+        "stays live. To undo it, plan the reverse change (newton_plan_undo)"
+    )
+    monkeypatch.setattr(
+        server.NewtonService, "run_script",
+        lambda *a, **k: subprocess.CompletedProcess([], 1, line + "\n", ""),
+    )
+    result = server.newton_abort_change("quasar", SID)
+    assert result["exit_code"] == 1
+    assert result["result"] == "refused_confirmed"
+    assert "stays live" in result["next_step"]
+    assert "newton_plan_undo" in result["next_step"]
+    assert result["log"]["kind"] == "untrusted-device-data"
+
+
+def test_abort_refusal_text_inside_a_router_line_is_not_trusted(configured, monkeypatch):
+    """The same words inside another line (router text) are not the wrapper's
+    refusal: no result field is added."""
+    line = (
+        f"ERROR: abort did not report success: abort refused: session {SID} was "
+        "already confirmed"
+    )
+    monkeypatch.setattr(
+        server.NewtonService, "run_script",
+        lambda *a, **k: subprocess.CompletedProcess([], 1, line + "\n", ""),
+    )
+    result = server.newton_abort_change("quasar", SID)
+    assert "result" not in result
+
+
 def test_mcp_in_memory_client_lists_exactly_thirteen_tools():
     """Exercise the SDK's in-memory transport rather than an OS socket."""
     from mcp.shared.memory import create_connected_server_and_client_session
@@ -685,7 +720,7 @@ def test_mcp_in_memory_client_lists_exactly_thirteen_tools():
     assert {tool.name for tool in response.tools} == server.TOOL_NAMES
     assert "newton_approve" not in {tool.name for tool in response.tools}
     apply_tool = next(tool for tool in response.tools if tool.name == "newton_apply_change")
-    assert set(apply_tool.inputSchema["properties"]) == {"device", "session_id"}
+    assert set(apply_tool.inputSchema["properties"]) == {"device", "session_id", "hold"}
     plan_tool = next(tool for tool in response.tools if tool.name == "newton_plan_change")
     assert set(plan_tool.inputSchema["properties"]) == {
         "device", "uci_batch", "timeout_s", "probes", "manifest_checks",
@@ -1025,3 +1060,45 @@ def test_staged_at_is_stamped_before_plan_script_runs(configured_lab, monkeypatc
         f"staged_at={staged_at!r} should equal the BEFORE instant "
         f"captured before run_script started, not {after_script!r}"
     )
+
+
+@pytest.mark.parametrize("command,shown", [
+    ("uci show \U0001f525", "show \U0001f525"),
+    ("ping -c 100 x", "-c 100 x"),
+    ("uci commit", "commit"),
+])
+def test_a_known_read_with_wrong_arguments_names_the_arguments(command, shown):
+    """A verb the table knows, with arguments no form accepts, is
+    refused for its arguments, not as if the verb were not allowed."""
+    with pytest.raises(server.NewtonError) as caught:
+        server.validate_read(command)
+    verb = command.split()[0]
+    assert str(caught.value) == (
+        f"read command '{verb}' does not accept these arguments: {shown} "
+        "(newton_read's description lists the accepted forms)"
+    )
+
+
+def test_an_unknown_read_verb_is_still_named_as_not_allowed():
+    with pytest.raises(server.NewtonError) as caught:
+        server.validate_read("reboot now")
+    assert str(caught.value) == "read command is not allowed: reboot"
+
+
+def test_plan_undo_names_its_own_change_id_parameter(configured_lab, monkeypatch):
+    """newton_plan_undo takes change_id, so a bad id is refused
+    under that name, not as session_id."""
+    monkeypatch.setattr(server.NewtonService, "run_script",
+                        lambda *a, **k: pytest.fail("must not run"))
+    result = server.newton_plan_undo("quasar", "nope", owner_confirmed_in_chat=True)
+    assert result == {"error": "change_id must be 32 lowercase hexadecimal characters"}
+
+
+def test_the_session_tools_still_name_session_id(configured_lab, monkeypatch):
+    monkeypatch.setattr(server.NewtonService, "run_script",
+                        lambda *a, **k: pytest.fail("must not run"))
+    for tool in (server.newton_change_status, server.newton_abort_change,
+                 server.newton_confirm_change):
+        assert tool("quasar", "nope") == {
+            "error": "session_id must be 32 lowercase hexadecimal characters"
+        }, tool

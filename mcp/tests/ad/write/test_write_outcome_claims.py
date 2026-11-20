@@ -2383,3 +2383,108 @@ def test_a_retry_that_cannot_record_itself_keeps_the_earlier_caveat(
     assert result["code"] == "not_sent"
     assert result["message"] == ad_apply.EARLIER_PENDING_NOT_SENT_MESSAGE
     _assert_pending(_receipt(plan_id))
+
+
+def test_a_stale_before_image_conflict_names_the_cause_and_keeps_the_live_value() -> None:
+    """Somebody changed the target between the plan and the apply: the DC
+    answers conflict with its live value.  The owner is told the target
+    changed since the plan and to plan again, and the live value reaches
+    the result (and the receipt), never thrown away."""
+    from newton_mcp.ad.write import render as ad_render
+
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+    lab.helpers["win-dc1"].objects[harness.SEED_GUID]["uac"] = 512
+
+    result = ad_apply.apply_change(plan_id, send=lab.send, devices=lab.devices, timeout_s=0.0)
+
+    assert result["state"] == ad_apply.STATE_CONFLICT
+    message = " ".join(str(result.get("message")).split())
+    assert "changed since the plan" in message
+    assert "plan the change again" in message
+    assert "nothing was written" in message
+    assert isinstance(result.get("live"), dict) and result["live"]
+    assert "live" in ad_render.applied(result)
+    receipt = store.read_json(store.receipt_path(plan_id))
+    assert receipt["live"] == result["live"]
+    assert receipt["message"] == result["message"]
+
+
+@pytest.mark.parametrize(
+    ("code", "step"),
+    [
+        ("expired", "approve the plan again"),
+        ("bad_token", "approve the plan again"),
+        ("risk_mismatch", "plan the change again"),
+        ("not_pdc", "PDC emulator"),
+        ("privileged", "privileged"),
+        ("schema", "write setup"),
+    ],
+)
+def test_a_pre_write_refusal_names_its_codes_next_step(code: str, step: str) -> None:
+    """The DC refused before writing and has no record of the txid: the
+    answer still says nothing changed, and adds the next step of the code
+    the DC named."""
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+
+    def send(target: object, body: dict[str, object]) -> dict[str, object]:
+        if body["mode"] == "apply":
+            return {"v": 1, "code": code}
+        if body["mode"] == "status":
+            return {"v": 1, "code": "not_found"}
+        return lab.send(target, body)  # type: ignore[arg-type]
+
+    result = ad_apply.apply_change(plan_id, send=send, devices=lab.devices, timeout_s=0.0)
+
+    assert result["state"] == ad_apply.STATE_REFUSED
+    message = " ".join(str(result["message"]).split())
+    assert message.startswith(ad_apply.DC_REFUSED_MESSAGE)
+    assert step in message
+    assert message != ad_apply.DC_REFUSED_MESSAGE
+
+
+def test_an_expired_user_create_says_plan_the_user_again() -> None:
+    """A user-create's password left the plan record with the apply, so the
+    same plan can never be applied again: the next step is a new plan."""
+    lab = harness.Lab()
+    lab.add_user(uac=512)
+    lab.add_domain_head()
+    plan_id = _approved_plan(lab, "user-create", ["newuser"], harness.DOMAIN_GUID)
+
+    def send(target: object, body: dict[str, object]) -> dict[str, object]:
+        if body["mode"] == "apply":
+            return {"v": 1, "code": "expired"}
+        if body["mode"] == "status":
+            return {"v": 1, "code": "not_found"}
+        return lab.send(target, body)  # type: ignore[arg-type]
+
+    result = ad_apply.apply_change(plan_id, send=send, devices=lab.devices, timeout_s=0.0)
+
+    assert result["state"] == ad_apply.STATE_REFUSED
+    message = " ".join(str(result["message"]).split())
+    assert message.startswith(ad_apply.DC_REFUSED_MESSAGE)
+    assert "plan the new user again" in message
+    assert "approve the plan again" not in message
+
+
+def test_a_conflict_whose_live_value_is_the_after_image_says_nothing_needs_applying() -> None:
+    """Somebody made the planned change between the plan and the apply: the
+    DC answers conflict with a live value equal to the plan's after-image.
+    The owner is told the target already holds the planned value and that
+    nothing needs applying, never to plan the same change again."""
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+    record = store.read_json(store.plan_path(plan_id))
+    lab.helpers["win-dc1"].objects[harness.SEED_GUID]["uac"] = 4260352 & ~4194304
+
+    result = ad_apply.apply_change(plan_id, send=lab.send, devices=lab.devices, timeout_s=0.0)
+
+    assert result["state"] == ad_apply.STATE_CONFLICT
+    assert result.get("live") == record["after"], (result.get("live"), record["after"])
+    message = " ".join(str(result.get("message")).split())
+    assert "already holds the planned value" in message
+    assert "nothing needs applying" in message
+    assert "nothing was written" in message
+    assert "plan the change again" not in message
+    assert store.read_json(store.receipt_path(plan_id))["message"] == result["message"]

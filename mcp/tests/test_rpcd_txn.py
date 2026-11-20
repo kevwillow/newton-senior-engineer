@@ -974,3 +974,69 @@ def test_the_resolve_margin_is_measured_with_the_callers_clock(router) -> None:
     # and while it is open the change is ours
     clock.value = deadline - txn.RESOLVE_MARGIN_S - 1
     assert engine.resolve(_ops(), deadline) == txn.OWN
+
+
+# ---- a link that fails before ``uci apply`` is sent ---------------
+
+
+def test_a_pending_listing_that_fails_in_the_apply_is_not_sent(
+    engine, router
+) -> None:
+    """A failure before ``uci apply`` is NOT_SENT, never raised.
+
+    A raise reads as "the change may be live" to the caller; nothing of
+    the change left Newton, so the apply says so.
+    """
+    router.pending_listing_fails = True
+    result = engine.apply(_ops(), 30, CREDENTIALS)
+
+    assert result.state == txn.NOT_SENT
+    assert not router.calls_to("apply")
+
+
+@pytest.mark.parametrize("fn", ["set", "apply"])
+def test_a_transport_failure_before_the_apply_is_sent_is_not_sent(
+    engine, router, monkeypatch, fn: str
+) -> None:
+    """The link drops while staging, or before the apply left."""
+    original = router.call
+
+    def call(session, obj, called_fn, args=None):
+        if (obj, called_fn) == ("uci", fn):
+            raise rpcd.RpcdTransportError("the router is gone", sent=False)
+        return original(session, obj, called_fn, args)
+
+    monkeypatch.setattr(router, "call", call)
+    result = engine.apply(_ops(), 30, CREDENTIALS)
+
+    assert result.state == txn.NOT_SENT
+    assert "before the change was applied" in result.reason
+
+
+def test_a_login_that_fails_in_the_apply_is_not_sent(
+    engine, router, monkeypatch
+) -> None:
+    def login(*_args, **_kwargs):
+        raise rpcd.RpcdTransportError("the router is gone", sent=False)
+
+    monkeypatch.setattr(router, "login", login)
+    result = engine.apply(_ops(), 30, CREDENTIALS)
+
+    assert result.state == txn.NOT_SENT
+
+
+def test_a_transport_failure_after_the_apply_was_sent_is_never_not_sent(
+    engine, router, monkeypatch
+) -> None:
+    """The guard's other side: a request that left is LOST, then read back."""
+    original = router.call
+
+    def call(session, obj, fn, args=None):
+        if (obj, fn) == ("uci", "apply"):
+            raise rpcd.RpcdTransportError("the answer was lost", sent=True)
+        return original(session, obj, fn, args)
+
+    monkeypatch.setattr(router, "call", call)
+    result = engine.apply(_ops(), 30, CREDENTIALS)
+
+    assert result.state == txn.LOST

@@ -129,6 +129,12 @@ declare -A ROOT_PROGRAM_PATH=()
 # by reassigning after sourcing this file.
 VISUDO=/usr/sbin/visudo
 
+# The python3 the venv is built with (create_venv) and the oldest
+# version it may be: the lock file has only cp311+ wheels and the
+# package needs 3.11.  A plain assignment a sourcing test can re-aim.
+INSTALL_PYTHON=/usr/bin/python3
+INSTALL_PYTHON_FOUND=
+
 # Where install_bootstrap places the root-owned bootstrap
 # binary and its one-line provenance file (commit <COMMIT_ID>). Plain
 # top-level assignments, re-aimable by a sourcing test.
@@ -164,6 +170,23 @@ MANAGED_SETTINGS_LOCK=0
 # the owner's own Claude Code hooks, skipping it leaves them alone.
 MANAGED_SETTINGS_NOTE="Newton asks you whether to set Claude Code's managed settings, so that only hooks from the system settings run (\`allowManagedHooksOnly\`). Setting it stops another tool from answering Newton's approval dialog for you, and your own user and project Claude Code hooks stop running on this machine. The default is no: your own hooks keep working, and every approval still needs your passphrase or authenticator code."
 
+# Contract: check_python_version -- no arguments; returns 0 and sets
+# INSTALL_PYTHON_FOUND to its major.minor when $INSTALL_PYTHON is 3.11
+# or newer; otherwise prints one ERROR line naming the version it found
+# and returns 1.  Every mode runs it right after check_root_programs and
+# before anything is written, so an install that could not build its
+# venv creates no user, group or home.
+check_python_version() {
+	local found
+	if found=$("$INSTALL_PYTHON" -I -c 'import sys; print("%d.%d" % sys.version_info[:2]); raise SystemExit(sys.version_info < (3, 11))' 2>/dev/null); then
+		INSTALL_PYTHON_FOUND=$found
+		return 0
+	fi
+	[[ $found =~ ^[0-9]+\.[0-9]+$ ]] || found=none
+	printf 'ERROR: Newton needs Python 3.11 or newer as %s (found %s); install it and run this again; nothing was changed\n' "$INSTALL_PYTHON" "$found" >&2
+	return 1
+}
+
 cleanup() {
 	local path
 	if (( CODE_ROOT_PENDING )); then
@@ -172,7 +195,7 @@ cleanup() {
 			mv -T -- "$CODE_ROOT_BACKUP" "$CODE_ROOT" || true
 			printf 'WARNING: previous installation was restored after a failed upgrade\n' >&2
 		else
-			printf 'WARNING: this install failed before completion; nothing was installed\n' >&2
+			printf 'WARNING: this install failed before completion; no Newton code was installed, but the newton user, group and home %s may already exist (a run after the fix reuses them)\n' "${NEWTON_HOME:-/var/lib/newton}" >&2
 		fi
 		CODE_ROOT_PENDING=0
 		CODE_ROOT_BACKUP=
@@ -591,7 +614,7 @@ ask_managed_settings() {
 	IFS= read -r answer || answer=
 	if [[ $answer == lock ]]; then
 		MANAGED_SETTINGS_LOCK=1
-		printf "Setting Claude Code's managed settings: %s (allowManagedHooksOnly)\n" "$file"
+		printf 'The installer will set allowManagedHooksOnly in %s at the end of the install; it is set only when the installer prints "Claude Code managed settings written".\n' "$file"
 		return 0
 	fi
 	MANAGED_SETTINGS_LOCK=0
@@ -1231,7 +1254,7 @@ no-install: Every change uses OpenWrt's own undo timer.
 no-install: Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays.
 no-install: Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval.
 no-install: Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run.
-installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 216 KB), no packages and no compiled code.
+installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 217 KB), no packages and no compiled code.
 installed: Newton's key can run that program and nothing else, so the agent never gets a root shell.
 installed: If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck.
 installed: More checks can run, and fewer changes need a script.
@@ -1411,6 +1434,7 @@ run_from_snapshot_mode() {
 		exit 1
 	}
 	check_root_programs || exit $?
+	check_python_version || exit 1
 	require_root_owned_chain "$dir" snapshot-dir || exit 1
 	bad=$(find "$resolved" -mindepth 1 ! \( -type d -o -type f \) -print -quit)
 	if [[ -n $bad ]]; then
@@ -1557,11 +1581,13 @@ main() {
 		if (( EUID == 0 )) && [[ -z $INSTALL_ROOT ]]; then
 			check_root_programs || exit $?
 		fi
+		check_python_version || exit 1
 		make_snapshot || exit $?
 		cd -- "$WORK" || exit 1
 		print_identity_block
 		cat <<EOF
 CHECK ONLY: no changes will be made.
+Would build the venv with: $INSTALL_PYTHON, Python $INSTALL_PYTHON_FOUND (3.11 or newer needed)
 Would install a verified snapshot of commit $COMMIT_ID (tree $TREE_ID)
 Would ensure system group: $SYSTEM_GROUP
 Would ensure system user: $SYSTEM_USER (home $NEWTON_HOME, mode 0700; shell /usr/sbin/nologin; no password)
@@ -1608,6 +1634,7 @@ EOF
 	if [[ -z $INSTALL_ROOT ]]; then
 		check_root_programs || exit $?
 	fi
+	check_python_version || exit 1
 	make_snapshot || exit $?
 	cd -- "$WORK" || exit 1
 	print_identity_block

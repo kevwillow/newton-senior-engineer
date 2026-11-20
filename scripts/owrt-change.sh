@@ -3,8 +3,10 @@
 #
 #   owrt-change.sh plan  <router> <changes.uci> [timeout] [probes-file]
 #                                                        validate, backup, stage, seal, print diff + plan facts
-#   owrt-change.sh apply <router> <SID> [timeout]         apply with rollback, verify over NEW connections,
-#                                                          confirm only after 3 consecutive passing rounds
+#   owrt-change.sh apply <router> <SID> [timeout] [--hold]  apply with rollback, verify over NEW connections,
+#                                                          confirm only after 3 consecutive passing rounds;
+#                                                          --hold: the same rounds, then NO confirm (the rollback stays armed)
+#   owrt-change.sh confirm <router> <SID>                 confirm a held apply inside its window, after one more round
 #   owrt-change.sh status <router> <SID>                  staged | applied-pending-confirm | rolled-back | gone
 #   owrt-change.sh backup <router>                        config backup to the agent host only
 #   owrt-change.sh abort <router> <SID>                   discard staged changes (or roll back now)
@@ -47,7 +49,11 @@ done
 # backups hold /etc/shadow and dropbear keys, so new files are 600 and new dirs 700
 umask 077
 TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+# BK_PARTIAL names a backup file still being written: a run that stops
+# before the archive checks out removes it, so no truncated file is left
+# under a normal backup name for an ALERT's "latest backup" to point at
+BK_PARTIAL=
+trap 'rm -rf "$TMPD"; [[ -z $BK_PARTIAL ]] || rm -f -- "$BK_PARTIAL"' EXIT
 
 # Resolve ssh the same way as mcp/newton_mcp/ssh_path.py: the first of
 # /usr/bin/ssh, /bin/ssh that is a regular executable file, else die before
@@ -145,12 +151,51 @@ if [[ -n ${OWRT_SSH_PROXY:-} ]]; then
 fi
 
 log()  { printf '%s %s %s\n' "$(date -Is)" "$ROUTER" "$*" >> "$AUDIT"; echo "$*"; }
-mask() { sed 's/CONFIRMED/confirmed/g; s/ROLLBACK WINDOW PASSED/rollback window passed/g; s/OUTCOME UNKNOWN/outcome unknown/g; s/ALERT/alert/g; s/APPLIED/applied/g'; }
+mask() { sed 's/CONFIRMED/confirmed/g; s/ROLLBACK WINDOW PASSED/rollback window passed/g; s/OUTCOME UNKNOWN/outcome unknown/g; s/ALERT/alert/g; s/APPLIED/applied/g; s/HELD APPLY/held apply/g'; }
 oneline() {
 	if (( $# > 0 )); then printf '%s' "$1"; else cat; fi |
 		LC_ALL=C tr '\000-\037\177' ' ' |
 		LC_ALL=C sed 's/\xe2\x80\xa8/ /g; s/\xe2\x80\xa9/ /g; s/\xc2\x85/ /g' |
 		mask | cut -c1-120
+}
+# refusal_next_step FIRST: the true next step for a router's exit-3 apply
+# refusal (its first stderr line, "error <code> [detail]"). Only the codes
+# that leave an applicable staged session say "still staged"; an unknown
+# code claims nothing and points at status.
+refusal_next_step() {
+	local words code again
+	read -r -a words <<< "$1"
+	code=${words[1]-}
+	again="if this plan needs approval, approve it again (an approval is spent once it reaches the router), then apply again: $0 apply $ROUTER $SID"
+	# the router checks the timeout before anything else of the plan, so a
+	# timeout that differs from the sealed one leaves the session applicable
+	[[ $code == plan-changed && ${words[2]-} == t && ${#words[@]} == 3 ]] && code=plan-changed-t
+	case $code in
+		plan-changed-t)
+			printf '%s' "the timeout differs from the one this session was planned with; session $SID is still staged; apply it again with the timeout it was planned with (the plan's next: line names it): $0 apply $ROUTER $SID <planned timeout>" ;;
+		not-sealed|plan-changed|stale-stage|stale-base)
+			printf '%s' "this session cannot be applied; plan the change again (if the router then says it is busy with this session, abort it first: $0 abort $ROUTER $SID)" ;;
+		session-gone|no-such-txn)
+			printf '%s' "the router no longer has session $SID (rpcd restarted or the router rebooted), so nothing is staged; plan the change again" ;;
+		role)
+			printf '%s' "the router says this login's key does not hold the role apply needs: it needs the change role, and nothing was applied; apply with a change-role key, or check the session with: $0 status $ROUTER $SID" ;;
+		not-owner)
+			printf '%s' "this login does not own session $SID on the router (another login planned it, or its owner record is missing), so nothing was applied; apply it from the login that planned it, or plan the change again from this one" ;;
+		guard)
+			printf '%s' "the router's rollback guard is not idle (another change is armed or a restore is pending); session $SID is still staged; check it with: $0 status $ROUTER $SID; when the guard is idle, $again" ;;
+		no-health-snapshot)
+			printf '%s' "the health record from before the apply is missing; session $SID is still staged; $again" ;;
+		needs-approval)
+			printf '%s' "session $SID is still staged; approve the plan, then apply again: $0 apply $ROUTER $SID" ;;
+		approval-window)
+			printf '%s' "the approval expired or is not valid yet; approve the plan again; session $SID is still staged; then apply again: $0 apply $ROUTER $SID" ;;
+		bad-approval)
+			printf '%s' "the approval does not match this plan; approve the plan again; session $SID is still staged; then apply again: $0 apply $ROUTER $SID" ;;
+		approval-key-missing)
+			printf '%s' "the router has no approval key (run: sudo -u newton newton-router-setup ${OWRT_EXPECT_DEVICE:-<device>} approval-key); session $SID is still staged; then $again" ;;
+		*)
+			printf '%s' "this refusal code is not one Newton knows, so whether session $SID can still be applied is not known from here; run: $0 status $ROUTER $SID" ;;
+	esac
 }
 # One secret-name catalog shared with mcp/newton_mcp/redact.py.
 # scripts/ and mcp/ are siblings both in the repo and in /opt/newton.
@@ -246,6 +291,41 @@ mask_secrets() {
 die()  { log "ERROR: $*"; exit 1; }
 r()    { "${SSH[@]}" -p "$PORT" -- "$ROUTER" "$@"; }
 need_sid() { [[ ${1:-} =~ ^[0-9a-f]{32}$ ]] || die "malformed or missing session id"; }
+# true when this host's audit log records a CONFIRMED line for session $1
+confirmed_here() { [[ -r $AUDIT ]] && grep -qF -- " CONFIRMED session=$1 " "$AUDIT"; }
+# true when this host's audit log records an abort that rolled back or
+# discarded session $1 (an `ABORTED ... (gone)` line rolled nothing back)
+aborted_here() {
+	[[ -r $AUDIT ]] && grep -qE -- " ABORTED session=$1 \((discarded|rolled-back|rolled-back-by-guard|already-rolled-back)\)$" "$AUDIT"
+}
+# reconcile_confirmed WHY: the router says session $SID is confirmed, but
+# this host never logged it (the link dropped after the router confirmed,
+# before its answer arrived). For a session this host applied (its plan
+# or hold record is still here), print the config hashes and log the
+# CONFIRMED line the server writes the receipt from. Returns 1, recording
+# nothing, for a session confirmed here already or not applied from here.
+reconcile_confirmed() {
+	confirmed_here "$SID" && return 1
+	[[ -e $PLANS/$SID.sha256 || -e $PLANS/$SID.held ]] || return 1
+	print_config_hashes
+	log "CONFIRMED session=$SID (reconciled: $1)"
+	rm -f "$PLANS/$SID.sha256" "$PLANS/$SID.held"
+}
+# held_closed_rolled_back STATUS: a held apply whose window ended
+# unconfirmed is recorded as rolled back only when the router's own status
+# line says rolled-back for this session; returns 1 (and records nothing)
+# otherwise. The server writes the rolled-back receipt from the line.
+held_closed_rolled_back() {
+	[[ $1 =~ ^rolled-back\ sid=$SID\  ]] || return 1
+	log "HELD APPLY ROLLED BACK session=$SID (its window ended unconfirmed; the router's status says rolled-back)"
+	rm -f "$PLANS/$SID.held"
+}
+HELD_UNKNOWN_NEXT="the router's status does not say rolled-back, so the outcome is not known from here"
+# router_says_confirmed STATUS: the router's own status line says this
+# session is confirmed (a confirm reached it after this host stopped
+# waiting, so no CONFIRMED line was logged here)
+router_says_confirmed() { [[ $1 =~ ^confirmed\ sid=$SID\  ]]; }
+confirmed_live() { printf '%s' "the router's status says session $SID is confirmed, so the change stays live; to undo it, plan the reverse change (newton_plan_undo)"; }
 logd_pid() { r "$PROG logd-pid" </dev/null; }
 # handshake [plan]: the hello call of design 2.6, first call of every host command (it replaces the push).
 # Parses the reply strictly (exactly one line, key=value fields, no repeats) and checks it against this
@@ -300,6 +380,7 @@ handshake() {
 		[[ ${H[busy]-} == - || ${H[busy]-} == "${H[caller]-}" ]] || die "router busy with another change (owner $(oneline "${H[busy]:-?}")); wait for it or abort it first"
 	fi
 	ROUTER_VERSION=${H[version]-}
+	HELLO_CALLER=${H[caller]-}
 	log "ROUTER version=$(oneline "${H[version]:-?}") caller=$(oneline "${H[caller]:-?}") profile=$(oneline "${H[profile]:-?}")"
 }
 valid_config_hashes() {
@@ -336,6 +417,19 @@ validate_timeout() {
 	[[ $T =~ ^[1-9][0-9]{1,2}$ ]] && (( T >= 60 && T <= 600 )) || die "timeout must be an integer 60..600"
 }
 
+# discard_staged REASON: a plan that staged session $SID failed after the
+# stage; abort the session and die with REASON and whether it really was
+# discarded. A failed abort (a dropped link) leaves the session staged on
+# the router, where it blocks the next plan, so the die names the abort.
+discard_staged() {
+	local out
+	out=$(r "$PROG abort $SID" </dev/null 2>/dev/null)
+	if [[ $out == "aborted $SID "* ]]; then
+		die "$1; the staged change was discarded"
+	fi
+	die "$1; the staged change could NOT be discarded (session $SID is still staged on the router); run: $0 abort $ROUTER $SID"
+}
+
 # staged_check SID: ask the router program to check the STAGED config without applying it.
 # Sets SC_STATUS (pass | skipped-untouched | not-checked) and SC_REASON. A staged config that fails fw4
 # check, or a running one that already fails, discards the session and dies. Anything that cannot run
@@ -351,11 +445,10 @@ staged_check() {
 	first=${out%%$'\n'*}
 	if [[ $first =~ ^fw4\ (fail|running-fails)(\ (.*))?$ ]]; then
 		detail=$(mask_secrets "${BASH_REMATCH[3]:-}" | oneline)
-		r "$PROG abort $sid" </dev/null >/dev/null 2>&1 || true
 		if [[ ${BASH_REMATCH[1]} == fail ]]; then
-			die "staged firewall config fails fw4 check: $detail; the staged change was discarded"
+			discard_staged "staged firewall config fails fw4 check: $detail"
 		fi
-		die "the firewall config already fails fw4 check before the change: $detail; fix it first; the staged change was discarded"
+		discard_staged "the firewall config already fails fw4 check before the change: $detail; fix it first"
 	elif (( crc != 0 )); then
 		SC_STATUS=not-checked; SC_REASON=check-error
 	elif [[ $first =~ ^fw4\ (pass|skipped-untouched)$ ]]; then
@@ -367,7 +460,7 @@ staged_check() {
 	fi
 }
 
-cmd=${1:-}; ROUTER=${2:-}; [[ -n $ROUTER ]] || { sed -n '2,31p' "$0"; exit 2; }
+cmd=${1:-}; ROUTER=${2:-}; [[ -n $ROUTER ]] || { sed -n '2,33p' "$0"; exit 2; }
 # the destination is one argv word of every ssh call.  A shape check
 # keeps a value that ssh could read as an option (a leading dash), a second
 # word (a space), a shell metacharacter or a newline out of the command
@@ -376,16 +469,49 @@ cmd=${1:-}; ROUTER=${2:-}; [[ -n $ROUTER ]] || { sed -n '2,31p' "$0"; exit 2; }
 # ssh_config alias still takes its user from ssh.
 ( LC_ALL=C; [[ $ROUTER =~ ^([A-Za-z0-9_][A-Za-z0-9_.-]{0,31}@)?[A-Za-z0-9][A-Za-z0-9.:-]{0,252}$ ]] ) || die "router destination must look like [user@]host"
 
+# Ctrl-C or a TERM: say what the router does on its own and how to look.
+# An apply that was sent and not yet confirmed is rolled back by the router
+# when its window ends.  Once the confirm was sent, this run cannot tell
+# whether it took, so it says only that and how to look.
+SID=; APPLY_SENT=0; CONFIRM_SENT=0
+on_interrupt() {
+	trap - INT TERM
+	if [[ $SID =~ ^[0-9a-f]{32}$ ]]; then
+		if (( CONFIRM_SENT == 1 )); then
+			log "INTERRUPTED session=$SID: this run stopped; the confirm was sent; whether it took is not known from here; run: $0 status $ROUTER $SID"
+		elif (( APPLY_SENT == 1 )); then
+			log "INTERRUPTED session=$SID: this run stopped after it sent the apply and confirmed nothing; if the change was applied, the router rolls it back by itself when its window ends; run: $0 status $ROUTER $SID"
+		else
+			log "INTERRUPTED session=$SID: this run stopped; run: $0 status $ROUTER $SID"
+		fi
+	else
+		log "INTERRUPTED: this run stopped"
+	fi
+	exit 130
+}
+trap on_interrupt INT TERM
+
 backup_now() {
-	local host ts bk lead
+	local host ts bk lead n
 	handshake
 	host=$(r "$PROG hostname" </dev/null) || die "router unreachable"
 	host=$(printf '%s' "$host" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_' | cut -c1-63)
 	lead=${host%%[!.]*}; host=${lead//./_}${host#"$lead"} # leading dots would hide the file
 	[[ -n $host ]] || host=router
-	ts=$(date +%Y%m%d-%H%M%S); bk="$BACKUPS/${host}-${ts}.tar.gz"
+	ts=$(date +%Y%m%d-%H%M%S)
+	# the name is claimed with noclobber (an O_EXCL create), so a second
+	# backup in the same second, from another router with the same hostname
+	# or another run, gets a -2, -3, ... suffix instead of overwriting it
+	bk="$BACKUPS/${host}-${ts}.tar.gz"; n=1
+	until ( set -C; : > "$bk" ) 2>/dev/null; do
+		n=$((n + 1))
+		(( n <= 99 )) || die "cannot create a new backup file in $BACKUPS"
+		bk="$BACKUPS/${host}-${ts}-$n.tar.gz"
+	done
+	BK_PARTIAL=$bk
 	r "$PROG backup" </dev/null > "$bk"
-	tar -tzf "$bk" >/dev/null 2>&1 || die "backup failed or corrupt: $(oneline "$bk")"
+	tar -tzf "$bk" >/dev/null 2>&1 || die "backup failed or corrupt (the partial file was removed): $(oneline "$bk")"
+	BK_PARTIAL=
 	log "BACKUP $(printf '%s' "$bk" | LC_ALL=C tr '\000-\037\177' ' ') ($(tar -tzf "$bk" | grep -c '^etc/config/[^/][^/]*$') config files)"
 }
 
@@ -396,6 +522,8 @@ backup)
 plan)
 	load_secret_catalog
 	F=${3:-}; [[ -r $F ]] || die "changes file not readable: $F"
+	# the router refuses any CR byte (stdin-bad-byte) without saying which
+	if LC_ALL=C grep -q $'\r' "$F"; then die "changes file contains CR (convert CRLF line endings to LF): $F"; fi
 	# `${4-90}` not `${4:-90}`: the default is only for an ABSENT argument; an empty one
 	# must reach validate_timeout and die (design 7.1, rows 90-92)
 	T=${4-90}
@@ -411,7 +539,20 @@ plan)
 	backup_now
 	handshake plan
 	SID=$(r "$PROG stage" < "$F" 2>"$TMPD/stage.err"); rc=$?
+	if (( rc == 255 )); then
+		# the router program finishes a stage whose link dropped, so a
+		# session may be open there; its id never reached this host
+		first=; IFS= read -r first < "$TMPD/stage.err" || true
+		die "the connection to the router failed while staging: $(oneline "$first"); whether the change was staged is not known; plan again (if the router then says it is busy with a session of this login, that refusal names it: abort that session, then plan again)"
+	fi
 	if (( rc != 0 )); then
+		busy_next=
+		first=; IFS= read -r first < "$TMPD/stage.err" || true
+		if [[ $first =~ ^error\ busy\ ([^\ ]+)\ ([0-9a-f]{32})$ && ${BASH_REMATCH[1]} == "${HELLO_CALLER-}" ]]; then
+			busy_next="session ${BASH_REMATCH[2]} of this login is still open on the router; apply it ($0 apply $ROUTER ${BASH_REMATCH[2]} <its planned timeout>) or abort it ($0 abort $ROUTER ${BASH_REMATCH[2]}), then plan again; an open session left alone expires on the router after about 45 minutes"
+		elif [[ $first =~ ^error\ busy\ ([^\ ]+)\  ]]; then
+			busy_next="another login ($(oneline "${BASH_REMATCH[1]}")) has a change open on the router; wait until it is applied or aborted (an open session left alone expires after about 45 minutes), then plan again"
+		fi
 		msg=; n=0
 		while IFS= read -r line || [[ -n $line ]]; do
 			[[ -z $msg ]] || msg+=' / '
@@ -419,7 +560,7 @@ plan)
 			n=$((n + 1)); (( n >= 3 )) && break
 		done < "$TMPD/stage.err"
 		if [[ -n $msg ]]; then
-			die "staging rejected: $msg"
+			die "staging rejected: $msg${busy_next:+; $busy_next}"
 		fi
 		die "staging rejected"
 	fi
@@ -430,23 +571,26 @@ plan)
 		SEAL=$(r "$PROG seal $SID $T" </dev/null 2>"$TMPD/seal.err"); rc=$?
 	fi
 	if (( rc != 0 )); then
-		r "$PROG abort $SID" </dev/null >/dev/null 2>&1 || true
 		first=
 		IFS= read -r first < "$TMPD/seal.err" || true
-		die "probes refused: $(oneline "$first"); the staged change was discarded"
+		if (( rc == 255 )); then
+			discard_staged "the connection to the router failed while sealing the plan: $(oneline "$first")"
+		fi
+		discard_staged "probes refused: $(oneline "$first")"
 	fi
 	# parse the seal reply exactly as the program prints it (design 3.5b step 9); anything else is fatal
+	bad_seal="malformed seal reply"
 	readarray -t seal_lines <<< "$SEAL"
-	(( ${#seal_lines[@]} >= 7 )) || die "malformed seal reply"
-	[[ ${seal_lines[0]} =~ ^base\ ([0-9a-f]{64})$ ]] || die "malformed seal reply"; SEAL_BASE=${BASH_REMATCH[1]}
-	[[ ${seal_lines[1]} =~ ^diff\ ([0-9a-f]{64})$ ]] || die "malformed seal reply"; SEAL_DIFF=${BASH_REMATCH[1]}
-	[[ ${seal_lines[2]} =~ ^probes\ ([0-9]+)\ ([0-9a-f]{64})$ ]] || die "malformed seal reply"; SEAL_PROBES_N=${BASH_REMATCH[1]}; SEAL_PROBES_SHA=${BASH_REMATCH[2]}
-	[[ ${seal_lines[3]} =~ ^t\ ([0-9]{2,3})$ ]] || die "malformed seal reply"; [[ ${BASH_REMATCH[1]} == "$T" ]] || die "malformed seal reply"
-	[[ ${seal_lines[4]} =~ ^profile\ (lab|prod)$ ]] || die "malformed seal reply"; SEAL_PROFILE=${BASH_REMATCH[1]}
-	[[ ${seal_lines[${#seal_lines[@]}-2]} =~ ^approval\ (required|not-required)$ ]] || die "malformed seal reply"; SEAL_APPROVAL=${BASH_REMATCH[1]}
-	[[ ${seal_lines[${#seal_lines[@]}-1]} =~ ^digest\ ([0-9a-f]{64})$ ]] || die "malformed seal reply"; SEAL_DIGEST=${BASH_REMATCH[1]}
+	(( ${#seal_lines[@]} >= 7 )) || discard_staged "$bad_seal"
+	[[ ${seal_lines[0]} =~ ^base\ ([0-9a-f]{64})$ ]] || discard_staged "$bad_seal"; SEAL_BASE=${BASH_REMATCH[1]}
+	[[ ${seal_lines[1]} =~ ^diff\ ([0-9a-f]{64})$ ]] || discard_staged "$bad_seal"; SEAL_DIFF=${BASH_REMATCH[1]}
+	[[ ${seal_lines[2]} =~ ^probes\ ([0-9]+)\ ([0-9a-f]{64})$ ]] || discard_staged "$bad_seal"; SEAL_PROBES_N=${BASH_REMATCH[1]}; SEAL_PROBES_SHA=${BASH_REMATCH[2]}
+	[[ ${seal_lines[3]} =~ ^t\ ([0-9]{2,3})$ ]] || discard_staged "$bad_seal"; [[ ${BASH_REMATCH[1]} == "$T" ]] || discard_staged "$bad_seal"
+	[[ ${seal_lines[4]} =~ ^profile\ (lab|prod)$ ]] || discard_staged "$bad_seal"; SEAL_PROFILE=${BASH_REMATCH[1]}
+	[[ ${seal_lines[${#seal_lines[@]}-2]} =~ ^approval\ (required|not-required)$ ]] || discard_staged "$bad_seal"; SEAL_APPROVAL=${BASH_REMATCH[1]}
+	[[ ${seal_lines[${#seal_lines[@]}-1]} =~ ^digest\ ([0-9a-f]{64})$ ]] || discard_staged "$bad_seal"; SEAL_DIGEST=${BASH_REMATCH[1]}
 	for (( k=5; k<${#seal_lines[@]}-2; k++ )); do
-		[[ ${seal_lines[k]} == section\ * || ${seal_lines[k]} == leash\ * ]] || die "malformed seal reply"
+		[[ ${seal_lines[k]} == section\ * || ${seal_lines[k]} == leash\ * ]] || discard_staged "$bad_seal"
 	done
 	staged_check "$SID"
 	printf '%s\n' "$SEAL_DIFF" > "$PLANS/$SID.sha256"
@@ -473,7 +617,8 @@ plan)
 	echo "----- diff -----"
 	while IFS= read -r line || [[ -n $line ]]; do mask_secrets "$line"; done <<< "$DIFF_RAW"
 	echo "----------------"
-	echo "next: $0 apply $ROUTER $SID [timeout]"
+	echo "next: $0 apply $ROUTER $SID $T"
+	echo "(to test the change before keeping it: $0 apply $ROUTER $SID $T --hold, then confirm or abort)"
 	;;
 apply)
 	# the approval token is validated before any ssh call; its value never reaches a log, a die text or an echoed command
@@ -493,6 +638,17 @@ apply)
 	load_secret_catalog
 	# `${4-90}` not `${4:-90}`: an empty timeout argument is invalid, not the default (design 7.1)
 	SID=${3:-}; T=${4-90}
+	# --hold, last: run the verify rounds but do not confirm (see confirm).
+	# Anything else after the timeout is refused, so a typo can never turn
+	# into an apply that confirms on its own.
+	HOLD=0
+	if [[ ${4-} == --hold ]]; then
+		(( $# == 4 )) || die "usage: $0 apply <router> <SID> [timeout] [--hold]; nothing applied"
+		HOLD=1; T=90
+	elif (( $# >= 5 )); then
+		[[ $5 == --hold ]] && (( $# == 5 )) || die "usage: $0 apply <router> <SID> [timeout] [--hold]; nothing applied"
+		HOLD=1
+	fi
 	NEED_DHCP=0; DNSMASQ_RESTARTED=0; DNSMASQ_TOUCHED=0
 	logd_repair() {
 		local when=$1 now old out repair_rc dhcp listener first
@@ -557,6 +713,18 @@ apply)
 		[[ -z $rollback_reason ]] || rollback_reason+='; '
 		rollback_reason+=$reason
 	}
+	# read_refused RC WHAT: a read before the apply exited RC. An exit 3
+	# is the router's refusal; its first stderr line (in $TMPD/read.err)
+	# and its next step are named, since a session gone after a reboot or
+	# an rpcd restart is not still staged.
+	read_refused() {
+		local first=
+		if (( $1 == 3 )); then
+			IFS= read -r first < "$TMPD/read.err" || true
+			die "$2: $(oneline "$first"); nothing applied; $(refusal_next_step "$first")"
+		fi
+		die "$2; nothing applied, session $SID is still staged"
+	}
 	need_sid "$SID"
 	validate_timeout
 	[[ -r $PLANS/$SID.sha256 ]] || die "no plan record for $SID — run plan first"
@@ -570,10 +738,13 @@ apply)
 			msg=${out%%$'\n'*}
 			die "OWRT_LOCAL_CHECK is not valid bash: $(oneline "$msg"); nothing applied, session $SID is still staged"
 		fi
+		# the local check runs in every round of this run; a later confirm
+		# could not run it again, so a held apply would confirm without it
+		(( HOLD == 0 )) || die "--hold cannot be used with client checks (OWRT_LOCAL_CHECK): they would not run again before the confirm; nothing applied, session $SID is still staged"
 	fi
 	handshake
 	# ONE diff fetch: the sha256 must equal the plan record's, then the masked DIFF audit lines (rows 261-263)
-	DIFF_RAW=$(r "$PROG diff $SID" </dev/null) || die "cannot read staged diff; nothing applied, session $SID is still staged"
+	DIFF_RAW=$(r "$PROG diff $SID" </dev/null 2>"$TMPD/read.err") || read_refused $? "cannot read staged diff"
 	if [[ -n $DIFF_RAW ]]; then
 		DIFF_SHA=$(printf '%s\n' "$DIFF_RAW" | sha256sum | cut -d' ' -f1)
 	else
@@ -583,13 +754,16 @@ apply)
 	while IFS= read -r line || [[ -n $line ]]; do log "DIFF session=$SID: $(mask_secrets "$line")"; done <<< "$DIFF_RAW"
 	operator=${OWRT_OPERATOR:-${SUDO_USER:-${USER:-unknown}}}
 	log "OPERATOR session=$SID: $(oneline "$operator")"
-	NAMED=$(r "$PROG named $SID" </dev/null) || die "cannot inspect the staged change for named nft objects; nothing applied, session $SID is still staged"
+	NAMED=$(r "$PROG named $SID" </dev/null 2>"$TMPD/read.err") || read_refused $? "cannot inspect the staged change for named nft objects"
 	FW_LOADED=0
 	if [[ -n $NAMED ]]; then
 		FW_LOADED=$(r "$PROG fw-loaded" </dev/null) || die "router unreachable before apply; nothing applied, session $SID is still staged"
 		[[ $FW_LOADED == [01] ]] || die "unexpected answer while reading the firewall state: $(oneline "$FW_LOADED"); nothing applied, session $SID is still staged"
 		named_log=$(oneline "$NAMED")
 		log "NAMED NFT OBJECTS session=$SID: $named_log — a firewall reload keeps them, so the firewall will be restarted after the apply"
+		# a held change can be rolled back with no run left to restart the
+		# firewall after it, so the live nft objects would not match
+		(( HOLD == 0 )) || die "--hold cannot be used for a change to named nft objects: their rollback needs the firewall restart this run makes after the window; nothing applied, session $SID is still staged"
 	fi
 	LOGD_SEEN=$(logd_pid </dev/null) || die "router unreachable before apply; nothing applied, session $SID is still staged"
 	CONFIG_BEFORE=$(r "$PROG confighash" </dev/null 2>"$TMPD/confighash.err"); config_before_rc=$?
@@ -608,18 +782,27 @@ apply)
 	log "APPLYBASE $CURRENT_BASE"
 	CONFIG_COUNT=$(printf '%s\n' "$CONFIG_BEFORE" | wc -l); CONFIG_COUNT=${CONFIG_COUNT//[[:space:]]/}
 	health_err=$(r "$PROG health-snapshot $SID" </dev/null 2>&1); health_rc=$?
+	if (( health_rc == 3 )); then
+		printf '%s\n' "$health_err" > "$TMPD/read.err"
+		read_refused 3 "cannot record service and firewall health before the apply"
+	fi
 	if (( health_rc != 0 )); then
 		health_detail=${health_err:+; helper said: $(oneline "$health_err")}
 		die "cannot record service and firewall health before the apply; nothing applied, session $SID is still staged$health_detail"
 	fi
 	log "APPLYING session=$SID"
+	APPLY_SENT=1
 	out=$(r "$PROG apply $SID $T $TOKEN $APPROVAL_NBF $APPROVAL_EXP" </dev/null 2>"$TMPD/apply.err"); arc=$?
 	appl_re="^applied $SID t=$T guard=[0-9]+$"
 	if (( arc == 0 )) && [[ $out =~ $appl_re ]]; then
 		:
 	elif (( arc == 3 )); then
 		first=; IFS= read -r first < "$TMPD/apply.err" || true
-		die "apply refused, nothing applied: $(oneline "$first"); session $SID is still staged"
+		die "apply refused, nothing applied: $(oneline "$first"); $(refusal_next_step "$first")"
+	elif (( arc == 1 )) && IFS= read -r first < "$TMPD/apply.err" && [[ $first == "error already-applied" ]]; then
+		# the router refuses before it touches anything: an earlier run
+		# applied this session (e.g. one that was interrupted)
+		die "apply refused: the router says session $SID was already applied (by an earlier run); nothing applied by this run; unless that run confirms it, the router rolls it back by itself when its window ends; run: $0 status $ROUTER $SID"
 	else
 		die "apply did not report success — OUTCOME UNKNOWN; run: $0 status $ROUTER $SID"
 	fi
@@ -670,7 +853,18 @@ apply)
 		sleep 5
 	done
 	confirm_refused=0
+	if (( good >= PASSES && HOLD == 1 )); then
+		# held: the rounds passed and nothing is confirmed. The router's
+		# rollback stays armed; `confirm` can confirm until held_until.
+		held_until=$(( $(date +%s) + deadline - SECONDS ))
+		printf '%s %s %s\n' "$NEED_DHCP" "$PROBE_N" "$held_until" > "$PLANS/$SID.held" || \
+			die "cannot record the hold of session $SID; nothing is confirmed and the router rolls the change back when its ${T}s window ends"
+		(( DNSMASQ_TOUCHED == 0 )) || log "NOTE session=$SID: dnsmasq was restarted during the window; after an abort or the window end, check DNS and DHCP"
+		log "HELD session=$SID until=$held_until ($PASSES consecutive passes; NOT confirmed: the router rolls the change back when its window ends, at $(date -d "@$held_until" -Is), unless it is confirmed first) confirm: $0 confirm $ROUTER $SID abort: $0 abort $ROUTER $SID"
+		exit 0
+	fi
 	if (( good >= PASSES )); then
+		CONFIRM_SENT=1
 		out=$(r "$PROG confirm $SID" </dev/null 2>"$TMPD/confirm.err"); crc=$?
 		if (( crc == 0 )) && [[ $out == "confirmed $SID" || $out == "confirmed $SID rpcd-timer-lost" ]]; then
 			lost_note=
@@ -773,7 +967,9 @@ apply)
 				(( attempt < 3 )) && sleep 5
 			done
 			if (( health_rc != 0 )); then
-				if [[ ${health_err%%$'\n'*} == "health: not compared"* ]]; then
+				if (( health_rc == 255 )); then
+					add_rollback_reason "the router was unreachable, so service or firewall health was not compared after the rollback: $(oneline "$health_err")"
+				elif [[ ${health_err%%$'\n'*} == "health: not compared"* ]]; then
 					add_rollback_reason "service or firewall health was not compared after the rollback: $(oneline "$health_err")"
 				else
 					add_rollback_reason "service or firewall health differs from before the apply after the rollback: $(oneline "$health_err")"
@@ -811,9 +1007,10 @@ apply)
 						log "DNSMASQ STARTED session=$SID (after rollback): dnsmasq was not running after the rollback and Newton had restarted it during the window (rc=${BASH_REMATCH[1]})"
 					fi
 				fi
-				post_ok=0
+				post_ok=0; post_rc=0
 				for (( attempt=1; attempt <= 5; attempt++ )); do
-					if r "$PROG dns-dhcp-check $NEED_DHCP" </dev/null 2>"$TMPD/post.err"; then
+					r "$PROG dns-dhcp-check $NEED_DHCP" </dev/null 2>"$TMPD/post.err"; post_rc=$?
+					if (( post_rc == 0 )); then
 						post_ok=1
 						break
 					fi
@@ -825,7 +1022,11 @@ apply)
 				else
 					IFS= read -r post_err < "$TMPD/post.err" || true
 					post_err=$(oneline "$post_err")
-					add_rollback_reason "DNS/DHCP check failed after the dnsmasq restart: $post_err"
+					if (( post_rc == 255 )); then
+						add_rollback_reason "the router was unreachable, so DNS and DHCP were not checked after the dnsmasq restart: $post_err"
+					else
+						add_rollback_reason "DNS/DHCP check failed after the dnsmasq restart: $post_err"
+					fi
 				fi
 			fi
 			# who rolled back: the status line's rpcd= field (design 6.5) — `rolled-back` means rpcd
@@ -869,17 +1070,140 @@ status)
 	SID=${3:-}; need_sid "$SID"; handshake
 	out=$(r "$PROG status $SID" </dev/null) || die "status did not answer — run: $0 status $ROUTER $SID"
 	oneline "$out"
+	held_line=; [[ -r $PLANS/$SID.held ]] && { IFS= read -r held_line < "$PLANS/$SID.held" || true; }
+	if [[ $held_line =~ ^[0-2]\ [0-9]+\ ([0-9]+)$ ]] && (( $(date +%s) >= BASH_REMATCH[1] )); then
+		if router_says_confirmed "$out"; then
+			echo "NOTE session=$SID: the window of its held apply has passed and $(confirmed_live)"
+		else
+			held_closed_rolled_back "$out" \
+				|| echo "NOTE session=$SID: the window of its held apply ended unconfirmed and $HELD_UNKNOWN_NEXT; compare the router's config with the latest backup in $BACKUPS, or run this status again"
+		fi
+	fi
+	if router_says_confirmed "$out"; then
+		reconcile_confirmed "the router's status says confirmed" || true
+	fi
+	;;
+confirm)
+	# confirm a change an `apply --hold` left armed. Only a held apply of
+	# this host, only inside its window (the router refuses a late one
+	# too), and only after one more verify round over a new connection.
+	SID=${3:-}; need_sid "$SID"
+	(( $# == 3 )) || die "usage: $0 confirm <router> <SID>; nothing confirmed"
+	HELD_FILE=$PLANS/$SID.held
+	confirmed_here "$SID" && die "session $SID was already confirmed; nothing confirmed (run: $0 status $ROUTER $SID)"
+	held_next="to see where session $SID stands, run: $0 status $ROUTER $SID; to roll it back now: $0 abort $ROUTER $SID"
+	[[ -r $HELD_FILE ]] || die "no held apply of session $SID on this host; nothing confirmed (only an apply run with --hold is confirmed here); $held_next"
+	held_line=; IFS= read -r held_line < "$HELD_FILE" || true
+	[[ $held_line =~ ^([0-2])\ ([0-9]+)\ ([0-9]+)$ ]] || die "the hold record of session $SID is malformed; nothing confirmed; an armed change rolls back on its own when its window ends; $held_next"
+	NEED_DHCP=${BASH_REMATCH[1]}; PROBE_N=${BASH_REMATCH[2]}; held_until=${BASH_REMATCH[3]}
+	if (( $(date +%s) >= held_until )); then
+		# the window ended unconfirmed: ask the router what it did
+		handshake
+		st=$(r "$PROG status $SID" </dev/null 2>/dev/null) || st=
+		router_says_confirmed "$st" \
+			&& die "the window of session $SID has closed; nothing confirmed by this run; $(confirmed_live)"
+		held_closed_rolled_back "$st" \
+			&& die "the window of session $SID has closed; nothing confirmed: the router rolled the change back (its status says rolled-back)"
+		die "the window of session $SID has closed; nothing confirmed; $HELD_UNKNOWN_NEXT; run: $0 status $ROUTER $SID, and compare the router's config with the latest backup in $BACKUPS"
+	fi
+	# check_failed WHAT MSG: a check before the confirm failed (WHAT says
+	# which, MSG is the refusal when the session is still armed). An earlier
+	# confirm may have reached the router after this host stopped waiting
+	# (then its verify answers no-such-txn); the router's status decides,
+	# so a confirmed session is never reported as rolling back.
+	check_failed() {
+		local st
+		st=$(r "$PROG status $SID" </dev/null 2>/dev/null) || st=
+		if router_says_confirmed "$st"; then
+			reconcile_confirmed "the router's status says confirmed" || true
+			rm -f "$HELD_FILE"
+			die "session $SID is already confirmed on the router; nothing confirmed by this run; $(confirmed_live) (before this confirm, $1)"
+		fi
+		die "$2"
+	}
+	handshake
+	r "$PROG verify $SID $NEED_DHCP" </dev/null >"$TMPD/round.out" 2>"$TMPD/round.err"; rc=$?
+	if (( rc != 0 )); then
+		first=; IFS= read -r first < "$TMPD/round.err" || true
+		check_failed "the verify round failed: $(oneline "$first")" "verify failed before the confirm: $(oneline "$first"); not confirmed: the router rolls the change back when its window ends, or abort now: $0 abort $ROUTER $SID"
+	fi
+	if [[ -n ${OWRT_LOCAL_CHECK:-} ]]; then
+		bash -c "$OWRT_LOCAL_CHECK" >/dev/null 2>"$TMPD/local.err"; lrc=$?
+		(( lrc == 0 )) || check_failed "the local check failed (exit $lrc)" "the local check failed before the confirm (exit $lrc); not confirmed: the router rolls the change back when its window ends, or abort now: $0 abort $ROUTER $SID"
+	fi
+	logd_now=$(logd_pid </dev/null) || check_failed "the router was unreachable" "router unreachable before the confirm; not confirmed; run: $0 status $ROUTER $SID"
+	[[ -n $logd_now ]] || check_failed "logd was not running" "logd is not running: not confirming while the system log is down; the router rolls the change back when its window ends"
+	CONFIRM_SENT=1
+	out=$(r "$PROG confirm $SID" </dev/null 2>"$TMPD/confirm.err"); crc=$?
+	first=; IFS= read -r first < "$TMPD/confirm.err" || true
+	if (( crc == 0 )) && [[ $out == "confirmed $SID" || $out == "confirmed $SID rpcd-timer-lost" ]]; then
+		lost_note=
+		[[ $out == "confirmed $SID rpcd-timer-lost" ]] && lost_note='; rpcd had lost its rollback timer, the guard held the window'
+		print_config_hashes
+		log "CONFIRMED session=$SID (held apply: $PASSES consecutive passes, then one more fresh ssh + router-side round before the confirm${OWRT_LOCAL_CHECK:+ + local check})$lost_note"
+		rm -f "$PLANS/$SID.sha256" "$HELD_FILE"
+	elif (( crc == 3 )) || [[ $crc == 1 && ( $first == 'error rpcd-confirm-failed'* || $first == 'error confirm-incomplete'* ) ]]; then
+		reason=$(oneline "$first"); reason=${reason:-exit $crc}
+		die "confirm refused: $reason; not confirmed: the router rolls the change back on its own; run: $0 status $ROUTER $SID"
+	else
+		log "CONFIRM DID NOT REPORT SUCCESS session=$SID — OUTCOME UNKNOWN; run: $0 status $ROUTER $SID"; exit 1
+	fi
 	;;
 abort)
-	SID=${3:-}; need_sid "$SID"; handshake
+	SID=${3:-}; need_sid "$SID"
+	# read before anything is logged: a log line would create a missing log
+	audit_readable=0; [[ -f $AUDIT && -r $AUDIT ]] && audit_readable=1
+	handshake
 	out=$(r "$PROG abort $SID" </dev/null 2>"$TMPD/abort.err"); arc=$?
-	if (( arc == 0 )) && [[ $out == "aborted $SID "* ]]; then
+	# the router refuses a confirmed session only while its last line
+	# names it; after a later session it answers "gone". This host's audit
+	# log keeps the CONFIRMED line, so "gone" for a session confirmed here
+	# is the same refusal. A live session is always aborted first.
+	if (( arc == 0 )) && [[ $out == "aborted $SID gone" ]] && confirmed_here "$SID"; then
+		die "abort refused: session $SID was already confirmed; the change stays live. To undo it, plan the reverse change (newton_plan_undo)"
+	elif (( arc == 0 )) && [[ $out == "aborted $SID gone" ]] && aborted_here "$SID"; then
+		# an earlier abort from this host discarded or rolled it back
+		rm -f "$PLANS/$SID.sha256" "$PLANS/$SID.held"
+		echo "session $SID was already aborted on this host; nothing to do"
+		exit 0
+	elif (( arc == 0 )) && [[ $out == "aborted $SID gone" ]] && (( ! audit_readable )); then
+		# without this host's audit log the confirmed check cannot run:
+		# nothing was rolled back by this abort, so it never says ABORTED
+		die "the router no longer has session $SID and this host's audit log ($AUDIT) cannot be read, so whether the change was confirmed, rolled back or is still live is not known from this host; this abort rolled nothing back. Check: $0 status $ROUTER $SID, and compare the router's config with the latest backup in $BACKUPS"
+	elif (( arc == 0 )) && [[ $out == "aborted $SID gone" ]]; then
+		# "gone" rolled nothing back: the router no longer had the session
+		# (a later session or a reboot), and a confirm killed before this
+		# host logged CONFIRMED leaves the change live. Only the router's
+		# status line decides; this abort never says ABORTED for it.
+		st=$(r "$PROG status $SID" </dev/null 2>/dev/null) || st=
+		oneline "$st"
+		if router_says_confirmed "$st"; then
+			reconcile_confirmed "the router's status says confirmed" || true
+			die "abort refused: session $SID was already confirmed; the change stays live. To undo it, plan the reverse change (newton_plan_undo)"
+		fi
+		if [[ $st =~ ^rolled-back\ sid=$SID\  ]]; then
+			# a line of its own: the server writes the rolled-back receipt of
+			# a held apply from it
+			[[ -e $PLANS/$SID.held ]] && log "HELD APPLY ROLLED BACK session=$SID (the abort found the session gone; the router's status says rolled-back)"
+			rm -f "$PLANS/$SID.sha256" "$PLANS/$SID.held"
+			log "the router no longer has session $SID and its status says rolled-back; this abort rolled nothing back"
+			exit 0
+		fi
+		die "the router no longer has session $SID; this abort rolled nothing back, and $HELD_UNKNOWN_NEXT: the change may still be live. Check: $0 status $ROUTER $SID, and compare the router's config with the latest backup in $BACKUPS"
+	elif (( arc == 0 )) && [[ $out == "aborted $SID "* ]]; then
 		log "ABORTED session=$SID ($(oneline "${out#aborted $SID }"))"
-		rm -f "$PLANS/$SID.sha256"
+		# a line of its own (router text never starts a line): the server
+		# writes the rolled-back receipt of a held apply from it
+		[[ -e $PLANS/$SID.held ]] && log "HELD APPLY ABORTED session=$SID"
+		rm -f "$PLANS/$SID.sha256" "$PLANS/$SID.held"
+	elif [[ $out == "refused $SID confirmed" ]]; then
+		# a confirmed change has no rollback left; nothing was aborted
+		reconcile_confirmed "the router refused the abort: it says confirmed" || true
+		die "abort refused: session $SID was already confirmed; the change stays live. To undo it, plan the reverse change (newton_plan_undo)"
 	else
 		first=; IFS= read -r first < "$TMPD/abort.err" || true
 		die "abort did not report success: $(oneline "$first"); run: $0 status $ROUTER $SID"
 	fi
 	;;
-*) sed -n '2,31p' "$0"; exit 2 ;;
+*) sed -n '2,33p' "$0"; exit 2 ;;
 esac

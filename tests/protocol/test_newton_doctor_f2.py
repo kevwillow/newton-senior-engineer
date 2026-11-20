@@ -267,6 +267,33 @@ def test_doctor_router_line_inconclusive_when_setup_exits_nonzero(
     assert "FAIL router-line-restricted" not in result.stdout
 
 
+def test_doctor_router_line_fail_when_setup_exits_nonzero_after_a_fail_proof(
+    doctor_env, tmp_path
+):
+    # the real setup tool's check prints the failing proof line and then
+    # stops with exit 1: the FAIL line is the result, not "sudo failed"
+    env = doctor_env["env"].copy()
+    env["DOCTOR_STUB_SETUP_REPORT"] = write_setup_report(
+        tmp_path,
+        [
+            "PASS proof unknown-and-empty: rejected",
+            "FAIL proof hello: expected caller=r1-newton-mcp; got 'root'",
+            'STOPPED check r1: check found a problem',
+        ],
+    )
+    env["DOCTOR_STUB_SETUP_RC"] = "1"
+
+    result = run(DOCTOR, "--router", "root@192.0.2.1", "--device", "r1", env=env)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert (
+        "FAIL router-line-restricted[r1]: FAIL proof hello: expected "
+        "caller=r1-newton-mcp; got 'root'" in result.stdout
+    )
+    assert "INCONCLUSIVE router-line-restricted" not in result.stdout
+    assert "PASS router-line-restricted" not in result.stdout
+
+
 def test_doctor_router_line_inconclusive_even_with_both_proofs_but_rc_nonzero(
     doctor_env, tmp_path
 ):

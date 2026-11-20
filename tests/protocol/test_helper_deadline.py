@@ -35,11 +35,14 @@ class HelperLab:
     def ubus_calls(self):
         return self.calls.read_text().splitlines()
 
-    def run(self, *cmd, uptime_file=None):
+    def run(self, *cmd, uptime_file=None, session_gone=False):
         shell = textwrap.dedent(
             f"""\
             ubus() {{
                 printf '%s\\n' "$*" >> {shlex.quote(str(self.calls))}
+                if [ -n "${{FAKE_SESSION_GONE:-}}" ] && [ "$2" = session ] && [ "$3" = list ]; then
+                    return 4
+                fi
                 return 0
             }}
             uci() {{ return 1; }}
@@ -60,6 +63,8 @@ class HelperLab:
         env["NEWTON_LOCK"] = str(self.lock)
         env["NEWTON_UPTIME_FILE"] = str(uptime_file or self.uptime)
         env["FAKE_EPOCH"] = str(self.epoch)
+        if session_gone:
+            env["FAKE_SESSION_GONE"] = "1"
         return subprocess.run(
             [busybox, "sh", "-c", shell],
             env=env,
@@ -200,3 +205,23 @@ def test_unreadable_uptime_apply_refused(lab, tmp_path):
     assert res.returncode == 1
     assert "cannot read uptime" in res.stdout + res.stderr
     assert not any("uci apply" in c for c in lab.ubus_calls())
+
+
+@pytest.mark.parametrize("was_applied", [True, False])
+def test_abort_of_a_gone_session_says_the_outcome_is_not_known(lab, was_applied):
+    """(i) rpcd restarted or the router rebooted: the session is gone. The
+    abort rolled nothing back, so it never says ABORTED, says the outcome
+    is not known from here and how to check, and exits non-zero."""
+    if was_applied:
+        apply_quietly(lab)
+    abort = lab.run("abort", SID, session_gone=True)
+
+    out = abort.stdout + abort.stderr
+    assert abort.returncode != 0
+    assert "ABORTED" not in out
+    assert f"session {SID} is gone" in out
+    assert "not known from here" in out
+    assert "uci show" in out
+    assert not any("uci rollback" in c for c in lab.ubus_calls())
+    if was_applied:
+        assert "an apply of this session was recorded" in out

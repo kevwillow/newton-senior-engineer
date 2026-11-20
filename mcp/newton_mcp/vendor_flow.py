@@ -426,6 +426,13 @@ def abort(
     }
 
 
+REDACTED_BACKUP_NOTE = (
+    "Every secret in this copy (passwords, keys, pre-shared keys) is replaced with "
+    "'<redacted>'. It is a reference copy of the running configuration, not a backup to "
+    "restore: loading it as is would set those secrets to '<redacted>' or fail."
+)
+
+
 def backup(
     svc: NewtonService,
     device: Device,
@@ -448,4 +455,6 @@ def backup(
     return {
         "backup_path": _envelope.envelope(f"{name}:backup", str(target)),
         "config_files": ["running-config"],
+        "redacted": True,
+        "note": REDACTED_BACKUP_NOTE,
     }

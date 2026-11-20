@@ -1339,6 +1339,69 @@ def test_un04_two_receipts_are_refused(env, monkeypatch):
     assert "more than one receipt" in str(excinfo.value)
 
 
+def test_un04_an_unknown_receipt_followed_by_a_confirmed_one_is_undone(env, monkeypatch):
+    """A held apply (or one whose confirm answer was lost) writes an UNKNOWN
+    receipt; the confirm, or a status that finds the router confirmed it,
+    writes the CONFIRMED one after it. That pair is one confirmed change."""
+    record, current = _change(
+        env, monkeypatch, diff="network.lan.ipaddr='10.0.0.2'",
+        before={"network": NET_BEFORE}, after={"network": NET_AFTER},
+        receipt_outcome="unknown",
+    )
+    _write_receipt(env, record, "confirmed", STAMP_LATER, monkeypatch)
+    draft = draft_undo(env.state, DEVICE, HOST, SID, current, AGENT)
+    assert draft.batch == "set network.lan.ipaddr='10.0.0.1'\n"
+
+
+@pytest.mark.parametrize("first,later", [
+    ("confirmed", "unknown"), ("rolled_back", "confirmed"), ("unknown", "unknown"),
+])
+def test_un04_other_pairs_of_receipts_are_refused(env, monkeypatch, first, later):
+    record, current = _change(
+        env, monkeypatch, diff="network.lan.ipaddr='10.0.0.2'",
+        before={"network": NET_BEFORE}, after={"network": NET_AFTER},
+        receipt_outcome=first,
+    )
+    _write_receipt(env, record, later, STAMP_LATER, monkeypatch)
+    with pytest.raises(UndoRefused) as excinfo:
+        draft_undo(env.state, DEVICE, HOST, SID, current, AGENT)
+    assert "more than one receipt" in str(excinfo.value)
+
+
+def test_un04_a_held_then_confirmed_change_can_be_undone(env, monkeypatch):
+    """apply(hold=True) writes an UNKNOWN receipt, the confirm a
+    CONFIRMED one.  The UNKNOWN receipt of the hold is not a second
+    receipt of the outcome: the change can be undone."""
+    record, current = _change(
+        env, monkeypatch, diff="network.lan.ipaddr='10.0.0.2'",
+        before={"network": NET_BEFORE}, after={"network": NET_AFTER},
+        stamp=STAMP_LATER,
+    )
+    # the receipt the held apply wrote, before the confirm's
+    _write_receipt(env, record, "unknown", STAMP_FIRST, monkeypatch)
+    assert len(list((env.state / "receipts").glob(f"*-{SID}.md"))) == 2
+
+    draft = draft_undo(env.state, DEVICE, HOST, SID, current, AGENT)
+
+    assert draft.batch == "set network.lan.ipaddr='10.0.0.1'\n"
+
+
+def test_un04_two_confirmed_receipts_beside_a_held_one_are_refused(
+    env, monkeypatch
+):
+    """An UNKNOWN receipt followed by two CONFIRMED ones is still
+    refused."""
+    record, current = _change(
+        env, monkeypatch, diff="network.lan.ipaddr='10.0.0.2'",
+        before={"network": NET_BEFORE}, after={"network": NET_AFTER},
+    )
+    _write_receipt(env, record, "unknown", "20261023T150000Z", monkeypatch)
+    _write_receipt(env, record, "confirmed", STAMP_LATER, monkeypatch)
+    with pytest.raises(UndoRefused) as excinfo:
+        draft_undo(env.state, DEVICE, HOST, SID, current, AGENT)
+    assert "more than one receipt" in str(excinfo.value)
+
+
 def test_un04_a_receipt_that_does_not_say_confirmed_is_refused(env, monkeypatch):
     _record_out, current = _change(
         env, monkeypatch, diff="network.lan.ipaddr='10.0.0.2'",

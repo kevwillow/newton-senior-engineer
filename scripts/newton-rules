@@ -340,6 +340,31 @@ def serving_vantages(
     return serving
 
 
+def inside_zones_hint(vantages: dict[str, Any], device: str) -> str:
+    """The zones the device's inside vantages carry, for a refusal."""
+    zones: set[str] = set()
+    for raw in vantages.values():
+        if not isinstance(raw, dict) or raw.get("role") != "inside":
+            continue
+        devices = raw.get("devices")
+        if not isinstance(devices, list) or device not in devices:
+            continue
+        entries = raw.get("zones")
+        for entry in entries if isinstance(entries, list) else []:
+            name = entry.get("name") if isinstance(entry, dict) else None
+            if isinstance(name, str) and ZONE_RE.fullmatch(name) is not None:
+                zones.add(name)
+    if not zones:
+        return (
+            f"{device} has no inside vantage yet "
+            "(set one up with newton-vantage-setup)"
+        )
+    return (
+        f"zones with an inside vantage for {device}: {', '.join(sorted(zones))} "
+        "(set a vantage up for another zone with newton-vantage-setup)"
+    )
+
+
 def target_in_check_targets(target: str, cidrs: tuple[str, ...]) -> bool:
     address = ipaddress.IPv4Address(target.rsplit(":", 1)[0])
     for cidr in cidrs:
@@ -392,7 +417,10 @@ def cmd_add(args: argparse.Namespace) -> int:
 
     serving = serving_vantages(vantages, args.device, args.zone)
     if not serving:
-        refuse(f"rule {args.id} has no vantage for zone {args.zone}")
+        refuse(
+            f"rule {args.id} has no vantage for zone {args.zone}; "
+            + inside_zones_hint(vantages, args.device)
+        )
     if len(serving) > 1:
         refuse(f"more than one inside vantage serves zone {args.zone} for this device")
     vantage_name, _raw, check_targets = serving[0]

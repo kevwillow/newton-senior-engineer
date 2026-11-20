@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import shutil
 import time
 from datetime import datetime, timezone
@@ -111,6 +112,20 @@ CHECK_TIMEOUT_S = (
 
 #: The result of a plan that is being applied right now.
 IN_PROGRESS = "in_progress"
+
+#: How long past its rollback window (and the settle after it) an apply
+#: may still be running: its calls before the apply and its reads after
+#: the window.  A claim older than that is an apply that never ended
+#: (the server was killed or the client went away).
+CLAIM_MARGIN_S = 600
+
+#: What the owner is told about an apply that never ended.
+STALE_CLAIM_NOTE = (
+    "the apply did not finish: Newton stopped before it ended, and its "
+    "rollback window has passed. The router has put the change back "
+    "unless Newton confirmed it before it stopped; read the router to "
+    "see which, and plan again to change it"
+)
 
 #: What the owner is told while the change is being applied.
 IN_PROGRESS_NOTE = (
@@ -1050,6 +1065,9 @@ def apply(
     # the approval is claimed here and settled in the finally below,
     # whether the change was applied or not
     svc.consume_approval(device_name, session_id, record)
+    # the claim is dated now, not when the approval was written: a
+    # status asked later tells an apply in flight from one that died
+    _touch(Path(svc.state) / "approvals" / f"{session_id}.claimed")
     try:
         factory = client_factory or noinstall_read.default_client_factory
         password = noinstall_read._password(device)
@@ -1101,11 +1119,16 @@ def apply(
             now=now,
         )
         # The change may reach the router from here on: the approval
-        # is consumed from now on, whatever happens next.
+        # is consumed, unless the transaction proves ``uci apply`` was
+        # never sent or the router refused it.
         reached_router = True
         outcome = transaction.apply(carried, timeout_s)
 
-        if outcome.state in (rpcd_txn.BUSY, rpcd_txn.REFUSED):
+        if outcome.state in (
+            rpcd_txn.BUSY, rpcd_txn.REFUSED, rpcd_txn.NOT_SENT
+        ):
+            # nothing is on the router: the owner's yes is theirs again
+            reached_router = False
             notes.append(outcome.reason or "the router refused the change")
             return _finish(
                 svc, device_name, record, session_id,
@@ -1171,13 +1194,20 @@ def apply(
         return _finish(svc, device_name, record, session_id, result)
     except rpcd.RpcdError as exc:
         # Something on the router failed in a way Newton did not
-        # expect.  The change may be live, so the run record is written
-        # and the owner is told the outcome is unknown.
+        # expect.  Once the apply may have been sent the change may be
+        # live, so the owner is told the outcome is unknown; before
+        # that nothing of the change is on the router.
+        if not reached_router:
+            notes.append(f"nothing was applied: {exc}")
+            return _finish(
+                svc, device_name, record, session_id,
+                _result(NOT_APPLIED, notes, not_verified),
+                receipt=False,
+            )
         notes.append(f"the change could not be finished: {exc}")
         return _finish(
             svc, device_name, record, session_id,
             _result(UNKNOWN, notes, not_verified),
-            receipt=reached_router,
         )
     finally:
         svc.settle_approval(session_id, reached_router=reached_router)
@@ -1255,6 +1285,44 @@ def _write_receipt(
 # ---- the status and the abort ----------------------------------------------
 
 
+def _touch(path: Path) -> None:
+    """Set a file's time to now, and do not mind when it is not there."""
+    try:
+        os.utime(path)
+    except OSError:
+        return
+
+
+def _claim(svc: Any, session_id: str, record: Mapping[str, Any]) -> str:
+    """'none', 'live' or 'stale': the approval claim of an apply.
+
+    A claim older than the longest an apply can run belongs to an apply
+    that never ended.  It is settled as used (the change may have
+    reached the router) and a run with no outcome is recorded as
+    unknown, so the status and the abort stop saying an apply is in
+    flight.
+    """
+    claimed = Path(svc.state) / "approvals" / f"{session_id}.claimed"
+    try:
+        claimed_at = claimed.stat().st_mtime
+    except OSError:
+        return "none"
+    timeout_s = record.get("timeout_s")
+    if isinstance(timeout_s, bool) or not isinstance(timeout_s, int):
+        timeout_s = 0
+    longest = timeout_s + owner_verify.SETTLE_GRACE_S + CLAIM_MARGIN_S
+    if time.time() - claimed_at <= longest:
+        return "live"
+    svc.settle_approval(session_id, reached_router=True)
+    run = owner_records.read_run(Path(svc.state), session_id)
+    if not run.get("outcome") and not run.get("verdict"):
+        # an outcome the apply recorded before it died stands
+        _write_run(
+            svc, session_id, _result(UNKNOWN, [STALE_CLAIM_NOTE], [])
+        )
+    return "stale"
+
+
 def status(svc: Any, device_name: str, session_id: str) -> dict[str, Any]:
     """The state of a no-install plan: what the apply ended in."""
     device = svc.device(device_name, allow_noinstall=True)
@@ -1264,6 +1332,7 @@ def status(svc: Any, device_name: str, session_id: str) -> dict[str, Any]:
             "status is for a router Newton cannot manage"
         )
     record = _load_record(svc, device_name, session_id, device)
+    claim = _claim(svc, session_id, record)
     run = owner_records.read_run(Path(svc.state), session_id)
     outcome = run.get("outcome")
     started_at = run.get("started_at")
@@ -1294,7 +1363,7 @@ def status(svc: Any, device_name: str, session_id: str) -> dict[str, Any]:
     # change may be on the router, and the router undoes it unless
     # Newton confirms it.  An approval that is claimed is such a run,
     # and so is a run that started and has not ended yet.
-    claimed = (Path(svc.state) / "approvals" / f"{session_id}.claimed").exists()
+    claimed = claim == "live"
     started = isinstance(started_at, (int, float)) and not isinstance(
         started_at, bool
     )
@@ -1341,7 +1410,8 @@ def abort(svc: Any, device_name: str, session_id: str) -> dict[str, Any]:
         )
     record = _load_record(svc, device_name, session_id, device)
     state = Path(svc.state)
-    if (state / "approvals" / f"{session_id}.claimed").exists():
+    claim = _claim(svc, session_id, record)
+    if claim == "live":
         return {
             "result": "not_aborted",
             "message": (
@@ -1376,7 +1446,9 @@ def abort(svc: Any, device_name: str, session_id: str) -> dict[str, Any]:
         return {
             "result": "not_aborted",
             "message": (
-                "the plan already ran: there is nothing to abort; the "
+                STALE_CLAIM_NOTE
+                if claim == "stale"
+                else "the plan already ran: there is nothing to abort; the "
                 "change is on the router unless the router put it back"
             ),
         }

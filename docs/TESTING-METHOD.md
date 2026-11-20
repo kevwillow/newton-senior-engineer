@@ -228,7 +228,7 @@ Checklist for a new platform:
    the lab bridges carry no uplink to the operator LAN, only the test runner
    reaches the device, and `scripts/newton-lab-isolation --iface <iface>
    --allow-mac <mac of the upstream router> --seconds N` passes
-   (`scripts/newton-lab-isolation:1-7`).
+   (`scripts/newton-lab-isolation:1-9`).
 9. **"Verified" and "Not verified".** Every scenario description carries the
    measured proof and its limits. Each vendor keeps its own "Not verified" list in the same shape.
 

@@ -353,13 +353,14 @@ def test_from_file_any_iface_line_is_unreadable(tmp_path):
         "--iface", "eth0", "--allow-mac", ALLOWED_MAC, "--from-file", str(capture)
     )
 
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "FAIL unreadable: 1 line could not be attributed" in result.stdout
-    assert "FAIL foreign[unknown]: unreadable x1 not in allow list" in result.stdout
+    # a line with no source MAC is unreadable, never a foreign server
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "INCONCLUSIVE unreadable: 1 line could not be attributed" in result.stdout
+    assert "FAIL foreign" not in result.stdout
     assert "first: 17:13:20.000000  In aa:bb:cc:00:11:22" in result.stdout
     assert result.stdout.splitlines()[-1] == (
-        "FAIL foreign DHCP server or router advert on eth0 in 120 s "
-        "(1 packet from foreign sources)"
+        "INCONCLUSIVE no foreign source seen on eth0 in 120 s, but 1 line "
+        "could not be read, so the check did not pass"
     )
     assert "PASS" not in result.stdout
 
@@ -377,13 +378,9 @@ def test_from_file_raw_ip_line_is_unreadable(tmp_path):
         "--iface", "eth0", "--allow-mac", ALLOWED_MAC, "--from-file", str(capture)
     )
 
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "FAIL unreadable: 1 line could not be attributed" in result.stdout
-    assert "FAIL foreign[unknown]: unreadable x1 not in allow list" in result.stdout
-    assert result.stdout.splitlines()[-1] == (
-        "FAIL foreign DHCP server or router advert on eth0 in 120 s "
-        "(1 packet from foreign sources)"
-    )
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "INCONCLUSIVE unreadable: 1 line could not be attributed" in result.stdout
+    assert "FAIL foreign" not in result.stdout
     assert "PASS" not in result.stdout
 
 
@@ -401,8 +398,8 @@ def test_from_file_unclassifiable_ethernet_line_is_unreadable(tmp_path):
         "--iface", "eth0", "--allow-mac", ALLOWED_MAC, "--from-file", str(capture)
     )
 
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "FAIL unreadable: 1 line could not be attributed" in result.stdout
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "INCONCLUSIVE unreadable: 1 line could not be attributed" in result.stdout
     assert "PASS" not in result.stdout
 
 
@@ -421,14 +418,42 @@ def test_from_file_two_unreadable_lines_are_counted(tmp_path):
         "--iface", "eth0", "--allow-mac", ALLOWED_MAC, "--from-file", str(capture)
     )
 
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "FAIL unreadable: 2 lines could not be attributed" in result.stdout
-    assert "FAIL foreign[unknown]: unreadable x2 not in allow list" in result.stdout
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "INCONCLUSIVE unreadable: 2 lines could not be attributed" in result.stdout
+    assert "FAIL foreign" not in result.stdout
     assert result.stdout.splitlines()[-1] == (
-        "FAIL foreign DHCP server or router advert on eth0 in 120 s "
-        "(2 packets from foreign sources)"
+        "INCONCLUSIVE no foreign source seen on eth0 in 120 s, but 2 lines "
+        "could not be read, so the check did not pass"
     )
     assert "PASS" not in result.stdout
+
+
+def test_from_file_unreadable_lines_beside_a_foreign_server_still_fail(tmp_path):
+    """A real foreign server is still a FAIL (exit 1) when some other lines
+    could not be read; the unreadable ones are not counted as foreign."""
+    capture = write_capture(
+        tmp_path,
+        [
+            "17:13:20.000000 ip: 192.168.4.9.67 > 255.255.255.255.68: "
+            "BOOTP/DHCP, Reply, length 300",
+            "19:06:41.123456 00:00:5e:00:53:01 > ff:ff:ff:ff:ff:ff, ethertype IPv4 "
+            "(0x0800), length 342: 192.168.4.9.67 > 255.255.255.255.68: "
+            "BOOTP/DHCP, Reply, length 300",
+        ],
+    )
+
+    result = run(
+        "--iface", "eth0", "--allow-mac", ALLOWED_MAC, "--from-file", str(capture)
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "FAIL foreign[00:00:5e:00:53:01]: dhcp-server x1 not in allow list" in result.stdout
+    assert "INCONCLUSIVE unreadable: 1 line could not be attributed" in result.stdout
+    assert "unknown" not in result.stdout
+    assert result.stdout.splitlines()[-1] == (
+        "FAIL foreign DHCP server or router advert on eth0 in 120 s "
+        "(1 packet from foreign sources)"
+    )
 
 
 def test_from_file_banner_and_summary_lines_are_ignored(tmp_path):

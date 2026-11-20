@@ -28,10 +28,16 @@ from noinstall_fakes import FakeRouter
 # A synthetic pin (the sha256 of a fixed string): the shape matters, the
 # value does not, and no lab certificate's fingerprint belongs in git.
 PIN = base64.b64encode(hashlib.sha256(b"newton-noinstall-test-pin").digest()).decode()
-NO_INSTALL_MESSAGE = (
-    "device lab-r1 uses no-install access; Newton cannot manage it yet "
-    "in this version"
-)
+def no_install_message(tool: str = "this tool") -> str:
+    """The refusal names the tool, says what no-install access
+    does support, and how the owner gets the installed mode; it no longer
+    says Newton cannot manage the device (false since 1.1)."""
+    return (
+        f"{tool} is not available for device lab-r1: it uses no-install access, "
+        "where Newton reads, plans, applies, shows the status of and aborts a "
+        "change. If this tool is needed, the owner can switch the router to the "
+        "installed mode: newton-router-setup lab-r1 uninstall, then install"
+    )
 
 # Every device tool, with the arguments it needs to reach the choke
 # point.  A new tool must be added here: the test below iterates the
@@ -42,6 +48,7 @@ TOOL_CALLS: dict[str, tuple] = {
     "newton_plan_change": ("lab-r1", "set network.lan.proto='static'"),
     "newton_plan_undo": ("lab-r1", "0" * 32),
     "newton_apply_change": ("lab-r1", "0" * 32),
+    "newton_confirm_change": ("lab-r1", "0" * 32),
     "newton_change_status": ("lab-r1", "0" * 32),
     "newton_abort_change": ("lab-r1", "0" * 32),
     "newton_grant_off": ("lab-r1",),
@@ -321,7 +328,8 @@ def test_every_other_device_tool_refuses_a_no_install_device(
             continue
         result = getattr(server, tool)(*args)
         assert isinstance(result, dict), tool
-        assert result.get("error") == NO_INSTALL_MESSAGE, tool
+        assert result.get("error") == no_install_message(tool), tool
+        assert "cannot manage" not in result["error"], tool
     assert ran == [], "no tool may reach ssh for a no-install device"
 
 
@@ -417,7 +425,7 @@ def test_the_wifi_scan_still_refuses_a_no_install_device(
         ("newton_run_scan", ("lab-r1", "0" * 32)),
     ):
         result = getattr(server, tool)(*args)
-        assert result.get("error") == NO_INSTALL_MESSAGE, tool
+        assert result.get("error") == no_install_message(tool), tool
 
 
 def test_the_apply_the_status_and_the_abort_answer_for_a_no_install_device(
@@ -434,7 +442,7 @@ def test_the_apply_the_status_and_the_abort_answer_for_a_no_install_device(
         "newton_abort_change",
     ):
         result = getattr(server, tool)("lab-r1", "0" * 32)
-        assert result.get("error") != NO_INSTALL_MESSAGE, tool
+        assert result.get("error") != no_install_message(tool), tool
         assert "no plan record" in result["error"], (tool, result)
 
 
@@ -443,7 +451,7 @@ def test_the_choke_point_refuses_the_device_itself(tmp_path, monkeypatch) -> Non
     service = server.NewtonService()
     with pytest.raises(server.NewtonError) as caught:
         service.device("lab-r1")
-    assert str(caught.value) == NO_INSTALL_MESSAGE
+    assert str(caught.value) == no_install_message()
 
 
 def test_a_no_install_device_is_still_listed(tmp_path, monkeypatch) -> None:
@@ -642,7 +650,7 @@ def test_every_advertised_tool_answers_for_a_no_install_device(
         if args is None:
             continue
         result = getattr(server, tool)(*args)
-        assert result.get("error") != NO_INSTALL_MESSAGE, tool
+        assert result.get("error") != no_install_message(tool), tool
 
 
 def test_an_installed_device_keeps_the_platform_capabilities(
@@ -660,3 +668,15 @@ def test_an_installed_device_keeps_the_platform_capabilities(
     assert caps["native_revert"] == "newton-guard"
     assert caps["tools"] == sorted(registry.capabilities("openwrt").tools)
     assert "newton_backup" in caps["tools"]
+
+
+def test_a_bad_https_host_refusal_states_the_host_rule(tmp_path, monkeypatch) -> None:
+    """The https_host refusal says what a host must look like."""
+    _write_inventory(
+        tmp_path, monkeypatch, _no_install_body(tmp_path, 'https_host = "https://192.0.2.1"\n')
+    )
+    with pytest.raises(server.NewtonError) as caught:
+        server.load_inventory()
+    assert str(caught.value) == (
+        "device lab-r1: https_host fails the hostname grammar: " + server.HOST_RULE
+    )

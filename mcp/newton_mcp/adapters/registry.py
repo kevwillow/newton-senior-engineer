@@ -19,6 +19,7 @@ OPENWRT_TOOLS = frozenset(
         "newton_plan_change",
         "newton_plan_undo",
         "newton_apply_change",
+        "newton_confirm_change",
         "newton_change_status",
         "newton_abort_change",
         "newton_grant_off",

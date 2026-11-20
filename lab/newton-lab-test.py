@@ -146,6 +146,7 @@ A probe or post that times out is a normal failed result (rc None, reason
 from __future__ import annotations
 
 import argparse
+import fcntl
 import fnmatch
 import hashlib
 import json
@@ -378,7 +379,7 @@ class Device:
     __slots__ = ("name", "vmid", "host", "user", "snapshot", "settle_cmd",
                  "kind", "proxy", "known_hosts", "admin_key",
                  "baseline_backup", "baseline_sha256", "router_key",
-                 "lab", "board_name", "platform", "vendor_write")
+                 "lab", "board_name", "platform", "vendor_write", "vm_name")
 
     def __init__(self, name: str, vmid: int, host: str, user: str,
                  snapshot: str, settle_cmd: str = "", *,
@@ -387,7 +388,7 @@ class Device:
                  baseline_backup: str = "", baseline_sha256: str = "",
                  router_key: str = "", lab: bool = False,
                  board_name: str = "", platform: str = "",
-                 vendor_write: bool = False) -> None:
+                 vendor_write: bool = False, vm_name: str = "") -> None:
         self.name = name
         self.vmid = vmid
         self.host = host
@@ -405,6 +406,8 @@ class Device:
         self.board_name = board_name
         self.platform = platform
         self.vendor_write = vendor_write
+        # the Proxmox VM name the vmid must carry (pve_rollback checks it)
+        self.vm_name = vm_name
 
     @property
     def is_physical(self) -> bool:
@@ -736,6 +739,19 @@ def _vendor_fields(name: str, dev: dict) -> tuple[str, bool]:
     return platform, vendor_write
 
 
+def _vm_name(name: str, dev: dict) -> str:
+    """The required Proxmox VM name of a VM device: pve_rollback refuses a
+    vmid whose VM carries another name, so a mistyped or copied vmid cannot
+    roll back some other VM."""
+    value = dev.get("vm_name")
+    if not isinstance(value, str) or not value:
+        raise LabConfigError(
+            f"devices.{name}.vm_name: required for a VM device: the Proxmox "
+            f"name of VM {dev.get('vmid')!r} (the runner checks it before any "
+            f"rollback)")
+    return value
+
+
 def _load_device_with_kind(name: str, dev: dict) -> Device:
     """A device table that sets `kind`: "vm" (the Proxmox snapshot kind) or
     "physical" (restored from a sysupgrade archive)."""
@@ -760,11 +776,12 @@ def _load_device_with_kind(name: str, dev: dict) -> Device:
                 raise LabConfigError(f"devices.{name}.{f}: missing")
         return Device(name=name, vmid=int(dev["vmid"]), host=str(dev["host"]),
                       user=str(dev["user"]), snapshot=str(dev["snapshot"]),
+                      vm_name=_vm_name(name, dev),
                       settle_cmd=str(dev.get("settle_cmd", "")),
                       platform=platform, vendor_write=vendor_write,
                       known_hosts=_vendor_path(name, dev, "known_hosts"),
                       admin_key=_vendor_path(name, dev, "admin_key"))
-    for f in ("vmid", "snapshot"):
+    for f in ("vmid", "snapshot", "vm_name"):
         if f in dev:
             raise LabConfigError(
                 f"devices.{name}.{f}: not valid for kind = \"physical\" "
@@ -844,6 +861,7 @@ def load_lab(path: Path) -> Lab:
             host=str(dev["host"]),
             user=str(dev["user"]),
             snapshot=str(dev["snapshot"]),
+            vm_name=_vm_name(name, dev),
             settle_cmd=str(dev.get("settle_cmd", "")),
             platform=platform,
             vendor_write=vendor_write,
@@ -1889,7 +1907,31 @@ def _curl_pve(lab: Lab, url: str, method: str = "GET",
     raise RuntimeError("curl failed: unreachable")  # pragma: no cover
 
 
+class VmIdentityError(RuntimeError):
+    """The VM behind a vmid is not the one the lab file names."""
+
+
+def pve_vm_name(lab: Lab, dev: Device) -> str | None:
+    """The name Proxmox gives the VM with this vmid (GET .../config), or
+    None when the answer carries no name."""
+    url = (f"https://{lab.pve_host}:8006/api2/json/nodes/{lab.pve_node}"
+           f"/qemu/{dev.vmid}/config")
+    data = _curl_pve(lab, url)
+    if not isinstance(data, dict):
+        return None
+    name = data.get("name")
+    return name if isinstance(name, str) else None
+
+
 def pve_rollback(lab: Lab, dev: Device) -> str:
+    # read-only identity check first: the rollback is never sent to a VM
+    # whose Proxmox name is not the one the lab file gives this device
+    actual = pve_vm_name(lab, dev)
+    if not dev.vm_name or actual != dev.vm_name:
+        raise VmIdentityError(
+            f"refusing to roll back vmid {dev.vmid} on node {lab.pve_node}: "
+            f"Proxmox names it {actual!r}, the lab file names {dev.vm_name} "
+            f"(devices.{dev.name}.vm_name); fix the vmid or vm_name")
     url = (f"https://{lab.pve_host}:8006/api2/json/nodes/{lab.pve_node}"
            f"/qemu/{dev.vmid}/snapshot/{dev.snapshot}/rollback")
     return str(_curl_pve(lab, url, method="POST", form=["start=1"]))
@@ -4643,6 +4685,47 @@ def _filter_scenarios(scenarios: list[Scenario], patterns: list[str]
     return matched, None
 
 
+# The lock every lab run holds (lab/scenarios-pulsar/README.md): the lab-r1
+# runs and the Pulsar/Beryl runs share lab-client and the other VMs.
+DEFAULT_LAB_LOCK = Path("/tmp/newton-lab.lock")
+LAB_LOCK_PATH = DEFAULT_LAB_LOCK
+
+
+def take_lab_lock() -> tuple[int | None, str]:
+    """Take LAB_LOCK_PATH with a non-blocking exclusive flock.
+
+    Returns (fd, "") on success; the caller closes fd to release it.
+    Returns (None, reason) when another run holds it or the file cannot be
+    opened.  An existing file is opened without O_CREAT (another user's
+    file in sticky /tmp cannot be opened with O_CREAT), a missing one is
+    created with O_EXCL; neither follows a symlink.
+    """
+    path = LAB_LOCK_PATH
+    try:
+        try:
+            fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            try:
+                fd = os.open(str(path),
+                             os.O_RDONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o644)
+            except FileExistsError:
+                # another run created it after the first look: open that one
+                fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as e:
+        return None, f"cannot open the lab lock {path}: {e.strerror or e}"
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None, (f"another lab run holds {path}; wait for it to finish "
+                      "(nothing was touched)")
+    except OSError as e:
+        os.close(fd)
+        return None, f"cannot lock the lab lock {path}: {e.strerror or e}"
+    return fd, ""
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="newton-lab-test",
@@ -4714,6 +4797,23 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{s.name} [{s.expect}]: {s.description}")
         return 0
 
+    # Every run past this point may touch the lab (an identity check, the
+    # reset, the scenarios), so it holds the shared lab lock for its whole
+    # length and refuses when another run holds it: a second run's reset
+    # would roll VMs back under the first.
+    lock_fd, lock_error = take_lab_lock()
+    if lock_fd is None:
+        print(f"ERROR: {lock_error}", file=sys.stderr)
+        return 2
+    try:
+        return _main_locked(args, lab, scenarios)
+    finally:
+        os.close(lock_fd)
+
+
+def _main_locked(args: argparse.Namespace, lab: Lab,
+                 scenarios: list[Any]) -> int:
+    """The part of main that runs with the lab lock held."""
     # The declared mode of the run, before anything is touched: the
     # check of the declarations against each other and against the
     # inventory.  A run that cannot be labelled is refused here, not

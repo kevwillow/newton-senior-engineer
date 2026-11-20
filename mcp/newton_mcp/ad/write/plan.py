@@ -20,6 +20,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
 
+from ...adapters.ssh_cli import RunnerRefused
 from . import inventory, request, store, transport
 from .errors import WriteError
 
@@ -287,6 +288,26 @@ UNLISTED_DC_WARNING = (
 )
 
 
+def _read(sender: Send, device: Any, read_request: dict[str, Any]) -> dict[str, Any]:
+    """One read of the plan, or a WriteError that names the DC.
+
+    A plan only reads, so a DC that did not answer has written nothing.
+    The reason is the transport's own fixed text, never the device's.
+    """
+    try:
+        return sender(device, read_request)
+    except transport.TransportError as exc:
+        reason = exc.message
+    except RunnerRefused:
+        reason = "the session was refused before it started"
+    raise WriteError(
+        f"the domain controller {device.name} did not answer the read "
+        f"({reason}); nothing was written. Check the host and key of "
+        f"{device.name} in devices.toml and that newton-ad-setup was run "
+        "on this DC"
+    )
+
+
 def plan_change(
     domain: str,
     verb: str,
@@ -324,7 +345,8 @@ def plan_change(
     read_target = _read_target(verb, names, value, inventory_devices, domain)
     answers: dict[str, Any] = {}
     for device in dcs:
-        answer = sender(
+        answer = _read(
+            sender,
             device,
             {
                 "v": 1,
@@ -351,7 +373,8 @@ def plan_change(
     first_facts = answers[pdc.name].get("facts")
     if isinstance(first_facts, dict):
         _check_facts(verb, target, first_facts)
-    before_answer = sender(
+    before_answer = _read(
+        sender,
         pdc,
         {
             "v": 1,

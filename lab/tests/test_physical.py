@@ -126,7 +126,7 @@ poll_s = 1
     return p
 
 
-VM_BLOCK = '[devices.vm1]\nvmid = 702\nhost = "10.0.0.2"\nuser = "root"\nsnapshot = "baseline"\n'
+VM_BLOCK = '[devices.vm1]\nvmid = 702\nvm_name = "vm1"\nhost = "10.0.0.2"\nuser = "root"\nsnapshot = "baseline"\n'
 
 
 @pytest.fixture
@@ -178,7 +178,7 @@ def test_physical_load_refuses_mixed_kinds(tmp_path, sha):
     block = _physical_toml_block(tmp_path, sha=sha, extra='snapshot = "b"')
     with pytest.raises(nl.LabConfigError, match="snapshot"):
         nl.load_lab(_toml(tmp_path, block))
-    vm = ('[devices.vm1]\nvmid = 702\nhost = "h"\nuser = "root"\n'
+    vm = ('[devices.vm1]\nvmid = 702\nvm_name = "vm1"\nhost = "h"\nuser = "root"\n'
           f'snapshot = "b"\nadmin_key = "{tmp_path}/admin.key"\n')
     with pytest.raises(nl.LabConfigError, match="admin_key"):
         nl.load_lab(_toml(tmp_path, "", vm))
@@ -956,7 +956,7 @@ def test_physical_load_requires_lab_true(tmp_path, sha):
 
 def test_vm_device_may_not_set_lab_or_board_name(tmp_path, sha):
     for f in ('lab = true', 'board_name = "x"'):
-        vm = ('[devices.vm1]\nvmid = 702\nhost = "h"\nuser = "root"\n'
+        vm = ('[devices.vm1]\nvmid = 702\nvm_name = "vm1"\nhost = "h"\nuser = "root"\n'
               f'snapshot = "b"\n{f}\n')
         with pytest.raises(nl.LabConfigError, match=f.split()[0]):
             nl.load_lab(_toml(tmp_path, "", vm))

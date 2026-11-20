@@ -1,7 +1,8 @@
 """The shipped lab example must stay the twin of the live lab file.
 
 lab/lab.toml is the live lab file: it names the maintainer's hypervisor, the lab
-VMs and the key and token files, so it is not part of this repository.
+VMs and the key and token files, so it is kept out of every published copy of
+Newton (the release build drops it).
 lab/lab.example.toml is the shipped twin: the same tables and the same keys, with
 synthetic values.  A table or a key that the live file gains and the example does
 not is drift, and the example is what a reader of this repository sees.

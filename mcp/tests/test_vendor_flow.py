@@ -500,6 +500,24 @@ def test_backup_is_redacted_and_private(vendor_lab: VendorLab) -> None:
     assert "synthetic-secret" not in path.read_text(encoding="utf-8")
     assert "<redacted>" in path.read_text(encoding="utf-8")
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    # The result says the copy is redacted and cannot be loaded back
+    assert result["redacted"] is True
+    assert "<redacted>" in result["note"]
+    assert "not a backup to restore" in result["note"]
+
+
+def test_the_backup_description_says_vendor_backups_are_redacted() -> None:
+    """The agent learns before it calls newton_backup that a vendor
+    copy has its secrets replaced and is for reference only."""
+    import asyncio
+
+    from newton_mcp import server
+
+    tools = asyncio.run(server.mcp.list_tools())
+    description = next(t.description for t in tools if t.name == "newton_backup")
+    assert "<redacted>" in description
+    assert "VyOS" in description and "RouterOS" in description and "Junos" in description
+    assert "not a backup to restore" in description
 
 
 def test_non_openwrt_tools_never_use_run_script(

@@ -444,6 +444,26 @@ def test_wrong_passphrase_is_wrong_and_counts_a_miss(clock):
     assert _lockout_record()["misses"] == 1
 
 
+def test_a_damaged_fingerprint_file_is_named_and_counts_no_miss(clock):
+    _write_plan(_plan())
+    path = approve.state_dir() / "approval-fp" / DEVICE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("garbage\n", encoding="ascii")
+    ctx = _FakeContext(clock)
+
+    outcome = _run_approval(ctx)
+
+    assert outcome.status != "approved"
+    assert "damaged" in outcome.message
+    assert (
+        f"run sudo -u newton /usr/local/bin/newton-router-setup {DEVICE} approval-key again"
+        in outcome.message
+    )
+    assert "wrong" not in outcome.message.lower()
+    assert not _approval_path().exists()
+    assert not (approve.state_dir() / "lockout" / f"{DEVICE}.json").exists()
+
+
 def test_the_third_wrong_passphrase_locks_the_next_call(clock):
     _write_plan(_plan())
     _write_fingerprint()
@@ -794,9 +814,23 @@ def test_five_concurrent_guesses_cannot_outrun_the_lockout(clock, monkeypatch):
     assert len(failures) <= dialogs
     assert len(verified) == dialogs
     statuses = [outcome.status for outcome in outcomes]
-    assert statuses.count("wrong") == 3
-    assert statuses.count("locked") == 2
-    assert 299 <= proof.lock_remaining(DEVICE) <= 300
+    # Every passphrase check was a dialog the owner saw and answered wrong.
+    assert statuses.count("wrong") == dialogs
+    # How the five calls interleave depends on the interpreter: on 3.12
+    # asyncio.wait_for runs the dialog inline, so the calls run one after
+    # another (3 wrong, then locked); on 3.11 it starts a task and yields,
+    # so the others find the first dialog open and are turned away
+    # Either way a call that got no dialog was refused
+    # and checked no passphrase.
+    for ctx, outcome in zip(contexts, outcomes):
+        if not ctx.messages:
+            assert outcome.status == "locked" or (
+                outcome.status == "fallback"
+                and "another approval dialog is already open" in outcome.message
+            ), outcome
+    if dialogs == 3:
+        assert statuses.count("locked") == 2
+        assert 299 <= proof.lock_remaining(DEVICE) <= 300
 
 
 def test_a_failing_acknowledgement_still_leaves_a_valid_approval(clock, monkeypatch):
@@ -859,7 +893,7 @@ def test_the_sync_apply_function_remains_importable_and_callable(
     monkeypatch.setattr(
         server.NewtonService,
         "apply",
-        lambda self, device, session_id: {"result": "confirmed"},
+        lambda self, device, session_id, hold=False: {"result": "confirmed"},
     )
 
     result = server.newton_apply_change(DEVICE, SID)
@@ -867,7 +901,7 @@ def test_the_sync_apply_function_remains_importable_and_callable(
     assert result == {"result": "confirmed"}
 
 
-def test_the_registered_apply_tool_has_only_device_and_session_id():
+def test_the_registered_apply_tool_has_only_device_session_id_and_hold():
     from mcp.shared.memory import create_connected_server_and_client_session
 
     async def listed():
@@ -881,7 +915,7 @@ def test_the_registered_apply_tool_has_only_device_and_session_id():
     tools = [tool for tool in response.tools if tool.name == "newton_apply_change"]
     assert len(tools) == 1
     tool = tools[0]
-    assert set(tool.inputSchema["properties"]) == {"device", "session_id"}
+    assert set(tool.inputSchema["properties"]) == {"device", "session_id", "hold"}
     assert "ctx" not in tool.inputSchema["properties"]
     assert "approval" not in json.dumps(tool.inputSchema).lower()
     assert "secret" not in json.dumps(tool.inputSchema).lower()
@@ -906,7 +940,7 @@ def test_the_async_apply_tool_returns_an_approval_error_and_audits_it(
     monkeypatch.setattr(
         server,
         "newton_apply_change",
-        lambda device, session_id: pytest.fail("apply must not run"),
+        lambda device, session_id, hold=False: pytest.fail("apply must not run"),
     )
 
     result = asyncio.run(server._apply_change_tool(DEVICE, SID, object()))
@@ -936,7 +970,7 @@ def test_the_async_apply_tool_runs_the_sync_apply_after_approval(
     monkeypatch.setattr(
         server,
         "newton_apply_change",
-        lambda device, session_id: {"result": "confirmed"},
+        lambda device, session_id, hold=False: {"result": "confirmed"},
     )
 
     result = asyncio.run(server._apply_change_tool(DEVICE, SID, object()))
@@ -965,7 +999,7 @@ def test_the_async_apply_tool_hides_an_unexpected_approval_error(
     monkeypatch.setattr(
         server,
         "newton_apply_change",
-        lambda device, session_id: pytest.fail("apply must not run"),
+        lambda device, session_id, hold=False: pytest.fail("apply must not run"),
     )
 
     result = asyncio.run(server._apply_change_tool(DEVICE, SID, object()))
@@ -1127,7 +1161,7 @@ def test_the_apply_tool_adds_the_approval_notice(configured_newton, monkeypatch)
     monkeypatch.setattr(
         server,
         "newton_apply_change",
-        lambda device, session_id: {"result": "confirmed"},
+        lambda device, session_id, hold=False: {"result": "confirmed"},
     )
 
     result = asyncio.run(server._apply_change_tool(DEVICE, SID, object()))
@@ -1143,7 +1177,7 @@ def test_the_apply_tool_adds_no_notice_when_there_is_none(configured_newton, mon
     monkeypatch.setattr(
         server,
         "newton_apply_change",
-        lambda device, session_id: {"result": "confirmed"},
+        lambda device, session_id, hold=False: {"result": "confirmed"},
     )
 
     result = asyncio.run(server._apply_change_tool(DEVICE, SID, object()))

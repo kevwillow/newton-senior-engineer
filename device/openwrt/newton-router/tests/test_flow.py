@@ -714,10 +714,11 @@ def test_output_contract_stdout_only_program_lines(router):
     assert res.out == f"confirmed {plan.sid}\n"
     for token in ("armed x", "confirmed y", "restored z"):
         assert token not in res.out
-    # abort (after confirm the txn is gone, so `aborted gone`)
+    # abort after confirm is refused (the change is live): stdout is
+    # exactly the one `refused <sid> confirmed` line
     res = router.forced(f"abort {plan.sid}", role="change", timeout=15)
-    assert res.rc == 0
-    assert res.out.split()[0] == "aborted"
+    assert res.rc == 3
+    assert res.out == f"refused {plan.sid} confirmed\n"
     for token in ("armed x", "confirmed y", "restored z"):
         assert token not in res.out
 

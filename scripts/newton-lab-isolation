@@ -3,6 +3,8 @@
 # Run it as: sudo scripts/newton-lab-isolation --iface eth0 --allow-mac aa:bb:cc:dd:ee:ff --seconds 300
 # PASS: a line "PASS no foreign DHCP server or router advert on <iface> in <N> s (<n> packets from allowed sources)".
 # FAIL: one "FAIL foreign[<mac>]: <kind> x<n> not in allow list" line per offending source, then a final FAIL line and exit 1.
+# INCONCLUSIVE: lines with no source MAC (a capture on any, tun or wg, or one taken without -e) are reported as
+# unreadable, never as a foreign source; with no FAIL, a final INCONCLUSIVE line and exit 3 (never a pass).
 # Blind spots: an RA behind IPv6 extension headers is not matched (ip6[40]); the allow list is by source MAC,
 # so a device that spoofs an allowed MAC passes; only Ethernet interfaces work.
 set -uo pipefail
@@ -48,7 +50,7 @@ help() {
 	printf '  --seconds N       capture window in seconds (default 120, range 10-3600)\n'
 	printf '  --from-file <pcap-text>    parse a saved tcpdump text capture instead of capturing\n'
 	printf 'example: sudo scripts/newton-lab-isolation --iface eth0 --allow-mac aa:bb:cc:dd:ee:ff --seconds 300\n'
-	printf 'exit codes: 0 PASS, 1 FAIL, 2 bad arguments, tcpdump missing or failed, capture ended early\n'
+	printf 'exit codes: 0 PASS, 1 FAIL, 2 bad arguments, tcpdump missing or failed, capture ended early, 3 INCONCLUSIVE (lines with no source MAC)\n'
 	exit 0
 }
 
@@ -141,7 +143,8 @@ parse_lines() {
 				continue
 			fi
 		fi
-		note unknown unreadable
+		# a line with no source MAC is unreadable: never counted as a
+		# foreign source, and never a PASS (INCONCLUSIVE below)
 		UNREADABLE=$((UNREADABLE + 1))
 		[[ -n $FIRST_UNREADABLE ]] || FIRST_UNREADABLE=${line:0:200}
 	done
@@ -220,7 +223,8 @@ if (( UNREADABLE > 0 )); then
 	else
 		nlines="$UNREADABLE lines"
 	fi
-	fail unreadable "$nlines could not be attributed to a source MAC (is --iface an Ethernet interface? any, tun and wg cannot be checked); first: $FIRST_UNREADABLE"
+	printf 'INCONCLUSIVE unreadable: %s could not be attributed to a source MAC (is --iface an Ethernet interface? any, tun and wg cannot be checked; was the capture taken with -e?); first: %s\n' \
+		"$nlines" "$FIRST_UNREADABLE"
 fi
 
 if (( FAILURES )); then
@@ -233,6 +237,12 @@ if (( EARLY )); then
 	printf 'ERROR: tcpdump stopped after %d s of the %d s window (the 10000-packet cap was reached or tcpdump was interrupted); the window was not fully observed, so no PASS is reported\n' \
 		"$WINDOW" "$DURATION" >&2
 	exit 2
+fi
+
+if (( UNREADABLE > 0 )); then
+	printf 'INCONCLUSIVE no foreign source seen on %s in %s s, but %s could not be read, so the check did not pass\n' \
+		"$IFACE" "$WINDOW" "$nlines"
+	exit 3
 fi
 
 pass "no foreign DHCP server or router advert on $IFACE in $WINDOW s ($(packets "$ALLOWED_TOTAL") from allowed sources)"

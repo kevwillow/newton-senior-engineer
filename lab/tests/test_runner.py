@@ -128,6 +128,7 @@ key = "~/.ssh/key"
 
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
 snapshot = "baseline"
@@ -528,8 +529,9 @@ def test_post_uses_ssh_for_device():
 
 def test_pve_rollback_uses_start1_and_rollback_path(lab):
     r1 = lab.devices["lab-r1"]
-    with mock.patch.object(nl, "_run",
-                           return_value=_cp(stdout=json.dumps({"data": "UPID:abc"}))) as m:
+    replies = [_cp(stdout=json.dumps({"data": {"name": r1.vm_name}})),
+               _cp(stdout=json.dumps({"data": "UPID:abc"}))]
+    with mock.patch.object(nl, "_run", side_effect=replies) as m:
         upid = nl.pve_rollback(lab, r1)
     assert upid == "UPID:abc"
     args = m.call_args[0][0]
@@ -543,8 +545,9 @@ def test_pve_rollback_uses_start1_and_rollback_path(lab):
 
 def test_pve_rollback_per_device(lab):
     isp = lab.devices["lab-isp"]
-    with mock.patch.object(nl, "_run",
-                           return_value=_cp(stdout=json.dumps({"data": "UPID"}))) as m:
+    replies = [_cp(stdout=json.dumps({"data": {"name": isp.vm_name}})),
+               _cp(stdout=json.dumps({"data": "UPID"}))]
+    with mock.patch.object(nl, "_run", side_effect=replies) as m:
         nl.pve_rollback(lab, isp)
     assert f"/qemu/{isp.vmid}/snapshot/{isp.snapshot}/rollback" in m.call_args[0][0][-1]
 
@@ -698,6 +701,7 @@ password_file = "{pwf}"
 key = "~/.ssh/key"
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
 snapshot = "baseline"
@@ -745,6 +749,7 @@ password_file = "{pwf}"
 key = "~/.ssh/k"
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
 snapshot = "baseline"
@@ -1372,6 +1377,7 @@ key = "~/.ssh/key"
 
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
 snapshot = "baseline"
@@ -1550,6 +1556,7 @@ password_file = "~/.config/newton/lab-root.pw"
 key = "~/.ssh/key"
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
 snapshot = "baseline"
@@ -2451,6 +2458,7 @@ password_file = "~/.config/newton/lab-root.pw"
 key = "~/.ssh/key"
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
 snapshot = "baseline"
@@ -2745,6 +2753,7 @@ key = "~/.ssh/key"
 
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
 snapshot = "baseline"
@@ -2995,6 +3004,7 @@ password_file = "~/.config/newton/lab-root.pw"
 key = "~/.ssh/key"
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
 snapshot = "baseline"
@@ -3107,6 +3117,7 @@ password_file = "~/.config/newton/lab-root.pw"
 key = "~/.ssh/key"
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
 snapshot = "baseline"
@@ -3544,6 +3555,7 @@ password_file = "~/.config/newton/lab-root.pw"
 key = "~/.ssh/key"
 [devices.other-r1]
 vmid = 800
+vm_name = "other-r1"
 host = "10.109.0.99"
 user = "root"
 snapshot = "baseline"
@@ -3783,6 +3795,7 @@ password_file = "~/.config/newton/lab-root.pw"
 key = "~/.ssh/key"
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
 snapshot = "baseline"
@@ -3835,6 +3848,7 @@ password_file = "~/.config/newton/lab-root.pw"
 key = "~/.ssh/key"
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
 snapshot = "baseline"
@@ -3881,6 +3895,7 @@ password_file = "~/.config/newton/lab-root.pw"
 key = "~/.ssh/key"
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
 snapshot = "baseline"
@@ -5050,8 +5065,8 @@ cmd = "true"
 def test_reset_lock_then_ok_through_the_curl_layer(fake_lab, monkeypatch):
     """The whole chain with only `_run` faked (curl and ssh): the real
     pve_rollback / pve_task_status / pve_wait_task / ssh_ready run. A lock
-    failure then OK gives exactly four curl calls in order (POST, GET, POST,
-    GET), two records, one 12 s pause, PASS."""
+    failure then OK gives exactly six curl calls in order (the VM-name
+    GET, POST, GET, again), two records, one 12 s pause, PASS."""
     lab_toml, scen_dir = fake_lab
     scens = _audit_scenario_1device(scen_dir.parent)
     lab = nl.load_lab(lab_toml)
@@ -5067,6 +5082,8 @@ def test_reset_lock_then_ok_through_the_curl_layer(fake_lab, monkeypatch):
             curl_calls.append((method, url))
             if method == "POST":
                 return _cp(stdout=json.dumps({"data": next(posted)}))
+            if url.endswith("/qemu/9102/config"):
+                return _cp(stdout=json.dumps({"data": {"name": "lab-r1"}}))
             upid = urllib.parse.unquote(
                 url.rsplit("/tasks/", 1)[1].rsplit("/status", 1)[0])
             return _cp(stdout=json.dumps({"data": {
@@ -5079,7 +5096,9 @@ def test_reset_lock_then_ok_through_the_curl_layer(fake_lab, monkeypatch):
     rec = nl.run_scenario(lab, scens[0])
     assert rec["error"] is None
     assert rec["passed"] is True
-    assert [m for m, _u in curl_calls] == ["POST", "GET", "POST", "GET"]
+    assert [m for m, _u in curl_calls] == ["GET", "POST", "GET",
+                                           "GET", "POST", "GET"]
+    assert curl_calls[0][1].endswith("/qemu/9102/config")
     assert all("/qemu/9102/snapshot/" in u and u.endswith("/rollback")
                for m, u in curl_calls if m == "POST")
     assert [r["exitstatus"] for r in rec["reset"]] == [LOCK, "OK"]

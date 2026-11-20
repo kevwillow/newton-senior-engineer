@@ -271,6 +271,7 @@ def _lab_toml(tmp_path: Path, *, admin_key: str | None = None,
         "\n"
         "[devices.lab-vyos]\n"
         "vmid = 9104\n"
+        'vm_name = "lab-vyos"\n'
         'host = "10.109.0.31"\n'
         'user = "newton"\n'
         'platform = "vyos"\n'
@@ -1477,6 +1478,7 @@ def _chr_lab_toml(tmp_path: Path) -> Path:
         "\n"
         "[devices.lab-chr]\n"
         "vmid = 9103\n"
+        'vm_name = "lab-chr"\n'
         'host = "10.109.0.21"\n'
         'user = "newton"\n'
         'platform = "routeros"\n'
@@ -2250,6 +2252,7 @@ def _junos_lab_toml(tmp_path: Path, *, fast_reset: bool = True) -> Path:
         "\n"
         "[devices.lab-junos]\n"
         "vmid = 9106\n"
+        'vm_name = "lab-junos"\n'
         'host = "10.109.0.41"\n'
         'user = "newton"\n'
         'platform = "junos"\n'
@@ -2611,3 +2614,73 @@ def test_a_device_whose_pending_read_failed_is_rolled_back(
 
     assert len(rollbacks) == 1
     assert result.passed is True, result.detail
+
+
+# ---- the shared lab lock ----------------------------------------------------
+
+def _vendor_argv(tmp_path: Path) -> list[str]:
+    return ["--vendor", "vyos", "--lab", str(_lab_toml(tmp_path)),
+            "--shapes", str(_shapes_toml(tmp_path)), "--state", str(tmp_path / "state")]
+
+
+def test_a_vendor_run_refuses_while_another_lab_run_holds_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The vendor runner rolls lab VMs back, so it takes the same lock as
+    lab/newton-lab-test.py and touches nothing while another run holds it."""
+    import fcntl
+
+    monkeypatch.setattr(vl, "open_tunnel", lambda *_a, **_k: pytest.fail("must not open"))
+    monkeypatch.setattr(vl, "run_shape", lambda *_a, **_k: pytest.fail("must not run"))
+    fd = os.open(str(nl.LAB_LOCK_PATH), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        rc = vl.main(_vendor_argv(tmp_path))
+    finally:
+        os.close(fd)
+    assert rc == 2
+    assert f"another lab run holds {nl.LAB_LOCK_PATH}" in capsys.readouterr().err
+
+
+def test_a_vendor_run_holds_the_lab_lock_for_its_whole_length(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fcntl
+
+    def is_free() -> bool:
+        fd = os.open(str(nl.LAB_LOCK_PATH), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        finally:
+            os.close(fd)
+        return True
+
+    seen: list[bool] = []
+
+    def fake_open(_lab: Any, _device: Any) -> FakeTunnel:
+        seen.append(is_free())
+        return FakeTunnel()
+
+    def fake_shape(_ctx: Any, shape: Any, **_kwargs: Any) -> Any:
+        seen.append(is_free())
+        return vl.ShapeResult(id=shape.id, expected=shape.expect, got=shape.expect,
+                              passed=True, seconds=0.0)
+
+    monkeypatch.setattr(vl, "open_tunnel", fake_open)
+    monkeypatch.setattr(vl, "run_shape", fake_shape)
+    assert vl.main(_vendor_argv(tmp_path)) == 0
+    assert seen and not any(seen)
+    assert is_free()
+
+
+def test_a_vendor_listing_needs_no_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import fcntl
+
+    fd = os.open(str(nl.LAB_LOCK_PATH), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        assert vl.main(_vendor_argv(tmp_path) + ["--list"]) == 0
+    finally:
+        os.close(fd)

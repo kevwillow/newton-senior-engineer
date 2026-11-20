@@ -4,7 +4,7 @@
 #
 # usage:
 #   newton-router-setup [--password-file FILE] [--admin plain-key|password] [--plain-key FILE] DEVICE ACTION [ARGS]
-#   ACTION: check | install | approval-key [--passphrase-file FILE] | swap-key [--new-key] [LABEL] | add-key [--new-key] LABEL ROLE | revoke LABEL
+#   ACTION: check | install | approval-key [--passphrase-file FILE] | swap-key [--new-key] [--remove-plain-key] [LABEL] | add-key [--new-key] LABEL ROLE | revoke LABEL
 #           | profile lab|prod | upgrade | rollback | uninstall | lab-snapshot [--new-key] [--labels L1,L2] [--gates-cmd CMD | --skip-gates]
 #
 # Notes on behaviour that the code alone does not explain:
@@ -72,6 +72,7 @@ PLAIN_KEY=''
 LABEL=''
 ROLE=''
 NEW_KEY=0
+REMOVE_PLAIN_OK=0
 PROFILE_VALUE=''
 PASSPHRASE_FILE=''
 LABELS=''
@@ -160,7 +161,7 @@ SSH_ERR_TAIL=''
 print_usage() {
 	cat <<'EOF'
 newton-router-setup [--password-file FILE] [--admin plain-key|password] [--plain-key FILE] DEVICE ACTION [ARGS]
-ACTION: check | install | no-install | offer-installed | approval-key [--passphrase-file FILE] | swap-key [--new-key] [LABEL] | add-key [--new-key] LABEL ROLE | revoke LABEL
+ACTION: check | install | no-install | offer-installed | approval-key [--passphrase-file FILE] | swap-key [--new-key] [--remove-plain-key] [LABEL] | add-key [--new-key] LABEL ROLE | revoke LABEL
         | profile lab|prod | upgrade | rollback | uninstall | lab-snapshot [--new-key] [--labels L1,L2] [--gates-cmd CMD | --skip-gates]
         | owner-run SID [--print] | owner-finish SID
 EOF
@@ -491,6 +492,7 @@ valid_path_chars() {
 # device, label or role value.
 parse_args() {
 	NEW_KEY=0
+	REMOVE_PLAIN_OK=0
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
 			-h|--help)
@@ -556,6 +558,10 @@ parse_args() {
 				case "$1" in
 					--new-key)
 						NEW_KEY=1
+						shift
+						;;
+					--remove-plain-key)
+						REMOVE_PLAIN_OK=1
 						shift
 						;;
 					-*)
@@ -978,7 +984,11 @@ choose_admin_path() {
 			home=$(home_dir) || exit 2
 			PLAIN_KEY="${home}/.ssh/id_ed25519"
 		fi
-		[[ -f "$PLAIN_KEY" ]] || die "--plain-key: file not found: $PLAIN_KEY"
+		if [[ ! -f "$PLAIN_KEY" ]]; then
+			[[ "$ACTION" == "swap-key" ]] \
+				&& die "--plain-key: file not found: $PLAIN_KEY (swap-key logs in with the plain key that install used: run install first, or name that key with --plain-key FILE)"
+			die "--plain-key: file not found: $PLAIN_KEY"
+		fi
 	fi
 }
 
@@ -1232,7 +1242,8 @@ settings in /etc/config/newton_wanhealth, the boot links
 /etc/rc.d/K10newton-wan-health, and
 ${#SYSUPGRADE_LINES[@]} lines in /etc/sysupgrade.conf, so a firmware upgrade
 keeps them. The guard service runs at boot; the WAN-health check stays idle
-until you set newton_wanhealth.main.enabled=1. One more line goes into
+until you set newton_wanhealth.main.enabled=1 and list the WAN interfaces
+(iface) and the probe targets (target) it watches. One more line goes into
 ${R_AUTH_KEYS}, but the install does not write it: swap-key
 or add-key does.
 
@@ -2207,6 +2218,30 @@ PYEOF
 	fi
 }
 
+# Contract: swap_plain_key_ok -- no arguments; runs before the first
+# change of swap-key. Says that the plain key (PLAIN_KEY) is removed from
+# the router's authorized_keys, then goes on only with --remove-plain-key
+# (REMOVE_PLAIN_OK=1) or the owner's "y" at the terminal; any other answer,
+# or no terminal and no flag, ends in stopped with the router unchanged.
+# The plain key may be the owner's own admin key (SETUP.md), and after the
+# swap it no longer logs in.
+swap_plain_key_ok() {
+	local answer=''
+	note "swap-key removes the plain key ${PLAIN_KEY} from the router: after the swap that key no longer logs in as root. If it is your own admin key, keep another way in (LuCI or the console) or use a separate setup key"
+	[[ ${REMOVE_PLAIN_OK:-0} -eq 1 ]] && return 0
+	if ! has_terminal; then
+		STATE_NOTE='router unchanged'
+		stopped "no terminal to ask before the plain key ${PLAIN_KEY} is removed; pass --remove-plain-key to swap-key to go ahead"
+	fi
+	printf '%s' "Remove the plain key ${PLAIN_KEY} from the router? (y/N) " >&2
+	read_answer answer
+	case "$answer" in
+	[yY]|[yY][eE][sS]) return 0 ;;
+	esac
+	STATE_NOTE='router unchanged'
+	stopped "the plain key was not removed; nothing changed"
+}
+
 # Contract: action_swap_key -- the swap-key action and
 # design 8.3: require_known_hosts, then the eight sub-steps of swap-
 # key with one PASS swap step N (or the already_swapped PASS, or the
@@ -2261,6 +2296,7 @@ action_swap_key() {
 		STATE_NOTE='router unchanged'
 		stopped "cannot check the tools the dead-man switch needs"
 	fi
+	swap_plain_key_ok
 	if ! swap_stage_new_line; then
 		STATE_NOTE='router unchanged'
 		stopped "cannot stage the new key line"
@@ -2396,22 +2432,35 @@ action_add_key() {
 }
 
 # Contract: action_revoke -- removes all router lines for LABEL, keeps any
-# local key files, reports already-revoked idempotence, then reports done.
+# local key files, then reports done.  No line removed is `already
+# revoked` only when this host keeps a local key file for LABEL (a revoke
+# that ran before); with neither a line nor a local key the label is most
+# likely mistyped, so it stops (router unchanged) and lists the Newton
+# labels the router has.  When LABEL is the key the inventory key_file
+# names, a WARN says Newton is now cut off and gives the add-key restore.
 action_revoke() {
-	local n keyfile files=''
+	local n keyfile files='' labels
 	require_known_hosts
+	keyfile="${KEYS_DIR}/${DEVICE}-${LABEL}"
+	[[ -e "$keyfile" ]] && files="$keyfile"
+	[[ -e "${keyfile}.pub" ]] && files="${files:+${files} }${keyfile}.pub"
 	n=$(auth_remove_label "$LABEL") || {
 		STATE_NOTE='router unchanged'
 		stopped "cannot revoke label $LABEL"
 	}
 	if [[ "$n" == "0" ]]; then
+		if [[ -z "$files" ]]; then
+			labels=$(auth_newton_labels) || labels='unknown (the router could not be read)'
+			STATE_NOTE='router unchanged'
+			stopped "no Newton key line or local key for label $LABEL on this router; Newton key labels on the router: ${labels:-none}"
+		fi
 		pass "already revoked"
 	else
 		pass "revoked $n line(s) for $LABEL"
 	fi
-	keyfile="${KEYS_DIR}/${DEVICE}-${LABEL}"
-	[[ -e "$keyfile" ]] && files="$keyfile"
-	[[ -e "${keyfile}.pub" ]] && files="${files:+${files} }${keyfile}.pub"
+	if [[ -n "$DEV_KEY_FILE" && "$DEV_KEY_FILE" == "$keyfile" ]]; then
+		warn "$LABEL is the key Newton uses for $DEVICE (key_file in the inventory): every Newton call to $DEVICE now fails at login; to restore it run: sudo -u newton /usr/local/bin/newton-router-setup $DEVICE add-key $LABEL change"
+	fi
 	if [[ -n "$files" ]]; then
 		info "local key files kept: $files"
 	fi
@@ -2912,11 +2961,12 @@ uninstall_wan_health_init() {
 # Contract: uninstall_rm_files -- ONE rsh_admin call (fixed text, ${RR}
 # on every location, </dev/null) that runs `rm -f` on the program, the
 # helper, the guard, the init, the two core `.prev` files, the two WAN
-# health files and their two `.prev` files; /etc/config/newton_wanhealth is
+# health files and their two `.prev` files, and every `.new` a cut-off
+# upload can leave (code_new_files); /etc/config/newton_wanhealth is
 # left in place (user data,
 # not touched by uninstall); the exit status is the call's.
 uninstall_rm_files() {
-	rsh_admin "rm -f '${RR}${R_PROG}' '${RR}${R_PROG}.prev' '${RR}${R_HELPER}' '${RR}${R_HELPER}.prev' '${RR}${R_GUARD}' '${RR}${R_INIT}' '${RR}${R_WANHEALTH}' '${RR}${R_WANHEALTH}.prev' '${RR}${R_WANHEALTH_INIT}' '${RR}${R_WANHEALTH_INIT}.prev'" </dev/null 2>/dev/null
+	rsh_admin "rm -f '${RR}${R_PROG}' '${RR}${R_PROG}.prev' '${RR}${R_HELPER}' '${RR}${R_HELPER}.prev' '${RR}${R_GUARD}' '${RR}${R_INIT}' '${RR}${R_WANHEALTH}' '${RR}${R_WANHEALTH}.prev' '${RR}${R_WANHEALTH_INIT}' '${RR}${R_WANHEALTH_INIT}.prev' $(code_new_files)" </dev/null 2>/dev/null
 }
 
 # Contract: uninstall_sysupgrade -- ONE rsh_admin call (fixed text,
@@ -4052,6 +4102,26 @@ AWKEOF
 	rsh_admin "awk -v L='${label}' '${prog}' \"${RR}${R_AUTH_KEYS}\"" </dev/null 2>/dev/null
 }
 
+# Contract: auth_newton_labels -- prints the labels of the Newton lines of
+# R_AUTH_KEYS (last token newton-router-LABEL), sorted, unique, joined by
+# ", "; a label that fails the label regex is left out; one rsh_admin call;
+# returns 1 when the call fails.
+auth_newton_labels() {
+	local prog out label
+	local -a labels=()
+	prog=$(awk_core_program; cat <<'AWKEOF'
+{ tokenize(); if (NT > 0 && T[NT] ~ /^newton-router-/) print substr(T[NT], 15) }
+AWKEOF
+)
+	out=$(rsh_admin "awk '${prog}' \"${RR}${R_AUTH_KEYS}\"" </dev/null 2>/dev/null) || return 1
+	while IFS= read -r label; do
+		valid_label "$label" && labels+=("$label")
+	done < <(printf '%s\n' "$out" | LC_ALL=C sort -u)
+	local IFS=,
+	out="${labels[*]}"
+	printf '%s\n' "${out//,/, }"
+}
+
 # Contract: auth_newton_label_blobs LABEL -- validates LABEL (label regex,
 # else die) and prints one field per Newton line for LABEL: the line's public
 # blob, or `-` when the line has no parsable blob.  A Newton line for LABEL
@@ -4327,6 +4397,13 @@ if [ -e "${RR}${R_GUARD}" ]; then
 else
 	echo "guard=not-installed"
 fi
+missing=''
+if [ -e "${RR}${R_PROG}" ] || [ -e "${RR}${R_GUARD}" ]; then
+	for c in device-id profile zones; do
+		[ -e "${RR}${R_NEWTON_DIR}/\$c" ] || missing="\$missing ${R_NEWTON_DIR}/\$c"
+	done
+fi
+echo "config_missing=\${missing# }"
 if [ -f "${RR}${R_LOCK}/sid" ]; then
 	sid=\$(cat "${RR}${R_LOCK}/sid" 2>/dev/null)
 	if [ -n "\$sid" ] && ubus call session list 2>/dev/null | grep -qF "\$sid"; then
@@ -4383,7 +4460,8 @@ _uci_is_false() {
 # M=N-1; a router without wifi, or an image without iwinfo, is still
 # valid because only wifi reads need iwinfo), INFO overlay free, the
 # two dropbear lines, the authorized_keys INFO line, the guard line, the
-# helper lock line, the wan-health INFO line); parsing is complete before any
+# helper lock line, a FAIL `not fully installed` when the report names a
+# missing config file (config_missing), the wan-health INFO line); parsing is complete before any
 # status is printed. Missing required fields, a tools_checked count different
 # from G0_TOOLS, or a missing/bad report_end prints only `FAIL router report
 # incomplete` and returns 3. The wan-health line is
@@ -4393,7 +4471,7 @@ _uci_is_false() {
 check_lines() {
 	local line key val release='' busybox='' overlay_kib=''
 	local dpa='' drpa='' ak_lines='' ak_labels='' ak_plain='' guard='' lock=''
-	local wan_health='' tools_checked='' report_end=''
+	local wan_health='' tools_checked='' report_end='' config_missing=''
 	local have_release=0 have_tools_checked=0 have_dpa=0 have_drpa=0
 	local have_ak_lines=0 have_report_end=0
 	local -a missing=()
@@ -4414,6 +4492,7 @@ check_lines() {
 			ak_labels) ak_labels="$val" ;;
 			ak_plain) ak_plain="$val" ;;
 			guard) guard="$val" ;;
+			config_missing) config_missing="$val" ;;
 			lock) lock="$val" ;;
 			wan_health) wan_health="$val" ;;
 			report_end) report_end="$val"; have_report_end=1 ;;
@@ -4484,6 +4563,12 @@ check_lines() {
 			restored*) info "guard ${guard}" ;;
 			*) fail "guard ${guard}"; fails=1 ;;
 		esac
+	fi
+	# the program or the guard is there but a config file the install
+	# writes later is not: an install that was cut off
+	if [[ -n "$config_missing" ]]; then
+		fail "not fully installed: ${config_missing} is missing; run install again (sudo -u newton /usr/local/bin/newton-router-setup ${DEVICE} install)"
+		fails=1
 	fi
 	case "$lock" in
 		none) pass "helper lock none" ;;
@@ -4585,9 +4670,23 @@ install_refuse_if_busy() {
 
 # Contract: install_dirs -- step 2 of 3.2: mkdir -p of the two router
 # directories and chmod 755 (/usr/libexec/newton) and 700 (/etc/newton)
-# in one rsh_admin call; the exit status is the call's.
+# in one rsh_admin call, which also removes every `.new` an earlier cut-off
+# upload left (code_new_files: a skipped identical upload never overwrites
+# one); the exit status is the call's.
 install_dirs() {
-	rsh_admin "mkdir -p \"${RR}/usr/libexec/newton\" \"${RR}${R_NEWTON_DIR}\" && chmod 755 \"${RR}/usr/libexec/newton\" && chmod 700 \"${RR}${R_NEWTON_DIR}\"" </dev/null 2>/dev/null
+	rsh_admin "mkdir -p \"${RR}/usr/libexec/newton\" \"${RR}${R_NEWTON_DIR}\" && chmod 755 \"${RR}/usr/libexec/newton\" && chmod 700 \"${RR}${R_NEWTON_DIR}\" && rm -f $(code_new_files)" </dev/null 2>/dev/null
+}
+
+# Contract: code_new_files -- prints the single-quoted ${RR} paths of the
+# `.new` file put_stream writes next to each code file (program, helper,
+# guard, its init, the WAN-health tool and its init), space separated, for
+# an rm -f; fixed text, pure.
+code_new_files() {
+	local p out=''
+	for p in "$R_PROG" "$R_HELPER" "$R_GUARD" "$R_INIT" "$R_WANHEALTH" "$R_WANHEALTH_INIT"; do
+		out="${out:+${out} }'${RR}${p}.new'"
+	done
+	printf '%s\n' "$out"
 }
 
 # Contract: install_code_files -- step 3 of 3.2: checks every source
@@ -4680,10 +4779,11 @@ wan_health_restart() {
 
 # Contract: install_wan_health_config -- ONE fixed-text rsh_admin call
 # (</dev/null, ${RR} on every location) that:
-# (a) creates /etc/config/newton_wanhealth EMPTY if it does not exist
-#     (`[ -e f ] || : > f`; never overwrites an existing one). When created
-#     here the file is chmod 600 so `uci set newton_wanhealth.main.enabled=1`
-#     will not fail on a router that has never seen the package; an
+# (a) creates /etc/config/newton_wanhealth if it does not exist, holding
+#     only the main section (type settings) with enabled '0' (never
+#     overwrites an existing one). When created here the file is chmod 600
+#     and `set newton_wanhealth.main.enabled=1` has a section to set: uci
+#     refuses an option of a section that does not exist; an
 #     existing file keeps its content AND its mode (user data); and
 # (b) runs `${RR}${R_WANHEALTH_INIT} enable` -- the init's start_service
 #     does nothing unless newton_wanhealth.main.enabled is 1, so enabling
@@ -4698,7 +4798,7 @@ wan_health_restart() {
 #     and the call's non-zero exit makes install fail at extras 2
 #     (install_restore + STOPPED). The exit status is the call's.
 install_wan_health_config() {
-	rsh_admin "f=\"${RR}/etc/config/newton_wanhealth\"; if [ ! -e \"\$f\" ]; then : > \"\$f\" && chmod 600 \"\$f\"; fi; \"${RR}${R_WANHEALTH_INIT}\" enable && \"${RR}${R_WANHEALTH_INIT}\" start" </dev/null 2>/dev/null
+	rsh_admin "f=\"${RR}/etc/config/newton_wanhealth\"; if [ ! -e \"\$f\" ]; then umask 077 && printf \"config settings 'main'\\n\\toption enabled '0'\\n\" > \"\$f\" && chmod 600 \"\$f\"; fi; \"${RR}${R_WANHEALTH_INIT}\" enable && \"${RR}${R_WANHEALTH_INIT}\" start" </dev/null 2>/dev/null
 }
 
 # Contract: install_wan_health_verify -- ONE fixed-text rsh_admin call
@@ -6691,7 +6791,7 @@ access_modes_notes() {
 	note "no-install: Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays."
 	note "no-install: Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval."
 	note "no-install: Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run."
-	note "installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 216 KB), no packages and no compiled code."
+	note "installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 217 KB), no packages and no compiled code."
 	note "installed: Newton's key can run that program and nothing else, so the agent never gets a root shell."
 	note "installed: If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck."
 	note "installed: More checks can run, and fewer changes need a script."
@@ -6731,7 +6831,7 @@ installed_offer_yes() {
 		stopped "cannot edit the inventory safely; remove the 'installed_offer' line of ${DEVICE} by hand: ${INVENTORY}"
 	fi
 	note "to switch ${DEVICE} to the installed mode, run these two commands yourself, in this order:"
-	note "  $(owner_command) ${DEVICE} uninstall   (removes the no-install login and ends the no-install mode)"
+	note "  $(owner_command) ${DEVICE} uninstall   (removes the no-install login and ends the no-install mode; it asks before it deletes the owner scripts of ${DEVICE}, with their backups and plan records, and keeps them unless you answer y)"
 	note "  $(owner_command) ${DEVICE} install"
 	note "the installed mode's key swap (swap-key) logs in with a plain key, which a no-install setup does not make: make that key and add it to the router first (INSTALL.md, step 7c)"
 }
@@ -7047,8 +7147,8 @@ action_offer_installed() {
 # Contract: owner_scripts_dir_exists -- exit 0 when the host-side state
 # directory holds an owner-scripts directory, else exit 1.  The owner
 # scripts, their backups and their plan records stay until the device's
-# uninstall removes them (decision 8), so the uninstall only asks for
-# the cleanup when there is something to clean.
+# uninstall removes them on the owner's yes (decision 8), so the
+# uninstall only asks when there is something to clean.
 owner_scripts_dir_exists() {
 	local state=''
 	state=$(state_dir) || return 1
@@ -7205,7 +7305,7 @@ action_owner_finish() {
 }
 
 uninstall_no_install() {
-	local out='' line='' sid='' host='' port='' count=0 rc=0 pwfile=''
+	local out='' line='' sid='' host='' port='' count=0 rc=0 pwfile='' answer='' state=''
 	require_known_hosts
 	# step 1: no apply is pending (a teardown must not drop an undo)
 	out=$(rpcd_apply_pending)
@@ -7303,16 +7403,33 @@ uninstall_no_install() {
 	# this device (decision 8: they stay until the uninstall).  This runs
 	# before the inventory fields are removed, so the device is still
 	# known to be a no-install one.
+	# They are what an undo of an earlier owner-script change is built
+	# from, so they go only on the owner's "y"; no answer, any other
+	# answer or no terminal keeps them and says where they are.
 	if owner_scripts_dir_exists; then
-		out=$("$RPCD" owner-cleanup "$DEVICE") || {
-			STATE_NOTE="the router is clean; the owner scripts of this device are still on this host"
-			stopped "uninstall step 5 failed: cannot remove the owner scripts"
-		}
-		while IFS= read -r line; do
-			[[ -n "$line" ]] || continue
-			printf '%s\n' "$line"
-		done <<<"$out"
-		pass "uninstall step 5: the owner scripts of this device are gone"
+		answer=''
+		if has_terminal; then
+			printf '%s' "Also delete the owner scripts of ${DEVICE} from this host, with their backups and plan records? No undo can be built for an earlier owner-script change without them (y/N) " >&2
+			read_answer answer
+		fi
+		case "$answer" in
+		[yY]|[yY][eE][sS])
+			out=$("$RPCD" owner-cleanup "$DEVICE") || {
+				STATE_NOTE="the router is clean; the owner scripts of this device are still on this host"
+				stopped "uninstall step 5 failed: cannot remove the owner scripts"
+			}
+			while IFS= read -r line; do
+				[[ -n "$line" ]] || continue
+				printf '%s\n' "$line"
+			done <<<"$out"
+			pass "uninstall step 5: the owner scripts of this device are gone"
+			;;
+		*)
+			state=$(state_dir) || state='the state directory'
+			note "kept the owner scripts of ${DEVICE} and their backups in ${state}/owner-scripts and their plan records in ${state}/plans; an undo of an earlier owner-script change is built from them; delete them by hand when you no longer need one"
+			pass "uninstall step 5: the owner scripts of this device are kept"
+			;;
+		esac
 	fi
 	# step 6: the host-side files and the inventory fields
 	# The inventory goes first: while it names the password file, the

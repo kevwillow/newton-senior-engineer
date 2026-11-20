@@ -652,6 +652,18 @@ run_check_key_ssh() {
 	ssh "${SSH_OPTIONS[@]}" "${KEY_OPTIONS[@]}" "$@"
 }
 
+# unreachable_fail KEYWORD OUTPUT -- ssh exit 255 on the empty-command
+# probe: ssh never reached the forced command (vantage off, no route,
+# host key or login refused).  Name the first line of ssh's error, never
+# an unforced key; print the FAIL and exit 1.
+unreachable_fail() {
+	local first
+	first=$(printf '%s\n' "$2" | head -n 1 | tr -cd '[:print:]')
+	printf 'FAIL cannot reach or log in to %s with the %s key (ssh exit 255): %s; check that the vantage is on and reachable from this host\n' \
+		"$DESTINATION" "$1" "${first:-no error text}" >&2
+	exit 1
+}
+
 action_check() {
 	local output rc stdout_file stderr_file
 	[[ -f $KEY_FILE ]] || die "key_file is missing: $KEY_FILE"
@@ -663,6 +675,7 @@ action_check() {
 	# comparison below.
 	rc=0
 	output=$(run_key_ssh -T "$DESTINATION" </dev/null 2>&1) || rc=$?
+	[[ $rc -ne 255 ]] || unreachable_fail scan "$output"
 	if [[ $rc -ne 2 || $output != 'newton-scan: refused' ]]; then
 		printf 'FAIL empty command was not refused (got rc=%s); the scan key is not forced to newton-scan. If the vantage is OpenWrt with no root password, dropbear lets any login in: set a root password.\n' "$rc" >&2
 		exit 1
@@ -1003,16 +1016,15 @@ chmod 600 "$auth_keys"'
 }
 
 action_check_client_checks() {
-	local output rc stdout_file stderr_file record zone_name
+	local output rc stdout_file stderr_file record zone_name failed tested
 	[[ -f $CHECK_KEY_FILE ]] || die "check key_file is missing: $CHECK_KEY_FILE"
 	[[ ${ZONE_COUNT:-0} -gt 0 ]] \
 		|| die "no zones are configured for $VANTAGE; add zones to the inventory"
-	record=${ZONE_RECORDS%%$'\n'*}
-	zone_name=${record%%|*}
 	# The same three confinement checks as the scan key, but with the
 	# client-check key and the newton-vantage-check refusal text.
 	rc=0
 	output=$(run_check_key_ssh -T "$DESTINATION" </dev/null 2>&1) || rc=$?
+	[[ $rc -ne 255 ]] || unreachable_fail client-check "$output"
 	if [[ $rc -ne 2 || $output != 'newton-vantage-check: refused' ]]; then
 		printf 'FAIL empty command was not refused (got rc=%s); the client-check key is not forced to newton-vantage-check.\n' "$rc" >&2
 		exit 1
@@ -1050,15 +1062,27 @@ action_check_client_checks() {
 	fi
 	printf 'PASS pty blocked\n'
 
-	# The canary check of the first zone: the vantage must be able to
-	# reach the zone's router address from inside the zone.
-	rc=0
-	output=$(run_check_key_ssh -T "$DESTINATION" "check ${zone_name} canary" </dev/null 2>&1) || rc=$?
-	if [[ $rc -ne 0 || $output != 'RESULT PASS reached' ]]; then
-		printf 'FAIL canary check of zone %s did not pass (got rc=%s: %s)\n' "$zone_name" "$rc" "$output" >&2
+	# The canary check of every configured zone: the vantage must be able
+	# to reach each zone's router address from inside that zone. One line
+	# per zone; DONE only when every zone passed.
+	failed=0; tested=0
+	while IFS= read -r record; do
+		[[ -n $record ]] || continue
+		zone_name=${record%%|*}
+		tested=$((tested + 1))
+		rc=0
+		output=$(run_check_key_ssh -T "$DESTINATION" "check ${zone_name} canary" </dev/null 2>&1) || rc=$?
+		if [[ $rc -ne 0 || $output != 'RESULT PASS reached' ]]; then
+			printf 'FAIL canary check of zone %s did not pass (got rc=%s: %s)\n' "$zone_name" "$rc" "$output" >&2
+			failed=$((failed + 1))
+		else
+			printf 'PASS canary %s\n' "$zone_name"
+		fi
+	done <<<"$ZONE_RECORDS"
+	if [[ $failed -ne 0 ]]; then
+		printf 'FAIL %s of %s zones did not pass the canary check; check-client-checks %s is not done\n' "$failed" "$tested" "$VANTAGE" >&2
 		exit 1
 	fi
-	printf 'PASS canary\n'
 	printf 'DONE check-client-checks %s\n' "$VANTAGE"
 }
 

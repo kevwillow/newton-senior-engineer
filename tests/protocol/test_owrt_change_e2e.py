@@ -68,6 +68,10 @@ FAKE_SSH_BODY = textwrap.dedent(
     ROUTER_ROOT = Path(os.environ["FAKE_SSH_ROUTER_ROOT"])
     BUSYBOX = os.environ["FAKE_SSH_BUSYBOX"]
     CONNECT_FLAG = Path(os.environ.get("FAKE_SSH_CONNECT_FLAG", "/nonexistent"))
+    # DROP_FLAG holds a command prefix: the next command that starts with
+    # it runs on the router for real, then the link drops before its
+    # answer arrives (ssh exits 255, the output is lost). Used once.
+    DROP_FLAG = Path(os.environ.get("FAKE_SSH_DROP_FLAG", "/nonexistent"))
 
     try:
         dest_idx = next(i for i, a in enumerate(sys.argv[1:], 1) if "@" in a)
@@ -102,6 +106,10 @@ FAKE_SSH_BODY = textwrap.dedent(
 
     out_bytes = proc.stdout
     err_bytes = proc.stderr
+    if DROP_FLAG.exists() and cmd.startswith(DROP_FLAG.read_text().strip()):
+        DROP_FLAG.unlink()
+        sys.stderr.write("client_loop: send disconnect: Broken pipe\\n")
+        sys.exit(255)
     if cmd.startswith("/usr/libexec/newton/newton-router hello "):
         out_text = out_bytes.decode("utf-8", "replace")
         out_text = out_text.replace(" mode=test ", " mode=prod ")
@@ -638,6 +646,7 @@ def e2e(tmp_path):
         "FAKE_SSH_ROUTER_ROOT": str(router.root),
         "FAKE_SSH_BUSYBOX": BUSYBOX,
         "FAKE_SSH_CONNECT_FLAG": str(tmp_path / "connect-fail"),
+        "FAKE_SSH_DROP_FLAG": str(tmp_path / "drop-after"),
         "FAKE_SSH_SID": SID,
     })
     # NB: the fixture does NOT pre-create the XDG_STATE_HOME / OWRT_BACKUP_DIR
@@ -689,6 +698,9 @@ def e2e(tmp_path):
         args = [str(SCRIPT), "abort", "root@lab-r1", sid]
         return _wrap_with_unshare(args, env, 120)
 
+    def run_script(*args):
+        return _wrap_with_unshare([str(SCRIPT), *args], env, 600)
+
     def set_rpcd_mode(mode):
         """Which rpcd is in force: "old" names the session's folder after
         the session id, "new" gives it a 32-hex name of its own (the
@@ -706,6 +718,8 @@ def e2e(tmp_path):
         run_apply=run_apply,
         run_status=run_status,
         run_abort=run_abort,
+        run_script=run_script,
+        drop_after=lambda prefix: (tmp_path / "drop-after").write_text(prefix + "\n"),
         set_rpcd_mode=set_rpcd_mode,
         install_md5sum=lambda: install_md5sum(router),
         install_init_fakes=lambda: install_init_fakes(router),
@@ -1513,7 +1527,8 @@ def test_a_failing_newton_probe_before_a_true_claim_names_no_claim(e2e):
 def test_each_failure_reason_the_router_prints_names_the_claim(e2e, line, claim, reason, words):
     sid, res = _ex4_plan_apply(e2e, b"ping\t127.0.0.1\t1\n" + line)
     assert res.returncode != 0 and "ROLLBACK WINDOW PASSED" in res.stdout, res.stdout
-    assert f"failed: {line.split(b'\t')[0].decode()} {reason}" in res.stdout, res.stdout
+    name = line.split(b'\t')[0].decode()
+    assert f"failed: {name} {reason}" in res.stdout, res.stdout
     import importlib as _il
 
     ex = _il.import_module("newton_mcp.explanation")
@@ -1521,3 +1536,69 @@ def test_each_failure_reason_the_router_prints_names_the_claim(e2e, line, claim,
     found = ex.failed_claim(res.stdout, sid, probes, [claim])
     assert found is not None and found["claim"] == 1, res.stdout
     assert words in found["text"] and f"({reason})" in found["text"], found
+
+
+# ----- a confirm whose answer is lost ------------------------------------
+
+
+def _plan_for_confirm(e2e):
+    _prep_plannable(e2e)
+    e2e.ready_for_arm()
+    e2e.router.set_fake("pidof", out="411\n")
+    changes = e2e.root / "changes.uci"
+    changes.write_text("set dhcp.cfg01.domain=lan\n")
+    res_plan = e2e.run_plan(changes=changes, timeout=120)
+    assert res_plan.returncode == 0, res_plan.stdout
+    meta, _ = _parse_plan_stdout(res_plan.stdout)
+    return _sid_from_staged(meta["STAGED"])
+
+
+def _reconciled(stdout, sid):
+    return [l for l in stdout.splitlines() if l.startswith(f"CONFIRMED session={sid} (reconciled: ")]
+
+
+@pytest.mark.parametrize("next_command", ["status", "abort"])
+def test_a_confirm_whose_answer_is_lost_is_recorded_by_the_next_status_or_abort(e2e, next_command):
+    """The router confirmed; the link dropped before its answer arrived, so the
+    apply ends OUTCOME UNKNOWN. The next status or abort finds the router's
+    status saying confirmed and records it (the CONFIRMED line, with the config
+    hashes before it), so the change ends CONFIRMED on this host too."""
+    sid = _plan_for_confirm(e2e)
+    e2e.drop_after(f"{PROG_PATH} confirm ")
+    res_apply = e2e.run_script("apply", "root@lab-r1", sid, "120")
+    assert res_apply.returncode == 1, res_apply.stdout
+    assert "OUTCOME UNKNOWN" in res_apply.stdout
+
+    res = e2e.run_script(next_command, "root@lab-r1", sid)
+    rec = _reconciled(res.stdout, sid)
+    assert len(rec) == 1, res.stdout
+    lines = res.stdout.splitlines()
+    assert any(l.startswith("CONFIGHASH ") for l in lines[: lines.index(rec[0])]), res.stdout
+    assert rec[0] in e2e.audit.read_text()
+    assert not (e2e.state_plans / f"{sid}.sha256").exists()
+    if next_command == "abort":
+        assert res.returncode == 1
+        assert "was already confirmed; the change stays live" in res.stdout.splitlines()[-1]
+    # a second status records nothing more
+    again = e2e.run_status(sid)
+    assert _reconciled(again.stdout, sid) == []
+
+
+def test_a_second_confirm_after_a_lost_confirm_answer_says_the_change_is_confirmed(e2e):
+    """A held apply; the confirm reached the router but its answer was lost.
+    A second confirm's verify round is refused (the session is closed): it
+    must not say the router rolls the change back."""
+    sid = _plan_for_confirm(e2e)
+    res_hold = e2e.run_script("apply", "root@lab-r1", sid, "120", "--hold")
+    assert res_hold.returncode == 0, res_hold.stdout
+    e2e.drop_after(f"{PROG_PATH} confirm ")
+    first = e2e.run_script("confirm", "root@lab-r1", sid)
+    assert first.returncode == 1 and "OUTCOME UNKNOWN" in first.stdout, first.stdout
+    second = e2e.run_script("confirm", "root@lab-r1", sid)
+    assert second.returncode == 1
+    final = second.stdout.splitlines()[-1]
+    assert final.startswith(f"ERROR: session {sid} is already confirmed on the router; "
+                            "nothing confirmed by this run; "), second.stdout
+    assert "rolls the change back" not in final
+    assert len(_reconciled(second.stdout, sid)) == 1
+    assert not (e2e.state_plans / f"{sid}.held").exists()

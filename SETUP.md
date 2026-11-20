@@ -25,9 +25,11 @@ Run these and report which are missing. Do not install anything yourself.
 ```sh
 uname -s                      # must print Linux
 command -v sudo git ssh python3
-python3 -c 'import venv, ensurepip'
+/usr/bin/python3 -c 'import sys, venv, ensurepip; sys.exit(0 if sys.version_info >= (3, 11) else "Python 3.11 or newer is needed, found " + sys.version.split()[0])'
 ```
-If something is missing, stop and give the user the exact line for their system, then wait:
+The installer builds its venv with `/usr/bin/python3`, which must be Python 3.11 or newer (Ubuntu 22.04 and RHEL 9
+ship an older one); the last line prints the version it found when it is older. If something is missing, stop
+and give the user the exact line for their system, then wait:
 - Debian/Ubuntu: `sudo apt install git openssh-client python3 python3-venv sudo`
 - Fedora/RHEL: `sudo dnf install git openssh-clients python3 sudo`
 Claude Code's `claude` command must also be on PATH (`command -v claude`); if it is not, stop.
@@ -51,12 +53,10 @@ Do not continue on a mismatch.
 
 ## 3. Install the skill (copy, never sync into a link)
 ```sh
-test -L ~/.claude/skills/newton && echo SYMLINK
-mkdir -p ~/.claude/skills/newton
-git -C ~/newton archive HEAD | tar -x -C ~/.claude/skills/newton
+if [ -L ~/.claude/skills/newton ]; then echo SYMLINK; elif [ -e ~/.claude/skills/newton ] && [ -n "$(ls -A ~/.claude/skills/newton 2>&1)" ]; then echo EXISTS; else mkdir -p ~/.claude/skills/newton && git -C ~/newton archive HEAD | tar -x -C ~/.claude/skills/newton && echo COPIED; fi
 ```
-If the first command prints `SYMLINK`, or `~/.claude/skills/newton` already exists and is not empty, stop and ask the
-user: do not delete, overwrite or `rsync --delete` into it. Other agents keep skills elsewhere
+The check runs first and the copy runs only when `~/.claude/skills/newton` is absent or empty. If it prints
+`SYMLINK` or `EXISTS`, nothing was copied: stop and ask the user; do not delete, overwrite or `rsync --delete` into it. Other agents keep skills elsewhere
 (`docs/SETUP-CLIENTS.md`); this file covers Claude Code.
 
 ## 4. Give the user ONE command to run as root
@@ -100,10 +100,14 @@ result. Replace `<name>` and `<router-ip>` with the user's answers.
 a. Ask for the router's address and which name to use (lower case letters, digits, `-`). Do not guess.
 b. The router entry. The user adds it to Newton's inventory, which the `newton` account owns:
    ```sh
-   printf '[devices.%s]\nplatform = "openwrt"\nhost = "%s"\nuser = "root"\n' <name> <router-ip> \
+   sudo -u newton grep -qxF '[devices.<name>]' /var/lib/newton/devices.toml 2>/dev/null && echo 'already in the inventory: <name>' \
+     || printf '[devices.%s]\nplatform = "openwrt"\nhost = "%s"\nuser = "root"\n' <name> <router-ip> \
      | sudo -u newton tee -a /var/lib/newton/devices.toml >/dev/null
    sudo -u newton chmod 600 /var/lib/newton/devices.toml
    ```
+   The first line checks for the device first, so running it twice never adds a second `[devices.<name>]` table (a
+   duplicate table makes the whole inventory unreadable). If it prints `already in the inventory`, the entry is there
+   from an earlier run; nothing was added.
 c. A setup key, for the installed mode only (skip it for the no-install mode, which logs in with the router's root
    password and needs no key). Newton first reaches the router with a plain key of the `newton` account:
    ```sh
@@ -121,8 +125,10 @@ e. Choose the access mode with the user. The **no-install** mode is the default 
    installed mode: `sudo -u newton /usr/local/bin/newton-router-setup <name> install`, then
    `sudo -u newton /usr/local/bin/newton-router-setup <name> swap-key --new-key newton-agent` (gives Newton its own restricted
    key, removes the plain one from the router and records the key in the inventory).
-   If the router refuses root password logins, add `--admin plain-key --plain-key <path to your admin key>` before the
-   device name.
+   If the router refuses root password logins, add `--admin plain-key --plain-key <path to a setup key>` before the
+   device name. swap-key removes that plain key from the router, so use a separate setup key that is on the router
+   (step c), not your own admin key, or keep another way in (LuCI or the console). swap-key says which key it removes
+   and asks before it changes anything; without a terminal it needs `--remove-plain-key`.
    Before you run the install, tell the user what it puts on the router (this is the text the install prints, with the
    sizes of the files it uploads) and that they have to type `yes` to go on. Anything else stops the install with
    "nothing was changed", and the router is not touched:
@@ -131,10 +137,10 @@ e. Choose the access mode with the user. The **no-install** mode is the default 
 What Newton puts on your router
 
 Newton's executable code is a small set of POSIX shell scripts; it also writes the configuration and service entries listed below.
-No package is installed and nothing is compiled: about 216 KB of shell in 6 files.
+No package is installed and nothing is compiled: about 217 KB of shell in 6 files.
 
   /usr/libexec/newton/newton-router     148 KB  the program Newton talks to
-  /usr/libexec/newton/newton-safe-apply   24 KB  the change helper
+  /usr/libexec/newton/newton-safe-apply   25 KB  the change helper
   /usr/libexec/newton-guard              31 KB  the rollback guard
   /etc/init.d/newton-guard               525 B  starts the guard at boot
   /usr/libexec/newton/newton-wan-health   11 KB  the dual-WAN health check
@@ -147,7 +153,8 @@ settings in /etc/config/newton_wanhealth, the boot links
 /etc/rc.d/K10newton-wan-health, and
 13 lines in /etc/sysupgrade.conf, so a firmware upgrade
 keeps them. The guard service runs at boot; the WAN-health check stays idle
-until you set newton_wanhealth.main.enabled=1. One more line goes into
+until you set newton_wanhealth.main.enabled=1 and list the WAN interfaces
+(iface) and the probe targets (target) it watches. One more line goes into
 /etc/dropbear/authorized_keys, but the install does not write it: swap-key
 or add-key does.
 
@@ -230,7 +237,7 @@ restore removes the WAN-health run-time state in /var/run/newton-wan-health
    NOTE no-install: Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays.
    NOTE no-install: Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval.
    NOTE no-install: Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run.
-   NOTE installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 216 KB), no packages and no compiled code.
+   NOTE installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 217 KB), no packages and no compiled code.
    NOTE installed: Newton's key can run that program and nothing else, so the agent never gets a root shell.
    NOTE installed: If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck.
    NOTE installed: More checks can run, and fewer changes need a script.
@@ -287,7 +294,9 @@ restore removes the WAN-health run-time state in /var/run/newton-wan-health
    sessions of the `newton` user, proves that the login is refused, and removes the password file and
    the inventory fields on this machine; it ends the no-install mode with them, so the entry is a plain
    device from then on (not installed yet). It refuses while an apply is pending on the router: a teardown
-   now could drop the pending undo.
+   now could drop the pending undo. It asks `(y/N)` before it deletes the device's owner scripts, their
+   backups and plan records from this machine (an undo of an earlier owner-script change is built from
+   them); without a `y` it keeps them and prints where they are.
 
    The two modes never mix: `install`, `upgrade`, `profile`, `swap-key`, `add-key`, `revoke`, `rollback` and
    `lab-snapshot` refuse a device whose inventory says `access = "no-install"`, and `no-install` refuses a router
@@ -295,15 +304,20 @@ restore removes the WAN-health run-time state in /var/run/newton-wan-health
    anything, while the router still holds the no-install login (the `rpcd.newton` section).
    Switching modes is an explicit teardown first and a setup second.
 f. `sudo -u newton /usr/local/bin/newton-router-setup <name> approval-key`: the user picks the approval passphrase and
-   types it twice. At the end it offers an authenticator app (6-digit codes instead of the passphrase in the approval
-   dialog); the user answers y or n there. Say the choice plainly: the passphrase is the default; the authenticator is
-   optional and can be added later with `sudo -u newton /usr/local/bin/newton-enrol totp <name>`. Never see or relay
-   the seed or the QR code.
-g. Read-only checkup: call `newton_list_devices`, then `newton_guided_audit` for the device. Report findings in plain
-   words, in order of risk. This makes no changes.
+   types it twice. On an installed device it then offers an authenticator app (6-digit codes instead of the passphrase
+   in the approval dialog); the user answers y or n there. Say the choice plainly: the passphrase is the default; the
+   authenticator is optional and can be added later with `sudo -u newton /usr/local/bin/newton-enrol totp <name>`.
+   On a no-install device approval-key does not offer the authenticator: it ends after the passphrase, so do not
+   describe a y/n question; if the user wants the app, the same `newton-enrol totp <name>` command adds it afterwards.
+   Never see or relay the seed or the QR code.
+g. Read-only checkup: call `newton_list_devices`, then, for a no-install device, `newton_read` for the device (the
+   no-install mode refuses `newton_guided_audit`: the guided audit needs the installed mode); for an installed device,
+   `newton_guided_audit`. Report findings in plain words, in order of risk. This makes no changes.
 h. Ask the user what they want to do next. For any change, follow the change protocol in `SKILL.md`: plan, show the
    diff and what it does, wait for the user's yes in chat, then call `newton_apply_change`; the approval dialog appears
    in the terminal running Claude Code and only the user answers it.
+i. Only when the user wants client checks or scans: they register a client machine themselves, with the commands of
+   `docs/INSTALL.md` step 11 (rule 3: you never edit the inventory). Give them those commands; do not run them.
 
 ## If something goes wrong
 Stop, say which step failed and paste the exact error. Do not retry with other flags, do not work around a refusal,

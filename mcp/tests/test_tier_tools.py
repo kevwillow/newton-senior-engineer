@@ -89,7 +89,7 @@ def _plan_output(diff="dhcp.skilltest='host'"):
 
 def test_tool_names_has_exactly_nineteen_names_and_lists_the_read_tools():
     """TOOL_NAMES is the canonical source of truth for the MCP surface."""
-    assert len(server.TOOL_NAMES) == 23
+    assert len(server.TOOL_NAMES) == 24
     assert "newton_list_tiers" in server.TOOL_NAMES
     assert "newton_plan_tier" in server.TOOL_NAMES
     assert "newton_guided_recommend" in server.TOOL_NAMES

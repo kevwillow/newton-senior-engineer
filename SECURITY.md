@@ -2,6 +2,8 @@
 
 Newton is an MCP server and an agent skill that changes routers with an undo armed on the router before every write: over SSH
 in the installed mode, and over the router's own web API (HTTPS, pinned certificate) in the OpenWrt no-install mode.
+On the main branch it also changes Active Directory domains, with the undo armed on the domain controller (an unlock
+has no undo; see Known limits).
 
 ## Reporting a vulnerability
 
@@ -26,6 +28,10 @@ Remove addresses and keys from everything you send. Reports are handled by the m
 - The program that runs on the router: `device/openwrt/newton-router/`, and the reboot-safe guard `device/openwrt/newton-guard/`.
 - The change scripts: `scripts/owrt-change.sh` (agent host) and `scripts/owrt-safe-apply.sh` (runs on the router).
 - The installer and setup scripts: `scripts/newton-install`, `scripts/newton-bootstrap`, `scripts/newton-router-setup`, `scripts/newton-doctor`.
+- Approval enrolment: `newton-enrol` (`mcp/newton_mcp/enrol.py`).
+- The Active Directory write path (on the main branch): `mcp/newton_mcp/ad/write/` on the Newton host, the helpers it runs on a domain controller (`mcp/newton_mcp/ad/collector/write.ps1` on Windows, `mcp/newton_mcp/ad/collector/newton-ad-samba-write` on Samba), and the setup script `scripts/newton-ad-setup`.
+- The scan vantage scripts: `scripts/newton-vantage-setup`, `scripts/newton-vantage-run`, `scripts/newton-vantage-check`.
+- The serial console script: `scripts/newton-serial.py`.
 
 ## Out of scope
 
@@ -39,7 +45,7 @@ Remove addresses and keys from everything you send. Reports are handled by the m
 - The AI is an untrusted planner. Deterministic code decides.
 - The router keys belong to a separate OS account (`newton`) that the AI's user cannot read. `newton-doctor` checks this.
 - An approval is a single-use token that expires, bound to the exact change and the router's current config. On an installed OpenWrt router the router program checks it again on the device. In the no-install mode and on VyOS, RouterOS and Junos only the Newton host checks it.
-- Every write arms an undo timer on the router first. In the installed mode a guard on the router survives reboots.
+- Every write through the MCP tools arms an undo on the device first: a timer on the router, or an undo the domain controller runs itself for an Active Directory change. An AD unlock has no undo (see Known limits), and the serial console script `scripts/newton-serial.py` arms none. In the installed mode a guard on the router survives reboots.
 - Wi-Fi keys and passwords in fields and values are masked before they reach the AI. A secret written as prose is not detected (see Known limits).
 - Text that comes from a device (hostnames, Wi-Fi names, logs) is marked untrusted data.
 - There is no tool that runs arbitrary commands, reboots, upgrades or installs packages.
@@ -53,6 +59,7 @@ The full threat model is [`docs/design/04-SECURITY-AND-SAFETY-MODEL.md`](docs/de
   leases and DNS entries by itself in that mode.
 - Approval on VyOS, MikroTik RouterOS and Junos is checked by the Newton host only. The device does not check it again. See [`docs/design/04-SECURITY-AND-SAFETY-MODEL.md`](docs/design/04-SECURITY-AND-SAFETY-MODEL.md), section Approvals.
 - On MikroTik RouterOS (CHR), undo is a reboot into a saved backup. See [`docs/design/05-DEVICE-ABSTRACTION-AND-VENDOR-STRATEGY.md`](docs/design/05-DEVICE-ABSTRACTION-AND-VENDOR-STRATEGY.md).
+- Active Directory changes (on the main branch): an unlock has no undo and stays written, and a new user whose objectGUID the domain controller did not record (the connection can fail between the add and that record) is left in place by the DC's undo, which records `undo_failed` with its DN in `conflicts`. `CHANGELOG.md` ("Unreleased") lists the other AD limits.
 - ADR-020: 1.0 has no per-device rate limit on changes. Each production change already needs its own approval. Placeholder fingerprints let a model test a guess at a low-entropy secret, one planning step per guess. Use high-entropy secrets.
 - A passphrase typed into the approval dialog passes through the Claude Code process. With Claude Code debug logging on,
   it is written to the debug log, and an installed Claude Code hook could read it. `newton-doctor` warns when debug logging

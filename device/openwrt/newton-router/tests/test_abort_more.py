@@ -176,7 +176,8 @@ def test_abort_cleans_rpcd_save_dir(router, row, setup):
 def test_abort_restore_refuses_wrong_line(router, restore_text, restore_rc):
     """abort_restore accepts only the exact first line `restored <SID>
     abort` (design 6.4 row 3 / row 4 / row 8). Any other line OR exit 1
-    fails the abort: stderr exactly `error rollback-failed`, exit 1,
+    fails the abort: stderr exactly `error rollback-failed guard: <the
+    guard's first line, or "no answer"> (exit <guard rc>)`, exit 1,
     stdout empty, NOTHING cleaned (the txn dir, <sid>.applied and the
     rpcd save dir are all still there)."""
     plan = applied(router)
@@ -189,7 +190,10 @@ def test_abort_restore_refuses_wrong_line(router, restore_text, restore_rc):
     )
     router.set_uptime(200)
     res = router.forced(f"abort {plan.sid}", caller="agent-one", timeout=30)
-    assert (res.rc, res.out, res.err) == (1, "", "error rollback-failed\n")
+    first = restore_text.split("\n", 1)[0] or "no answer"
+    assert (res.rc, res.out, res.err) == (
+        1, "", f"error rollback-failed guard: {first} (exit {restore_rc})\n"
+    )
     lock = router.root / "tmp/owrt-safe-apply.lock"
     assert (lock / f"{SID}.txn").is_dir(), "txn dir must remain on rollback-failed"
     assert (lock / f"{SID}.applied").is_file(), \
@@ -227,6 +231,35 @@ def test_abort_restore_accepts_exact_line(router):
     how = res.out.split()[2]
     cleaned(router, SID, how)
 
+
+
+@pytest.mark.parametrize(
+    "restore_text,restore_rc",
+    [
+        (f"retry {SID} verify-failed 2\n", 1),
+        (f"failed {SID} lkg-corrupt\n", 1),
+        ("refused lkg-missing txn-x\n", 1),
+        ("refused nothing-pending\n", 0),
+    ],
+    ids=["retry", "failed-lkg-corrupt", "lkg-missing", "nothing-pending"],
+)
+def test_rollback_failed_keeps_the_guards_first_line(router, restore_text, restore_rc):
+    """The owner must tell a retry (it may succeed shortly) from a
+    permanent failure (the last-known-good copy is damaged): the guard's
+    first line stays in the rollback-failed error as its detail."""
+    plan = applied(router)
+    make_rpcd_save(router, sid=plan.sid)
+    use_logging_stub_guard(
+        router,
+        status_text=f"pending {SID} 100\n",
+        restore_text=restore_text,
+        restore_rc=restore_rc,
+    )
+    router.set_uptime(200)
+    res = router.forced(f"abort {plan.sid}", caller="agent-one", timeout=30)
+    assert res.rc == 1
+    assert res.err.startswith("error rollback-failed guard: ")
+    assert restore_text.strip() in res.err
 
 # ---- 4. non-owner abort ticks the guard first; owner and root do not ----
 
@@ -378,14 +411,14 @@ def test_abort_twice_keeps_the_restorer_label(router, rpcd_rc, how, label):
     "last_line",
     [
         pytest.param(f"aborted {SID_OTHER} rolled-back", id="other-sid"),
-        pytest.param(f"confirmed {SID}", id="confirmed"),
+        pytest.param(f"confirmed {SID_OTHER}", id="other-confirmed"),
     ],
 )
 def test_abort_gone_overwrites_a_last_that_names_another_session(
     router, last_line
 ):
     """Row 9 with no txn: `tmp/newton/last` holding `aborted <other sid>
-    ...` or `confirmed <sid>` does NOT name this SID's restorer, so the
+    ...` or `confirmed <other sid>` does NOT name this SID, so the
     `gone` path writes `aborted <sid> gone` as before."""
     router.write("tmp/newton/last", last_line + "\n")
     res = router.forced(f"abort {SID}", caller="agent-one", timeout=30)
@@ -401,3 +434,39 @@ def test_abort_gone_writes_last_when_there_is_none(router):
     res = router.forced(f"abort {SID}", caller="agent-one", timeout=30)
     assert (res.rc, res.out, res.err) == (0, f"aborted {SID} gone\n", "")
     cleaned(router, SID, "gone")
+
+
+# ---- 7. abort of a session that was already confirmed --------------------
+# A confirmed change is live and has no rollback left: its txn and lock are
+# gone and `tmp/newton/last` says `confirmed <sid>`. An abort must not read
+# as a revert: it refuses, says so on stdout, leaves `last` as it was, and
+# `status` keeps answering `confirmed`.
+
+
+def test_abort_of_a_confirmed_session_refuses_and_keeps_last(router):
+    plan = applied(router)
+    res = router.forced(f"confirm {plan.sid}", caller="agent-one", timeout=30)
+    assert (res.rc, res.out) == (0, f"confirmed {plan.sid}\n"), res.err
+    assert read_last(router) == f"confirmed {plan.sid}\n"
+    config_before = (router.root / "etc/config/network").read_bytes()
+
+    res2 = router.forced(f"abort {plan.sid}", caller="agent-one", timeout=30)
+    assert (res2.rc, res2.out, res2.err) == (
+        3, f"refused {plan.sid} confirmed\n", "error already-confirmed\n"
+    )
+    assert read_last(router) == f"confirmed {plan.sid}\n"
+    assert (router.root / "etc/config/network").read_bytes() == config_before
+    assert lock_is_free(router)
+    res3, word, fields = status(router, plan.sid)
+    assert word == "confirmed", res3.out
+
+
+def test_abort_of_a_confirmed_last_with_no_txn_refuses(router):
+    """Row 9 with `tmp/newton/last` = `confirmed <sid>` and no txn: the
+    refusal, not `aborted <sid> gone`."""
+    router.write("tmp/newton/last", f"confirmed {SID}\n")
+    res = router.forced(f"abort {SID}", caller="agent-one", timeout=30)
+    assert (res.rc, res.out, res.err) == (
+        3, f"refused {SID} confirmed\n", "error already-confirmed\n"
+    )
+    assert read_last(router) == f"confirmed {SID}\n"

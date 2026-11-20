@@ -25,6 +25,9 @@ WANHEALTH_INIT = "etc/init.d/newton-wan-health"
 WANHEALTH_SRC = "scripts/newton-wan-health.sh"
 WANHEALTH_INIT_SRC = "scripts/newton-wan-health.init"
 WANHEALTH_CONFIG = "etc/config/newton_wanhealth"
+# what the install writes when the file is absent: the main section the
+# init reads (newton_wanhealth.main.enabled), off
+WANHEALTH_CONFIG_NEW = "config settings 'main'\n\toption enabled '0'\n"
 WANHEALTH_START_MARKER = "tmp/newton-wan-health.start"
 WANHEALTH_STOP_MARKER = "tmp/newton-wan-health.stop"
 WANHEALTH_RESTART_MARKER = "tmp/newton-wan-health.restart"
@@ -103,9 +106,10 @@ def test_install_wan_health_files_and_init_enable(setup_env):
 		env.src / WANHEALTH_INIT_SRC).read_text()
 	# the init's enable made the S95 symlink
 	assert snap["etc/rc.d/S95newton-wan-health"]["link"] == "../init.d/newton-wan-health"
-	# /etc/config/newton_wanhealth was created empty, mode 600
+	# /etc/config/newton_wanhealth was created with a disabled main
+	# section, mode 600
 	assert env.router.path(WANHEALTH_CONFIG).exists()
-	assert env.router.read(WANHEALTH_CONFIG) == ""
+	assert env.router.read(WANHEALTH_CONFIG) == WANHEALTH_CONFIG_NEW
 	assert snap[WANHEALTH_CONFIG]["mode"] == "0o600"
 
 
@@ -130,15 +134,16 @@ def test_install_does_not_overwrite_existing_wan_health_config(setup_env):
 
 def test_install_creates_empty_wan_health_config_when_missing(setup_env):
 	"""A router that has no /etc/config/newton_wanhealth gets the file
-	 created empty (mode 600) so uci does not refuse later `uci set
-	 newton_wanhealth.main.enabled=1` calls."""
+	 created (mode 600) with the main section, disabled, so a later
+	 `set newton_wanhealth.main.enabled=1` has a section to set: uci
+	 refuses an option of a section that does not exist."""
 	env = setup_env
 	seed_known_hosts(env)
 	assert not env.router.path(WANHEALTH_CONFIG).exists()
 	r = run(env, "install")
 	assert r.rc == 0
 	assert env.router.path(WANHEALTH_CONFIG).exists()
-	assert env.router.read(WANHEALTH_CONFIG) == ""
+	assert env.router.read(WANHEALTH_CONFIG) == WANHEALTH_CONFIG_NEW
 	assert env.router.snapshot()[WANHEALTH_CONFIG]["mode"] == "0o600"
 
 
@@ -594,9 +599,11 @@ def test_install_first_failure_stops_disables_then_removes_wan_health(
 	assert env.router.path(WANHEALTH_STOP_MARKER).exists()
 	stop = _calls_with(r, "init.d/newton-wan-health' stop")
 	disable = _calls_with(r, "init.d/newton-wan-health' disable")
-	remove = [call for call in _calls_with(r, "rm -f")
-	          if WANHEALTH in (call.get("command") or "")
-	          and WANHEALTH_INIT in (call.get("command") or "")]
+	# the restore's removal of the two files (install step 2 also runs an
+	# rm -f, of the stray .new uploads, which names them with .new)
+	remove = _calls_with(
+		r, f'rm -f "{env.router.path(WANHEALTH)}" '
+		   f'"{env.router.path(WANHEALTH_INIT)}"')
 	assert len(stop) == 1, r.calls
 	assert len(disable) == 1, r.calls
 	assert len(remove) == 1, r.calls

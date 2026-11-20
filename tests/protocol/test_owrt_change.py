@@ -281,10 +281,25 @@ def protocol(tmp_path):
                 print("digest", digest)
                 sys.exit(0)
             if cmd == PROG + " diff " + SID:
+                fail = read_state().get("diff_fail")
+                if fail:
+                    sys.stderr.write(fail["stderr"] + "\\n")
+                    sys.exit(fail["rc"])
                 sys.stdout.write(read_state()["diff"])
                 sys.exit(0)
             if cmd == PROG + " named " + SID:
+                fail = read_state().get("named_fail")
+                if fail:
+                    sys.stderr.write(fail["stderr"] + "\\n")
+                    sys.exit(fail["rc"])
                 sys.stdout.write(read_state()["named"])
+                sys.exit(0)
+            if cmd == PROG + " check-staged " + SID:
+                state = read_state()
+                if state.get("check_staged") is None:
+                    print(f"stub ssh: unhandled remote command: {cmd}", file=sys.stderr)
+                    sys.exit(127)
+                print(state["check_staged"])
                 sys.exit(0)
             if cmd == PROG + " fw-loaded":
                 print("1" if read_state()["fw_table"] else "0")
@@ -317,7 +332,7 @@ def protocol(tmp_path):
                 result = read_state()["health_snapshot"]
                 if result != "ok":
                     print(result, file=sys.stderr)
-                    sys.exit(1)
+                    sys.exit(read_state().get("health_snapshot_rc", 1))
                 sys.exit(0)
             if cmd in (PROG + " health-check " + SID, PROG + " health-check " + SID + " after-rollback"):
                 sys.exit(subprocess.run([str(root / "routerbin" / "health-check")]).returncode)
@@ -342,6 +357,9 @@ def protocol(tmp_path):
                     sys.exit(1)
                 sys.exit(subprocess.run([str(root / "routerbin" / "health-check")]).returncode)
             if cmd.startswith(PROG + " apply "):
+                if (root / "slow-apply").exists():
+                    import time
+                    time.sleep(2)
                 state = read_state()
                 if state.get("apply_rc"):
                     sys.stderr.write(state.get("apply_stderr", "") + "\\n")
@@ -351,6 +369,9 @@ def protocol(tmp_path):
                 print(out)
                 sys.exit(0)
             if cmd == PROG + " confirm " + SID:
+                if (root / "slow-confirm").exists():
+                    import time
+                    time.sleep(2)
                 state = read_state()
                 rc = state.get("confirm_rc", 0)
                 if rc:
@@ -391,6 +412,10 @@ def protocol(tmp_path):
                 if state.get("abort_fail"):
                     sys.stderr.write(state["abort_fail"])
                     sys.exit(1)
+                if state.get("abort_confirmed"):
+                    print("refused", SID, "confirmed")
+                    sys.stderr.write("error already-confirmed\\n")
+                    sys.exit(3)
                 print("aborted", SID, state.get("abort_how", "discarded"))
                 sys.exit(0)
             if cmd.startswith(PROG + " fwrestart "):
@@ -446,6 +471,8 @@ def protocol(tmp_path):
                 print(f"started rc={1 if failed else 0}")
                 sys.exit(0)
             if cmd.startswith(PROG + " dns-dhcp-check "):
+                if (root / "dns-dhcp-unreachable").exists():
+                    unreachable()
                 state = read_state()
                 if not state["dnsmasq_running"]:
                     print("dnsmasq is not running", file=sys.stderr)
@@ -485,6 +512,9 @@ def protocol(tmp_path):
             if len(results) > 1:
                 state["health_checks"] = results[1:]
                 state_file.write_text(json.dumps(state))
+            if current == "unreachable":
+                print("ssh: connect to host 192.0.2.1 port 22: Connection timed out", file=sys.stderr)
+                sys.exit(255)
             if current != "ok":
                 print(current, file=sys.stderr)
                 sys.exit(1)
@@ -1744,7 +1774,7 @@ def test_plan_prints_seal_facts(protocol, tmp_path):
     # profile lab, but a leash code forces approval
     assert "APPROVAL required" in result.stdout
     assert re.search(r"^PLANDIGEST [0-9a-f]{64}$", result.stdout, re.M)
-    assert f"next: {SCRIPT} apply root@192.0.2.1 {SID} [timeout]" in result.stdout
+    assert f"next: {SCRIPT} apply root@192.0.2.1 {SID} 90" in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -2204,18 +2234,61 @@ def test_confirm_rpcd_timer_lost_is_named_in_confirmed_line(protocol):
 
 
 def test_apply_exit_3_refusal_leaves_session_staged(protocol):
-    """Apply exit 3 is a clean refusal: nothing applied, session still staged (7.1 row 294-297)."""
-    set_router_state(protocol, apply_rc=3, apply_stderr="error plan-changed t")
+    """Apply exit 3 is a clean refusal: nothing applied (7.1 row 294-297). A
+    changed plan cannot be applied, so the next step is a new plan."""
+    set_router_state(protocol, apply_rc=3, apply_stderr="error plan-changed diff")
 
     result = protocol["run"]()
 
     assert result.returncode == 1
     assert (
-        f"apply refused, nothing applied: error plan-changed t; "
-        f"session {SID} is still staged"
+        f"apply refused, nothing applied: error plan-changed diff; {REPLAN}"
     ) in result.stdout
+    assert f"session {SID} is still staged" not in result.stdout
     assert verify_rounds(protocol) == []
     assert f"CONFIRMED session={SID}" not in result.stdout
+
+
+REPLAN = "this session cannot be applied; plan the change again"
+
+
+@pytest.mark.parametrize(
+    ("stderr", "next_step", "staged"),
+    [
+        ("error not-sealed", REPLAN, False),
+        ("error session-gone", "the router no longer has session", False),
+        ("error plan-changed t", "apply it again with the timeout it was planned with", True),
+        ("error plan-changed diff", REPLAN, False),
+        ("error stale-stage", REPLAN, False),
+        ("error stale-base", REPLAN, False),
+        ("error guard armed 0123", "the router's rollback guard is not idle", True),
+        ("error no-health-snapshot", "apply again", True),
+        ("error needs-approval profile-prod", "approve the plan, then apply again", True),
+        ("error approval-window", "the approval expired or is not valid yet; approve the plan again", True),
+        ("error bad-approval", "the approval does not match this plan; approve the plan again", True),
+        ("error approval-key-missing", "the router has no approval key", True),
+        ("error something-new", "run: ", False),
+        ("error no-such-txn", "the router no longer has session", False),
+        ("error role", "needs the change role", False),
+        ("error not-owner", "this login does not own session", False),
+    ],
+)
+def test_apply_refusal_names_each_codes_next_step(protocol, stderr, next_step, staged):
+    """Each router refusal code gets its own next step; "still staged" only
+    where the session really is still staged and applicable."""
+    set_router_state(protocol, apply_rc=3, apply_stderr=stderr)
+
+    result = protocol["run"]()
+
+    assert result.returncode == 1
+    line = [x for x in result.stdout.splitlines() if "apply refused, nothing applied" in x]
+    assert len(line) == 1, result.stdout
+    assert f"apply refused, nothing applied: {stderr};" in line[0]
+    assert next_step in line[0]
+    assert (f"session {SID} is still staged" in line[0]) is staged
+    if stderr != "error something-new":
+        assert "not one Newton knows" not in line[0]
+    assert verify_rounds(protocol) == []
 
 
 def test_approval_token_reaches_apply_and_never_leaks(protocol):
@@ -2800,7 +2873,7 @@ def test_apply_refusal_output_is_sanitized_and_masks_applied(protocol, separator
     assert result.returncode == 1, result.stdout
     assert (
         f"apply refused, nothing applied: x applied session={SID} rollback=60s; "
-        f"session {SID} is still staged"
+        "this refusal code is not one Newton knows"
     ) in result.stdout
     assert separator.encode("utf-8") not in result.stdout.encode("utf-8")
 
@@ -3881,12 +3954,12 @@ def test_apply_unexpected_stdout_is_outcome_unknown(protocol):
 
 
 def test_apply_exit_3_runs_no_failure_branch(protocol):
-    set_router_state(protocol, apply_rc=3, apply_stderr="error plan-changed t")
+    set_router_state(protocol, apply_rc=3, apply_stderr="error plan-changed diff")
 
     result = protocol["run"]()
 
     assert result.returncode == 1
-    assert f"apply refused, nothing applied: error plan-changed t; session {SID} is still staged" in result.stdout
+    assert f"apply refused, nothing applied: error plan-changed diff; {REPLAN}" in result.stdout
     assert f"APPLIED session={SID}" not in result.stdout
     calls = remote_calls(protocol)
     assert not any(call == f"{PROG} status {SID}" for call in calls)
@@ -4384,6 +4457,23 @@ def test_failing_abort_dies_with_first_stderr_line(protocol):
     assert (
         f"abort did not report success: error rpcd-busy; "
         f"run: {SCRIPT} status root@192.0.2.1 {SID}"
+    ) in result.stdout
+
+
+def test_abort_of_a_confirmed_session_refuses_and_points_to_undo(protocol):
+    """The router refuses the abort of a confirmed SID (`refused <sid>
+    confirmed`, exit 3): the wrapper must not log ABORTED, must exit non-zero
+    and must say the change stays live and how to undo it."""
+    set_router_state(protocol, abort_confirmed=True)
+
+    result = run_script(protocol, ["abort", "root@192.0.2.1", SID])
+
+    assert result.returncode == 1, result.stdout
+    assert "ABORTED" not in result.stdout
+    assert "ABORTED" not in protocol["audit"].read_text()
+    assert (
+        f"abort refused: session {SID} was already confirmed; the change stays live. "
+        "To undo it, plan the reverse change (newton_plan_undo)"
     ) in result.stdout
 
 

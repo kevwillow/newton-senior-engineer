@@ -11,12 +11,13 @@ Do the steps in order. Every command runs on the machine that will manage your r
 
 ## 1. Check the prerequisites
 
-You need Linux with `sudo`, `git`, an SSH client and Python 3 with its `venv` module. Check what you have:
+You need Linux with `sudo`, `git`, an SSH client and Python 3.11 or newer as `/usr/bin/python3`, with its `venv`
+module (Ubuntu 22.04 and RHEL 9 ship an older one; the installer refuses it). Check what you have:
 
 ```sh
 uname -s
 command -v sudo git ssh python3
-python3 -c 'import venv, ensurepip'
+/usr/bin/python3 -c 'import sys, venv, ensurepip; sys.exit(0 if sys.version_info >= (3, 11) else "Python 3.11 or newer is needed, found " + sys.version.split()[0])'
 ```
 `uname -s` must print `Linux`. If a program is missing, install it and run the checks again.
 
@@ -66,11 +67,11 @@ the same commit. Do not go on if they differ.
 The skill is a directory of files. Copy it into the skills folder of the assistant you use. For Claude Code:
 
 ```sh
-mkdir -p ~/.claude/skills/newton
-git -C ~/newton archive HEAD | tar -x -C ~/.claude/skills/newton
+if [ -L ~/.claude/skills/newton ]; then echo SYMLINK; elif [ -e ~/.claude/skills/newton ] && [ -n "$(ls -A ~/.claude/skills/newton 2>&1)" ]; then echo EXISTS; else mkdir -p ~/.claude/skills/newton && git -C ~/newton archive HEAD | tar -x -C ~/.claude/skills/newton && echo COPIED; fi
 ```
 Copy the files. Do not point the folder at the clone with a link and do not sync into it: a link makes the installed
-skill and the live repository the same files. Move any existing folder aside yourself first.
+skill and the live repository the same files. The command checks first and copies only into an absent or empty
+folder; if it prints `SYMLINK` or `EXISTS`, nothing was copied: move the existing folder aside yourself, then run it again.
 
 Other assistants use `~/.codex/skills/`, `~/.config/opencode/skills/`, `~/.hermes/skills/` or `~/.cursor/skills/`.
 
@@ -109,7 +110,7 @@ skip it.
 An existing file is never overwritten; the installer prints the one line to add instead. The approval passphrase
 comes in step 7. The install creates the `newton` account and group (home `/var/lib/newton`, no login shell), which
 holds the router keys; the code under `/opt/newton`; the launchers `/usr/local/bin/newton-mcp`, `newton-approve`,
-`newton-router-setup`, `newton-enrol`, `newton-ad-setup` and `newton-doctor`; the sudoers rules in `/etc/sudoers.d/newton-mcp`; and
+`newton-router-setup`, `newton-vantage-setup`, `newton-enrol`, `newton-ad-setup` and `newton-doctor`; the sudoers rules in `/etc/sudoers.d/newton-mcp`; and
 the bootstrap `/usr/local/sbin/newton-bootstrap`.
 
 Near its end the install prints these lines. The two access modes are for the router, and step 7e picks one:
@@ -123,7 +124,7 @@ no-install: Every change uses OpenWrt's own undo timer.
 no-install: Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays.
 no-install: Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval.
 no-install: Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run.
-installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 216 KB), no packages and no compiled code.
+installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 217 KB), no packages and no compiled code.
 installed: Newton's key can run that program and nothing else, so the agent never gets a root shell.
 installed: If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck.
 installed: More checks can run, and fewer changes need a script.
@@ -147,6 +148,12 @@ The bootstrap checks the commit itself and asks for `install ` and the first 12 
 installer refuses to run a second time, but only after you have typed the full commit confirmation and answered the
 `lock` question; the refused run installs nothing. The root shell is what the repository's own notes use for both commands, because
 the bootstrap needs a clean environment; from such a shell the first install is `<repo>/scripts/newton-install`.
+
+Before an update, confirm or abort every held change: a held change cannot be confirmed by a server that was updated
+under it. After the update, restart Claude Code, or run `/mcp` and reconnect `newton`, so the new server runs (the old
+one keeps the old code in memory). Then, for each router in the installed mode, run
+`sudo -u newton /usr/local/bin/newton-router-setup <device> upgrade`, so the router program matches the new server; a
+no-install router needs nothing.
 
 ## 5. Register the MCP server with your assistant
 
@@ -200,10 +207,13 @@ Every command in this step runs in your own terminal, one at a time.
 your own:
 
 ```sh
-printf '[devices.%s]\nplatform = "openwrt"\nhost = "%s"\nuser = "root"\n' router1 192.0.2.1 \
+sudo -u newton grep -qxF '[devices.router1]' /var/lib/newton/devices.toml 2>/dev/null && echo 'already in the inventory: router1' \
+  || printf '[devices.%s]\nplatform = "openwrt"\nhost = "%s"\nuser = "root"\n' router1 192.0.2.1 \
   | sudo -u newton tee -a /var/lib/newton/devices.toml >/dev/null
 sudo -u newton chmod 600 /var/lib/newton/devices.toml
 ```
+The first line checks for the device first, so running it twice never adds a second table for it (a duplicate table
+makes the whole inventory unreadable).
 **7c.** Make the first key. This step is for the installed mode only; for the no-install mode, skip it, because the
 no-install setup logs in to the router with its root password and needs no key. In the installed mode, Newton reaches
 the router with a plain key of the `newton` account:
@@ -263,7 +273,9 @@ The **installed** mode puts Newton's program on the router, and swaps the plain 
 sudo -u newton /usr/local/bin/newton-router-setup router1 install
 sudo -u newton /usr/local/bin/newton-router-setup router1 swap-key --new-key newton-agent
 ```
-`swap-key` logs in with the plain key from 7c, so that key must be on the router first. After `swap step 7` it
+`swap-key` logs in with the plain key from 7c, so that key must be on the router first, and it removes that key from
+the router: it says so and asks `(y/N)` before it changes anything (with no terminal, pass `--remove-plain-key` after
+`swap-key` instead). After `swap step 7` it
 waits about 95 s with no output before its last check; let it finish. If it is stopped there, run it again without
 `--new-key`: it sees the key already swapped and updates the inventory.
 
@@ -295,10 +307,10 @@ install with "nothing was changed", and the router is not touched:
 What Newton puts on your router
 
 Newton's executable code is a small set of POSIX shell scripts; it also writes the configuration and service entries listed below.
-No package is installed and nothing is compiled: about 216 KB of shell in 6 files.
+No package is installed and nothing is compiled: about 217 KB of shell in 6 files.
 
   /usr/libexec/newton/newton-router     148 KB  the program Newton talks to
-  /usr/libexec/newton/newton-safe-apply   24 KB  the change helper
+  /usr/libexec/newton/newton-safe-apply   25 KB  the change helper
   /usr/libexec/newton-guard              31 KB  the rollback guard
   /etc/init.d/newton-guard               525 B  starts the guard at boot
   /usr/libexec/newton/newton-wan-health   11 KB  the dual-WAN health check
@@ -311,7 +323,8 @@ settings in /etc/config/newton_wanhealth, the boot links
 /etc/rc.d/K10newton-wan-health, and
 13 lines in /etc/sysupgrade.conf, so a firmware upgrade
 keeps them. The guard service runs at boot; the WAN-health check stays idle
-until you set newton_wanhealth.main.enabled=1. One more line goes into
+until you set newton_wanhealth.main.enabled=1 and list the WAN interfaces
+(iface) and the probe targets (target) it watches. One more line goes into
 /etc/dropbear/authorized_keys, but the install does not write it: swap-key
 or add-key does.
 
@@ -363,8 +376,9 @@ restore removes the WAN-health run-time state in /var/run/newton-wan-health
 (every *.state file and all_down.flag); the directory itself stays, empty.
 ```
 
-If the router refuses root password logins, add `--admin plain-key --plain-key <path to your admin key>` before the
-device name.
+If the router refuses root password logins, add `--admin plain-key --plain-key <path to a setup key>` before the
+device name. `swap-key` removes that plain key from the router, so use a separate setup key (step 7c), not your own
+admin key, or keep another way in (LuCI or the console).
 
 **7f.** Choose the approval passphrase. On a no-install router, step 7e already asked for it, and the authenticator
 app belongs to the installed mode, so it is not offered there; run this only to change the passphrase. On an
@@ -403,8 +417,10 @@ changes without asking, except the ones Newton always asks about. The assistant 
   [SECURITY.md](../SECURITY.md).
 - The dialog waits 180 seconds. If nobody answers in that time, nothing is approved and no attempt is counted. The
   dialog can stay on the screen after that; an answer typed then is ignored, so ask for the change again.
-- Three wrong answers in the dialog lock the device for five minutes; every later lock waits twice as long. The count
-  is the dialog's own: the terminal path below counts no wrong answers and locks nothing.
+- Three wrong answers in a row lock the device for five minutes; every later lock waits twice as long. A correct answer
+  clears the count. The dialog counts wrong answers, and so do `newton-approve ad-change` and the approval that
+  `newton-rpcd owner-check` asks for; the terminal path below for a router change counts no wrong answers and locks
+  nothing.
 - If the dialog does not come up, run this in your own terminal with the id the assistant gave you:
 
 ```sh
@@ -425,6 +441,8 @@ sudo -u newton /usr/local/bin/newton-router-setup router1 uninstall
 On a **no-install** router, `uninstall` removes the web-interface login Newton made and ends Newton's live sessions on
 the router, and it refuses while a change waits for confirmation. It touches no key and no file, because the
 no-install mode puts none on the router. It then switches the inventory entry back to the installed mode, not yet installed.
+On this machine it asks `(y/N)` before it deletes the router's owner scripts with their backups and plan records (an
+undo of an earlier owner-script change is built from them); without a `y` it keeps them and prints where they are.
 
 On an **installed** router it removes the guard, the code files, every Newton key line in the authorized keys file (for every host and label,
 including the key the Newton server itself uses) and the sysupgrade.conf lines. It prints each removed key with its
@@ -496,13 +514,18 @@ In the write entry:
 key_file = "/var/lib/newton/.ssh/dc1-ops"
 known_hosts = "/var/lib/newton/.ssh/dc1.known_hosts"
 ```
-Then append both to the inventory, which the `newton` account owns, as in 7b:
+Then append both to the inventory, which the `newton` account owns, as in 7b. Use your own names in the two
+`[devices.<name>]` lines:
 
 ```sh
-sudo -u newton tee -a /var/lib/newton/devices.toml < dc1.toml >/dev/null
-sudo -u newton tee -a /var/lib/newton/devices.toml < dc1-ops.toml >/dev/null
+sudo -u newton grep -qxF '[devices.dc1]' /var/lib/newton/devices.toml && echo 'already in the inventory: dc1' \
+  || sudo -u newton tee -a /var/lib/newton/devices.toml < dc1.toml >/dev/null
+sudo -u newton grep -qxF '[devices.dc1-ops]' /var/lib/newton/devices.toml && echo 'already in the inventory: dc1-ops' \
+  || sudo -u newton tee -a /var/lib/newton/devices.toml < dc1-ops.toml >/dev/null
 sudo -u newton chmod 600 /var/lib/newton/devices.toml
 ```
+Each append checks for its entry first, so running this twice never adds a second table (a duplicate table makes the
+whole inventory unreadable, and every device stops working).
 
 **10f.** For changes only, once per domain: record the approval key of the entry that stands for the domain (the PDC
 emulator's write entry). Type the passphrase you typed on every DC of the domain, twice:
@@ -511,6 +534,91 @@ emulator's write entry). Type the passphrase you typed on every DC of the domain
 sudo -u newton /usr/local/bin/newton-ad-setup approval-key dc1-ops
 ```
 The fingerprint it prints must equal the one each DC printed.
+
+## 11. A client machine for client checks and scans (optional)
+
+Client checks (DNS, DHCP and the internet work from a client, and what you meant to block is blocked) and nmap scans
+run from a machine you register: a Linux or OpenWrt machine in your network (an inside client) or outside it. Newton
+logs in to it with a restricted key that may run only Newton's scan or check command. The machine needs `nmap`,
+`timeout` and `sha256sum` on its PATH. Client checks have run in the virtual lab only, not on a real router. Every
+command in this step runs in your own terminal on this machine. This guide calls the client `pc1`.
+
+**11a.** Pin the client's host key, as in 10d:
+
+```sh
+sudo -u newton mkdir -p -m 700 /var/lib/newton/.ssh
+ssh-keyscan -t ed25519 192.0.2.50 | sudo -u newton tee /var/lib/newton/.ssh/pc1.known_hosts >/dev/null
+sudo -u newton ssh-keygen -lf /var/lib/newton/.ssh/pc1.known_hosts
+```
+Compare the fingerprint with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the client. If they differ, stop
+and remove the file.
+
+**11b.** The setup logs in to the client once, as the account Newton will use there, to put the restricted key in
+place. Make it a key for that login:
+
+```sh
+sudo -u newton ssh-keygen -t ed25519 -N '' -f /var/lib/newton/.ssh/pc1-admin
+sudo -u newton cat /var/lib/newton/.ssh/pc1-admin.pub
+```
+Add the printed line to that account's `~/.ssh/authorized_keys` on the client (`/etc/dropbear/authorized_keys` for
+root on an OpenWrt client). To use the account's password instead, put it in a file of the `newton` account with mode
+0600 and write `admin_password_file = "<that file>"` in place of `admin_key` below.
+
+**11c.** Write the entry into a file `pc1.toml` in your current directory, with your own values:
+
+```toml
+[vantages.pc1]
+host = "192.0.2.50"
+user = "scanner"
+key_file = "/var/lib/newton/.ssh/pc1-scan"
+known_hosts = "/var/lib/newton/.ssh/pc1.known_hosts"
+admin_key = "/var/lib/newton/.ssh/pc1-admin"
+role = "inside"
+devices = ["router1"]
+check_targets = ["192.0.2.0/24"]
+
+[[vantages.pc1.zones]]
+name = "lan"
+src = "192.0.2.50"
+canary = "192.0.2.1:53"
+iface = "eth0"
+```
+- `host` and `user`: the client's address and the account Newton logs in to.
+- `key_file`: where the setup makes the restricted key (it also makes `<key_file>-check` for the client checks).
+- `role`: `inside` for a client in your network, `outside` for one on the internet side (an outside client scans the
+  router's WAN address and needs no zones).
+- `devices`: the inventory names of the routers this client may scan or check.
+- `zones` (client checks only), one table per router zone the client sits in: `name` is the router's firewall zone,
+  `src` the client's own address in it, `canary` the router's address in that zone with a port that answers there
+  (53 for DNS), `iface` the client's interface for the DHCP check; `netns`, a network namespace, is optional.
+- `check_targets` (optional): the ranges the check command may probe; without it, the private ranges.
+
+**11d.** Add the entry to the inventory, as in 7b:
+
+```sh
+sudo -u newton grep -qxF '[vantages.pc1]' /var/lib/newton/devices.toml && echo 'already in the inventory: pc1' \
+  || sudo -u newton tee -a /var/lib/newton/devices.toml < pc1.toml >/dev/null
+sudo -u newton chmod 600 /var/lib/newton/devices.toml
+```
+
+**11e.** Put the restricted key and the scan command on the client, then check them:
+
+```sh
+sudo -u newton /usr/local/bin/newton-vantage-setup pc1 install
+```
+
+```sh
+sudo -u newton /usr/local/bin/newton-vantage-setup pc1 check
+```
+For client checks, also:
+
+```sh
+sudo -u newton /usr/local/bin/newton-vantage-setup pc1 install-client-checks
+```
+
+```sh
+sudo -u newton /usr/local/bin/newton-vantage-setup pc1 check-client-checks
+```
 
 ## If something goes wrong
 

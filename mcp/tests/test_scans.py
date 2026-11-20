@@ -565,6 +565,44 @@ def test_scan_approval_uses_passphrase_fingerprint_and_writes_bound_consent(
     ) == 0o600
 
 
+def test_scan_approval_names_a_damaged_fingerprint_file(tmp_path, monkeypatch, capsys):
+    """A damaged fingerprint file never approves the scan and is not
+    reported as a wrong passphrase."""
+    _write_inventory(tmp_path, monkeypatch, vantages=(("outside-a", "outside"),))
+    _write_request(tmp_path, _request())
+    fp_path = tmp_path / "state" / "approval-fp" / "router"
+    fp_path.parent.mkdir(parents=True)
+    fp_path.write_text("garbage\n")
+    monkeypatch.setattr(approve, "_getpass", lambda prompt: "synthetic scan approval phrase")
+    monkeypatch.setattr(
+        approve.sys, "stdin", TerminalInput(f"approve {REQUEST_ID[:8]}\n")
+    )
+
+    assert approve.main([REQUEST_ID]) == 1
+    err = capsys.readouterr().err
+    assert "wrong approval passphrase" not in err
+    assert (
+        "newton-approve: the approval fingerprint file for router is damaged; "
+        "run sudo -u newton /usr/local/bin/newton-router-setup router approval-key again; "
+        "consent not created"
+    ) in err
+    assert not (tmp_path / "state" / "scan-consents" / f"{REQUEST_ID}.json").exists()
+
+
+def test_scan_approval_fails_closed_on_an_unknown_fingerprint_answer(tmp_path, monkeypatch, capsys):
+    _write_inventory(tmp_path, monkeypatch, vantages=(("outside-a", "outside"),))
+    _write_request(tmp_path, _request())
+    monkeypatch.setattr(approve, "check_approval_fingerprint", lambda path, fp: "unexpected")
+    monkeypatch.setattr(approve, "_getpass", lambda prompt: "synthetic scan approval phrase")
+    monkeypatch.setattr(
+        approve.sys, "stdin", TerminalInput(f"approve {REQUEST_ID[:8]}\n")
+    )
+
+    assert approve.main([REQUEST_ID]) == 1
+    assert "consent not created" in capsys.readouterr().err
+    assert not (tmp_path / "state" / "scan-consents" / f"{REQUEST_ID}.json").exists()
+
+
 @pytest.mark.parametrize("case", ["none", "expired", "replayed", "modified", "wrong-device"])
 def test_run_refuses_bad_consent_or_request_before_runner(tmp_path, monkeypatch, case):
     _write_inventory(tmp_path, monkeypatch, vantages=(("outside-a", "outside"),))
@@ -950,3 +988,56 @@ def test_default_route_still_refuses_an_equal_metric_tie():
     }
     with pytest.raises(scans.ScanError):
         scans.default_route_interface(dump)
+
+
+class _InterruptedInput(TerminalInput):
+    def readline(self, *args):
+        raise KeyboardInterrupt
+
+
+def test_scan_approval_ctrl_c_at_the_confirmation_creates_no_consent(
+    tmp_path, monkeypatch, capsys
+):
+    """Ctrl-C at the scan confirmation prompt is a refusal, not a
+    traceback."""
+    _write_inventory(tmp_path, monkeypatch, vantages=(("outside-a", "outside"),))
+    _write_request(tmp_path, _request())
+    monkeypatch.setattr(approve, "_getpass", lambda prompt: pytest.fail("no passphrase"))
+    monkeypatch.setattr(approve.sys, "stdin", _InterruptedInput())
+
+    assert approve.main([REQUEST_ID]) == 1
+    assert (
+        "newton-approve: confirmation could not be read; consent not created"
+        in capsys.readouterr().err
+    )
+    assert not (tmp_path / "state" / "scan-consents" / f"{REQUEST_ID}.json").exists()
+
+
+def test_scan_approval_wrong_confirmation_says_what_to_type(tmp_path, monkeypatch, capsys):
+    """The scan refusal names the exact text the prompt wanted."""
+    _write_inventory(tmp_path, monkeypatch, vantages=(("outside-a", "outside"),))
+    _write_request(tmp_path, _request())
+    monkeypatch.setattr(approve, "_getpass", lambda prompt: pytest.fail("no passphrase"))
+    monkeypatch.setattr(approve.sys, "stdin", TerminalInput("approve\n"))
+
+    assert approve.main([REQUEST_ID]) == 1
+    assert (
+        f"newton-approve: confirmation did not match: type 'approve {REQUEST_ID[:8]}' "
+        "exactly; consent not created"
+    ) in capsys.readouterr().err
+
+
+def test_scan_approval_ignores_spaces_around_the_confirmation(tmp_path, monkeypatch, capsys):
+    """The scan confirmation takes a pasted trailing space."""
+    _write_inventory(tmp_path, monkeypatch, vantages=(("outside-a", "outside"),))
+    _write_request(tmp_path, _request())
+    monkeypatch.setattr(approve, "_getpass", lambda prompt: "")
+    monkeypatch.setattr(
+        approve.sys, "stdin", TerminalInput(f"approve {REQUEST_ID[:8]} \n")
+    )
+
+    assert approve.main([REQUEST_ID]) == 1
+    err = capsys.readouterr().err
+    # past the confirmation: the empty passphrase is what refuses it
+    assert "confirmation" not in err, err
+    assert "passphrase" in err, err

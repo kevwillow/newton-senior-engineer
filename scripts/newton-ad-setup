@@ -8,6 +8,11 @@
 #   newton-ad-setup write samba  --domain DNS --pubkey FILE --device NAME --host HOST --ou DN [--domain-device NAME]
 #   newton-ad-setup approval-key NAME
 #
+# approval-key stores the fingerprint in the caller's state directory
+# (NEWTON_STATE_DIR, else ~/.local/state/newton). Run from a source tree, it
+# serves only a source-tree newton-approve; for an installed Newton run
+# sudo -u newton /usr/local/bin/newton-ad-setup approval-key NAME instead.
+#
 # The script is printed on stdout and never run by this tool: the owner
 # reads it and runs it as a Domain Admin on the domain controller.  The
 # windows build is a PowerShell script, the samba build a bash script.

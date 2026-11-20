@@ -308,6 +308,15 @@ def test_the_block_says_the_approval_rule_is_per_profile(setup_env):
 	assert "lab = true" in text
 
 
+def test_the_block_gives_the_whole_wan_health_enable_step():
+	"""enabled=1 alone leaves the check idle: with no iface or target
+	list it has nothing to probe, so the block names both lists."""
+	block = flat(render_block(REPO))
+	assert ("the WAN-health check stays idle until you set "
+	        "newton_wanhealth.main.enabled=1 and list the WAN interfaces "
+	        "(iface) and the probe targets (target) it watches.") in block
+
+
 def test_the_leash_count_in_the_block_is_the_router_programs():
 	"""The "N rules in all" of the block is the number of distinct leash
 	codes the router program can fire, so a new rule cannot leave the

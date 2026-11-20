@@ -105,6 +105,8 @@ def _release_readme() -> Path:
 
 
 AD_TOOL_NAMES = frozenset(name for name in server.TOOL_NAMES if name.startswith("newton_ad_"))
+# Main-branch tools that are not AD tools and are not in the 1.1.3 release.
+MAIN_ONLY_TOOL_NAMES = frozenset({"newton_confirm_change"})
 
 
 def test_the_release_readme_counts_the_released_tools_and_the_ones_on_main() -> None:
@@ -112,7 +114,7 @@ def test_the_release_readme_counts_the_released_tools_and_the_ones_on_main() -> 
     line, the six AD tools of the main branch elsewhere, and both counts on
     its layout line."""
     text = _release_readme().read_text(encoding="utf-8")
-    released = server.TOOL_NAMES - AD_TOOL_NAMES
+    released = server.TOOL_NAMES - AD_TOOL_NAMES - MAIN_ONLY_TOOL_NAMES
     assert len(released) == 17 and len(AD_TOOL_NAMES) == 6
     feature = [
         line
@@ -126,7 +128,7 @@ def test_the_release_readme_counts_the_released_tools_and_the_ones_on_main() -> 
     for name in sorted(AD_TOOL_NAMES):
         assert f"`{name}`" in text, f"the release README does not name {name}"
     layout = [line for line in text.splitlines() if line.startswith("mcp/newton_mcp/ ")]
-    assert layout and "(seventeen tools in 1.1.3, twenty-three on main)" in layout[0]
+    assert layout and "(seventeen tools in 1.1.3, twenty-four on main)" in layout[0]
 
 
 @pytest.mark.skipif(
@@ -134,14 +136,14 @@ def test_the_release_readme_counts_the_released_tools_and_the_ones_on_main() -> 
     reason="README.md is the release README in the public tree; the test above covers it",
 )
 def test_readme_counts_and_tools() -> None:
-    """README lists twenty-three tools and every tool name."""
+    """README lists twenty-four tools and every tool name."""
     readme_text = README_MD.read_text(encoding="utf-8")
     # The word "eleven tools" must not appear anywhere.
     assert "eleven tools" not in readme_text, (
         "README.md still says 'eleven tools' after the tool count grew"
     )
 
-    # The MCP server feature line mentions 'twenty-three tools' and every tool name.
+    # The MCP server feature line mentions 'twenty-four tools' and every tool name.
     feature_lines = [
         line
         for line in readme_text.splitlines()
@@ -149,15 +151,15 @@ def test_readme_counts_and_tools() -> None:
     ]
     assert feature_lines, "README.md has no feature line listing newton tools"
     feature_line = feature_lines[0]
-    assert "twenty-three tools" in feature_line, (
-        f"Feature line does not say 'twenty-three tools': {feature_line[:120]!r}"
+    assert "twenty-four tools" in feature_line, (
+        f"Feature line does not say 'twenty-four tools': {feature_line[:120]!r}"
     )
     for tool_name in sorted(server.TOOL_NAMES):
         assert tool_name in feature_line, (
             f"Feature line does not list {tool_name}"
         )
 
-    # The repository-layout line for mcp/newton_mcp/ says "(twenty-three tools)".
+    # The repository-layout line for mcp/newton_mcp/ says "(twenty-four tools)".
     layout_lines = [
         line
         for line in readme_text.splitlines()
@@ -167,8 +169,8 @@ def test_readme_counts_and_tools() -> None:
         "README.md has no repository-layout line for mcp/newton_mcp/"
     )
     layout_line = layout_lines[0]
-    assert "(twenty-three tools)" in layout_line, (
-        f"Layout line does not say '(twenty-three tools)': {layout_line!r}"
+    assert "(twenty-four tools)" in layout_line, (
+        f"Layout line does not say '(twenty-four tools)': {layout_line!r}"
     )
 
 
@@ -226,9 +228,9 @@ _NUMBER_WORD_TOOLS = re.compile(
 
 def test_setup_clients_tool_count_matches_the_server() -> None:
     """docs/SETUP-CLIENTS.md names no tool count but the server's own."""
-    assert len(server.TOOL_NAMES) == 23
+    assert len(server.TOOL_NAMES) == 24
     text = SETUP_CLIENTS_MD.read_text(encoding="utf-8")
     counts = {match.group(1).lower() for match in _NUMBER_WORD_TOOLS.finditer(text)}
-    assert counts <= {"twenty-three"}, (
-        f"docs/SETUP-CLIENTS.md says {sorted(counts)} tools; the server has twenty-three"
+    assert counts <= {"twenty-four"}, (
+        f"docs/SETUP-CLIENTS.md says {sorted(counts)} tools; the server has twenty-four"
     )

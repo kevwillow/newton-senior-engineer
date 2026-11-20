@@ -263,6 +263,7 @@ poll_s = 1
 
 [devices.lab-isp]
 vmid = 9101
+vm_name = "lab-isp"
 host = "10.0.0.1"
 user = "root"
 snapshot = "baseline"
@@ -270,6 +271,7 @@ settle_cmd = "isp-fingerprint"
 
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.0.0.2"
 user = "root"
 snapshot = "baseline"
@@ -277,6 +279,7 @@ settle_cmd = "r1-fingerprint"
 
 [devices.lab-client]
 vmid = 9105
+vm_name = "lab-client"
 host = "10.0.0.3"
 user = "user"
 snapshot = "baseline"
@@ -501,6 +504,7 @@ password_file = "password"
 key = "key"
 [devices.router]
 vmid = 1
+vm_name = "router"
 host = "192.0.2.1"
 user = "root"
 snapshot = "baseline"

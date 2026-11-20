@@ -156,6 +156,19 @@ def test_the_answer_lock_sets_the_guard():
     assert "was not set" not in result.stdout
 
 
+def test_the_lock_answer_promises_nothing_before_the_file_is_written():
+    """The answer comes long before the write (an install can still fail
+    or refuse in between), so the answer line says the guard WILL be set
+    and that the installer says when it is written; it never says it is
+    being set now."""
+    result = run_ask_managed_settings(b"lock\n")
+
+    assert "Setting Claude Code's managed settings" not in result.stdout
+    line = next(l for l in result.stdout.splitlines() if "allowManagedHooksOnly" in l and "will" in l)
+    assert "/etc/claude-code/managed-settings.json" in line
+    assert "Claude Code managed settings written" in line
+
+
 @pytest.mark.parametrize(
     "feed",
     [

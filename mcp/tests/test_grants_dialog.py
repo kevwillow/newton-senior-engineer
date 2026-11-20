@@ -566,7 +566,7 @@ def test_the_apply_result_carries_a_newton_result_and_grant_notice(
     monkeypatch.setattr(
         server,
         "newton_apply_change",
-        lambda device, session_id: {"result": "confirmed"},
+        lambda device, session_id, hold=False: {"result": "confirmed"},
     )
 
     result = asyncio.run(server._apply_change_tool(DEVICE, SID, object()))
@@ -629,7 +629,7 @@ def test_a_failed_grant_approved_apply_ends_the_grant(
     monkeypatch.setattr(
         server,
         "newton_apply_change",
-        lambda device, session_id: {"result": outcome},
+        lambda device, session_id, hold=False: {"result": outcome},
     )
 
     result = asyncio.run(server._apply_change_tool(DEVICE, SID, object()))
@@ -655,7 +655,7 @@ def test_a_failed_change_ends_a_grant_opened_by_the_dialog(
     monkeypatch.setattr(
         server,
         "newton_apply_change",
-        lambda device, session_id: {"result": "rolled_back"},
+        lambda device, session_id, hold=False: {"result": "rolled_back"},
     )
 
     result = asyncio.run(server._apply_change_tool(DEVICE, SID, object()))
@@ -682,7 +682,7 @@ def test_an_error_after_a_grant_approval_ends_the_grant(
     monkeypatch.setattr(
         server,
         "newton_apply_change",
-        lambda device, session_id: {"error": "apply failed"},
+        lambda device, session_id, hold=False: {"error": "apply failed"},
     )
 
     result = asyncio.run(server._apply_change_tool(DEVICE, SID, object()))
@@ -756,7 +756,7 @@ def test_a_failed_apply_on_a_pre_existing_approval_ends_the_grant(
     monkeypatch.setattr(
         server,
         "newton_apply_change",
-        lambda device, session_id: {"result": "rolled_back"},
+        lambda device, session_id, hold=False: {"result": "rolled_back"},
     )
 
     result = asyncio.run(server._apply_change_tool(DEVICE, SID, object()))
@@ -784,7 +784,7 @@ def test_a_rolled_back_change_without_a_grant_does_not_claim_a_grant_ended(
     monkeypatch.setattr(
         server,
         "newton_apply_change",
-        lambda device, session_id: {"result": "rolled_back"},
+        lambda device, session_id, hold=False: {"result": "rolled_back"},
     )
 
     result = asyncio.run(server._apply_change_tool(DEVICE, SID, object()))
@@ -809,7 +809,7 @@ def test_an_expired_grant_is_not_a_grant_that_ended(
     monkeypatch.setattr(
         server,
         "newton_apply_change",
-        lambda device, session_id: {"result": "rolled_back"},
+        lambda device, session_id, hold=False: {"result": "rolled_back"},
     )
 
     result = asyncio.run(server._apply_change_tool(DEVICE, SID, object()))
@@ -886,3 +886,138 @@ def test_an_installed_plan_with_injected_section_types_is_not_grant_approved(
     assert outcome.status != "approved", outcome
     assert outcome.grant_used is False, outcome
     assert not _approval_path().exists()
+
+
+# ---- a held change has not failed: the grant ends only if it later does ----
+
+
+def test_a_held_grant_approved_apply_keeps_the_grant(configured_newton, monkeypatch):
+    """hold=true and verify passed returns `held`, which is not a
+    failure, so the grant stays open and the line does not say it ended."""
+    _write_plan(_grantable_plan())
+    _open_grant()
+
+    async def collect(ctx, device, session_id):
+        return elicit_approval.Outcome(
+            "approved",
+            "approved by your easy grant",
+            grant_used=True,
+            grant_note="EASY GRANT: DHCP reservations until 16:40",
+        )
+
+    monkeypatch.setattr(server.elicit_approval, "collect_approval", collect)
+    monkeypatch.setattr(
+        server,
+        "newton_apply_change",
+        lambda device, session_id, hold=False: {"result": "held", "confirm_by": 1794000000},
+    )
+
+    result = asyncio.run(server._apply_change_tool(DEVICE, SID, object(), hold=True))
+
+    assert "EASY GRANT ENDED." not in result["newton_result"]
+    assert grants.load_live_grant(DEVICE) is not None
+
+
+def _fake_script(stdout: str, rc: int = 0):
+    import subprocess
+
+    def run(self, device, *args, **kwargs):
+        return subprocess.CompletedProcess(list(args), rc, stdout, "")
+
+    return run
+
+
+@pytest.mark.parametrize("out,rc", [
+    ("ERROR: confirm refused: error too-late; not confirmed: the router rolls "
+     "the change back on its own\n", 1),
+    (f"CONFIRM DID NOT REPORT SUCCESS session={SID} — OUTCOME UNKNOWN; "
+     "run: owrt-change.sh status\n", 1),
+])
+def test_a_held_change_that_does_not_confirm_ends_the_grant(
+    configured_newton, monkeypatch, out, rc
+):
+    _write_plan(_grantable_plan())
+    _open_grant()
+    monkeypatch.setattr(server.NewtonService, "run_script", _fake_script(out, rc))
+
+    result = server.newton_confirm_change(DEVICE, SID)
+
+    assert result["result"] != "confirmed"
+    assert result["easy_grant"] == "ended"
+    assert "EASY GRANT ENDED." in result["newton_result"]
+    assert grants.load_live_grant(DEVICE) is None
+
+
+def test_a_held_change_that_confirms_keeps_the_grant(configured_newton, monkeypatch):
+    _write_plan(_grantable_plan())
+    _open_grant()
+    monkeypatch.setattr(
+        server.NewtonService, "run_script",
+        _fake_script(f"CONFIRMED session={SID} (verify passed)\n"),
+    )
+
+    result = server.newton_confirm_change(DEVICE, SID)
+
+    assert result["result"] == "confirmed"
+    assert "easy_grant" not in result
+    assert "EASY GRANT ENDED." not in result["newton_result"]
+    assert grants.load_live_grant(DEVICE) is not None
+
+
+def test_a_confirm_without_a_grant_claims_no_grant_ended(configured_newton, monkeypatch):
+    _write_plan(_grantable_plan())
+    monkeypatch.setattr(
+        server.NewtonService, "run_script",
+        _fake_script("ERROR: confirm refused: error too-late; not confirmed\n", 1),
+    )
+
+    result = server.newton_confirm_change(DEVICE, SID)
+
+    assert "easy_grant" not in result
+    assert "EASY GRANT ENDED." not in result["newton_result"]
+
+
+def test_an_aborted_held_change_ends_the_grant(configured_newton, monkeypatch):
+    _write_plan(_grantable_plan())
+    _open_grant()
+    monkeypatch.setattr(
+        server.NewtonService, "run_script",
+        _fake_script(f"ABORTED session={SID} (restored)\nHELD APPLY ABORTED session={SID}\n"),
+    )
+
+    result = server.newton_abort_change(DEVICE, SID)
+
+    assert result["easy_grant"] == "ended"
+    assert grants.load_live_grant(DEVICE) is None
+
+
+def test_a_held_change_the_router_rolled_back_ends_the_grant(configured_newton, monkeypatch):
+    """The window ended unconfirmed and a status call learns it: that held
+    change failed, so the grant ends."""
+    _write_plan(_grantable_plan())
+    _open_grant()
+    monkeypatch.setattr(
+        server.NewtonService, "run_script",
+        _fake_script(
+            f"rolled-back sid={SID} guard=restored:deadline rpcd=rolled-back config=base boot=same\n"
+            f"HELD APPLY ROLLED BACK session={SID} (its window ended unconfirmed; the router's "
+            "status says rolled-back)\n"
+        ),
+    )
+
+    server.newton_change_status(DEVICE, SID)
+
+    assert grants.load_live_grant(DEVICE) is None
+
+
+def test_a_status_of_a_live_held_change_keeps_the_grant(configured_newton, monkeypatch):
+    _write_plan(_grantable_plan())
+    _open_grant()
+    monkeypatch.setattr(
+        server.NewtonService, "run_script",
+        _fake_script(f"held sid={SID} guard=armed rpcd=pending config=new boot=same\n"),
+    )
+
+    server.newton_change_status(DEVICE, SID)
+
+    assert grants.load_live_grant(DEVICE) is not None

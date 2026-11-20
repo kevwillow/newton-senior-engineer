@@ -203,7 +203,8 @@ def fake_tools(tmp_path, *, mode="remote"):
             "esac\n"
             "case $remote in\n"
             "  'check '*' canary')\n"
-            "    if [ \"${FAKE_CANARY:-1}\" = 1 ]; then\n"
+            "    zone=${remote#check }; zone=${zone% canary}\n"
+            "    if [ \"${FAKE_CANARY:-1}\" = 1 ] && [ \"$zone\" != \"${FAKE_CANARY_FAIL_ZONE:-}\" ]; then\n"
             "      printf 'RESULT PASS reached\\n'\n"
             "    else\n"
             "      printf 'RESULT NOTTESTED unreachable\\n'\n"
@@ -525,7 +526,7 @@ def test_check_client_checks_proves_the_key_is_confined_and_the_canary_answers(t
         "PASS empty command refused\n"
         "PASS forwarding blocked\n"
         "PASS pty blocked\n"
-        "PASS canary\n"
+        "PASS canary guest\n"
         "DONE check-client-checks edge\n"
     )
 
@@ -547,24 +548,52 @@ def test_check_client_checks_fails_when_the_canary_is_not_reached(tmp_path):
     assert "PASS canary" not in result.stdout
 
 
-def test_check_client_checks_uses_the_first_zone(tmp_path):
-    zones = (
-        '{ name = "guest", src = "192.0.2.50", canary = "192.0.2.1:53" },'
-        ' { name = "lab", src = "192.0.2.60", canary = "192.0.2.1:53" }'
-    )
-    write_inventory(tmp_path, zones=zones)
+THREE_ZONES = (
+    '{ name = "guest", src = "192.0.2.50", canary = "192.0.2.1:53" },'
+    ' { name = "lab", src = "192.0.2.60", canary = "192.0.2.1:53" },'
+    ' { name = "iot", src = "192.0.2.70", canary = "192.0.2.1:53" }'
+)
+
+
+def _three_zone_check(tmp_path, fail_zone=None):
+    write_inventory(tmp_path, zones=THREE_ZONES)
     env, log = fake_tools(tmp_path, mode="check")
     env["FAKE_REFUSAL_TEXT"] = "newton-vantage-check: refused"
+    if fail_zone:
+        env["FAKE_CANARY_FAIL_ZONE"] = fail_zone
     key_file = tmp_path / "keys" / "edge"
     key_file.parent.mkdir(parents=True, exist_ok=True)
     key_file.write_text("existing private fixture\n")
     (key_file.parent / (key_file.name + "-check")).write_text("check private fixture\n")
+    return run_setup(env, action="check-client-checks"), log
 
-    result = run_setup(env, action="check-client-checks")
+
+def test_check_client_checks_runs_the_canary_of_every_zone(tmp_path):
+    result, log = _three_zone_check(tmp_path)
 
     assert result.returncode == 0, result.stdout + result.stderr
     blocks = call_blocks(log)
-    assert args_for(blocks[3][1])[-1] == "check guest canary"
+    assert [args_for(b)[-1] for _n, b in blocks[3:]] == [
+        "check guest canary", "check lab canary", "check iot canary",
+    ]
+    assert "PASS canary guest\nPASS canary lab\nPASS canary iot\n" in result.stdout
+    assert result.stdout.endswith("DONE check-client-checks edge\n")
+
+
+@pytest.mark.parametrize("fail_zone", ["guest", "lab", "iot"])
+def test_check_client_checks_fails_when_any_zone_fails(tmp_path, fail_zone):
+    """A broken second (or third) zone is reported and blocks DONE; every
+    zone still gets its own line."""
+    result, log = _three_zone_check(tmp_path, fail_zone=fail_zone)
+
+    assert result.returncode != 0
+    assert "DONE" not in result.stdout
+    assert f"FAIL canary check of zone {fail_zone}" in result.stderr
+    for zone in ("guest", "lab", "iot"):
+        if zone != fail_zone:
+            assert f"PASS canary {zone}\n" in result.stdout
+    assert f"PASS canary {fail_zone}" not in result.stdout
+    assert len(call_blocks(log)) == 6
 
 
 def test_the_existing_actions_are_unchanged(tmp_path):
@@ -597,3 +626,43 @@ def test_usage_refuses_an_unknown_action(tmp_path):
 
     assert result.returncode == 2
     assert "usage" in result.stderr
+
+
+# ---- an unreachable vantage is named as such, not blamed on the key -------
+
+UNREACHABLE_SSH = (
+    "#!/bin/sh\n"
+    "{ printf 'CALL ssh\\n'; printf 'ARG %s\\n' \"$@\"; printf 'END\\n'; } >>\"$FAKE_LOG\"\n"
+    "printf 'ssh: connect to host vantage.example.test port 22: No route to host\\n' >&2\n"
+    "printf 'second line that is not shown\\n' >&2\n"
+    "exit 255\n"
+)
+
+
+@pytest.mark.parametrize(
+    "action, key_word",
+    [("check", "scan"), ("check-client-checks", "client-check")],
+)
+def test_check_of_an_unreachable_vantage_names_the_ssh_error(tmp_path, action, key_word):
+    """ssh exit 255 on the empty-command probe means ssh never reached the
+    forced command: the FAIL names the ssh error and says nothing about an
+    unforced key or a root password."""
+    write_inventory(tmp_path)
+    env, log = fake_tools(tmp_path, mode="check")
+    (tmp_path / "bin" / "ssh").write_text(UNREACHABLE_SSH)
+    key_file = tmp_path / "keys" / "edge"
+    key_file.parent.mkdir(parents=True, exist_ok=True)
+    key_file.write_text("existing private fixture\n")
+    (key_file.parent / (key_file.name + "-check")).write_text("check private fixture\n")
+
+    result = run_setup(env, action=action)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == (
+        f"FAIL cannot reach or log in to scanner@vantage.example.test with the "
+        f"{key_word} key (ssh exit 255): ssh: connect to host "
+        "vantage.example.test port 22: No route to host; check that the vantage "
+        "is on and reachable from this host\n"
+    )
+    assert len(call_blocks(log)) == 1

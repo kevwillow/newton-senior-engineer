@@ -128,6 +128,10 @@ def test_a_yes_stores_nothing_and_prints_the_switch_steps(setup_env):
     assert any("newton-router-setup r1 uninstall" in line
                and "removes the no-install login" in line
                for line in lines), lines
+    # the offer says what the uninstall can remove besides the login
+    assert any("it asks before it deletes the owner scripts of r1, with "
+               "their backups and plan records" in line
+               for line in lines), lines
     assert any("newton-router-setup r1 install" in line
                for line in lines), lines
     # nothing was run: the no-install login is still on the router and the

@@ -393,6 +393,75 @@ DC_REFUSED_MESSAGE = (
     "The domain controller refused the change before writing it, so "
     "nothing changed."
 )
+#: The next step of each pre-write code the DC can name, added after
+#: DC_REFUSED_MESSAGE.  The text is Newton's own; the DC's code only picks it.
+DC_REFUSED_NEXT_STEPS: dict[str, str] = {
+    "expired": (
+        "The approval was outside its window when the DC checked it (an "
+        "approval lasts 30 minutes): approve the plan again with "
+        "newton-approve ad-change and the plan id, then apply it."
+    ),
+    "bad_token": (
+        "The DC did not accept the approval token: its approval key does not "
+        "match the one the approval was made with. Check that the passphrase "
+        "typed on the DC and at newton-approve is the same, then approve the "
+        "plan again and apply it."
+    ),
+    "risk_mismatch": (
+        "The DC derived another risk level for this change than the plan "
+        "holds: the target is not as it was when it was planned. Read it "
+        "with the admin tools and plan the change again."
+    ),
+    "not_pdc": (
+        "The DC the change went to does not hold the PDC emulator role: make "
+        "the inventory's write entry for the domain name the PDC emulator, "
+        "then plan the change again."
+    ),
+    "privileged": (
+        "A privileged account or group is involved (the target, or the write "
+        "account itself is in a privileged group): Newton does not change "
+        "privileged objects, and its write account must stay out of "
+        "privileged groups."
+    ),
+    "schema": (
+        "The DC's write helper did not accept the form of the request: check "
+        "that the DC runs the write setup of this Newton version."
+    ),
+}
+#: For a user-create the password left the plan record with this apply, so
+#: an approval step cannot help: the same plan can never be applied again.
+DC_REFUSED_USER_CREATE_STEP = (
+    "The password of the new user left the plan record with this apply, so "
+    "this plan cannot be applied again: fix the cause and plan the new user "
+    "again."
+)
+DC_REFUSED_USER_CREATE_CODES = frozenset({"expired", "bad_token"})
+#: The DC refused with conflict and no other armed change: the target's
+#: live value is not the plan's before-image, so somebody changed it.
+STALE_TARGET_MESSAGE = (
+    "The domain controller refused the apply: the target changed since the "
+    "plan (its live value, in live, is not the plan's before-image), so "
+    "nothing was written. Read the target with the admin tools and plan the "
+    "change again from its value now."
+)
+#: The same conflict, but the live value is the plan's after-image:
+#: somebody else made the planned change, so there is nothing to apply.
+ALREADY_HELD_MESSAGE = (
+    "The domain controller refused the apply: the target already holds the "
+    "planned value (its live value, in live, is the plan's after-image, so "
+    "somebody else made this change since the plan), so nothing was written "
+    "and nothing needs applying."
+)
+
+
+def _dc_refused_message(code: object, verb: object) -> str:
+    """DC_REFUSED_MESSAGE with the next step of the code the DC named."""
+    if not isinstance(code, str):
+        return DC_REFUSED_MESSAGE
+    if verb == "user-create" and code in DC_REFUSED_USER_CREATE_CODES:
+        return f"{DC_REFUSED_MESSAGE} {DC_REFUSED_USER_CREATE_STEP}"
+    step = DC_REFUSED_NEXT_STEPS.get(code)
+    return DC_REFUSED_MESSAGE if step is None else f"{DC_REFUSED_MESSAGE} {step}"
 REPLAY_MESSAGE = (
     "The domain controller already holds this transaction: an earlier apply "
     "of this plan reached it, and this apply changed nothing. The receipt of "
@@ -771,6 +840,10 @@ def apply_change(plan_id: str, **kwargs: Any) -> dict[str, Any]:
     final receipt, and a second apply while it is held is refused before
     anything is sent or written.  See ``_apply_change`` for the rest.
     """
+    # A plan id that cannot name a file is no plan: the same answer
+    # status and abort give, before any path is built from it.
+    if not isinstance(plan_id, str) or store.PLAN_ID_RE.fullmatch(plan_id) is None:
+        raise WriteError("the plan record is not found or is invalid")
     # kiss: one host only; two Newton hosts sharing a plan are not locked.
     directory = store.receipts_dir()
     try:
@@ -983,6 +1056,10 @@ def _apply_change(
             state = STATE_CONFLICT
             if answer.get("armed") is True:
                 message = ARMED_CONFLICT_MESSAGE
+            elif isinstance(live, dict) and live and live == plan.get("after"):
+                message = ALREADY_HELD_MESSAGE
+            else:
+                message = STALE_TARGET_MESSAGE
         elif code == "replay":
             state, message = STATE_REPLAY, REPLAY_MESSAGE
         else:
@@ -1005,7 +1082,7 @@ def _apply_change(
                 and record.get("code") == "ok"
                 and record.get("state") == "refused"
             ):
-                state, message = STATE_REFUSED, DC_REFUSED_MESSAGE
+                state, message = STATE_REFUSED, _dc_refused_message(code, plan.get("verb"))
             elif unmarked:
                 # The DC answered the write itself, and its store took
                 # neither the mark nor the refused record: its undo may run
@@ -1044,6 +1121,9 @@ def _apply_change(
             receipt["message"] = message
         if third and state == STATE_APPLY_UNKNOWN:
             receipt["live"] = live
+        elif state == STATE_CONFLICT and isinstance(live, dict) and live:
+            # the DC's value now, which made the before-image stale
+            receipt["live"] = live
         receipt_error: str | None = None
         if pending and never_held:
             # The refusal says nothing about the earlier attempt: its pending
@@ -1079,6 +1159,8 @@ def _apply_change(
         if message is not None:
             result["message"] = message
         if third and state == STATE_APPLY_UNKNOWN:
+            result["live"] = live
+        elif state == STATE_CONFLICT and isinstance(live, dict) and live:
             result["live"] = live
         return _with_receipt_error(result, receipt_error, secret_error)
 

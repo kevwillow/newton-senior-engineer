@@ -66,7 +66,7 @@ def test_tool_schema_has_no_approval_or_ctx_parameter(configured_newton):
         return ElicitResult(action="cancel")
 
     tool, _ = _call(never)
-    assert set(tool.inputSchema["properties"]) == {"device", "session_id"}
+    assert set(tool.inputSchema["properties"]) == {"device", "session_id", "hold"}
     assert "grant_hours" not in json.dumps(tool.inputSchema).lower()
     assert "grant" not in json.dumps(tool.inputSchema).lower()
 

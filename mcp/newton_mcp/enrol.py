@@ -127,6 +127,13 @@ def _enrol_totp(device: str) -> int:
                 "nothing was enrolled",
                 file=sys.stderr,
             )
+        elif status == _proof.PASS_DAMAGED:
+            print(
+                f"newton-enrol: the approval fingerprint file for {device} is damaged; "
+                f"run sudo -u newton /usr/local/bin/newton-router-setup {device} approval-key again; "
+                "nothing was enrolled",
+                file=sys.stderr,
+            )
         else:
             print(
                 f"newton-enrol: wrong approval passphrase for {device}; "
@@ -312,3 +319,7 @@ def main(argv: list[str] | None = None) -> int:
     if command == "grant-off":
         return _grant_off(device)
     return _set_level(device, args[2])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

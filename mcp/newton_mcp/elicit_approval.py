@@ -670,6 +670,15 @@ async def _collect_locked(
                     f"{approve._sanitize_terminal_value(device_name)} approval-key",
                     session_id,
                 )
+            if status == approval_proof.PASS_DAMAGED:
+                # never approves, and is not a wrong answer: no miss counted
+                return _fallback(
+                    "the approval fingerprint file for "
+                    f"{approve._sanitize_terminal_value(device_name)} is damaged; "
+                    "run sudo -u newton /usr/local/bin/newton-router-setup "
+                    f"{approve._sanitize_terminal_value(device_name)} approval-key again",
+                    session_id,
+                )
             if status != approval_proof.PASS_OK or key is None:
                 remaining = approval_proof.record_failure(device_name)
                 return _wrong(device_name, remaining, session_id)

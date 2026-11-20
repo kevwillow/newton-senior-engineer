@@ -289,6 +289,20 @@ def test_verify_passphrase_reports_a_missing_fingerprint():
     assert key is None
 
 
+@pytest.mark.parametrize("content", [b"not-a-fingerprint\n", b"v1 \xff\xfe\n", b"", b"v1 " + b"0" * 63 + b"\n"])
+def test_verify_passphrase_reports_a_damaged_fingerprint_file(content):
+    """A file that is there but is not a v1 fingerprint line is damaged:
+    it never approves, and it is not reported as a wrong passphrase."""
+    path = _state_file("approval-fp", DEVICE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    status, key = proof.verify_passphrase(DEVICE, "synthetic pass")
+    assert status == proof.PASS_DAMAGED
+    assert key is None
+    # the key is still taken as stale: the dialog stops early
+    assert proof.key_is_stale(DEVICE, _derived_k(b"synthetic pass"))
+
+
 def test_verify_passphrase_refuses_an_empty_passphrase():
     status, key = proof.verify_passphrase(DEVICE, "")
     assert status == "bad-input"

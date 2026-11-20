@@ -139,7 +139,7 @@ def test_pulsar_whole_session_has_no_secret_or_private_key_output(pulsar_env):
 	for action, typed in (
 		(("install",), ("yes",)),
 		(("approval-key",), (PASSPHRASE, PASSPHRASE)),
-		(("swap-key", "--new-key"), ()),
+		(("swap-key", "--new-key"), ("y",)),
 	):
 		results.append(assert_ok(
 			env, env.run("--plain-key", str(env.plain_key), "pulsar", *action,
@@ -174,7 +174,10 @@ def test_every_repeated_action_is_idempotent(setup_env):
 		 "revoke it first"),
 		(("profile", "lab"), (GOOD_PW,), None, None),
 		(("upgrade",), (GOOD_PW,), env.src, None),
-		(("revoke", "missing-label"), (GOOD_PW,), None, None),
+		# a label with no line and no local key is refused (a likely
+		# typo), and the refusal changes nothing either
+		(("revoke", "missing-label"), (GOOD_PW,), None,
+		 "no Newton key line or local key for label missing-label"),
 	):
 		before = env.router.snapshot()
 		result = run(env, *args, typed=typed, src=source)

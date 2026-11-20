@@ -540,11 +540,111 @@ def test_revoke_removes_line_and_revokes_login(setup_env):
 	assert r3.out.splitlines()[-1] == "DONE revoke r1"
 	assert "PASS already revoked" in r3.out.splitlines()
 
+	# a label with no router line and no local key is not "already
+	# revoked": it is most likely a typo, so revoke stops and names the
+	# Newton labels the router has (none here)
 	r4 = env.run("r1", "revoke", "lab-runner", typed=(GOOD_PW,))
-	assert r4.rc == 0
-	assert r4.out.splitlines()[-1] == "DONE revoke r1"
-	assert "PASS already revoked" in r4.out.splitlines()
+	assert r4.rc == 1
+	assert r4.out.splitlines()[-1] == (
+		"STOPPED revoke r1: no Newton key line or local key for label "
+		"lab-runner on this router; Newton key labels on the router: none")
+	assert "PASS already revoked" not in r4.out.splitlines()
 	assert env.router.authorized_keys() == []
+
+
+def test_revoke_of_a_mistyped_label_stops_and_lists_the_labels(setup_env):
+	"""A typo of a label that is on the router: no line matches and no
+	local key exists, so revoke stops (exit 1), names the labels the
+	router has and leaves every line in place."""
+	env = setup_env
+	install_ok(env)
+	for label in ("newton-agent", "lab-runner"):
+		r = env.run("r1", "add-key", "--new-key", label, "change",
+		            typed=(GOOD_PW,))
+		assert r.rc == 0, r.out
+	before = env.router.read("etc/dropbear/authorized_keys")
+	r = env.run("r1", "revoke", "newton-agnet", typed=(GOOD_PW,))
+	assert r.rc == 1
+	assert "NOTE state: router unchanged" in r.out.splitlines()
+	assert r.out.splitlines()[-1] == (
+		"STOPPED revoke r1: no Newton key line or local key for label "
+		"newton-agnet on this router; Newton key labels on the router: "
+		"lab-runner, newton-agent")
+	assert not any(l.startswith("PASS ") for l in r.out.splitlines())
+	assert env.router.read("etc/dropbear/authorized_keys") == before
+
+
+def test_revoke_with_only_a_local_pub_file_is_already_revoked(setup_env):
+	"""The local key file is what tells a done revoke from a typo; the
+	.pub alone is enough."""
+	env = setup_env
+	install_ok(env)
+	key = make_keypair(env, "lab-runner")
+	key.unlink()
+	r = env.run("r1", "revoke", "lab-runner", typed=(GOOD_PW,))
+	assert r.rc == 0, r.out
+	assert "PASS already revoked" in r.out.splitlines()
+	assert r.out.splitlines()[-1] == "DONE revoke r1"
+
+
+def _point_inventory_at(env, label):
+	key = env.keys_dir / ("r1-%s" % label)
+	with env.inventory.open("a") as fh:
+		fh.write('key_file = "%s"\n' % key)
+	return key
+
+
+def test_revoke_of_the_key_newton_uses_warns_and_gives_the_restore(setup_env):
+	"""Revoking the label of the inventory key_file cuts Newton off the
+	router: revoke says so and gives the add-key command that restores
+	it from the kept local key."""
+	env = setup_env
+	install_ok(env)
+	r1 = env.run("r1", "add-key", "--new-key", "newton-agent", "change",
+	             typed=(GOOD_PW,))
+	assert r1.rc == 0, r1.out
+	_point_inventory_at(env, "newton-agent")
+	r2 = env.run("r1", "revoke", "newton-agent", typed=(GOOD_PW,))
+	assert r2.rc == 0, r2.out
+	assert (
+		"WARN newton-agent is the key Newton uses for r1 (key_file in the "
+		"inventory): every Newton call to r1 now fails at login; to "
+		"restore it run: sudo -u newton /usr/local/bin/newton-router-setup "
+		"r1 add-key newton-agent change") in r2.out.splitlines()
+	assert r2.out.splitlines()[-1] == "DONE revoke r1"
+	assert env.router.authorized_keys() == []
+
+
+def test_revoke_of_another_label_does_not_warn(setup_env):
+	env = setup_env
+	install_ok(env)
+	for label in ("newton-agent", "lab-runner"):
+		r = env.run("r1", "add-key", "--new-key", label, "change",
+		            typed=(GOOD_PW,))
+		assert r.rc == 0, r.out
+	_point_inventory_at(env, "newton-agent")
+	r = env.run("r1", "revoke", "lab-runner", typed=(GOOD_PW,))
+	assert r.rc == 0, r.out
+	assert not [l for l in r.out.splitlines() if l.startswith("WARN ")]
+
+
+def test_swap_key_without_the_plain_key_says_to_run_install_first(setup_env):
+	"""swap-key before install: the missing plain key error says what
+	swap-key needs."""
+	env = setup_env
+	seed_known_hosts(env)
+	# the default path is the newton user's ~/.ssh/id_ed25519 (from the
+	# passwd entry, not HOME); --plain-key names a missing key here
+	missing = env.tmp / "no-such-key"
+	for extra in ((), ("--new-key",)):
+		r = env.run("--plain-key", missing, "r1", "swap-key", *extra,
+		            typed=(GOOD_PW,))
+		assert r.rc == 2
+		assert r.err.strip().splitlines()[-1] == (
+			"error: --plain-key: file not found: %s (swap-key logs in with "
+			"the plain key that install used: run install first, or name "
+			"that key with --plain-key FILE)" % missing)
+		assert r.calls == []
 
 
 def test_uninstall_restore_command_fails_safe_off_the_newton_host(setup_env):

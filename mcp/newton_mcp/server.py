@@ -46,6 +46,7 @@ from . import touched as _touched
 from . import undo_plan as _undo_plan
 from . import wifiscan as _wifiscan
 from . import vendor_flow
+from .ad import render as _ad_audit_render
 from .ad import tools as _ad_tools
 from .ad.setupgen import DOMAIN_RE as AD_DNS_DOMAIN_RE
 from .ad.write import apply as _ad_apply
@@ -79,6 +80,7 @@ TOOL_NAMES = {
     "newton_plan_change",
     "newton_plan_undo",
     "newton_apply_change",
+    "newton_confirm_change",
     "newton_change_status",
     "newton_abort_change",
     "newton_grant_off",
@@ -167,6 +169,12 @@ def _ssh_runner() -> SshCliRunner:
         return runner
 
 SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
+# HOST_RE in words, for the inventory refusals.
+HOST_RULE = (
+    "a hostname or IP address of letters, digits, '.', ':' and '-', starting with a "
+    "letter or digit, at most 253 characters; no URL scheme (https://), path, spaces "
+    "or user@ (the login goes in user)"
+)
 _CONFIGHASH_RE = re.compile(
     r"^CONFIGHASH ([0-9a-f]{32}) ([A-Za-z0-9_-]{1,64})$"
 )
@@ -408,7 +416,12 @@ def load_inventory() -> dict[str, Device]:
     devices: dict[str, Device] = {}
     for name, raw in entries.items():
         if not isinstance(name, str) or not DEVICE_NAME_RE.fullmatch(name):
-            raise NewtonError(f"invalid device name in inventory: {oneline(str(name))}")
+            raise NewtonError(
+                f"invalid device name in inventory: {oneline(str(name))}: a device "
+                "name is lowercase letters, digits and hyphens, starts with a letter "
+                "and has at most 32 characters; Newton loads no device until that "
+                "entry is fixed or removed"
+            )
         if not isinstance(raw, dict):
             raise NewtonError(f"invalid device entry: {oneline(name)}")
         platform = raw.get("platform")
@@ -425,7 +438,7 @@ def load_inventory() -> dict[str, Device]:
         # lane uses; a user of ``-oProxyCommand=...`` would otherwise make
         # ssh read the destination as an option.
         if HOST_RE.fullmatch(host) is None:
-            raise NewtonError(f"device {name}: host fails the hostname grammar")
+            raise NewtonError(f"device {name}: host fails the hostname grammar: {HOST_RULE}")
         if user_grammar(platform).fullmatch(user) is None:
             raise NewtonError(f"device {name}: user fails the username grammar")
         auth = raw.get("auth", "key")
@@ -691,7 +704,9 @@ def load_inventory() -> dict[str, Device]:
             https_spki = pin
             https_host = raw.get("https_host", host)
             if not isinstance(https_host, str) or HOST_RE.fullmatch(https_host) is None:
-                raise NewtonError(f"device {name}: https_host fails the hostname grammar")
+                raise NewtonError(
+                    f"device {name}: https_host fails the hostname grammar: {HOST_RULE}"
+                )
             https_port = raw.get("https_port", 443)
             if (
                 isinstance(https_port, bool)
@@ -989,8 +1004,15 @@ def validate_read(command: str) -> list[str]:
         _validate_ip(args)
     else:
         forms = READ_FORMS.get(cmd)
-        if forms is None or not any(_form_matches(args, form) for form in forms):
+        if forms is None:
             raise NewtonError(f"read command is not allowed: {tokens[0]}")
+        if not any(_form_matches(args, form) for form in forms):
+            # the verb is a read; its arguments are what no form accepts
+            raise NewtonError(
+                f"read command {oneline(cmd)!r} does not accept these arguments: "
+                f"{oneline(' '.join(args))} (newton_read's description lists the "
+                "accepted forms)"
+            )
     # last line of defence: every token must be safe to send unquoted in
     # key mode (the router's request charset, design 3.2)
     if not all(READ_TOKEN_RE.fullmatch(token) for token in tokens):
@@ -1072,7 +1094,9 @@ class NewtonService:
         except _scans.ScanError as exc:
             raise NewtonError(str(exc)) from exc
 
-    def device(self, name: str, allow_noinstall: bool = False) -> Device:
+    def device(
+        self, name: str, allow_noinstall: bool = False, tool: str = "this tool"
+    ) -> Device:
         """Resolve a device, refusing a no-install one unless asked.
 
         (ADR-021 point 1) a no-install device is refused here, at
@@ -1085,8 +1109,11 @@ class NewtonService:
         device = self.devices[name]
         if device.access == "no-install" and not allow_noinstall:
             raise NewtonError(
-                f"device {oneline(name)} uses no-install access; Newton cannot "
-                "manage it yet in this version"
+                f"{tool} is not available for device {oneline(name)}: it uses "
+                "no-install access, where Newton reads, plans, applies, shows the "
+                "status of and aborts a change. If this tool is needed, the owner "
+                "can switch the router to the installed mode: newton-router-setup "
+                f"{oneline(name)} uninstall, then install"
             )
         return device
 
@@ -1097,7 +1124,7 @@ class NewtonService:
         no-install set names (NO_INSTALL_TOOLS): the same set the
         listing advertises, so the two can never disagree.
         """
-        device = self.device(name, allow_noinstall=(tool in NO_INSTALL_TOOLS))
+        device = self.device(name, allow_noinstall=(tool in NO_INSTALL_TOOLS), tool=tool)
         try:
             caps = registry.capabilities(device.platform)
         except registry.UnknownPlatform as exc:
@@ -2491,7 +2518,7 @@ class NewtonService:
         owner_confirmed_in_chat: Any = None,
     ) -> dict[str, Any]:
         device = self.device_for("newton_plan_undo", device_name)
-        require_session(change_id)
+        require_session(change_id, "change_id")
         # the owner's yes comes before any device contact, also the backup below.
         if owner_confirmed_in_chat is not True:
             raise NewtonError(OWNER_CONFIRMATION_HELP)
@@ -2757,8 +2784,18 @@ class NewtonService:
         suffix = "\n" if uci_batch.endswith("\n") else ""
         return "\n".join(out_lines) + suffix
 
-    def apply(self, device_name: str, session_id: str) -> dict[str, Any]:
+    def apply(
+        self, device_name: str, session_id: str, hold: Any = False
+    ) -> dict[str, Any]:
+        if not isinstance(hold, bool):
+            raise NewtonError("hold must be true or false")
         device = self.device_for("newton_apply_change", device_name)
+        if hold and (device.platform != "openwrt" or device.access == "no-install"):
+            # only the installed OpenWrt flow can leave a change armed and
+            # confirm it later; the others confirm before they return
+            raise NewtonError(
+                "hold is available only for an installed OpenWrt router; nothing applied"
+            )
         if device.platform != "openwrt":
             return vendor_flow.apply(self, device, device_name, session_id)
         require_session(session_id)
@@ -2838,6 +2875,13 @@ class NewtonService:
                 "this device requires approval for every change but the plan record says none is needed; plan again"
             )
         client_rows = _client_checks.client_claims(checked_explanation["expect"])
+        if hold and client_rows:
+            # the client checks run in every round of the apply, but a
+            # later confirm could not run them again
+            raise NewtonError(
+                "hold cannot be used for a plan with client checks: they would not run again "
+                "before the confirm; nothing applied"
+            )
         spec_path: Path | None = None
         spec: dict[str, Any] | None = None
         spec_directory = self.state / "vantage-runs"
@@ -2912,6 +2956,7 @@ class NewtonService:
                     device.destination,
                     session_id,
                     str(timeout_s),
+                    *(("--hold",) if hold else ()),
                     timeout=timeout_s + 300,
                     extra_env=extra_env,
                 )
@@ -2950,8 +2995,19 @@ class NewtonService:
                 "result": classify_apply(cp.returncode, stdout, session_id),
                 "log": _envelope.envelope(f"{device_name}:apply", log),
             }
+            held_until: int | None = None
+            if outcome["result"] == "held":
+                held_until = held_until_of(stdout, session_id)
+                if not hold or held_until is None:
+                    # a HELD line nobody asked for is not a known outcome
+                    outcome["result"] = "unknown"
+            if outcome["result"] == "held":
+                outcome["confirm_by"] = held_until
+                outcome["next_step"] = HELD_NEXT_STEP
             # A receipt for every change that ended CONFIRMED, ROLLED BACK or UNKNOWN.  An
             # error after the APPLYING line means the request reached the router, so it is UNKNOWN.
+            # A held change has not ended yet: its receipt says unknown, so the
+            # trail holds it even if nobody confirms; the confirm adds its own.
             receipt_outcome = outcome["result"] if outcome["result"] in _change_receipt.OUTCOME_WORDS else None
             if receipt_outcome is None and reached_router:
                 receipt_outcome = "unknown"
@@ -2969,7 +3025,7 @@ class NewtonService:
             # not device text; the device supplies only a probe number, a probe name
             # and a reason word that must fit the strict shape.  A client claim
             # is named by the vantage runner's own line instead.
-            if outcome["result"] != "confirmed":
+            if outcome["result"] not in ("confirmed", "held"):
                 failed = _explanation.failed_claim(
                     stdout, session_id, probes_record, checked_explanation["expect"]
                 )
@@ -3184,7 +3240,139 @@ class NewtonService:
 
             return noinstall_flow.status(self, device_name, session_id)
         cp = self.run_script(device, "status", device.destination, session_id)
-        return {"exit_code": cp.returncode, "log": _envelope.envelope(f"{device_name}:status", script_log(cp))}
+        self._record_held_rollback(device_name, session_id, cp)
+        self._record_reconciled_confirm(device_name, session_id, cp)
+        stdout, _hashes = _remove_config_hashes(cp.stdout or "")
+        return {"exit_code": cp.returncode,
+                "log": _envelope.envelope(f"{device_name}:status", stdout + (cp.stderr or ""))}
+
+    def _record_reconciled_confirm(
+        self, device_name: str, session_id: str, cp: subprocess.CompletedProcess[str]
+    ) -> None:
+        """The router confirmed a change whose answer never reached this
+        host (the apply or confirm ended OUTCOME UNKNOWN). A later status,
+        abort or confirm that reads the router's confirmed status writes a
+        line of its own (router text is masked and never starts a line
+        with CONFIRMED); the confirmed receipt and the after-hash follow,
+        as for any confirmed change."""
+        stdout, confighash_text = _remove_config_hashes(cp.stdout or "")
+        marker = f"CONFIRMED session={session_id} (reconciled: "
+        lines = [line.removesuffix("\r") for line in stdout.split("\n")]
+        if not any(line.startswith(marker) for line in lines):
+            return
+        record = self._plan_record_for(device_name, session_id)
+        if record is None:
+            return
+        self._write_change_receipt(device_name, record, "confirmed", stdout + (cp.stderr or ""))
+        try:
+            _undo_plan.record_after_hash(self.state, session_id, confighash_text)
+        except Exception:
+            pass
+
+    def _record_held_rollback(
+        self, device_name: str, session_id: str, cp: subprocess.CompletedProcess[str]
+    ) -> None:
+        """A held apply whose window ended unconfirmed: the wrapper writes a
+        line of its own (router text is masked and never starts with it)
+        only when the router's status said rolled-back; the receipt follows."""
+        marker = f"HELD APPLY ROLLED BACK session={session_id}"
+        lines = [line.removesuffix("\r") for line in (cp.stdout or "").split("\n")]
+        if not any(line == marker or line.startswith(marker + " (") for line in lines):
+            return
+        record = self._plan_record_for(device_name, session_id)
+        if record is not None:
+            self._write_change_receipt(device_name, record, "rolled_back", script_log(cp))
+        # a held change the router rolled back failed: it ends the grant
+        _end_grant_after_a_failed_change(device_name)
+
+    def confirm(self, device_name: str, session_id: str) -> dict[str, Any]:
+        """Confirm a change an apply with hold=True left armed.
+
+        The wrapper's confirm subcommand checks that this host holds the
+        apply, that its window is still open, runs one more verify round
+        over a new connection and only then confirms; the router refuses
+        a confirm after its window as well.
+        """
+        device = self.device_for("newton_confirm_change", device_name)
+        require_session(session_id)
+        try:
+            cp = self.run_script(
+                device, "confirm", device.destination, session_id, timeout=180
+            )
+        except subprocess.TimeoutExpired as exc:
+            # the run may have reached the router's confirm: not known
+            partial = ((exc.stdout or "") if isinstance(exc.stdout, str) else "") + (
+                (exc.stderr or "") if isinstance(exc.stderr, str) else "")
+            record = self._plan_record_for(device_name, session_id)
+            if record is not None:
+                self._write_change_receipt(device_name, record, "unknown", partial)
+            return {
+                "result": "unknown",
+                "log": _envelope.envelope(f"{device_name}:confirm", partial or "confirm subprocess timed out"),
+                "next_step": (
+                    "The confirm did not finish in time, so whether the change was confirmed "
+                    "is not known from here. Call newton_change_status to see where it "
+                    "stands; the router rolls the change back when its window ends unless "
+                    "it was confirmed."
+                ),
+            }
+        stdout, confighash_text = _remove_config_hashes(cp.stdout or "")
+        log = stdout + (cp.stderr or "")
+        lines = [line.removesuffix("\r") for line in stdout.split("\n")]
+        final = next((line for line in reversed(lines) if line.strip()), "")
+        sid = re.escape(session_id)
+        if cp.returncode != 0 and _host_confirm_refusal_re(session_id).match(final):
+            # refused on this host, never confirmed (the shapes are
+            # anchored: router text reaches a line only after a prefix); a
+            # closed window may have learned the router rolled it back, and
+            # a failed check may have found the router already confirmed it
+            self._record_held_rollback(device_name, session_id, cp)
+            self._record_reconciled_confirm(device_name, session_id, cp)
+            raise NewtonError(final.removeprefix("ERROR: "))
+        if cp.returncode == 0 and re.match(rf"^CONFIRMED session={sid}(\s|$)", final):
+            result = "confirmed"
+        elif "OUTCOME UNKNOWN" in final:
+            result = "unknown"
+        else:
+            result = "not_confirmed"
+        outcome: dict[str, Any] = {
+            "result": result,
+            "log": _envelope.envelope(f"{device_name}:confirm", log),
+        }
+        if result != "confirmed" and _end_grant_after_a_failed_change(device_name):
+            # a held change that did not confirm failed, so it ends the
+            # grant (the apply left the grant open while the change was held)
+            outcome["easy_grant"] = "ended"
+        if result == "not_confirmed":
+            outcome["next_step"] = (
+                "Not confirmed: the router rolls the change back when its window ends. "
+                "Call newton_change_status to see where it stands, or newton_abort_change "
+                "to roll it back now."
+            )
+        if result in ("confirmed", "unknown"):
+            record = self._plan_record_for(device_name, session_id)
+            if record is not None:
+                self._write_change_receipt(device_name, record, result, log)
+            if result == "confirmed":
+                try:
+                    _undo_plan.record_after_hash(self.state, session_id, confighash_text)
+                except Exception:
+                    pass
+        return outcome
+
+    def _plan_record_for(
+        self, device_name: str, session_id: str
+    ) -> dict[str, Any] | None:
+        """The stored plan record of this device and session, or None."""
+        try:
+            record = json.loads(
+                (self.state / "plans" / f"{session_id}.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return None
+        if not isinstance(record, dict) or record.get("device") != device_name:
+            return None
+        return record
 
     def abort(self, device_name: str, session_id: str) -> dict[str, Any]:
         device = self.device_for("newton_abort_change", device_name)
@@ -3196,7 +3384,39 @@ class NewtonService:
 
             return noinstall_flow.abort(self, device_name, session_id)
         cp = self.run_script(device, "abort", device.destination, session_id)
-        return {"exit_code": cp.returncode, "log": _envelope.envelope(f"{device_name}:abort", script_log(cp))}
+        abort_stdout, _hashes = _remove_config_hashes(cp.stdout or "")
+        result: dict[str, Any] = {
+            "exit_code": cp.returncode,
+            "log": _envelope.envelope(f"{device_name}:abort", abort_stdout + (cp.stderr or "")),
+        }
+        # The wrapper's own refusal for a confirmed session, matched as a
+        # whole line (router text reaches the output only after a prefix
+        # and never starts a line with it).
+        refused_line = (
+            f"ERROR: abort refused: session {session_id} was already confirmed; "
+            "the change stays live. To undo it, plan the reverse change (newton_plan_undo)"
+        )
+        stdout_lines = [line.removesuffix("\r") for line in (cp.stdout or "").split("\n")]
+        # the router answered gone and its status said rolled-back: the
+        # wrapper's HELD APPLY ROLLED BACK line, the receipt follows it
+        self._record_held_rollback(device_name, session_id, cp)
+        # the router refused the abort as confirmed, or its status said so,
+        # for a change this host never logged CONFIRMED: the receipt follows
+        self._record_reconciled_confirm(device_name, session_id, cp)
+        if cp.returncode == 0 and f"HELD APPLY ABORTED session={session_id}" in stdout_lines:
+            # the abort of a held apply ends it: rolled back on the router
+            record = self._plan_record_for(device_name, session_id)
+            if record is not None:
+                self._write_change_receipt(device_name, record, "rolled_back", script_log(cp))
+            if _end_grant_after_a_failed_change(device_name):
+                result["easy_grant"] = "ended"
+        if cp.returncode != 0 and refused_line in (cp.stdout or "").split("\n"):
+            result["result"] = "refused_confirmed"
+            result["next_step"] = (
+                "Nothing was aborted: this change was already confirmed and stays live. "
+                "To undo it, call newton_plan_undo with this session id."
+            )
+        return result
 
 
 def parse_section_fact(section_line: str) -> tuple[tuple[str, str], tuple[str | None, str | None]] | None:
@@ -3207,9 +3427,25 @@ def parse_section_fact(section_line: str) -> tuple[tuple[str, str], tuple[str | 
     return parse_section_fact_line(section_line)
 
 
-def require_session(session_id: str) -> None:
+def _end_grant_after_a_failed_change(device_name: str) -> bool:
+    """End the device's live grant because a change failed; True if one ended.
+
+    A held change that is rolled back, aborted or not confirmed failed
+    after the apply left the grant open.  A record that is expired or
+    malformed was never a live grant, so nothing is claimed for it.
+    """
+    try:
+        if _grants.load_live_grant(device_name) is not None:
+            return _grants.revoke_grant(device_name)
+    except (OSError, ValueError):
+        pass
+    return False
+
+
+def require_session(session_id: str, name: str = "session_id") -> None:
+    """Refuse an id that is not 32 lowercase hex; *name* is the tool's parameter."""
     if not isinstance(session_id, str) or not SESSION_RE.fullmatch(session_id):
-        raise NewtonError("session_id must be 32 lowercase hexadecimal characters")
+        raise NewtonError(f"{name} must be 32 lowercase hexadecimal characters")
 
 
 def script_log(cp: subprocess.CompletedProcess[str]) -> str:
@@ -3239,6 +3475,8 @@ def classify_apply(returncode: int, stdout: str, session_id: str) -> str:
     final = next((line for line in reversed(lines) if line.strip()), "")
     if returncode == 0 and re.match(rf"^CONFIRMED session={sid}(\s|$)", final):
         return "confirmed"
+    if returncode == 0 and re.match(rf"^HELD session={sid} until=[0-9]{{1,12}}(\s|$)", final):
+        return "held"
     if returncode == 1 and re.match(rf"^ROLLBACK WINDOW PASSED session={sid}(\s|$)", final):
         return "rolled_back"
     if (re.match(rf"^ALERT session={sid}(\s|$)", final)
@@ -3246,6 +3484,41 @@ def classify_apply(returncode: int, stdout: str, session_id: str) -> str:
             or any(re.match(rf"^APPLIED session={sid}(\s|$)", line) for line in lines)):
         return "unknown"
     return "error"
+
+
+HELD_NEXT_STEP = (
+    "The change is live and NOT confirmed: the router rolls it back on its own when its window "
+    "ends (confirm_by, UNIX seconds). Ask the owner to test it now, from a client if the router "
+    "cannot test it. Then call newton_confirm_change with this device and session_id to keep "
+    "it, or newton_abort_change to roll it back, before the window ends. The window is the "
+    "plan's timeout_s (90 s by default, 60 to 600), and the verify rounds already used part of "
+    "it; if that is too short for a client test, abort and plan the change again with a longer "
+    "timeout_s."
+)
+
+
+def _host_confirm_refusal_re(session_id: str) -> re.Pattern[str]:
+    """The wrapper's confirm refusals in which this run confirmed nothing:
+    made before any router call, or after its checks found the router had
+    already confirmed the session (an earlier confirm whose answer was lost)."""
+    sid = re.escape(session_id)
+    return re.compile(
+        rf"^ERROR: (?:no held apply of session {sid} on this host"
+        rf"|session {sid} was already confirmed"
+        rf"|the hold record of session {sid} is malformed"
+        rf"|the window of session {sid} has closed"
+        rf"|session {sid} is already confirmed on the router"
+        rf"|usage: [^;]*); nothing confirmed"
+    )
+
+
+def held_until_of(stdout: str, session_id: str) -> int | None:
+    """The until= time of the wrapper's final HELD line, or None."""
+    sid = re.escape(session_id)
+    lines = [line.removesuffix("\r") for line in stdout.split("\n")]
+    final = next((line for line in reversed(lines) if line.strip()), "")
+    match = re.match(rf"^HELD session={sid} until=([0-9]{{1,12}})(\s|$)", final)
+    return int(match.group(1)) if match else None
 
 
 def parse_backup(output: str) -> dict[str, Any] | None:
@@ -3435,6 +3708,22 @@ def check_explanation_inputs(
         raise NewtonError(f"{exc}. {EXPLANATION_HELP}") from exc
 
 
+def _unredactable() -> dict[str, str] | None:
+    """The refusal when the redaction key cannot be loaded, else None.
+
+    Every answer is redacted with a key kept in the state directory.  When
+    that directory is unsafe (a symlink, a writable parent) or the key is
+    unusable, none of the answer is returned: the refusal carries only
+    Newton's own reason (a path and what is wrong with it), so the owner
+    learns what to fix instead of a crash or "internal server error".
+    """
+    try:
+        _redact.get_key()
+    except RuntimeError as exc:
+        return {"error": f"state directory unsafe: {oneline(str(exc))}"}
+    return None
+
+
 def call_tool(tool: str, device: str, fn: Any) -> dict[str, Any]:
     # The device name is checked before anything is logged or
     # looked up; the audit line for a bad name never carries the caller's text.
@@ -3445,13 +3734,15 @@ def call_tool(tool: str, device: str, fn: Any) -> dict[str, Any]:
         service = NewtonService()
         result = fn(service)
         write_audit(tool, device, str(result.get("result", "ok")))
-        return _redact.redact_value(result)
+        return _unredactable() or _redact.redact_value(result)
     except DeviceTextError as exc:
         write_audit(tool, device, "error")
-        return _redact.redact_value({"error": _envelope.envelope(f"{device}:{tool}", str(exc))})
+        return _unredactable() or _redact.redact_value(
+            {"error": _envelope.envelope(f"{device}:{tool}", str(exc))}
+        )
     except NewtonError as exc:
         write_audit(tool, device, "error")
-        return {"error": _redact.redact_text(str(exc))}
+        return _unredactable() or {"error": _redact.redact_text(str(exc))}
     except Exception:
         _log_unexpected_error(tool, device)
         write_audit(tool, device, "error")
@@ -3514,8 +3805,10 @@ def _model_read(service: NewtonService, device: str, command: str) -> dict[str, 
 
 
 @mcp.tool(description=_envelope_docstring(
-    "Snapshot a device's /etc/config to the local backup dir. The returned "
-    "backup_path comes from the device and is returned inside an "
+    "Snapshot a device's /etc/config to the local backup dir. On a VyOS, RouterOS or "
+    "Junos device it saves the running configuration with every secret replaced by "
+    "'<redacted>': a reference copy, not a backup to restore (its result says redacted: "
+    "true). The returned backup_path comes from the device and is returned inside an "
     "untrusted-device-data envelope."
 ))
 def newton_backup(device: str) -> dict[str, Any]:
@@ -3553,6 +3846,11 @@ name; brackets = optional with the shown default):
   root-password-class EMPTY|LOCKED|HASH|NOROOT|MULTIROOT
 TEXT fields may start with '!' for a negative match. An empty probe list
 means only the built-in steps (ping, DNS, DHCP test, health) run.
+
+`timeout_s` is the rollback window (90 s by default, 60 to 600). For a change
+you will apply with hold=true (tested from a client), set a longer timeout_s
+(300, say): the hold ends at timeout_s minus 15 s, and the verify rounds use
+part of that.
 
 `manifest_checks` is a list of control ids (^[A-Za-z0-9_.-]{1,64}$, each at
 most once) expanded to extra probe lists from the manifest BEFORE the
@@ -3633,15 +3931,23 @@ def newton_plan_undo(
 _APPLY_CHANGE_DESCRIPTION = _envelope_docstring(
     "Apply a saved plan. If approval is needed the owner is shown a dialog in their client and answers it; "
     "if the client cannot show one, tell the owner to run the newton-approve command in the error. "
+    "On an installed OpenWrt router the change is confirmed on its own after three passing verify "
+    "rounds. With hold=true the same rounds run but nothing is confirmed: the result is held, the "
+    "router's rollback stays armed until confirm_by, and you call newton_confirm_change to keep the "
+    "change (or newton_abort_change to roll it back) before then; use it when the change can only be "
+    "tested from a client. The hold ends at the plan's timeout_s minus 15 s, and the verify rounds use "
+    "part of that, so plan a change you will hold with a longer timeout_s (300, say). "
     "The session_id comes from newton_plan_change. The log field comes from the device and is returned "
     "inside an untrusted-device-data envelope (server-side messages stay bare)."
 )
 
 
-def newton_apply_change(device: str, session_id: str) -> dict[str, Any]:
+def newton_apply_change(
+    device: str, session_id: str, hold: Any = False
+) -> dict[str, Any]:
     """Apply a saved plan without opening the owner's approval dialog."""
     return call_tool(
-        "newton_apply_change", device, lambda s: s.apply(device, session_id)
+        "newton_apply_change", device, lambda s: s.apply(device, session_id, hold)
     )
 
 
@@ -3650,6 +3956,7 @@ async def _apply_change_tool(
     device: str,
     session_id: str,
     ctx: Context,
+    hold: bool = False,
 ) -> dict[str, Any]:
     from . import approve
     from . import grants
@@ -3693,7 +4000,9 @@ async def _apply_change_tool(
             or outcome.grant_note.startswith(elicit_approval.GRANT_OPENED_PREFIX + ":")
             or outcome.status in ("approved", "skip")
         )
-        if grant_ended and result.get("result") != "confirmed":
+        # A held change has not failed yet: the confirm, abort or status
+        # that learns it failed ends the grant then.
+        if grant_ended and result.get("result") not in ("confirmed", "held"):
             # The line says a grant ended, so a grant must have been open.
             # A record that is expired or malformed was never a live grant
             # (load_live_grant deletes it) and a device that never had one
@@ -3736,7 +4045,7 @@ async def _apply_change_tool(
         return _finish(
             {"error": _redact.redact_text(outcome.message)}, outcome
         )
-    result = await asyncio.to_thread(newton_apply_change, device, session_id)
+    result = await asyncio.to_thread(newton_apply_change, device, session_id, hold)
     if not isinstance(result, dict):
         result = {"error": "internal server error"}
     result = _finish(result, outcome)
@@ -3744,6 +4053,53 @@ async def _apply_change_tool(
         # the owner has to be told once: the passphrase was on the
         # screen they typed it on, and it may still be there
         result["approval_notice"] = outcome.notice
+    return result
+
+
+def _plan_summary(session_id: str) -> str:
+    """The first line of Newton's own description of a stored plan."""
+    from . import approve
+
+    if not (isinstance(session_id, str) and SESSION_RE.fullmatch(session_id)):
+        return "(plan not available)"
+    try:
+        record = approve._load_plan(session_id)
+        batch = record.get("uci_batch")
+        if not isinstance(batch, str):
+            return "(plan not available)"
+        lines = _consequences.describe(batch)
+    except (OSError, ValueError, TypeError):
+        return "(plan not available)"
+    return lines[0] if lines else "(plan not available)"
+
+
+@mcp.tool(description=_envelope_docstring(
+    "Confirm a change that newton_apply_change applied with hold=true, before its window ends "
+    "(confirm_by). Newton runs one more verify round over a new connection first and does not "
+    "confirm when it fails; the router refuses a confirm after the window. Use it only after the "
+    "owner tested the change and said to keep it. The log field comes from the device and is "
+    "returned inside an untrusted-device-data envelope."
+))
+def newton_confirm_change(device: str, session_id: str) -> dict[str, Any]:
+    from . import notice
+
+    result = call_tool(
+        "newton_confirm_change", device, lambda s: s.confirm(device, session_id)
+    )
+    if "error" in result:
+        # refused before the router was asked: nothing about the change
+        # is known from this call, so no result line is claimed
+        return result
+    valid_device = isinstance(device, str) and DEVICE_NAME_RE.fullmatch(device)
+    valid_session = isinstance(session_id, str) and SESSION_RE.fullmatch(session_id)
+    result["newton_result"] = notice.result_line(
+        result,
+        device if valid_device else "-",
+        session_id if valid_session else "",
+        _plan_summary(session_id),
+    )
+    if result.get("easy_grant") == "ended":
+        result["newton_result"] += "  EASY GRANT ENDED."
     return result
 
 
@@ -3910,7 +4266,7 @@ def newton_list_getters(device: str) -> dict[str, Any]:
     )
 
 
-@mcp.tool(description=_envelope_docstring(
+@mcp.tool(name="newton_ad_audit", description=_envelope_docstring(
     "Run the read-only Active Directory audit on one AD device (platform "
     "ad-windows or ad-samba). The collector document is fetched over ssh "
     "with the forced command of the platform and is validated against the "
@@ -3920,12 +4276,29 @@ def newton_list_getters(device: str) -> dict[str, Any]:
     "ids (newton_ad_list_checks lists them); without it every check of the "
     "catalogue runs. The report holds the counts and the result of every "
     "check; every directory string in it is inside an untrusted-device-data "
-    "envelope (see server description). This tool changes nothing."
+    "envelope (see server description). The report is bounded: a check "
+    f"lists at most {_ad_audit_render.MAX_FINDINGS_PER_CHECK} findings and "
+    f"a finding at most {_ad_audit_render.MAX_OBJECTS_PER_FINDING} objects, "
+    "with the full counts in findings_total and objects_total, and the "
+    "listed findings take at most "
+    f"{_ad_audit_render.MAX_FINDINGS_BYTES} bytes: a check whose findings would pass that budget "
+    "lists none (findings_truncated is true on it), `truncated` is true and `truncated_note` says so; pass "
+    "`checks` with fewer ids to list them. This tool changes nothing."
 ))
+async def _ad_audit_tool(
+    device: str,
+    checks: list[str] | None = None,
+) -> dict[str, Any]:
+    # The audit fetches and renders a whole directory: off the event
+    # loop, so a confirm or an abort of another change still runs.
+    return await asyncio.to_thread(newton_ad_audit, device, checks)
+
+
 def newton_ad_audit(
     device: str,
     checks: list[str] | None = None,
 ) -> dict[str, Any]:
+    """Run the AD audit (the sync body the tool runs in a thread)."""
     return call_tool(
         "newton_ad_audit", device, lambda s: s.ad_audit(device, checks)
     )

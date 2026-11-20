@@ -715,7 +715,7 @@ printf 'lab=%s,%s,%s,%s\n' "$LABELS" "$NEW_KEY" "$GATES_CMD" "$SKIP_GATES"
 def test_usage_names_new_key_for_every_minting_action(unit):
 	r = unit.run("print_usage\n")
 	assert r.returncode == 0
-	assert "swap-key [--new-key] [LABEL]" in r.stdout
+	assert "swap-key [--new-key] [--remove-plain-key] [LABEL]" in r.stdout
 	assert "add-key [--new-key] LABEL ROLE" in r.stdout
 	assert "lab-snapshot [--new-key]" in r.stdout
 
@@ -1522,6 +1522,14 @@ def _install_code_files(router, tmp, program="ok"):
 		router.write(rel_fs, (src / rel_src).read_text(), 0o755)
 
 
+def _install_config_files(router):
+	"""The three config files the install writes after the code files, so
+	check does not report a half-finished install."""
+	for name, text in (("device-id", "r1\n"), ("profile", "lab\n"),
+	                   ("zones", "")):
+		router.write("etc/newton/%s" % name, text, 0o600)
+
+
 def test_hello_direct_prints_the_reply_line(router_unit):
 	router = router_unit.router
 	_install_code_files(router, router_unit.tmp)
@@ -2061,6 +2069,7 @@ def _run_action_check(router_unit, typed):
 def test_action_check_happy_path(router_unit):
 	router = router_unit.router
 	_install_code_files(router, router_unit.tmp)
+	_install_config_files(router)
 	r = _run_action_check(router_unit, ["root-pw-for-tests"])
 	assert r.returncode == 0
 	lines = r.stdout.splitlines()
@@ -2674,13 +2683,15 @@ def test_action_revoke_removes_only_label_and_keeps_local_keys(router_unit):
 	assert LINE_B in router.authorized_keys()
 
 
-def test_action_revoke_unknown_label_is_already_revoked(router_unit):
+def test_action_revoke_unknown_label_is_refused(router_unit):
+	"""No line and no local key: a likely typo, not an earlier revoke."""
 	before = router_unit.router.read("etc/dropbear/authorized_keys")
 	r = router_unit.run("ACTION=revoke\nLABEL=unknown-key\naction_revoke\n")
-	assert r.returncode == 0
+	assert r.returncode == 1
 	assert r.stdout.splitlines() == [
-		"PASS already revoked",
-		"DONE revoke r1",
+		"NOTE state: router unchanged",
+		"STOPPED revoke r1: no Newton key line or local key for label "
+		"unknown-key on this router; Newton key labels on the router: none",
 	]
 	assert router_unit.router.read("etc/dropbear/authorized_keys") == before
 
@@ -3723,7 +3734,7 @@ def test_action_swap_key_end_to_end(router_unit):
 	r = router_unit.run(
 		"DEV_KNOWN_HOSTS=%s\n" % router_unit.kh +
 		"DEVICE=r1\nACTION=swap-key\nLABEL=newton-agent\n"
-		"action_swap_key\n",
+		"REMOVE_PLAIN_OK=1\naction_swap_key\n",
 		extra_env={"NEWTON_INVENTORY": str(inv)},
 	)
 	assert r.returncode == 0, (r.stdout, r.stderr)
@@ -4311,6 +4322,7 @@ def test_action_check_password_only_proof_factor_unchanged(router_unit):
 	# factored helper).
 	router = router_unit.router
 	_install_code_files(router, router_unit.tmp)
+	_install_config_files(router)
 	tty = router_unit.tmp / "typed"
 	tty.write_text(GOOD_PW_UNITS + "\n")
 	r = router_unit.run(

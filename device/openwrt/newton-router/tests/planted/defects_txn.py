@@ -28,7 +28,7 @@ MUTANTS = [
     ('B06', 'abort leaves the txn directory', 'rm -rf "$LOCK/$sid.txn"\n\tcrash_point\n\trm -f "$LOCK/$sid.applied"', 'crash_point\n\trm -f "$LOCK/$sid.applied"', TA),
     ('B07', 'abort does not write last', 'printf \'%s\\n\' "aborted $sid $how" > "$R/tmp/newton/last"', ':', TA),
     ('B08', 'a non-owner is never refused', 'abort_stale "$txn" "$G_W1" "$G_W2" "$sid" || fail not-owner 3', ':', TA),
-    ('B09', 'abort_restore accepts any guard answer', '[ "${gout%%"$NL"*}" = "restored $sid abort" ] || fail rollback-failed 1', ':', TA),
+    ('B09', 'abort_restore accepts any guard answer', '[ "$grc" -eq 0 ] && [ "$gfirst" = "restored $sid abort" ] && return 0', 'return 0', TA),
     ('B10', 'row 4: already-rolled-back test reversed', 'if [ "$base_c" = "$base_now" ]; then\n\t\t\t\thow=already-rolled-back\n\t\t\telse\n\t\t\t\thow=rolled-back-by-guard\n\t\t\tfi', 'if [ "$base_c" = "$base_now" ]; then\n\t\t\t\thow=rolled-back-by-guard\n\t\t\telse\n\t\t\t\thow=already-rolled-back\n\t\t\tfi', TA),
     ('B11', 'row 6 already-confirmed never fires', '[ "$post_c" = "$post_sha" ] && fail already-confirmed 1', ':', TA),
     ('B12', 'abort does not tick the guard for a non-owner', '"$GUARD" tick </dev/null >/dev/null 2>&1\n\t\tfi\n\tfi\n\tguard_status', ':\n\t\tfi\n\tfi\n\tguard_status', TA),

@@ -206,6 +206,23 @@ def test_totp_refuses_without_a_fingerprint(monkeypatch, capsys, no_qrencode):
     assert proof.get_level(DEVICE) == proof.LEVEL_PASSPHRASE
 
 
+def test_totp_names_a_damaged_fingerprint_file(monkeypatch, capsys, no_qrencode):
+    path = approve.state_dir() / "approval-fp" / DEVICE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("garbage\n", encoding="ascii")
+    monkeypatch.setattr(proof, "generate_seed", lambda: SEED)
+    _type_passphrase(monkeypatch)
+    monkeypatch.setattr(sys, "stdin", FakeStdin([lambda: _current_code()]))
+
+    assert enrol.main(["totp", DEVICE]) == 1
+
+    out = capsys.readouterr()
+    assert "wrong approval passphrase" not in out.err
+    assert f"the approval fingerprint file for {DEVICE} is damaged" in out.err
+    assert f"run sudo -u newton /usr/local/bin/newton-router-setup {DEVICE} approval-key again" in out.err
+    assert proof.load_totp(DEVICE) is None
+
+
 def test_totp_stores_nothing_when_the_code_is_wrong(monkeypatch, capsys, no_qrencode):
     _write_fingerprint()
     monkeypatch.setattr(proof, "generate_seed", lambda: SEED)

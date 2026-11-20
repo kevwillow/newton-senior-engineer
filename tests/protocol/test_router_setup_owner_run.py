@@ -974,13 +974,55 @@ def test_the_uninstall_removes_the_owner_scripts_of_that_device_only(
     assert (scripts / first["session_id"]).is_dir()
     assert (scripts / second["session_id"]).is_dir()
 
-    result = run_owner(env, "uninstall", device="r1")
+    result = run_owner(env, "uninstall", device="r1", typed=(GOOD_PW, "y"))
     assert result.rc == 0, result.out + result.err
+    assert OWNER_DELETE_QUESTION in result.err
     assert not (scripts / first["session_id"]).exists()
     assert (scripts / second["session_id"]).is_dir()
     plans = env.state_dir / "plans"
     assert not (plans / f"{first['session_id']}.json").exists()
     assert (plans / f"{second['session_id']}.json").exists()
+    assert ("PASS uninstall step 5: the owner scripts of this device are gone"
+            in result.out.splitlines())
+
+
+OWNER_DELETE_QUESTION = (
+    "Also delete the owner scripts of r1 from this host, with their backups "
+    "and plan records? No undo can be built for an earlier owner-script "
+    "change without them (y/N) "
+)
+
+
+@pytest.mark.parametrize("typed", [(GOOD_PW, "n"), (GOOD_PW,)],
+                         ids=["no", "no-answer"])
+def test_the_uninstall_keeps_the_owner_scripts_unless_the_owner_says_yes(
+    setup_env, typed
+):
+    """Without a yes the owner scripts, their backups and the plan records
+    stay, and the run says where they are."""
+    env = setup_env
+    seed_known_hosts(env)
+    seed_acl(env)
+    seed_https(env)
+    set_inventory(env, device="r1")
+    first = build_plan(env, device="r1")
+    scripts = env.state_dir / "owner-scripts"
+    plans = env.state_dir / "plans"
+    kept_script = (scripts / first["session_id"])
+    assert kept_script.is_dir()
+
+    result = run_owner(env, "uninstall", device="r1", typed=typed)
+    assert result.rc == 0, result.out + result.err
+    lines = result.out.splitlines()
+    assert OWNER_DELETE_QUESTION in result.err
+    assert kept_script.is_dir()
+    assert (plans / f"{first['session_id']}.json").exists()
+    assert ("NOTE kept the owner scripts of r1 and their backups in %s and "
+            "their plan records in %s; an undo of an earlier owner-script "
+            "change is built from them; delete them by hand when you no "
+            "longer need one" % (scripts, plans)) in lines
+    assert "PASS uninstall step 5: the owner scripts of this device are kept" in lines
+    assert lines[-1] == "DONE uninstall r1"
 
 
 # -- 4. the lines of the script ----------------------------------------------

@@ -1,0 +1,63 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Runs in the public repository; a private fork shows the jobs as skipped.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+        suite:
+          - mcp
+          - device/openwrt/newton-router/tests
+          - device/openwrt/newton-guard/tests
+          - lab/tests
+          - tests/serial
+          - tests/profiles
+          - tests/protocol
+    name: ${{ matrix.suite }} (py ${{ matrix.python }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: System tools the tests use
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q busybox-static
+          # The lint tests need shellcheck 0.11.0; Ubuntu 24.04 ships 0.9.0.
+          curl -sSfL -o "$RUNNER_TEMP/sc.tar.xz" \
+            https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  $RUNNER_TEMP/sc.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/sc.tar.xz" -C "$RUNNER_TEMP"
+          sudo install -m 0755 "$RUNNER_TEMP/shellcheck-v0.11.0/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+          # Ubuntu 24.04 blocks unprivileged user namespaces; the installer tests need them.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          git config --global user.name ci
+          git config --global user.email ci@example.invalid
+      - name: Install the test environment
+        working-directory: mcp
+        run: uv sync --locked --extra test --python ${{ matrix.python }}
+      - name: Run ${{ matrix.suite }}
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          # Short on purpose: tests bind Unix sockets under it (limit 107 bytes).
+          export PYTEST_DEBUG_TEMPROOT=/tmp/pt
+          mkdir -p "$PYTEST_DEBUG_TEMPROOT"
+          if [ "$SUITE" = mcp ]; then
+            cd mcp && .venv/bin/python -m pytest -q -p no:cacheprovider
+          else
+            mcp/.venv/bin/python -m pytest "$SUITE" -q -p no:cacheprovider
+          fi

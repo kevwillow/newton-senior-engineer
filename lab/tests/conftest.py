@@ -77,3 +77,10 @@ def _no_sleep(monkeypatch):
 @pytest.fixture(autouse=True)
 def _default_lab_file(monkeypatch):
     monkeypatch.setattr("newton_lab_test.DEFAULT_LAB", lab_toml_path())
+
+
+# Every test points the lab lock at its own temp file: a test must never take
+# (or be refused by) the real /tmp/newton-lab.lock a live lab run holds.
+@pytest.fixture(autouse=True)
+def _private_lab_lock(tmp_path, monkeypatch):
+    monkeypatch.setattr(_mod, "LAB_LOCK_PATH", tmp_path / "newton-lab.lock")

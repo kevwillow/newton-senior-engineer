@@ -328,7 +328,7 @@ def swap_install(env):
 
 def swap(env):
 	"""swap-key pulsar through the plain-key admin path."""
-	return env.run("--plain-key", env.plain_key, "pulsar", "swap-key",
+	return env.run("--plain-key", env.plain_key, "pulsar", "swap-key", "--remove-plain-key",
 	               "--new-key")
 
 

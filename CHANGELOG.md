@@ -168,6 +168,12 @@ Two version numbers exist and are separate:
   the AD approval fingerprint in the newton user's state directory, where `newton-approve` reads it. It takes
   `approval-key` and one device name, nothing else. The `newton-approve` launcher takes `ad-change <plan_id>` as well
   as a lone plan id, and `newton-doctor` checks the new launcher like the others.
+- An apply that holds: `newton_apply_change` with `hold=true` (`owrt-change.sh apply ... --hold`) runs the verify
+  rounds and does not confirm, so a change that can only be tested from a client stays under the router's rollback
+  until `confirm_by`; `newton_confirm_change` (`owrt-change.sh confirm`) confirms it after one more verify round, and
+  `newton_abort_change` rolls it back. Without `hold` the apply confirms on its own as before. Installed OpenWrt
+  routers only, and not for a change to named nft objects or a plan with client checks. A held apply writes a
+  receipt with outcome unknown; the confirm adds a confirmed one.
 
 ### Known limits
 - A new user's objectGUID is read on Samba at its planned DN, and on Windows by its sAMAccountName right after the add:
@@ -205,6 +211,175 @@ Two version numbers exist and are separate:
   inventory follows it.
 - Newton does not change privileged groups, delete objects, reset passwords, reset krbtgt, or change trusts,
   functional levels or Group Policy, and there is no owner-script tool for Active Directory yet.
+
+### Fixed
+- AD audit and AD write follow-ups:
+  - `newton_ad_audit` renders a large domain in seconds: the proof that no directory string reached a fix command
+    strips each string once, so its cost no longer grows with findings times strings (1000 affected accounts took
+    over 100 s). The tool runs off the event loop, so a long audit no longer blocks a confirm or an abort.
+  - The audit report is bounded: a check lists at most 10 findings and a finding at most 10 objects, with the full
+    counts in `findings_total` and `objects_total`, and the listed findings take at most 60000 bytes. A report that
+    leaves anything out says `truncated` and carries a note; the tool description states the caps.
+  - `newton_ad_plan_change` against a DC that does not answer names the DC, the reason, that nothing was written and
+    where to look (`devices.toml`, `newton-ad-setup`), instead of "internal server error".
+  - `newton_ad_apply_change` with a malformed plan id answers "the plan record is not found or is invalid", as status
+    and abort do, instead of "internal server error".
+- `newton_read` with a known verb and arguments no form accepts (`uci show <junk>`) now says those arguments were
+  refused, not that the verb is not allowed. `newton_plan_undo` refuses a bad id as `change_id`, its own parameter, not
+  `session_id`.
+- The inventory refusals say the rule: a bad device name names the name rule and that no device loads until that entry
+  is fixed or removed; a bad `host` or `https_host` says what a host must look like (no URL scheme, path, spaces or
+  `user@`).
+- `newton-approve`: Ctrl-C or the end of input at the "Type 'approve xxxxxxxx'" prompt is a refusal ("confirmation could
+  not be read; approval not created"), not a Python traceback; a wrong answer names the exact text to type, and spaces
+  around a pasted answer are ignored (plan, scan and AD approvals).
+- `python -m newton_mcp.approve` and `python -m newton_mcp.enrol` now run the command (they printed nothing and exited
+  0, an approval that approved nothing).
+- When the MCP state directory is unsafe (a symlink, a writable parent) or its redaction key is unusable, every tool
+  now answers `state directory unsafe: <reason>` and returns none of the output it cannot redact. Before, a call that
+  worked answered "internal server error" and a refused call crashed with the bare reason.
+- A tool a no-install router does not support no longer answers that Newton "cannot manage it yet in this version"
+  (false since 1.1): it names the tool, says what no-install access supports, and how the owner switches the router to
+  the installed mode.
+- `newton_backup` on a VyOS, RouterOS or Junos device now says (in its description and in the result: `redacted:
+  true` and a note) that every secret in the saved copy is replaced with `<redacted>`, so it is a reference copy, not a
+  backup to restore.
+- A held change (`hold=true`) no longer ends the easy grant when it is applied: a held change has not failed. The
+  grant ends when that change later fails: a confirm that does not confirm, an abort, or a status that finds it rolled
+  back (a confirm that returns a result other than confirmed says `EASY GRANT ENDED.`, and an abort sets
+  `easy_grant: "ended"`; a confirm refused on this host and a status end the grant without saying so).
+- Clearer errors (router program 1.3.3):
+  - `owrt-safe-apply.sh abort` of a session that rpcd no longer has no longer prints `ABORTED.`: it says whether the
+    change was rolled back is not known from there, and exits 3. `owrt-change.sh abort` says the same for a `gone`
+    answer when this host's audit log cannot be read.
+  - An apply refused by the router names the next step of its refusal code (plan again, approve again, the guard's
+    state); "still staged" only where the session still can be applied. `no-such-txn` (the usual answer after a
+    reboot) says plan again; `role` and `not-owner` name the key's missing change role and the owning login.
+  - `owrt-change.sh abort` never says `ABORTED` for a `gone` answer: it asks the router's status, records a rollback
+    only when that line says rolled-back (a held apply's rolled-back receipt follows it), refuses as confirmed when
+    it says confirmed, and otherwise says the outcome is not known and exits non-zero.
+  - After a held apply's window, `status` and `confirm` say the change is confirmed and stays live when the router's
+    status line says confirmed (a confirm that reached the router after the host stopped waiting).
+  - A `rollback-failed` abort carries the guard's first line, so a retry can be told from a damaged last-known-good.
+  - A held apply whose window ended unconfirmed is recorded as rolled back once the router's status says so;
+    otherwise its receipt stays unknown with a next step. The confirm refusals for a missing or malformed hold record
+    and the held next step name what to do; a confirm past its timeout is outcome-unknown, not an internal error.
+  - The serial tool hard-blocks a recursive `rm` of `/` or a top-level system directory (also a glob such as `/etc*`
+    that matches one), and of a target it cannot resolve (`~`, `$`, a command substitution, `.` or `..`, or a
+    relative path after a `cd`); `push` backs the old file up first, never over an earlier `.newton-bak`, and asks `--i-know` before it writes a login file.
+  - `newton-vantage-setup check-client-checks` checks every zone; `newton-lab-isolation` reports a line with no source
+    MAC as INCONCLUSIVE, never as a foreign DHCP server; the vendor lab runner takes `/tmp/newton-lab.lock`.
+  - AD: a stale before-image conflict names its cause and keeps the DC's live value; a pre-write refusal adds its
+    code's next step; an installed `newton-approve` no longer offers the source-tree approval-key form.
+  - A damaged approval fingerprint file is named as such and counts no wrong answer, and the message gives the full
+    `sudo -u newton /usr/local/bin/newton-router-setup <device> approval-key` command.
+  - The serial tool's recursive-`rm` block reads every word of a command: an `rm` behind any wrapper (`timeout`,
+    `nice`, `env`, `sudo`, `setsid`; even `echo rm -rf /` is refused), a command name the shell expands (`$R`), an `rm`
+    that `xargs` feeds, and every quoted command line (`sh -c`, `su -c`, `env -S`, `eval`, a here-string, text piped
+    into `sh`, a `-c` string attached to its option as in `sh -c'...'`). It also blocks a `find` that deletes (`-delete`, or an `-exec` that runs `rm`) from
+    `/`, a top-level system directory or a start the shell decides, grouped with `\(` `\)` too. A command name built by a command substitution is not seen. It stays a guard
+    rail, not a sandbox.
+  - The serial tool hard-blocks `mtd` with `erase` or `write` anywhere after it (`mtd -r erase rootfs_data`, OpenWrt's
+    usual factory reset), a recursive `rm` or deleting `find` of any path under `/overlay` or `/rom` (flags in separate
+    words too), and a recursive `rm` of `/etc/config`, `/etc/dropbear`, `/root/.ssh`, `/usr/lib` or `/lib/modules`
+    (paths below them stay allowed). `poweroff`, `halt`, `shutdown`, `opkg remove|upgrade`, `ifconfig ... down`,
+    `service` or `/etc/init.d/` `network|firewall|dropbear` `stop|restart|disable`, and any command that names
+    `dropbear` with a verb that stops, disables or removes it now need `--approved`.
+  - Serial `push` checks the file's md5 after the byte count, so a garbled line that keeps the length is no longer
+    reported `PUSHED`; every failure after the write starts says the target is already overwritten and names the
+    `.newton-bak` backup (or that there was no earlier file), and a dropped serial line during a push is reported with
+    exit 7 instead of a traceback.
+  - AD: a conflict whose live value is already the plan's after-image says the target holds the planned value and
+    nothing needs applying, instead of telling the owner to plan the change again.
+  - The release README describes the apply with hold, `newton_confirm_change` and the refused abort of a confirmed
+    change, and the MCP tests that read README.md are run against the README the public tree ships.
+  - SETUP.md and docs/INSTALL.md: the skill copy checks before it writes, the inventory append is safe to rerun, and
+    the checkup names what each access mode can run. The installer's lock answer says the guard will be set.
+- Install and operating docs:
+  - docs/INSTALL.md step 10e checks for each domain controller entry before it appends it, as step 7b does, so a
+    second run cannot add a duplicate table that makes the whole inventory unreadable; SKILL.md says the same.
+  - docs/INSTALL.md step 11 registers a client machine for client checks and scans (the `[vantages.<name>]` entry,
+    its keys, `newton-vantage-setup install` and `check`); SETUP.md and the release README point to it.
+  - `newton-install` refuses a `/usr/bin/python3` older than 3.11 right after its root-program check and before it
+    writes anything (`--check` names the Python it will use); a failed first install no longer says nothing was
+    installed once the `newton` user, group and home exist. The prerequisites in SETUP.md, docs/INSTALL.md and
+    docs/SETUP-CLIENTS.md name 3.11 and check it.
+  - docs/SETUP-CLIENTS.md lists the `newton-vantage-setup` and `newton-ad-setup` launchers and their sudoers rules,
+    and the approve launcher's `ad-change` form; docs/INSTALL.md step 4 lists `newton-vantage-setup`.
+  - SKILL.md and the `newton_plan_change` and `newton_apply_change` descriptions: plan a change you will hold with a
+    longer `timeout_s`, because the hold ends at `timeout_s` minus 15 s. SKILL.md says `hold=true` is refused for a
+    zone `log_limit` (OW-FW-09) or an `ipset` change, that a VyOS, RouterOS or Junos apply confirms by itself, that
+    `NEWTON_FIELD_RECEIPTS` reaches only a development server, and that an update ends with a reconnect and a router
+    `upgrade`; it no longer quotes a test count. docs/INSTALL.md gives the same update steps, and SETUP.md says a
+    no-install `approval-key` asks no authenticator question.
+- Owner-facing claims: SKILL.md and the README name release 1.1.3 and the Active Directory audit (48 checks) and changes
+  merged on main; the router's own expiry check is the installed OpenWrt router's; the scenario counts, the guided
+  interview's fourteen questions and the router program of the 97-scenario Pulsar run (1.1.0) are stated as they are;
+  the dev README's test counts are dated. The release README says the approval lockout and the 1.5 s minimum are the
+  dialog's (the terminal `newton-approve` fallback for a router change has neither). `SECURITY.md` names the AD
+  write path, `newton-enrol`, the vantage scripts and the serial script in scope, and the writes that arm no undo. The
+  lab example's header says lab/lab.toml is kept out of every published copy. A test ties each claim to the tree.
+- An abort of a session that was already confirmed is refused and points to `newton_plan_undo`, instead of reporting
+  success while the change stays live: the router refuses while its last session is that one (`refused <SID>
+  confirmed`), and when a later session has replaced that line and the router answers `gone`, the host refuses if its
+  audit log records the confirm. The router program is version 1.3.2.
+- `newton-router-setup swap-key` asks before it removes the plain key from the router (`--remove-plain-key` skips
+  the question), and the no-install uninstall asks before it deletes the device's owner scripts and plan records.
+- `newton-doctor` reports FAIL when the router check printed a failed proof, whatever its exit code.
+- A correct passphrase clears the count of wrong answers, on both the OpenWrt and the AD approval paths.
+- The lab runner checks a VM's name before it rolls the VM back (`vm_name` in the lab file is now required for VM
+  devices), and two runs of it can no longer use the lab at the same time (`/tmp/newton-lab.lock`).
+- `owrt-change.sh` messages when a step fails part way:
+  - A change the router confirmed whose answer never reached this host (the apply or confirm ended `OUTCOME
+    UNKNOWN`) is recorded as confirmed by the next `status`, `abort` or `confirm` that finds the router saying
+    confirmed: a `CONFIRMED ... (reconciled: ...)` line after the config hashes, from which the server writes the
+    confirmed receipt and the after-hash, so `newton_plan_undo` can undo it. An undo accepts an unknown receipt
+    followed by a confirmed one (a held apply that was confirmed); any other pair of receipts is still refused.
+  - A second confirm whose check fails on a session the router already confirmed says it is confirmed and stays
+    live, instead of saying the router rolls it back.
+  - A plan that fails after staging (a refused, lost or malformed seal, or a staged config that fails `fw4 check`)
+    says "discarded" only when the cleanup abort worked; otherwise it names the session still staged and the abort to
+    run. A seal or stage whose link dropped is a connection error, not a router refusal.
+  - A plan refused because a session of the same login is still open names that session and how to apply or abort
+    it; the plan's `next:` line carries the planned timeout (and the `--hold` form). An apply refused for a different
+    timeout says the session is still staged and to apply with the planned timeout.
+  - The reads before an apply name the router's refusal and its next step (a session gone after a reboot says plan
+    again, not "still staged"); an unreachable router after a rollback is reported as health or DNS/DHCP not
+    checked, not as a difference.
+  - A backup never overwrites another of the same name, and a truncated one is removed.
+  - Ctrl-C says the router rolls an unconfirmed apply back at the end of its window (once the confirm was sent, it
+    says only that the outcome is not known from here and names `status`); a second apply of an applied
+    session says it was already applied, not `OUTCOME UNKNOWN`; a second abort of a session aborted here says there
+    is nothing to do; a changes file with CRLF line endings is refused with that reason before any ssh call.
+- A no-install apply whose link to the router fails before `uci apply` is sent (the login, the pending check, the
+  staging), or that the router answers busy or refuses, now says `not_applied`: the approval can be used again, no
+  receipt is written, and `newton_abort_change` drops the plan. It used to say `unknown` and spend the approval.
+- `newton_plan_undo` of a change applied with `hold=true` and then confirmed is no longer refused for having more than
+  one receipt: UNKNOWN receipts followed by one CONFIRMED receipt are one confirmed change; any other set of several
+  receipts is still refused.
+- The receipt of a no-install change no longer tells the owner to restore a full backup with `sysupgrade -r`. An
+  owner-script change names its restore script (the `owner-run` command of its restore plan) and says the host-side
+  copy holds only the UCI sections the change touches; a change Newton applied itself says no backup was kept and
+  that the way back is a reverse change planned with `newton_plan_change`.
+- A no-install apply that never ended (the MCP server was killed, or the client went away) no longer leaves
+  `newton_change_status` at `in_progress` and `newton_abort_change` at "an apply is in flight" for ever: once its
+  rollback window and the settle after it have passed, the status says `unknown` with a note that the apply did not
+  finish, and the approval is marked used. An outcome the apply recorded before it stopped is kept.
+- Setup script follow-ups:
+  - `newton-rules add` for a zone with no inside vantage (or a mistyped zone) names the zones the device's inside
+    vantages carry and points to `newton-vantage-setup`.
+  - `newton-vantage-setup check` and `check-client-checks` on a vantage that ssh cannot reach (exit 255) name ssh's
+    error instead of saying the key is not forced and advising a root password.
+  - `newton-router-setup check` FAILs with `not fully installed` when the program or the guard is on the router but
+    `/etc/newton/device-id`, `profile` or `zones` is not (an install that was cut off), and names the install
+    command. Uninstall, and a re-run of install, remove any `.new` a cut-off upload left next to a code file.
+  - `newton-router-setup revoke` of a label with no key line on the router and no local key file (most likely a typo)
+    stops and lists the Newton key labels the router has, instead of printing `PASS already revoked`; a revoke of the
+    key the inventory's `key_file` names warns that Newton is now cut off and gives the `add-key` restore command.
+  - `swap-key` without the plain key says to run install first or to name the key with `--plain-key`.
+  - The install writes `/etc/config/newton_wanhealth` (when it is absent) with the `main` section, disabled, so
+    setting `newton_wanhealth.main.enabled=1` has a section to set; the install text also names the `iface` and
+    `target` lists the check needs before it probes anything.
 
 ## [1.1.3] - 2026-11-09
 

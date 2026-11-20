@@ -32,7 +32,10 @@ off again once its `reset_after` has restored Pulsar.
    `etc/newton/device-id` (equal to the device name) and `etc/newton/profile` (equal to `lab`) present.
    The example also defines lab-client (VM 9105, snapshot `baseline-pulsar`) on Pulsar's lab LAN 192.168.151.0/24
    (VLAN 151 on the WAN cable) and wan2 on VLAN 101; a lab-r1 run resets lab-client back to its `baseline` snapshot,
-   so the two runs must both hold `/tmp/newton-lab.lock` and never overlap.
+   so the two runs must both hold `/tmp/newton-lab.lock` and never overlap. The runner takes that lock itself (a
+   non-blocking `flock`) for every run except `--list`, and refuses with "another lab run holds /tmp/newton-lab.lock"
+   while another run holds it; hold it by hand (`flock /tmp/newton-lab.lock ...`) only for work outside the runner,
+   such as building a snapshot.
 2. List without touching anything: `python3 lab/newton-lab-test.py --lab <copy> --scenarios lab/scenarios-pulsar --list`
 3. Run one: `python3 lab/newton-lab-test.py --lab <copy> --scenarios lab/scenarios-pulsar --only p-01-static-lease`
 

@@ -9,8 +9,9 @@ install of the MCP server.
 
 ## Before you start
 
-Prerequisites: `sudo`, `git`, an ssh client and the system Python 3 with its `venv` module (Debian and
-Ubuntu: `sudo apt install python3-venv`; a fresh Ubuntu 26.04 cloud image lacks it).
+Prerequisites: `sudo`, `git`, an ssh client and the system Python (`/usr/bin/python3`) 3.11 or newer with its `venv`
+module (Debian and Ubuntu: `sudo apt install python3-venv`; a fresh Ubuntu 26.04 cloud image lacks it). The
+installer refuses an older Python before it changes anything.
 
 The repo documents the install in `SKILL.md` (the MCP server section, "First install" and "Every later install"). Follow that procedure
 exactly. The first install opens a new terminal and starts a root shell with
@@ -63,15 +64,19 @@ functions that name them:
 | State dir | `/var/lib/newton/state` (`newton:newton` `0700`) | `install_code_root` |
 | Code root | `/opt/newton/` (`scripts/`, `mcp/`, `device/`, `profiles/`, `SKILL.md`, venv) | `install_code_root` |
 | MCP launcher | `/usr/local/bin/newton-mcp` (`root:root` `0755`; clean env; newton user only; refuses arguments) | `perform_install` (constant `LAUNCHER`) |
-| Approve launcher | `/usr/local/bin/newton-approve` (`root:root` `0755`; one 32-hex arg) | `perform_install` (constant `APPROVE_LAUNCHER`) |
+| Approve launcher | `/usr/local/bin/newton-approve` (`root:root` `0755`; one 32-hex arg, or `ad-change` and one 32-hex arg) | `perform_install` (constant `APPROVE_LAUNCHER`) |
 | Setup launcher | `/usr/local/bin/newton-router-setup` (`root:root` `0755`; passes args through) | `perform_install` (constant `SETUP_LAUNCHER`) |
 | Enrol launcher | `/usr/local/bin/newton-enrol` (`root:root` `0755`; clean env; newton user only; passes args through) | `perform_install` (constant `ENROL_LAUNCHER` in `main`) |
+| Vantage setup launcher | `/usr/local/bin/newton-vantage-setup` (`root:root` `0755`; clean env; newton user only; passes args through) | `perform_install` (constant `VANTAGE_SETUP_LAUNCHER` in `main`) |
+| AD setup launcher | `/usr/local/bin/newton-ad-setup` (`root:root` `0755`; clean env; newton user only; `approval-key` and one device name) | `perform_install` (constant `AD_SETUP_LAUNCHER` in `main`) |
 | Doctor launcher | `/usr/local/bin/newton-doctor` (`root:root` `0755`; test seams disabled) | `perform_install`, `render_installed_doctor` (constant `DOCTOR_LAUNCHER`) |
 | Sudoers file | `/etc/sudoers.d/newton-mcp` (`root:root` `0440`) | `perform_install` (constant `SUDOERS`) |
 | Sudoers MCP rule (NOPASSWD) | `<invoking_user> ALL=(newton) NOPASSWD: /usr/local/bin/newton-mcp ""` | `SUDOERS_MCP_LINE` in `main` (this is what makes `sudo -n` non-interactive) |
 | Sudoers approve rule | `<invoking_user> ALL=(newton) /usr/local/bin/newton-approve` + `Defaults!/usr/local/bin/newton-approve timestamp_timeout=0` | `SUDOERS_APPROVE_LINE`, `SUDOERS_APPROVE_DEFAULTS_LINE` in `main` |
 | Sudoers setup rule | `<invoking_user> ALL=(newton) /usr/local/bin/newton-router-setup` + `Defaults!/usr/local/bin/newton-router-setup timestamp_timeout=0` | `SUDOERS_SETUP_LINE`, `SUDOERS_SETUP_DEFAULTS_LINE` in `main` |
 | Sudoers enrol rule | `<invoking_user> ALL=(newton) /usr/local/bin/newton-enrol` + `Defaults!/usr/local/bin/newton-enrol timestamp_timeout=0` | `SUDOERS_ENROL_LINE`, `SUDOERS_ENROL_DEFAULTS_LINE` in `main` |
+| Sudoers vantage setup rule | `<invoking_user> ALL=(newton) /usr/local/bin/newton-vantage-setup` + `Defaults!/usr/local/bin/newton-vantage-setup timestamp_timeout=0` | `SUDOERS_VANTAGE_SETUP_LINE`, `SUDOERS_VANTAGE_SETUP_DEFAULTS_LINE` in `main` |
+| Sudoers AD setup rule | `<invoking_user> ALL=(newton) /usr/local/bin/newton-ad-setup` + `Defaults!/usr/local/bin/newton-ad-setup timestamp_timeout=0` | `SUDOERS_AD_SETUP_LINE`, `SUDOERS_AD_SETUP_DEFAULTS_LINE` in `main` |
 | Claude Code managed settings | `/etc/claude-code/managed-settings.json` = `{"allowManagedHooksOnly": true}` (`root:root` `0644`; optional: written only when the owner answers `lock` to the install question and the file is absent; default: no; never overwritten) | `ask_managed_settings`, `install_managed_settings` |
 | Bootstrap | `/usr/local/sbin/newton-bootstrap` + `/usr/local/sbin/newton-bootstrap.source` | `install_bootstrap` (plain mode only) |
 
@@ -231,7 +236,7 @@ run by (`SKILL.md`, "Isolation check"):
 Do not run the repo's `scripts/newton-doctor` for this check; it honours the
 test seams and reports are not trusted (`SKILL.md`, "Isolation check").
 
-A client UI smoke test (the agent listing the twenty-three tools, calling
+A client UI smoke test (the agent listing the twenty-four tools, calling
 `newton_list_devices`) is not documented in the repo.
 
 ## Not confirmed

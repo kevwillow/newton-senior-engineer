@@ -1,11 +1,12 @@
 # lab/lab.example.toml -- the shipped twin of lab/lab.toml.
 #
 # lab/lab.toml is the live lab file: it names the maintainer's Proxmox host,
-# the lab VMs and the key and token files, so it is not part of this
-# repository.  This file has the same structure and the same keys, with
-# synthetic values: made-up hosts, documentation-range addresses, synthetic
-# VM ids and placeholder paths under /home/user/.  Copy it, fill in your own
-# values and point the runner at the copy:
+# the lab VMs and the key and token files, so it is
+# kept out of every published copy of Newton (the release build drops it).
+# This file has the same structure and the same keys, with synthetic values:
+# made-up hosts and addresses (private and documentation ranges), synthetic VM ids and
+# placeholder paths under /home/user/.  Copy it, fill in your own values and
+# point the runner at the copy:
 #
 #   python3 lab/newton-lab-test.py --lab lab.toml --list
 #
@@ -21,7 +22,7 @@ pin_file = "/home/user/.config/pve/apollo.pin"
 proxy = "ssh -i /home/user/.ssh/apollo -o BatchMode=yes -W %h:%p root@192.0.2.11"
 password_file = "/home/user/.config/newton/lab-root.pw"
 key = "/home/user/.ssh/apollo"
-# The runner's restricted key and the lab approval passphrase (RD7 = A): both files are created at setup time by
+# The runner's restricted key and the lab approval passphrase. Both files are created at setup time by
 # `newton-router-setup lab-r1 add-key --new-key lab-runner change` and `approval-key`; they are lab-only, and the runner never
 # creates or reads the passphrase file except to derive the approval token for approval = true scenarios.
 router_key = "/home/user/.ssh/newton-lab-runner"
@@ -42,8 +43,12 @@ quiet_s = 10   # Seconds the successful fingerprint must remain unchanged.
 timeout_s = 120 # Maximum seconds to wait for a device to settle.
 poll_s = 1     # Seconds between settle fingerprint polls.
 
+# Every VM device names its Proxmox VM (vm_name, required): before any rollback the runner reads the VM's name
+# for that vmid from the Proxmox API and refuses, with nothing rolled back, when it is not this name. A mistyped
+# or copied vmid then stops the run instead of rolling back some other VM with a snapshot of the same name.
 [devices.lab-isp]
 vmid = 9101
+vm_name = "lab-isp"
 host = "10.109.0.10"
 user = "root"
 snapshot = "baseline"
@@ -51,13 +56,15 @@ settle_cmd = "{ ubus call service list; ubus call network.interface dump | jsonf
 
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
-snapshot = "baseline-newton-1-3-1"   # RD7 = A: pve_snapshot_name of the router program's version (see newton-router-setup lab-snapshot)
+snapshot = "baseline-newton-1-3-3"   # pve_snapshot_name of the router program's version (see newton-router-setup lab-snapshot)
 settle_cmd = "{ ubus call service list; ubus call network.interface dump | jsonfilter -e '@.interface[*].interface' -e '@.interface[*].up'; } | md5sum"
 
 [devices.lab-client]
 vmid = 9105
+vm_name = "lab-client"
 host = "10.109.0.50"
 user = "labuser"
 snapshot = "baseline"
@@ -73,6 +80,7 @@ settle_cmd = 'systemctl is-system-running && [ "$(systemctl list-jobs --no-legen
 # through apollo and rewrites the known_hosts file for the tunnel's local endpoint.
 [devices.lab-vyos]
 vmid = 9104
+vm_name = "lab-vyos"
 host = "10.109.0.31"
 user = "newton"
 platform = "vyos"
@@ -88,6 +96,7 @@ admin_key = "/home/user/.config/newton/lab-vyos/newton"
 # baseline table of the CHR lives in lab/vendor-shapes.toml.
 [devices.lab-chr]
 vmid = 9103
+vm_name = "lab-chr"
 host = "10.109.0.21"
 user = "newton"
 platform = "routeros"
@@ -107,6 +116,7 @@ admin_key = "/home/user/.config/newton/lab-chr/newton"
 # lives in lab/vendor-shapes.toml.
 [devices.lab-junos]
 vmid = 9106
+vm_name = "lab-junos"
 host = "10.109.0.41"
 user = "newton"
 platform = "junos"

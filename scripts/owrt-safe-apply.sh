@@ -18,6 +18,7 @@
 #   owrt-safe-apply.sh status  <SID>                  # staged | applied-pending-confirm | rolled-back | gone
 #   owrt-safe-apply.sh confirm <SID>                  # keep the change (run from a fresh connection)
 #   owrt-safe-apply.sh abort   <SID>                  # discard staged changes, or roll back now if applied
+#                                                     # (a gone session: exit 3, outcome not known from here)
 #
 # Rollback covers UCI config only (/etc/config). It does not undo package changes, file edits,
 # passwords, reboots, or client-side state (leases, wifi associations) caused by the apply.
@@ -225,7 +226,7 @@ named)
 	done
 	;;
 check-staged)
-	# P16: check the STAGED firewall config without applying it. Prints exactly ONE line (the host reads
+	# check the STAGED firewall config without applying it. Prints exactly ONE line (the host reads
 	# only the first): fw4 pass | fail DETAIL | running-fails DETAIL | skipped-untouched | not-checked REASON.
 	# fw4 builds its ruleset from uci.cursor() with no arguments, so a ucode wrapper swaps the cursor for one
 	# that reads /etc/config plus the rpcd session's delta dir (the dir `uci -P` uses), includes fw4's own
@@ -505,10 +506,13 @@ abort)
 	[ -n "${1:-}" ] || die "missing session id"
 	valid_sid "$1"
 	if ! live "$1"; then
+		# rpcd restarted, the router rebooted, or the session ended: this run
+		# rolls nothing back, so it never says ABORTED and exits non-zero.
+		if applied "$1"; then was="an apply of this session was recorded"; else was="no apply of this session is recorded here (a reboot also clears this record)"; fi
 		clean "$1"
-		echo "session already gone; cleaned transaction state."
-		echo "ABORTED."
-		exit 0
+		echo "session $1 is gone; this abort rolled nothing back; $was."
+		echo "Whether the change was rolled back or is still live is not known from here: check with uci show <config> (compare it with your latest backup) and logread; cleaned this helper's transaction state."
+		exit 3
 	fi
 	if expired "$1"; then
 		echo "rollback deadline passed — automatic rollback already happened."

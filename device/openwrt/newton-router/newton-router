@@ -1479,7 +1479,7 @@ cmd_hello() {
 		'') agentv=0 ;;
 		*) agentv=1 ;;
 	esac
-	printf 'hello %s api=1 version=1.3.1 mode=%s prog=%s helper=%s guard=%s init=%s device=%s profile=%s approval-key=%s guard-state=%s busy=%s caller=%s role=%s door=%s tty=%s agent=%s from=%s\n' \
+	printf 'hello %s api=1 version=1.3.3 mode=%s prog=%s helper=%s guard=%s init=%s device=%s profile=%s approval-key=%s guard-state=%s busy=%s caller=%s role=%s door=%s tty=%s agent=%s from=%s\n' \
 		"$nonce" "$MODE_STR" "$prog" "$helper" "$guard" "$init" "$device" "$profile" "$key" "$gstate" "$busy" "$CALLER" "$ROLE" "$DOOR" "$ttyv" "$agentv" "$FROM_ADDR"
 	if [ "$DOOR" = ssh ]; then
 		hello_record "$nonce"
@@ -1683,8 +1683,7 @@ approval_token() {
 # clock-window rules hold:
 #   EXP > NBF, EXP - NBF <= 3600, now <= EXP.
 # Only the expiry bound is enforced; a router whose clock is behind
-# (no RTC, WAN down) must still accept a fresh token (owner ruling
-# 2026-10-21). Replay stays bounded by host-side single use, the HMAC
+# (no RTC, WAN down) must still accept a fresh token. Replay stays bounded by host-side single use, the HMAC
 # over digest+NBF+EXP and the stage-age limit.
 check_approval_window() {
 	local nbf="$1" exp="$2" now diff
@@ -1792,8 +1791,8 @@ leash_classify() {
 	done < "$chg"
 	# the first small awk pass: the unique (config, section) pairs of the
 	# parsed C lines, in order of first appearance (a section rename
-	# touches both names); the parser is the packet A final one (policy
-	# parse_diff_line): op char, config, path, last-dot option split, one
+	# touches both names); the parser is the policy's own
+	# (parse_diff_line): op char, config, path, last-dot option split, one
 	# pair of quotes removed from the value
 	# shellcheck disable=SC2016  # the awk program is fixed text (design 3.1)
 	awk '
@@ -2571,7 +2570,7 @@ cmd_named() {
 	run_helper named "$1"
 }
 
-# cmd_check_staged: P16 (router program 1.3.0). The helper checks the STAGED firewall config without
+# cmd_check_staged (router program 1.3.0). The helper checks the STAGED firewall config without
 # applying it; this program is the boundary that holds the answer to ONE line the host can trust:
 #   fw4 pass | fw4 skipped-untouched | fw4 not-checked REASON | fw4 fail DETAIL | fw4 running-fails DETAIL
 # Anything else the helper says (more lines, an unknown word, nothing, a watchdog kill) becomes a
@@ -2698,7 +2697,7 @@ cmd_health_snapshot() {
 }
 
 # cmd_apply: design 6.2 steps 1 to 8 (pre-arm refusals); part 2 in a later round.
-# SW2 round 2a (design Item 2): argv grows from 3 to 5 user words; the new
+# SW2 (design Item 2): argv grows from 3 to 5 user words; the new
 # NBF and EXP carry the approval window into the HMAC. The window-shape
 # check fires before reading any state, so a malformed approval fails closed
 # without ever reading the txn dir.
@@ -3304,13 +3303,18 @@ abort_clean() {
 }
 
 # abort_restore SID: run guard restore abort and require its first line
-# to be exactly "restored <SID> abort"; otherwise fail rollback-failed 1.
+# to be exactly "restored <SID> abort"; otherwise fail rollback-failed 1,
+# with the guard's first line and exit status as the detail, so the owner
+# can tell a retry from a permanent failure (a damaged last-known-good).
 abort_restore() {
-	local sid="$1" gout
-	gout=$("$GUARD" restore abort </dev/null 2>/dev/null) || fail rollback-failed 1
+	local sid="$1" gout grc gfirst
+	grc=0
+	gout=$("$GUARD" restore abort </dev/null 2>/dev/null) || grc=$?
 	NL='
 '
-	[ "${gout%%"$NL"*}" = "restored $sid abort" ] || fail rollback-failed 1
+	gfirst=${gout%%"$NL"*}
+	[ "$grc" -eq 0 ] && [ "$gfirst" = "restored $sid abort" ] && return 0
+	fail rollback-failed 1 "guard: ${gfirst:-no answer} (exit $grc)"
 }
 
 # abort_stale TXN G_W1 G_W2 SID: 0 when the txn is stale (any change
@@ -3472,6 +3476,13 @@ cmd_abort() {
 	# keep that line instead of replacing it with the content-free "gone".
 	last=
 	[ -f "$R/tmp/newton/last" ] && IFS= read -r last 2>/dev/null < "$R/tmp/newton/last"
+	# A SID that was CONFIRMED has no rollback left: the change is live.
+	# Refuse, and leave the last line as it is so status keeps answering
+	# confirmed; an 'aborted <sid> gone' line here would read as a revert.
+	if [ "$last" = "confirmed $sid" ]; then
+		printf 'refused %s confirmed\n' "$sid"
+		fail already-confirmed 3
+	fi
 	keep_last=
 	case "$last" in
 		"aborted $sid "*) keep_last=keep ;;

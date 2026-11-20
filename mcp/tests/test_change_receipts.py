@@ -496,3 +496,99 @@ def test_cr21_regenerate_finished_time_skips_receipt_audit_line(configured):
     assert "Applied: 2026-10-24T15:01:00-04:00" in text
     assert "Finished: 2026-10-24T15:02:00-04:00" in text
     assert "Finished: 2026-10-24T15:03:00-04:00" not in text
+
+
+# ---- the receipt of a no-install change names its real way back ----
+
+RSID = "ab" * 16
+ORIGINAL_SID = "cd" * 16
+
+
+def _owner_record(root, **updates):
+    """An owner-script apply record, as the owner-run lane hands it on."""
+    state = root / "state"
+    backup = state / "owner-scripts" / SID / "backup"
+    backup.mkdir(parents=True, exist_ok=True)
+    (backup / "dhcp.json").write_text("{}")
+    fields = {
+        "router_leash": "owner-script",
+        "kind": "owner-script",
+        "restore_sid": RSID,
+        "backup_manifest_sha256": "5" * 64,
+        "backup_path": str(backup),
+    }
+    fields.update(updates)
+    return _record(root, **fields)
+
+
+def _auto_record(root):
+    """An auto (rpcd) record: Newton applied it itself; no backup kept."""
+    record = _record(root, router_leash="rpcd", mode="auto")
+    record.pop("backup_path")
+    return record
+
+
+def _render(root, record, outcome):
+    return cr.render(root / "state", record, outcome, [], "the host audit log")
+
+
+@pytest.mark.parametrize("outcome", ["confirmed", "unknown"])
+def test_cr22_an_owner_script_receipt_names_the_restore_script(configured, outcome):
+    text = _render(configured, _owner_record(configured), outcome)
+    undo = text.split("## How to undo", 1)[1]
+    backup = text.split("## Backup", 1)[1].split("## How to undo", 1)[0]
+    assert "sysupgrade -r" not in text
+    assert "full config" not in backup or "not a full-config" in backup
+    assert "including secrets" not in backup
+    assert f"owner-scripts/{SID}/backup" in backup
+    assert "Wi-Fi keys" in backup
+    assert f"owner-run {RSID}" in undo
+    assert "quasar" in undo
+    if outcome == "unknown":
+        assert "newton_change_status" in undo
+
+
+@pytest.mark.parametrize("outcome", ["confirmed", "unknown"])
+def test_cr22b_an_auto_receipt_says_no_backup_was_kept(configured, outcome):
+    text = _render(configured, _auto_record(configured), outcome)
+    undo = text.split("## How to undo", 1)[1]
+    backup = text.split("## Backup", 1)[1].split("## How to undo", 1)[0]
+    assert "sysupgrade -r" not in text
+    assert "including secrets" not in backup
+    assert "no copy" in backup
+    assert "newton_plan_change" in undo
+    if outcome == "unknown":
+        assert "newton_change_status" in undo
+
+
+def test_cr22c_a_restore_script_receipt_says_what_it_restored(configured):
+    record = _owner_record(
+        configured, router_leash="owner-script-restore", restore_of=ORIGINAL_SID
+    )
+    record.pop("restore_sid")
+    text = _render(configured, record, "confirmed")
+    undo = text.split("## How to undo", 1)[1]
+    assert "sysupgrade -r" not in text
+    assert ORIGINAL_SID in undo
+    assert "plan" in undo
+
+
+def test_cr22d_the_owner_run_receipt_written_on_disk_names_the_restore_script(
+    configured, monkeypatch
+):
+    """The receipt the owner-run lane writes (backup_path is the backup
+    directory) has no failed copy note and no sysupgrade advice."""
+    record = _owner_record(configured)
+    path = cr.write_receipt(configured / "state", record, "confirmed", "")
+    assert path is not None
+    text = path.read_text()
+    assert "not a regular file" not in text
+    assert "sysupgrade -r" not in text
+    assert f"owner-run {RSID}" in text
+
+
+def test_cr22e_an_installed_receipt_keeps_the_full_backup_advice(configured):
+    """The other side: an installed change keeps its sysupgrade advice."""
+    text = _render(configured, _record(configured), "confirmed")
+    assert "sysupgrade -r" in text
+    assert "including secrets" in text

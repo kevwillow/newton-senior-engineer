@@ -19,10 +19,21 @@ formats from the binary value, and ``assert_no_directory_text`` proves
 that no directory string ended up inside one of them.  A command that
 fails the proof is not rendered: the report is refused rather than
 handed over with a directory string in it.
+
+The proof strips each directory string of its quoting once and looks for
+it among the windows of each command, so its cost grows with the size of
+the report, not with the product of its strings and its commands.
+
+The report is bounded: a check lists at most ``MAX_FINDINGS_PER_CHECK``
+findings and a finding at most ``MAX_OBJECTS_PER_FINDING`` objects, each
+with its full count, and once the listed findings of the report reach
+``MAX_FINDINGS_BYTES`` the checks after them list none.  The report then
+says it is truncated and how to see the rest.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 
 from .. import envelope as _envelope
@@ -42,6 +53,26 @@ ENVELOPE_SOURCE = "ad:audit"
 _QUOTING_CHARACTERS = "'\"`‘’‛“”"
 
 
+# A check lists at most this many findings, a finding at most this many
+# objects, and the listed findings of the whole report take at most this
+# many bytes of JSON.  A real domain can hold thousands of affected
+# accounts: the full list would not fit the model's context.
+MAX_FINDINGS_PER_CHECK = 10
+MAX_OBJECTS_PER_FINDING = 10
+MAX_FINDINGS_BYTES = 60_000
+
+TRUNCATED_NOTE = (
+    "Not every finding is listed: a check lists at most "
+    f"{MAX_FINDINGS_PER_CHECK} findings and a finding at most "
+    f"{MAX_OBJECTS_PER_FINDING} objects, and the listed findings of the "
+    f"report take at most {MAX_FINDINGS_BYTES} bytes, so a check whose "
+    "findings would pass that budget lists none (findings_truncated is true "
+    "on it). findings_total and objects_total hold the full counts; "
+    "pass `checks` with fewer check ids to list the findings of a check "
+    "that was left out for size."
+)
+
+
 class RenderError(Exception):
     """The report cannot be rendered safely.
 
@@ -56,6 +87,36 @@ def _without_quoting(text: str) -> str:
     )
 
 
+class DirectoryText:
+    """The directory strings of a report, ready to be looked for.
+
+    Each string is stripped of its quoting once and kept by its length;
+    a command is then searched window by window, one window size per
+    length, so the cost of a command does not grow with the number of
+    strings.
+    """
+
+    def __init__(self, strings: Iterable[str]) -> None:
+        self._by_length: dict[int, set[str]] = {}
+        for text in strings:
+            if not text:
+                continue
+            needle = _without_quoting(text)
+            if not needle:
+                # A name that is only punctuation cannot be told apart
+                # from the punctuation of a command.
+                continue
+            self._by_length.setdefault(len(needle), set()).add(needle)
+
+    def check(self, command: str) -> None:
+        """Refuse a command that holds one of the strings."""
+        haystack = _without_quoting(command)
+        for length, needles in self._by_length.items():
+            for start in range(len(haystack) - length + 1):
+                if haystack[start:start + length] in needles:
+                    raise RenderError("the fix command holds a directory string")
+
+
 def assert_no_directory_text(command: str, strings: Iterable[str]) -> None:
     """Refuse a command that holds a directory string.
 
@@ -65,17 +126,7 @@ def assert_no_directory_text(command: str, strings: Iterable[str]) -> None:
     a false alarm only costs a report and a false command costs a
     domain.
     """
-    needle_command = _without_quoting(command)
-    for text in strings:
-        if not text:
-            continue
-        needle = _without_quoting(text)
-        if not needle:
-            # A name that is only punctuation cannot be told apart from
-            # the punctuation of a command.
-            continue
-        if needle in needle_command:
-            raise RenderError("the fix command holds a directory string")
+    DirectoryText(strings).check(command)
 
 
 def _wrap(text: str) -> dict[str, str]:
@@ -142,7 +193,7 @@ def _render_fix(
     fix: Fix,
     sid: str | None,
     guid: str | None,
-    strings: Iterable[str],
+    strings: DirectoryText,
 ) -> dict[str, object]:
     """The fix of a finding, with every command proven free of text."""
     rendered = {
@@ -151,7 +202,7 @@ def _render_fix(
     }
     for step in rendered.values():
         for command in step["commands"]:  # type: ignore[index]
-            assert_no_directory_text(command, strings)
+            strings.check(command)
     return rendered
 
 
@@ -207,12 +258,12 @@ def _directory_strings(report: AuditReport) -> list[str]:
 
 def _render_finding(
     finding: Finding,
-    strings: Iterable[str],
+    strings: DirectoryText,
 ) -> dict[str, object]:
-    """One finding, with its objects enveloped."""
+    """One finding, with its first objects enveloped."""
     sid, guid = _identifiers(finding)
     objects = []
-    for affected in finding.objects:
+    for affected in finding.objects[:MAX_OBJECTS_PER_FINDING]:
         name = _object_name(affected)
         objects.append(
             {
@@ -230,6 +281,8 @@ def _render_finding(
         "severity": finding.severity.value,
         "title": _wrap(finding.title),
         "objects": objects,
+        "objects_total": len(finding.objects),
+        "objects_truncated": len(finding.objects) > MAX_OBJECTS_PER_FINDING,
         "maps_to": list(finding.maps_to),
         "fix": (
             _render_fix(finding.fix, sid, guid, strings)
@@ -240,8 +293,8 @@ def _render_finding(
     return rendered
 
 
-def _render_result(result: CheckResult, strings: Iterable[str]) -> dict[str, object]:
-    """One check result."""
+def _render_result(result: CheckResult, strings: DirectoryText) -> dict[str, object]:
+    """One check result, with its first findings."""
     return {
         "id": result.check_id,
         "title": result.title,
@@ -251,9 +304,35 @@ def _render_result(result: CheckResult, strings: Iterable[str]) -> dict[str, obj
         "note": _wrap(result.note) if result.note else None,
         "maps_to": list(result.maps_to),
         "findings": [
-            _render_finding(finding, strings) for finding in result.findings
+            _render_finding(finding, strings)
+            for finding in result.findings[:MAX_FINDINGS_PER_CHECK]
         ],
+        "findings_total": len(result.findings),
+        "findings_truncated": len(result.findings) > MAX_FINDINGS_PER_CHECK,
     }
+
+
+def _truncated(rendered: dict[str, object]) -> bool:
+    """Whether a rendered result leaves out a finding or an object."""
+    if rendered["findings_truncated"]:
+        return True
+    findings = rendered["findings"]
+    assert isinstance(findings, list)
+    return any(finding["objects_truncated"] for finding in findings)
+
+
+def _within_budget(results: list[dict[str, object]]) -> None:
+    """Empty the findings of the checks past the byte budget, in order."""
+    used = 0
+    for rendered in results:
+        if not rendered["findings"]:
+            continue
+        size = len(json.dumps(rendered["findings"], default=str))
+        if used + size > MAX_FINDINGS_BYTES:
+            rendered["findings"] = []
+            rendered["findings_truncated"] = True
+            continue
+        used += size
 
 
 def render(report: AuditReport) -> dict[str, object]:
@@ -262,13 +341,18 @@ def render(report: AuditReport) -> dict[str, object]:
     The whole tree goes through the redactor last, so a secret that
     reached a string of the report is redacted wherever it is.
     """
-    strings = _directory_strings(report)
+    strings = DirectoryText(_directory_strings(report))
+    results = [_render_result(result, strings) for result in report.results]
+    _within_budget(results)
+    truncated = any(_truncated(rendered) for rendered in results)
     payload: dict[str, object] = {
         "domain": _wrap(report.domain),
         "collector": report.collector,
         "counts": dict(report.counts),
         "generated": report.generated,
         "scope_note": report.scope_note,
-        "results": [_render_result(result, strings) for result in report.results],
+        "results": results,
+        "truncated": truncated,
+        "truncated_note": TRUNCATED_NOTE if truncated else None,
     }
     return _redact.redact_value(payload)

@@ -29,7 +29,7 @@ from noinstall_fakes import FakeRouter
 from test_inventory_noinstall import (
     DEVICE_FREE_TOOLS,
     NO_INSTALL_ALLOWED,
-    NO_INSTALL_MESSAGE,
+    no_install_message,
     TOOL_CALLS,
     _no_install_body,
     _write_inventory,
@@ -100,7 +100,7 @@ def test_every_other_device_tool_still_refuses_a_no_install_device(
             continue
         result = getattr(server, tool)(*args)
         assert isinstance(result, dict), tool
-        assert result.get("error") == NO_INSTALL_MESSAGE, tool
+        assert result.get("error") == no_install_message(tool), tool
     assert ran == [], "no tool may reach ssh for a no-install device"
 
 

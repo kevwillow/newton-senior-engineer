@@ -61,6 +61,9 @@ APPLIED_PENDING = "APPLIED_PENDING"
 BUSY = "BUSY"
 REFUSED = "REFUSED"
 LOST = "LOST"
+#: The link failed before ``uci apply`` was sent: the router holds
+#: nothing of the change (what was staged dies with the spent session).
+NOT_SENT = "NOT_SENT"
 
 # The verdicts of a resolve.
 OWN = "OWN"
@@ -415,6 +418,12 @@ def _holds_any(
 # ---- the results -----------------------------------------------------------
 
 
+def _not_sent(exc: Exception) -> str:
+    """The reason of an apply that never reached ``uci apply``."""
+    return f"the link failed before the change was applied: {exc}"
+
+
+
 @dataclass(frozen=True)
 class ApplyResult:
     """What an apply ended in."""
@@ -542,37 +551,19 @@ class RpcdTransaction:
         if creds is not None:
             self.credentials = creds
         creds = self.credentials
-        session = self._open(creds, window_s + 60)
         try:
-            if self.pending(session):
-                return ApplyResult(
-                    BUSY,
-                    reason="an apply is already pending on the router",
-                )
+            session = self._open(creds, window_s + 60)
+        except RpcdError as exc:
+            return ApplyResult(NOT_SENT, reason=_not_sent(exc))
+        try:
             try:
-                held = self._changes(session)
-            except RpcdTxnError as exc:
-                # the router's change list cannot be read: nothing is
-                # staged, nothing is applied
-                return ApplyResult(REFUSED, reason=str(exc))
-            if held:
-                return ApplyResult(
-                    REFUSED,
-                    reason="the session already holds changes",
-                )
-            self._read_prior(session, ops)
-            self._stage(session, ops)
-            try:
-                matched = self._changes_match(ops, self._changes(session))
-            except RpcdTxnError as exc:
-                # a change record Newton does not recognise: the apply
-                # is refused, never guessed at
-                return ApplyResult(REFUSED, reason=str(exc))
-            if not matched:
-                return ApplyResult(
-                    REFUSED,
-                    reason="the router staged something else than the change",
-                )
+                ready = self._prepare(session, ops)
+            except RpcdError as exc:
+                # nothing went to ``uci apply``: what was staged stays
+                # in this session, which is spent below
+                return ApplyResult(NOT_SENT, reason=_not_sent(exc))
+            if ready is not None:
+                return ready
             sent_at = self._now()
             deadline = sent_at + window_s
             try:
@@ -595,7 +586,8 @@ class RpcdTransaction:
                 raise
             except RpcdTransportError as exc:
                 if not exc.sent:
-                    raise
+                    # the request never left Newton: nothing applied
+                    return ApplyResult(NOT_SENT, reason=_not_sent(exc))
                 # The answer was lost.  The change may or may not have
                 # been applied, so the values are read back in a fresh
                 # session before anything is confirmed.
@@ -628,6 +620,46 @@ class RpcdTransaction:
             # the change back into it as staged, and an apply from there
             # would re-apply it.
             session.mark_spent()
+
+    def _prepare(
+        self, session: RpcdSession, ops: Sequence[Op]
+    ) -> ApplyResult | None:
+        """Stage the ops in ``session``; None when the apply may be sent.
+
+        Everything here comes before ``uci apply``: a refusal is an
+        ApplyResult, and a failed call raises for the caller to report
+        as NOT_SENT.
+        """
+        if self.pending(session):
+            return ApplyResult(
+                BUSY,
+                reason="an apply is already pending on the router",
+            )
+        try:
+            held = self._changes(session)
+        except RpcdTxnError as exc:
+            # the router's change list cannot be read: nothing is
+            # staged, nothing is applied
+            return ApplyResult(REFUSED, reason=str(exc))
+        if held:
+            return ApplyResult(
+                REFUSED,
+                reason="the session already holds changes",
+            )
+        self._read_prior(session, ops)
+        self._stage(session, ops)
+        try:
+            matched = self._changes_match(ops, self._changes(session))
+        except RpcdTxnError as exc:
+            # a change record Newton does not recognise: the apply
+            # is refused, never guessed at
+            return ApplyResult(REFUSED, reason=str(exc))
+        if not matched:
+            return ApplyResult(
+                REFUSED,
+                reason="the router staged something else than the change",
+            )
+        return None
 
     # -- resolve -------------------------------------------------------------
 

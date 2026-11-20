@@ -881,3 +881,70 @@ def test_the_abort_tool_answers_when_the_session_to_the_dc_fails(
     assert result["result"] == "error"
     assert result["code"]["text"].endswith("unavailable")
     assert "newton_ad_change_status" in result["message"]
+
+
+@pytest.mark.parametrize("plan_id", ["zzz", "../../etc/passwd", "A" * 32])
+def test_the_apply_tool_names_a_malformed_plan_id_as_status_and_abort_do(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plan_id: str
+) -> None:
+    """A malformed plan id gets the answer status and abort give, never
+    the generic internal error."""
+    _inventory(tmp_path, monkeypatch)
+
+    applied = server.newton_ad_apply_change(DOMAIN, plan_id)
+    status = server.newton_ad_change_status(DOMAIN, plan_id)
+
+    assert applied.get("error") != "internal server error"
+    assert "the plan record is not found or is invalid" in applied["error"]
+    assert applied["error"] == status["error"]
+
+
+def _send_raising(exc: BaseException, *, after_reads: int = 0) -> Any:
+    """A transport that answers ``after_reads`` reads, then raises."""
+    calls: list[dict[str, Any]] = []
+    answer = _fake_send(calls)
+
+    def send(target: Any, request: dict[str, Any]) -> dict[str, Any]:
+        if len(calls) >= after_reads:
+            raise exc
+        return answer(target, request)
+
+    return send
+
+
+@pytest.mark.parametrize("after_reads", [0, 2])
+@pytest.mark.parametrize("kind", ["unavailable", "error", "refused"])
+def test_the_plan_tool_names_the_dc_that_did_not_answer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    after_reads: int,
+) -> None:
+    """A DC that does not answer the plan's read is named, with the reason
+    and a next step, never the generic internal error.  The
+    first reads go to every DC; the third is the PDC's before-image read.
+    """
+    from newton_mcp.adapters.ssh_cli import RunnerRefused
+    from newton_mcp.ad.write.transport import TransportError
+
+    exc: BaseException
+    if kind == "refused":
+        exc = RunnerRefused("the key file is not usable")
+    else:
+        exc = TransportError(kind, "the write helper did not answer")
+    _inventory(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "newton_mcp.ad.write.transport.send",
+        _send_raising(exc, after_reads=after_reads),
+    )
+
+    result = server.newton_ad_plan_change(DOMAIN, "uac-clear", ["seed-asrep"], 4194304)
+
+    assert result.get("error") != "internal server error"
+    error = result["error"]
+    assert "win-dc1" in error
+    assert "did not answer the read" in error
+    assert "devices.toml" in error
+    assert "newton-ad-setup" in error
+    assert "nothing was written" in error
+    assert not list((tmp_path / "state").glob("ad-plans/*.json"))

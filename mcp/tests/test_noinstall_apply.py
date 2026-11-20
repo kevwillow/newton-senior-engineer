@@ -1480,3 +1480,298 @@ def test_a_grant_covers_a_no_install_change_of_a_section_the_router_holds(
 
     assert outcome.status == "approved", outcome
     assert outcome.grant_used is True, outcome
+
+
+# ---- a link that drops before the apply is sent -------------------
+
+
+def _fail_on(router: ApplyRouter, obj: str, fn: str) -> None:
+    """The link drops on the first call of ``obj.fn`` made after the
+    backup read: nothing was sent."""
+    from newton_mcp.adapters import openwrt_rpcd as rpcd
+
+    # the apply logs in for the backup, then for the transaction
+    transaction_login = len(router.logins) + 2
+
+    def hook(called_obj: str, called_fn: str, _args: dict[str, Any]) -> None:
+        if len(router.logins) < transaction_login:
+            return
+        if (called_obj, called_fn) == (obj, fn):
+            raise rpcd.RpcdTransportError("the router is gone", sent=False)
+
+    router.on_call = hook
+
+
+@pytest.mark.parametrize(
+    "obj, fn, batch",
+    [
+        ("file", "list", RESERVATION),
+        ("uci", "changes", RESERVATION),
+        ("uci", "add", RESERVATION),
+        ("uci", "set", DNS_SERVER),
+        ("uci", "apply", RESERVATION),
+    ],
+)
+def test_a_link_lost_before_the_apply_is_sent_is_not_applied(
+    tmp_path: Path, monkeypatch, obj: str, fn: str, batch: str
+) -> None:
+    """A change that never reached ``uci apply`` is not applied.
+
+    The link drops while the change is staged (or the apply itself is
+    never sent): the router holds nothing, so the owner is told so, the
+    approval goes back to them, no receipt is written and the plan can
+    still be dropped.
+    """
+    router, clock = _setup(tmp_path, monkeypatch)
+    before = dict(router.sections)
+    plan = _plan(tmp_path, monkeypatch, batch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    _approve(state, sid, _record(state, sid))
+    _fail_on(router, obj, fn)
+
+    result = _apply(tmp_path, monkeypatch, router, clock, sid)
+
+    assert result["result"] == "not_applied", result
+    assert router.count("uci", "confirm") == 0
+    assert router.sections == before
+    assert _run_record(state, sid)["outcome"] == "not_applied"
+    assert not list((state / "receipts").glob(f"*-{sid}.md"))
+    # the approval goes back to the owner: nothing reached the router
+    assert (state / "approvals" / f"{sid}.json").exists()
+    assert not (state / "approvals" / f"{sid}.used").exists()
+    assert not (state / "approvals" / f"{sid}.claimed").exists()
+
+    aborted = _server.newton_abort_change("lab-r1", sid)
+    assert aborted["result"] == "aborted", aborted
+
+
+def test_a_busy_router_gives_the_approval_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A router that answers 'busy' to the apply applied nothing.
+
+    The approval goes back to the owner, as for any apply that never
+    reached the router.
+    """
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    _approve(state, sid, _record(state, sid))
+    router.apply_code = 6
+
+    result = _apply(tmp_path, monkeypatch, router, clock, sid)
+
+    assert result["result"] == "not_applied", result
+    assert (state / "approvals" / f"{sid}.json").exists()
+    assert not (state / "approvals" / f"{sid}.used").exists()
+
+
+def test_a_link_lost_after_the_apply_was_sent_stays_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The other side of the test above: an apply that may have been sent and
+    whose answer is an error the router gave is never 'not applied'."""
+    from newton_mcp.adapters import openwrt_rpcd as rpcd
+
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    _approve(state, sid, _record(state, sid))
+
+    def hook(obj: str, fn: str, _args: dict[str, Any]) -> None:
+        if (obj, fn) == ("uci", "apply"):
+            raise rpcd.RpcdCallFailed(2)
+
+    router.on_call = hook
+
+    result = _apply(tmp_path, monkeypatch, router, clock, sid)
+
+    assert result["result"] == "unknown", result
+    assert (state / "approvals" / f"{sid}.used").exists()
+
+
+def test_a_router_that_cannot_be_reached_before_the_apply_is_not_applied(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An rpcd failure before the transaction is not 'unknown'.
+
+    The client cannot even be made: nothing reached the router, so the
+    run says not applied, no receipt is written and the approval goes
+    back to the owner.
+    """
+    from newton_mcp.adapters import openwrt_rpcd as rpcd
+
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    _approve(state, sid, _record(state, sid))
+
+    def factory(_device: Any) -> Any:
+        raise rpcd.RpcdTransportError("the router is gone", sent=False)
+
+    result = noinstall_flow.apply(
+        _server.NewtonService(),
+        "lab-r1",
+        sid,
+        now=clock,
+        sleep=clock.advance,
+        client_factory=factory,
+    )
+
+    assert result["result"] == "not_applied", result
+    assert _run_record(state, sid)["outcome"] == "not_applied"
+    assert not list((state / "receipts").glob(f"*-{sid}.md"))
+    assert (state / "approvals" / f"{sid}.json").exists()
+
+
+# ---- a claim left behind by an apply that never ended -------------
+
+
+def _stale_claim(state: Path, sid: str, age_s: float = 86400.0) -> Path:
+    """What a killed apply leaves: the approval claimed, a day ago."""
+    approvals = state / "approvals"
+    claimed = approvals / f"{sid}.claimed"
+    (approvals / f"{sid}.json").replace(claimed)
+    then = time.time() - age_s
+    os.utime(claimed, (then, then))
+    return claimed
+
+
+def test_the_status_of_a_stale_claim_is_unknown_and_settles_the_claim(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An apply killed after its claim is not in progress for ever.
+
+    Long after its window, the status says the outcome is unknown and
+    why, and the claim is settled as used: the change may have reached
+    the router.
+    """
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    _approve(state, sid, _record(state, sid))
+    _stale_claim(state, sid)
+
+    status = _server.newton_change_status("lab-r1", sid)
+
+    assert status["result"] == "unknown", status
+    assert any("did not finish" in note for note in status["notes"]), status
+    assert not (state / "approvals" / f"{sid}.claimed").exists()
+    assert (state / "approvals" / f"{sid}.used").exists()
+    # the next status says the same
+    again = _server.newton_change_status("lab-r1", sid)
+    assert again["result"] == "unknown", again
+
+
+def test_the_abort_of_a_stale_claim_says_the_apply_did_not_finish(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The abort no longer says an apply is in flight for ever."""
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    _approve(state, sid, _record(state, sid))
+    _stale_claim(state, sid)
+
+    result = _server.newton_abort_change("lab-r1", sid)
+
+    assert result["result"] == "not_aborted", result
+    assert "in flight" not in result["message"], result
+    assert "did not finish" in result["message"], result
+    assert (state / "plans" / f"{sid}.json").exists()
+    assert not (state / "approvals" / f"{sid}.claimed").exists()
+
+
+def test_a_claim_inside_its_window_is_still_in_progress(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The guard's other side: a claim younger than the apply can run
+    is an apply in flight."""
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    record = _record(state, sid)
+    _approve(state, sid, record)
+    # just inside the longest an apply can take
+    _stale_claim(state, sid, age_s=float(record["timeout_s"]))
+
+    status = _server.newton_change_status("lab-r1", sid)
+
+    assert status["result"] == "in_progress", status
+    assert (state / "approvals" / f"{sid}.claimed").exists()
+
+
+def test_the_apply_dates_its_claim_from_the_claim_not_the_approval(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An approval written long before the apply is claimed now: the
+    status asked during the apply says in progress, never unknown."""
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    _approve(state, sid, _record(state, sid))
+    approval = state / "approvals" / f"{sid}.json"
+    then = time.time() - 86400.0
+    os.utime(approval, (then, then))
+    seen: list[str] = []
+
+    def hook(obj: str, fn: str, _args: dict[str, Any]) -> None:
+        if (obj, fn) == ("uci", "apply") and not seen:
+            seen.append(_server.newton_change_status("lab-r1", sid)["result"])
+
+    router.on_call = hook
+
+    result = _apply(tmp_path, monkeypatch, router, clock, sid)
+
+    assert result["result"] == "confirmed", result
+    assert seen == ["in_progress"], seen
+
+
+def test_a_stale_claim_keeps_the_outcome_its_apply_recorded(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An apply killed after its run record and before its settle: the
+    outcome it recorded stands, and only the claim is settled."""
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    _approve(state, sid, _record(state, sid))
+    owner_records.write_run(
+        state, sid, {"started_at": time.time(), "outcome": "confirmed"}
+    )
+    _stale_claim(state, sid)
+
+    status = _server.newton_change_status("lab-r1", sid)
+
+    assert status["result"] == "confirmed", status
+    assert (state / "approvals" / f"{sid}.used").exists()
+
+
+def test_a_stale_claim_whose_apply_proved_nothing_applied_can_be_aborted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An apply that recorded not_applied and died before its settle:
+    the plan can still be dropped."""
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    _approve(state, sid, _record(state, sid))
+    owner_records.write_run(
+        state, sid, {"started_at": time.time(), "outcome": "not_applied"}
+    )
+    _stale_claim(state, sid)
+
+    result = _server.newton_abort_change("lab-r1", sid)
+
+    assert result["result"] == "aborted", result
+    assert not (state / "plans" / f"{sid}.json").exists()

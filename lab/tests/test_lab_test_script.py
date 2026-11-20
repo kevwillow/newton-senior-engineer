@@ -58,6 +58,7 @@ key = "~/.ssh/key"
 
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
 snapshot = "baseline"
@@ -136,6 +137,7 @@ approve_passphrase_file = "{approve_passphrase_file}"
 
 [devices.{device_name}]
 vmid = 9102
+vm_name = "{device_name}"
 host = "10.109.0.11"
 user = "root"
 snapshot = "{snapshot}"
@@ -184,6 +186,7 @@ password_file = "~/.config/newton/lab-root.pw"
 key = "~/.ssh/key"
 [devices.lab-r1]
 vmid = 9102
+vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
 snapshot = "baseline"
@@ -1455,6 +1458,8 @@ def test_hello_preflight_run_start_resets_and_blocks_when_fails(
 
     def fake_run(args, env=None, **_kw):
         if args[0] == "curl":
+            if args[-1].endswith("/config"):
+                return _cp(stdout=json.dumps({"data": {"name": "lab-r1"}}))
             return _cp(stdout=json.dumps({"data": "UPID:abc"}))
         if args[0] == "ssh":
             last = args[-1] if isinstance(args[-1], str) else ""

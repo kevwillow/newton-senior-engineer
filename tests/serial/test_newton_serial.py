@@ -18,7 +18,10 @@ PASSWORD = "very-secret-password"
 
 
 class FakeConsole:
-    def __init__(self, mode="login", expected_password=PASSWORD):
+    def __init__(self, mode="login", expected_password=PASSWORD, answers=None):
+        # answers: marked command text -> (output, exit) for scripted replies
+        self.answers = dict(answers or {})
+        self.commands = []
         self.master, self.slave = pty.openpty()
         tty.setraw(self.slave)
         self.path = os.ttyname(self.slave)
@@ -105,6 +108,11 @@ class FakeConsole:
             if marked:
                 token, line = marked.group(1), marked.group(2)
                 self._write(f"__NWS{token}__\r\n")
+            self.commands.append(line)
+            if token and line in self.answers:
+                text, code = self.answers[line]
+                self._write(f"{text}\r\n__NWE{token}__{code}\r\nroot@OpenWrt:~# ")
+                continue
             if line == "uname -a":
                 self._write("Linux OpenWrt 6.6.0 test\r\n")
             elif line == "long":
@@ -270,6 +278,368 @@ def test_push_refuses_hard_rule_content(console, tmp_path):
     f = tmp_path / "x.sh"; f.write_text("echo hi\nfirstboot\n")
     result = invoke(console, tmp_path, "push", str(f), "/tmp/x.sh")
     assert result.returncode == 2 and not console.received
+
+
+@pytest.mark.parametrize("command", [
+    "rm -rf /", "rm -rf /*", "rm -rf /etc", "rm -rf /etc/", "rm -rf /etc/*", "rm -fr /usr",
+    "rm -r /lib", "rm -Rf /bin", "rm -rf /sbin", "rm -rf /www", "rm -rf /root", "rm -rf /overlay",
+    "rm -rf /rom", "rm -f -r /etc", "rm --recursive --force /etc", "rm -rf //etc", "rm -rf '/etc'",
+    "cd /tmp && rm -rf /etc", "rm -rf /tmp/x /etc", "/bin/rm -rf /etc", "rm -rf /etc/../etc",
+    "rm -rf /etc*", "rm -rf /e*", "rm -rf /e??", "rm -rf /[e]tc", "rm -rf /*/", "rm -rf /etc*/",
+    # targets the router's shell expands, and relative ones after a cd: fail closed
+    "rm -rf ~", "rm -rf ~/", "rm -rf ~root", "rm -rf $HOME", "rm -rf \"$HOME\"", "rm -rf ${HOME}",
+    "rm -rf $'/etc'", "rm -rf \"$D\"", "cd / && rm -rf etc", "cd /; rm -rf etc", "cd / && rm -rf ./etc",
+    # a command substitution leaves the rm with no target word; . and .. name the shell's own directory
+    "rm -rf $(echo /etc)", "rm -rf `echo /etc`", "rm -rf ..", "rm -rf .", "rm -rf ../x", "rm -rf ./..",
+    # wrapped by timeout, nice, env, sudo with options, or a shell's -c string
+    "timeout 5 rm -rf /etc", "timeout -s KILL 5 rm -rf /", "timeout --kill-after=2 5 rm -rf /etc",
+    "nice rm -rf /etc", "nice -n 5 rm -rf /", "nice -5 rm -rf /usr", "env -i rm -rf /etc",
+    "env -u HOME rm -rf /etc", "/usr/bin/env rm -rf /etc", "env -S 'rm -rf /etc'", "sudo -u root rm -rf /etc",
+    "sh -c 'rm -rf /etc'", "bash -c 'rm -rf /'", "sh -ec 'rm -rf /etc'", "busybox sh -c 'rm -rf /etc'",
+    "/bin/ash -c 'rm -rf ~'", "timeout 5 sh -c 'nice rm -rf /etc'",
+    # find that deletes, from / or a system directory or a target the shell decides
+    "find / -delete", "find /etc -name '*.x' -delete", "find -L / -delete", "find . -delete", "find ~ -delete",
+    "find / -name x -exec rm -rf {} \\;", "find /etc -exec rm {} +", "timeout 9 find /usr -delete",
+    "sh -c 'find / -delete'",
+    # long option forms, a lone -, -S with the rest of the line or attached, options after an assignment
+    "sudo --user root rm -rf /etc", "sudo --chdir /tmp rm -rf /etc", "env - rm -rf /etc", "env -S rm -rf /etc",
+    "env --split-string= rm -rf /etc", "env -S'rm -rf /etc'", "env -iS'rm -rf /etc'", "env FOO=1 -u BAR rm -rf /etc",
+    # su and other shells, wrappers not in the table, and an rm or a shell that find or xargs runs
+    "su -c 'rm -rf /etc'", "su root -c 'rm -rf /etc'", "su --command='rm -rf /etc'", "csh -c 'rm -rf /etc'",
+    "setsid rm -rf /etc", "watch rm -rf /etc", "find /etc | xargs rm -rf", "find / -exec sh -c 'rm -rf /etc' {} +",
+    "find / -exec sh -c 'rm -rf \"$1\"' _ {} +",
+    # a shell string behind a wrapper the guard does not parse
+    "sudo --user root sh -c 'rm -rf /etc'", "env FOO=1 -u BAR sh -c 'rm -rf /etc'", "setsid bash -lc 'rm -rf ~'",
+    "nohup env -S 'rm -rf /etc'", "env --split-string='rm -rf /etc'", "env -S 'sh -c \"rm -rf /etc\"'",
+    # a quoted command line that eval, a pipe into a shell or a here-string runs
+    "eval 'rm -rf /etc'", "eval \"find / -delete\"", "echo 'rm -rf /etc' | sh", "printf 'rm -rf /etc\\n' | bash",
+    "bash <<< 'rm -rf /etc'",
+    # a wrapper inside find -exec, xargs feeding rm past a placeholder target, a variable command name
+    "find / -exec busybox rm -rf {} +", "find /etc -exec env rm -rf {} +", "find / -exec timeout 5 rm -rf {} +",
+    "find /etc | xargs rm -rf {}", "find /etc -print0 | xargs -0 rm -rf {}", "echo /etc | xargs -I{} rm -rf {}",
+    "R=rm; $R -rf /etc",
+    # a -c string attached to its option
+    "sh -c'rm -rf /etc'", "sudo sh -c'rm -rf /etc'", "su -c'rm -rf /etc'",
+    "bash -ec'rm -rf /'",
+    # a deleting find with an escaped group
+    "find / \\( -name x \\) -delete", "find /etc \\( -name '*.x' \\) -exec rm -rf {} +",
+    # whole-config, SSH key and library directories one level down
+    "rm -rf /etc/config", "rm -rf /etc/config/", "rm -rf /etc/config/*", "rm -rf /etc/dropbear",
+    "rm -rf /root/.ssh", "rm -rf /usr/lib", "rm -rf /lib/modules", "rm -rf /etc/conf*",
+    "find /etc/config -name '*.bak' -delete",
+])
+def test_recursive_rm_of_root_or_a_system_directory_is_hard_blocked(console, tmp_path, command):
+    """A recursive rm of / or of a top-level system directory is refused even
+    with --approved, before anything is written to the console."""
+    result = invoke(console, tmp_path, "--approved", "run", command)
+    assert result.returncode == 2, (command, result.stderr)
+    assert "hard-blocked" in result.stderr
+    time.sleep(0.03)
+    assert not console.received
+
+
+@pytest.mark.parametrize("command", ["rm -rf /tmp/newton", "rm /etc/config/x", "rm -rf /etc/config/old", "ls -r /etc",
+                                     "rm -rf /tmp/new*", "rm -rf /etc/config/old*", "rm -rf old",
+                                     "rm ~/x", "rm $F", "cd / && rm etc/x", "rm -rf ./old", "rm -rf old/..x",
+                                     "timeout 5 rm -rf /tmp/x", "nice -n 5 rm -rf /tmp/x", "env -i ls -r /etc",
+                                     "sh -c 'rm -rf /tmp/x'", "bash -c 'ls -r /'", "find /tmp -name x -delete",
+                                     "find /etc/config/old -name '*.bak' -delete", "find / -name x", "find /etc -name x -print",
+                                     "find /tmp -exec rm {} +", "timeout 5 ls -r /etc", "grep -r rm /tmp",
+                                     "sudo --user root ls -r /etc", "env - ls -r /", "su -c 'rm -rf /tmp/x'",
+                                     "find /tmp -exec sh -c 'rm -rf /tmp/y' {} +", "eval 'ls -r /etc'",
+                                     "echo 'hello world' | sh", "logger 'disk cleanup done'", "$EDITOR /etc/config/x",
+                                     "rm -rf /tmp/overlay/x", "rm -rf /etc/dropbear/old", "rm -rf /usr/lib/foo",
+                                     "cat /proc/mtd", "rm /overlay/upper/etc/config/x",
+                                     # options after a group or a substitution, with no system target
+                                     "find / \\( -name x \\) -print", "echo $(date) -r", "ls -r /etc",
+                                     "sudo --user root ls -r /etc", "env - ls -r /", "echo `date` -q -r",
+                                     "sh -c 'ls -r /etc'", "ls -cr /tmp",
+                                     # everyday commands with a substitution and a recursive flag
+                                     "cp -r /etc/config /tmp/config-$(date +%F).bak",
+                                     "grep -r \"$(uci get system.@system[0].hostname)\" /etc/config",
+                                     "diff -r /etc/config /tmp/config-`date +%F`.bak", "chown -R $(id -u) /www"])
+def test_ordinary_rm_is_not_hard_blocked(command):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ns", SCRIPT)
+    ns = importlib.util.module_from_spec(spec); spec.loader.exec_module(ns)
+    assert ns.safe_command(command, True) is None, command
+
+
+@pytest.mark.parametrize("command", [
+    # OpenWrt's usual factory reset: options before the verb
+    "mtd -r erase rootfs_data", "mtd -r write x.bin firmware", "mtd -q -r erase firmware",
+    "/sbin/mtd -r erase rootfs_data", "timeout 9 mtd -r erase rootfs_data",
+    # a recursive rm below /overlay or /rom, flags in separate words
+    "rm -r -f /overlay/upper", "rm -R /overlay/upper/etc", "rm -f -r /rom/etc", "rm -rf /overlay/upper",
+    "find /overlay/upper -delete",
+])
+def test_factory_reset_shapes_are_hard_blocked(console, tmp_path, command):
+    result = invoke(console, tmp_path, "--approved", "run", command)
+    assert result.returncode == 2, (command, result.stderr)
+    assert "hard-blocked" in result.stderr
+    time.sleep(0.03)
+    assert not console.received
+
+
+@pytest.mark.parametrize("command", [
+    "poweroff", "halt", "shutdown -h now", "timeout 5 poweroff",
+    "opkg remove dropbear", "opkg upgrade luci", "opkg --force-depends remove x",
+    "/etc/init.d/dropbear disable", "/etc/init.d/dropbear stop", "/etc/init.d/firewall disable",
+    "/etc/init.d/network disable", "service network restart", "service dropbear stop",
+    "service firewall stop", "killall dropbear", "sh -c '/etc/init.d/dropbear disable'",
+    "ifconfig br-lan down", "ifconfig eth0 0.0.0.0 down",
+])
+def test_lockout_commands_need_approval(console, tmp_path, command):
+    """Power off, removing a package, stopping or disabling dropbear, the
+    network or the firewall, and taking an interface down need --approved;
+    with it they are not hard-blocked."""
+    result = invoke(console, tmp_path, "run", command)
+    assert result.returncode == 2, (command, result.stderr)
+    assert "--approved" in result.stderr
+    time.sleep(0.03)
+    assert not console.received
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ns", SCRIPT)
+    ns = importlib.util.module_from_spec(spec); spec.loader.exec_module(ns)
+    assert ns.safe_command(command, True) is None, command
+
+
+@pytest.mark.parametrize("command", [
+    "uname -a", "opkg list-installed", "ifconfig br-lan", "/etc/init.d/dropbear status",
+    "logread | grep dropbear", "service network status", "cat /proc/mtd",
+])
+def test_reads_need_no_approval(command):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ns", SCRIPT)
+    ns = importlib.util.module_from_spec(spec); spec.loader.exec_module(ns)
+    assert ns.safe_command(command, False) is None, command
+
+
+def test_help_says_the_rules_are_a_guard_rail_not_a_sandbox():
+    result = subprocess.run([sys.executable, str(SCRIPT), "--help"], text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0
+    flat = " ".join(result.stdout.split())
+    assert "guard rail, not a sandbox" in flat
+
+
+def _md5(text):
+    import hashlib
+    return hashlib.md5(text.encode()).hexdigest()
+
+
+def _push_console(dest, *, exists=True, backup_rc=0, size=None, bak_exists=False, md5=_md5("new\n")):
+    answers = {
+        f"test -e {dest}": ("", 0 if exists else 1),
+        f"test -e {dest}.newton-bak": ("", 0 if bak_exists else 1),
+        f"cp -p {dest} {dest}.newton-bak": ("cp: write error" if backup_rc else "", backup_rc),
+    }
+    if size is not None:
+        answers[f"wc -c < {dest}"] = (str(size), 0)
+    if md5 is not None:
+        answers[f"md5sum < {dest}"] = (f"{md5}  -", 0)
+    return FakeConsole("shell", answers=answers).start()
+
+
+def test_push_backs_up_the_old_file_before_it_writes(tmp_path):
+    f = tmp_path / "x.txt"; f.write_text("new\n")
+    console = _push_console("/etc/config/x", size=4)
+    try:
+        result = invoke(console, tmp_path, "push", str(f), "/etc/config/x")
+    finally:
+        console.close()
+    assert result.returncode == 0, result.stderr
+    assert "backup: /etc/config/x.newton-bak" in result.stdout + result.stderr
+    cmds = console.commands
+    cp = cmds.index("cp -p /etc/config/x /etc/config/x.newton-bak")
+    cat = next(i for i, c in enumerate(cmds) if c.startswith("cat > /etc/config/x <<"))
+    assert cp < cat
+
+
+class _AnyBackupConsole(FakeConsole):
+    """Answers every cp -p as a success, whatever the backup name."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.answers = _CpAnswers(self.answers)
+
+
+class _CpAnswers(dict):
+    def __contains__(self, key):
+        return super().__contains__(key) or str(key).startswith("cp -p ")
+
+    def __getitem__(self, key):
+        if not super().__contains__(key) and str(key).startswith("cp -p "):
+            return ("", 0)
+        return super().__getitem__(key)
+
+
+def test_a_second_push_keeps_the_first_backup(tmp_path):
+    """A .newton-bak from an earlier push holds the file as it was before
+    Newton touched it: a later push never overwrites it, and backs the
+    current file up under a new name it prints."""
+    f = tmp_path / "x.txt"; f.write_text("new\n")
+    answers = {
+        "test -e /etc/config/x": ("", 0),
+        "test -e /etc/config/x.newton-bak": ("", 0),
+        "wc -c < /etc/config/x": ("4", 0),
+        "md5sum < /etc/config/x": (_md5("new\n") + "  -", 0),
+    }
+    console = _AnyBackupConsole("shell", answers=answers).start()
+    try:
+        result = invoke(console, tmp_path, "push", str(f), "/etc/config/x")
+    finally:
+        console.close()
+    assert result.returncode == 0, result.stderr
+    cmds = console.commands
+    assert "cp -p /etc/config/x /etc/config/x.newton-bak" not in cmds
+    cps = [c for c in cmds if c.startswith("cp -p /etc/config/x /etc/config/x.newton-bak")]
+    assert len(cps) == 1, cmds
+    name = cps[0].split(" ")[-1]
+    assert re.fullmatch(r"/etc/config/x\.newton-bak-[0-9]{8}T[0-9]{6}-[0-9a-f]{6}", name), name
+    assert f"backup: {name}" in result.stdout + result.stderr
+    cat = next(i for i, c in enumerate(cmds) if c.startswith("cat > /etc/config/x <<"))
+    assert cmds.index(cps[0]) < cat
+
+
+def test_push_refuses_when_it_cannot_tell_whether_a_backup_exists(tmp_path):
+    f = tmp_path / "x.txt"; f.write_text("new\n")
+    answers = {
+        "test -e /etc/config/x": ("", 0),
+        "test -e /etc/config/x.newton-bak": ("", 2),
+    }
+    console = FakeConsole("shell", answers=answers).start()
+    try:
+        result = invoke(console, tmp_path, "push", str(f), "/etc/config/x")
+    finally:
+        console.close()
+    assert result.returncode == 7, result.stderr
+    assert "nothing written" in result.stderr
+    assert not any(c.startswith(("cp ", "cat > ")) for c in console.commands)
+
+
+def test_push_refuses_when_the_backup_fails(tmp_path):
+    f = tmp_path / "x.txt"; f.write_text("new\n")
+    console = _push_console("/etc/config/x", backup_rc=1, size=4)
+    try:
+        result = invoke(console, tmp_path, "push", str(f), "/etc/config/x")
+    finally:
+        console.close()
+    assert result.returncode != 0
+    assert "backup" in result.stderr and "nothing written" in result.stderr
+    assert not any(c.startswith("cat > ") for c in console.commands)
+
+
+def test_push_to_a_new_file_needs_no_backup(tmp_path):
+    f = tmp_path / "x.txt"; f.write_text("new\n")
+    console = _push_console("/etc/config/x", exists=False, size=4)
+    try:
+        result = invoke(console, tmp_path, "push", str(f), "/etc/config/x")
+    finally:
+        console.close()
+    assert result.returncode == 0, result.stderr
+    assert not any(c.startswith("cp ") for c in console.commands)
+    assert any(c.startswith("cat > /etc/config/x <<") for c in console.commands)
+
+
+@pytest.mark.parametrize("dest", [
+    "/etc/dropbear/authorized_keys", "/etc/shadow", "/etc/passwd", "/etc//shadow",
+    "/etc/./passwd", "/tmp/../etc/dropbear/authorized_keys",
+])
+def test_push_refuses_login_files_without_i_know(console, tmp_path, dest):
+    f = tmp_path / "x.txt"; f.write_text("x\n")
+    result = invoke(console, tmp_path, "push", str(f), dest)
+    assert result.returncode == 2, result.stderr
+    assert "--i-know" in result.stderr
+    time.sleep(0.03)
+    assert not console.received
+
+
+def test_push_of_a_login_file_runs_with_i_know_and_backs_up(tmp_path):
+    f = tmp_path / "x.txt"; f.write_text("ssh-ed25519 AAAA k\n")
+    console = _push_console("/etc/dropbear/authorized_keys", size=19, md5=_md5("ssh-ed25519 AAAA k\n"))
+    try:
+        result = invoke(console, tmp_path, "push", "--i-know", str(f), "/etc/dropbear/authorized_keys")
+    finally:
+        console.close()
+    assert result.returncode == 0, result.stderr
+    assert "cp -p /etc/dropbear/authorized_keys /etc/dropbear/authorized_keys.newton-bak" in console.commands
+
+
+def test_push_with_a_garbled_line_is_not_reported_as_pushed(tmp_path):
+    """A line that keeps the byte count but changes bytes fails the check, and
+    the message says the file is already overwritten and names the backup.
+    """
+    f = tmp_path / "x.txt"; f.write_text("new\n")
+    console = _push_console("/etc/config/x", size=4, md5=_md5("nex\n"))
+    try:
+        result = invoke(console, tmp_path, "push", str(f), "/etc/config/x")
+    finally:
+        console.close()
+    assert result.returncode == 7, result.stderr
+    assert "PUSHED" not in result.stdout
+    assert "already overwritten" in result.stderr
+    assert "/etc/config/x.newton-bak" in result.stderr
+
+
+def test_push_short_count_says_the_target_is_overwritten(tmp_path):
+    f = tmp_path / "x.txt"; f.write_text("new\n")
+    console = _push_console("/etc/config/x", size=3)
+    try:
+        result = invoke(console, tmp_path, "push", str(f), "/etc/config/x")
+    finally:
+        console.close()
+    assert result.returncode == 7, result.stderr
+    assert "already overwritten" in result.stderr
+    assert "/etc/config/x.newton-bak" in result.stderr
+
+
+def test_push_to_a_new_file_that_fails_says_there_was_no_old_file(tmp_path):
+    f = tmp_path / "x.txt"; f.write_text("new\n")
+    console = _push_console("/etc/config/x", exists=False, size=3)
+    try:
+        result = invoke(console, tmp_path, "push", str(f), "/etc/config/x")
+    finally:
+        console.close()
+    assert result.returncode == 7, result.stderr
+    assert "no earlier file" in result.stderr
+
+
+class _UnplugConsole(FakeConsole):
+    """Drops the line (closes its end of the pty) once the push starts its
+    heredoc, as an adapter pulled out mid-push would."""
+
+    def _run(self):
+        while not self.stop.is_set():
+            line = self._readline()
+            if line is None:
+                return
+            line = line.split("\x03")[-1]
+            if line.startswith("cat > "):
+                os.close(self.master)
+                self.master = None
+                return
+            if line == "":
+                self._write("root@OpenWrt:~# ")
+                continue
+            marked = self.MARKED.match(line)
+            if marked:
+                token, body = marked.group(1), marked.group(2)
+                code = self.answers.get(body, ("", 0))[1]
+                self._write(f"{line}\r\n__NWS{token}__\r\n\r\n__NWE{token}__{code}\r\nroot@OpenWrt:~# ")
+
+
+def test_push_reports_a_dropped_line_instead_of_a_traceback(tmp_path):
+    f = tmp_path / "x.txt"; f.write_text("".join(f"line {i} " + "x" * 100 + "\n" for i in range(200)))
+    console = _UnplugConsole("shell", answers={"test -e /etc/config/x": ("", 0),
+                                               "test -e /etc/config/x.newton-bak": ("", 1)}).start()
+    try:
+        result = invoke(console, tmp_path, "push", str(f), "/etc/config/x")
+    finally:
+        console.close()
+    assert result.returncode == 7, (result.returncode, result.stderr)
+    assert "Traceback" not in result.stderr
+    assert "serial line failed" in result.stderr
+    assert "/etc/config/x.newton-bak" in result.stderr
 
 
 def test_push_refuses_tabs(console, tmp_path):

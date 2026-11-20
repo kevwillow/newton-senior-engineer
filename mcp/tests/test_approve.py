@@ -854,12 +854,13 @@ def test_approve_missing_fingerprint_refuses_with_setup_remediation(
     assert not (state / "approvals" / f"{SID}.json").exists()
 
 
-def test_approve_treats_malformed_fingerprint_as_mismatch(
+def test_approve_reports_a_malformed_fingerprint_as_damaged(
     tmp_path, monkeypatch, capsys
 ):
-    """A truncated or non-v1 fingerprint file is treated like a
-    mismatch (the right way to keep a broken file from disabling the
-    new check): refuse without writing an approval."""
+    """A truncated or non-v1 fingerprint file never approves (a broken
+    file cannot disable the check), and it is named for what it is: the
+    owner is told the file is damaged and to run approval-key again, and
+    the attempt is not counted as a wrong answer."""
     state, _ = write_plan(tmp_path, monkeypatch)
     fp_dir = state / "approval-fp"
     fp_dir.mkdir(parents=True, exist_ok=True)
@@ -870,11 +871,17 @@ def test_approve_treats_malformed_fingerprint_as_mismatch(
     )
     assert approve.main([SID]) == 1
     output = capsys.readouterr()
-    assert "wrong approval passphrase for quasar" in output.err
+    assert "wrong approval passphrase" not in output.err
+    assert (
+        "the approval fingerprint file for quasar is damaged; run "
+        "sudo -u newton /usr/local/bin/newton-router-setup quasar approval-key again; "
+        "approval not created"
+    ) in output.err
     assert not (state / "approvals" / f"{SID}.json").exists()
+    assert not (state / "lockout" / "quasar.json").exists()
 
 
-def test_approve_treats_non_ascii_fingerprint_as_mismatch(
+def test_approve_treats_non_ascii_fingerprint_as_damaged(
     tmp_path, monkeypatch
 ):
     """A fingerprint file holding a non-ASCII byte does NOT
@@ -890,15 +897,15 @@ def test_approve_treats_non_ascii_fingerprint_as_mismatch(
     (fp_dir / "quasar").write_bytes(b"v1 \xff\xfe\xfd some bytes\n")
     assert approve.check_approval_fingerprint(
         fp_dir / "quasar", "f" * 64
-    ) == approve.APPROVAL_FP_MISMATCH
+    ) == approve.APPROVAL_FP_DAMAGED
 
 
-def test_approve_refuses_with_wrong_passphrase_message_when_fingerprint_is_non_ascii(
+def test_approve_refuses_with_the_damaged_message_when_fingerprint_is_non_ascii(
     tmp_path, monkeypatch, capsys
 ):
     """The full main path catches the non-ASCII
-    fingerprint as a mismatch and prints the existing 'wrong approval
-    passphrase' message; no traceback, no approval file."""
+    fingerprint as a damaged file; no traceback, no approval file, no
+    wrong answer counted."""
     state, _ = write_plan(tmp_path, monkeypatch)
     fp_dir = state / "approval-fp"
     fp_dir.mkdir(parents=True, exist_ok=True)
@@ -909,9 +916,11 @@ def test_approve_refuses_with_wrong_passphrase_message_when_fingerprint_is_non_a
     )
     assert approve.main([SID]) == 1
     output = capsys.readouterr()
-    assert "wrong approval passphrase for quasar" in output.err
+    assert "the approval fingerprint file for quasar is damaged" in output.err
+    assert "wrong approval passphrase" not in output.err
     assert "approval not created" in output.err
     assert not (state / "approvals" / f"{SID}.json").exists()
+    assert not (state / "lockout" / "quasar.json").exists()
     assert "Traceback" not in output.err
 
 
@@ -1266,3 +1275,74 @@ def test_approve_the_host_only_note_belongs_to_the_platforms_that_write():
     assert approve.platform_can_write("junos") is True
     for read_only in ("openwrt", "eos", "iosxe", "fortios"):
         assert approve.platform_can_write(read_only) is False
+
+
+@pytest.mark.parametrize(
+    "module,usage",
+    [
+        ("newton_mcp.approve", "usage: newton-approve"),
+        ("newton_mcp.enrol", "usage: newton-enrol"),
+    ],
+)
+def test_python_dash_m_runs_main_and_says_how_to_use_it(module, usage, tmp_path):
+    """`python -m newton_mcp.approve` ran nothing and exited 0, an
+    'approval' that approved nothing.  Run as a module, each CLI runs its
+    main: with no arguments that is the usage text and exit 2."""
+    import subprocess
+    import sys as _sys
+
+    cp = subprocess.run(
+        [_sys.executable, "-m", module],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        env={**os.environ, "NEWTON_STATE_DIR": str(tmp_path / "state")},
+        timeout=60,
+    )
+    assert cp.returncode == 2, (cp.returncode, cp.stdout, cp.stderr)
+    assert usage in cp.stderr
+
+
+class _InterruptedInput(TerminalInput):
+    """A terminal where the owner pressed Ctrl-C at the prompt."""
+
+    def readline(self, *args):
+        raise KeyboardInterrupt
+
+
+@pytest.mark.parametrize("stdin", [_InterruptedInput(), TerminalInput("")])
+def test_a_confirmation_that_cannot_be_read_creates_no_approval(
+    tmp_path, monkeypatch, capsys, stdin
+):
+    """Ctrl-C (or end of input) at the confirmation prompt is a
+    refusal with its own words, never a Python traceback."""
+    state, _ = write_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr(approve, "_getpass", refuse_getpass)
+    monkeypatch.setattr(approve.sys, "stdin", stdin)
+    assert approve.main([SID]) == 1
+    err = capsys.readouterr().err
+    assert "newton-approve: confirmation could not be read; approval not created" in err
+    assert not (state / "approvals" / f"{SID}.json").exists()
+
+
+def test_a_wrong_confirmation_says_what_to_type(tmp_path, monkeypatch, capsys):
+    """The refusal names the exact text the prompt wanted."""
+    write_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr(approve, "_getpass", refuse_getpass)
+    monkeypatch.setattr(approve.sys, "stdin", TerminalInput("yes\n"))
+    assert approve.main([SID]) == 1
+    assert (
+        f"confirmation did not match: type 'approve {SID[:8]}' exactly; "
+        "approval not created"
+    ) in capsys.readouterr().err
+
+
+def test_spaces_around_the_confirmation_are_ignored(tmp_path, monkeypatch, capsys):
+    """A pasted confirmation with a trailing space still matches."""
+    state, _ = write_plan(tmp_path, monkeypatch)
+    passphrase = "made-up-e2e-pass"
+    write_fingerprint(state, "quasar", approve.derive_k(passphrase.encode("utf-8"), "quasar"))
+    monkeypatch.setattr(approve, "_getpass", lambda prompt: passphrase)
+    monkeypatch.setattr(approve.sys, "stdin", TerminalInput(f" approve {SID[:8]} \n"))
+    assert approve.main([SID]) == 0, capsys.readouterr().err
+    assert (state / "approvals" / f"{SID}.json").exists()

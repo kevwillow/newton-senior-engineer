@@ -966,11 +966,12 @@ check_router() {
 # own terminal (the sudo rule has no NOPASSWD, so sudo asks for the owner's
 # password; the tty stays attached, stdin is never redirected, and only
 # stdout is captured, so the tool's own prompts stay visible).
-# (a) the tool exiting non-zero is INCONCLUSIVE (sudo or the tool failed),
-#     never a PASS;
-# (b) any report line starting with `FAIL proof ` is the setup tool's own
+# (a) any report line starting with `FAIL proof ` is the setup tool's own
 #     failing proof line: FAIL, naming the first such line escaped and cut
-#     to 200 characters;
+#     to 200 characters, whatever the exit code (the tool's check stops
+#     with exit 1 after printing it);
+# (b) otherwise the tool exiting non-zero is INCONCLUSIVE (sudo or the tool
+#     failed), never a PASS;
 # (c) PASS only when the report holds both proof lines as whole lines
 #     (`PASS proof hello: restricted identity` and
 #     `PASS proof unknown-and-empty: rejected`; that is what the setup
@@ -986,13 +987,15 @@ check_router_line() {
 	# which stays on the owner's terminal
 	output=$(timeout --foreground 600 "$SUDO" -u newton /usr/local/bin/newton-router-setup "$device" check)
 	rc=$?
-	if (( rc != 0 )); then
-		inconclusive "$name" "newton-router-setup exited $rc (sudo or the setup tool failed; never a PASS)"
-		return
-	fi
+	# a failing proof line is the result whatever the exit code: the
+	# setup tool's check prints it and then stops with exit 1
 	line=$(grep -m1 '^FAIL proof ' <<<"$output" || true)
 	if [[ -n $line ]]; then
 		fail "$name" "$(escape_text "$line")"
+		return
+	fi
+	if (( rc != 0 )); then
+		inconclusive "$name" "newton-router-setup exited $rc (sudo or the setup tool failed; never a PASS)"
 		return
 	fi
 	if grep -Fxq 'PASS proof hello: restricted identity' <<<"$output" &&

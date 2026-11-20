@@ -53,7 +53,8 @@ def install_pulsar(env):
 
 
 def swap(env, *extra):
-	return env.run("--plain-key", env.plain_key, "pulsar", "swap-key", *extra)
+	return env.run("--plain-key", env.plain_key, "pulsar", "swap-key",
+	               "--remove-plain-key", *extra)
 
 
 def pulsar_blob(env, label="newton-agent"):

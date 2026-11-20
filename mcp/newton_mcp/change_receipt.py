@@ -350,6 +350,12 @@ def render(
     if failed:
         out.append(f"FAILED: {_clean(failed['text'], 300)}")
     out += ["", "Script log for this session (masked):", "", _block(verify)]
+    no_install = _no_install_kind(record)
+    if no_install is not None:
+        out += ["", "## Backup", "", *_no_install_backup(record, no_install)]
+        out += ["", "## How to undo", ""]
+        out.append(_no_install_undo(record, no_install, outcome))
+        return "\n".join(out) + "\n"
     out += [
         "",
         "## Backup",
@@ -376,6 +382,84 @@ def render(
             "also undoes any later change. Config only: packages, passwords, reboots and client leases are not undone."
         )
     return "\n".join(out) + "\n"
+
+
+# ---- a no-install change: no full backup, and no sysupgrade -r -------------
+
+#: The leash of each kind of no-install record.
+_NO_INSTALL_LEASHES = {
+    "owner-script": "owner",
+    "owner-script-restore": "restore",
+    "rpcd": "auto",
+}
+
+
+def _no_install_kind(record: dict[str, Any]) -> str | None:
+    """'owner', 'restore' or 'auto' for a no-install record, else None."""
+    return _NO_INSTALL_LEASHES.get(str(record.get("router_leash", "")))
+
+
+def _no_install_backup(record: dict[str, Any], kind: str) -> list[str]:
+    """The Backup section of a no-install change: what Newton kept, truly."""
+    sid = str(record.get("session_id", ""))
+    if kind == "auto":
+        return [
+            "- Newton kept no copy of the router's settings for this change: the values before it were read "
+            "and compared in memory during the apply, and are not stored.",
+        ]
+    manifest = record.get("backup_manifest_sha256")
+    manifest_text = _clean(manifest, 64) if isinstance(manifest, str) and manifest else "not recorded"
+    return [
+        f"- Host-side copy: owner-scripts/{sid}/backup/ in Newton's state directory "
+        "(the restore script was built from it).",
+        f"- Manifest sha256: {manifest_text}",
+        "- It is a structured copy of the UCI sections the change touches, as the router's web API answered: "
+        "not a full-config backup, and it has no rpcd, uhttpd or dropbear settings. It holds Wi-Fi keys; "
+        "keep it private. It is not shown here.",
+    ]
+
+
+def _owner_run(device: str, sid: str) -> str:
+    """The command that runs one owner script (the plan's own words)."""
+    from . import owner_flow
+
+    return owner_flow.next_step(device, sid)
+
+
+def _no_install_undo(record: dict[str, Any], kind: str, outcome: str) -> str:
+    """How to go back from a no-install change: the route that exists."""
+    if outcome == "rolled_back":
+        return "Nothing to undo: the router rolled the change back and is at its state before the plan."
+    device = str(record.get("device", ""))
+    device_ok = _DEVICE_RE.fullmatch(device) is not None
+    if kind == "owner":
+        restore_sid = record.get("restore_sid")
+        if device_ok and isinstance(restore_sid, str) and _SID_RE.fullmatch(restore_sid):
+            way = (
+                f"use the restore script Newton made with this plan (restore plan {restore_sid}): "
+                + _owner_run(device, restore_sid)
+                + ". It puts back the values in the host-side copy above, and only those."
+            )
+        else:
+            way = "plan the reverse change with newton_plan_change: the restore plan of this change is not recorded."
+    elif kind == "restore":
+        restore_of = record.get("restore_of")
+        of = _clean(restore_of, 32) if isinstance(restore_of, str) and _SID_RE.fullmatch(restore_of) else "unknown"
+        way = (
+            f"this was the restore of change {of}; to make that change again, plan it again with "
+            "newton_plan_change."
+        )
+    else:
+        way = (
+            "plan the reverse change with newton_plan_change (Newton reads the router afresh), or restore a "
+            "backup you made yourself in LuCI under System > Backup. Newton kept no backup to restore."
+        )
+    if outcome == "unknown":
+        return (
+            "The outcome is not certain. First run `newton_change_status` for this session before anything else. "
+            f"If the change turns out to be live and must go, {way}"
+        )
+    return f"The change is live. To go back, {way}"
 
 
 def _load_record(state: Path, sid: str) -> dict[str, Any]:

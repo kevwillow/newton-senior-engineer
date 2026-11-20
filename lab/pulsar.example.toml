@@ -176,6 +176,7 @@ default = ["mgmt_ssh", "mgmt_ssh_pw", "mgmt_ssh_newton", "mgmt_luci", "p_interne
 # ---- lab-isp (ISP-A side of Pulsar's WAN), reset to its snapshot at run start ----
 [devices.lab-isp]
 vmid = 9101
+vm_name = "lab-isp"
 host = "10.109.0.10"
 user = "root"
 snapshot = "baseline"
@@ -903,6 +904,7 @@ description = "The client can open tcp 22 to lab-isp at 10.100.0.1 (lab-isp's is
 # device names differ, and they appear nowhere in these cmds.
 [devices.lab-client]
 vmid = 9105
+vm_name = "lab-client"
 host = "10.109.0.50"
 user = "labuser"
 snapshot = "baseline-pulsar"
@@ -1500,6 +1502,7 @@ description = "pulsar: install the WAN-health tool (scripts/newton-wan-health.sh
 # wrong pin fail loudly instead of quietly reading a neighbour.
 [devices.lab-wifi]
 vmid = 9107
+vm_name = "lab-wifi"
 host = "10.109.0.51"
 user = "labuser"
 snapshot = "baseline-wifi"

@@ -53,9 +53,17 @@ def _commands() -> list[list[str]]:
     """Every sh command of section 10, split the way a shell splits words."""
     commands: list[list[str]] = []
     for block in _blocks("sh"):
-        for line in block.splitlines():
+        # a line ending in a backslash goes on; `a && b || c` is three commands
+        for line in block.replace("\\\n", " ").splitlines():
             if line.strip():
-                commands.append(shlex.split(line))
+                argv: list[str] = []
+                for word in shlex.split(line):
+                    if word in ("&&", "||"):
+                        commands.append(argv)
+                        argv = []
+                    else:
+                        argv.append(word)
+                commands.append(argv)
     assert commands, "section 10 of docs/INSTALL.md has no sh commands"
     return commands
 

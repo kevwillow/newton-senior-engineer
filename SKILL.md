@@ -1,7 +1,7 @@
 ---
 name: newton
 description: "Newton, the network engineer. Configure, troubleshoot and design small-to-large networks from an AI agent over SSH or a serial console, with safety rails that prevent lockouts and destructive commands. Primary platform: OpenWrt 25.12+ routers (uci, ubus, fw4/nftables, DSA VLANs, dnsmasq/odhcpd, wifi, apk), driven through a tested apply-with-automatic-rollback protocol. Ships as a skill and as an MCP server (newton-mcp) so any MCP client can use the same protocol. Also covers Linux host networking (Proxmox bridges, NetworkManager) and network design (subnetting, VLANs, DHCP/DNS, dual-WAN). Use when the user says 'configure the router', 'add a port forward', 'set up a VLAN', 'change the wifi', 'reserve an IP', 'why is the network slow', 'how fast is my internet', 'run a speed test', 'test the wifi speed', 'open a port', 'set up dual WAN', 'segment the network', or any task touching uci, ubus, nft, fw4, dnsmasq, odhcpd, wifi, iwinfo, apk/opkg on an OpenWrt device, or network config on a Linux host. Primary use: the owner types /newton (or /network-engineer) to enter Network-engineer mode; every network request runs through that mode's flow."
-version: 1.1.2
+version: 1.1.3
 author: Kev
 license: MIT (scripts, SKILL.md); see references/README.md for reference-doc licenses
 platforms: [linux]
@@ -104,7 +104,7 @@ no-install login.
 
 **no-install:** Newton puts nothing on the router except one web-interface user. Every change uses OpenWrt's own undo timer. Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays. Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval. Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run.
 
-**installed:** Newton puts a program on the router: a small set of shell scripts (6 files, about 216 KB), no packages and no compiled code. Newton's key can run that program and nothing else, so the agent never gets a root shell. If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck. More checks can run, and fewer changes need a script. uninstall removes Newton's program and key; it keeps the guard's saved settings and the rest of /etc/newton (its lock and log), the program directory, the WAN-health settings in /etc/config/newton_wanhealth, the keys from before swap-key and the sysupgrade file: the saved settings and the copy of your keys are what you restore by hand.
+**installed:** Newton puts a program on the router: a small set of shell scripts (6 files, about 217 KB), no packages and no compiled code. Newton's key can run that program and nothing else, so the agent never gets a root shell. If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck. More checks can run, and fewer changes need a script. uninstall removes Newton's program and key; it keeps the guard's saved settings and the rest of /etc/newton (its lock and log), the program directory, the WAN-health settings in /etc/config/newton_wanhealth, the keys from before swap-key and the sysupgrade file: the saved settings and the copy of your keys are what you restore by hand.
 
 The no-install mode is **not** as safe as the installed mode. Its rollback is OpenWrt's own, the
 same one LuCI uses, and Newton only applies the changes that are acceptable if they stay. Never
@@ -216,7 +216,7 @@ the router (repo source `scripts/owrt-safe-apply.sh`), and the on-router program
 (repo source `device/openwrt/newton-router/newton-router`, installed by
 `scripts/newton-router-setup` to `/usr/libexec/newton/newton-router`). The host script and the router
 program each pass the repo's test suites plus an end-to-end test that runs the real program behind a
-fake ssh; the router program also passed the 97 Pulsar scenarios on a real router (2026-10-23).
+fake ssh; router program 1.1.0 also passed the 97 Pulsar scenarios on a real router (2026-10-23).
 
 | Script | Runs on | Does |
 |---|---|---|
@@ -300,10 +300,13 @@ they only see redacted: the MCP refuses `uci-equals` and `uci-unset` on a secret
 the agent gets no yes/no oracle on a value it only sees redacted (`root-password-class` returns a
 class name, never the field). Each round runs the sealed probes in order after the ping, DNS and
 health steps; when verification fails, the last failed round's reason and masked output are
-written to the audit log. If the affected path cannot be tested from the router or the agent host,
-do not auto-confirm: ask the user to test from a client and use `owrt-change.sh abort <SID>` (or
-`status`) on the agent host, or the matching program subcommand over the agent's key, before the
-window closes.
+written to the audit log. On an installed router the apply confirms on its own after three passing
+rounds. If the affected path cannot be tested from the router or the agent host, apply with
+`hold=true`: the rounds run, nothing is confirmed and the rollback stays armed until `confirm_by`;
+ask the user to test from a client, then call `newton_confirm_change` to keep it or
+`newton_abort_change` to roll it back before the window closes. Plan a change you will hold with a longer
+`timeout_s` (300, say): the hold ends at `timeout_s` minus 15 s, and the verify rounds use part of that, so the
+90 s default leaves well under a minute to test.
 
 **Touched controls run their live checks (ADR-010).** `newton_plan_change` seals the probes of every
 manifest control the change applies, without `manifest_checks`: a control matches only when every value
@@ -315,7 +318,9 @@ OW-NTP-01, OW-V6-04. NOT auto-checked (25 ids, pinned by `tests/profiles/test_pr
 check needs a lab client or lab names (OW-FW-01, OW-FW-04, OW-FW-09, OW-LOG-01, OW-MGMT-02, OW-V6-03,
 OW-ZONE-01, OW-ZONE-02, OW-DHCP-01) or the control has no batch (OW-FW-05, OW-FW-08, OW-LOG-03,
 OW-MGMT-06, OW-MGMT-08, OW-SVC-01, OW-SVC-02, OW-UPD-01, OW-UPD-02, OW-V6-01, OW-V6-02, OW-WIFI-01..04,
-OW-ZONE-03). For those, test from a client yourself before the window closes.
+OW-ZONE-03). For those, apply with `hold=true` and have the change tested from a client before the window
+closes, then confirm or abort it. The exception: OW-FW-09 sets a zone `log_limit`, and the wrapper refuses
+`hold=true` for any change to a zone `log_limit` or an `ipset` (nothing is applied); apply those without it.
 
 **Tiers plan one batch at a time, never atomically.** `newton_list_tiers` lists the three tiers (standard, hardened, lockdown) and their non-skipped batches; `newton_plan_tier(device, tier, batch_index, values, explanation, owner_confirmed_in_chat)` plans one ordered batch of `<tier>.uci` through the same `plan()` path the regular change protocol uses (explain the batch to the owner first; `steps` needs one entry per change line of the resolved batch, and the refusal names that count). A tier is applied batch by batch in order, NOT atomically: each batch is its own plan, approval, apply and confirm, a failed batch rolls back only itself and earlier batches stay applied. The `values` table fills the `{name}` placeholders inside that batch (read the router with `newton_read` to find them, for example the name of the WAN firewall zone); a missing or malformed value is refused before any device call, never echoed. Controls in `skipped` (lab-bound or needing a package) are never planned; they live in the manifest for the lab runner, not for the operator. A tier is written for a router that has not had a lower tier applied: stepping up (for example standard to lockdown) does not delete options the lower tier set, such as dropbear `Interface`, so delete those first. There is no `apply-tier` tool: apply each batch through the existing `newton_apply_change` flow.
 
@@ -364,7 +369,8 @@ The apply reloads the firewall (`fw4 reload`), which keeps existing **named nft 
 zone's `limit <zone>.log_limit` keeps its old rate, and an `ipset` keeps elements removed from
 the config; a changed set `timeout`, `match` or type even makes the whole reload fail (every
 firewall change in that apply stays unloaded) while fw4 exits 0. So when the staged change
-touches a zone's `log_limit` or any `ipset` section, the wrapper restarts the firewall after the
+touches a zone's `log_limit` or any `ipset` section, the wrapper refuses `hold=true` (a held change could roll back
+with no run left to restart the firewall) and restarts the firewall after the
 apply and again after a rollback (`/etc/init.d/firewall restart`; lab-r1: 0.14-0.20 s, about
 60-100 ms with no table, i.e. no filtering and no NAT for new flows; established flows survive;
 elements added to fw4 sets at run time are lost: measured with `nft add element`, which a reload
@@ -540,6 +546,7 @@ surface. It has **no tool that runs arbitrary commands**, reboots, upgrades or i
 | `newton_plan_change` | stage a `uci batch`; requires `owner_confirmed_in_chat=true` (the owner said yes in the conversation, see Step 0) and `explanation` (`intent`, `steps` one per change line, `expect` 1-8 claims, `risk`), both inside the plan hash; takes `probes: list[list[str]]` and optional `manifest_checks: list[str]` (host-expanded into probe lists before `seal`); returns diff, session id, router digest, profile, leash codes, `approval_required` + reasons |
 | `newton_plan_undo` | undo a CONFIRMED change by id; Newton builds the changes; give only `intent` and `risk` in `explanation`; conflicts with later changes REFUSE the whole undo and are listed; packages, passwords, reboots and client leases are not undone; needs the owner's yes in chat and `newton-approve` like any change |
 | `newton_apply_change` | apply with rollback + fresh-connection verification; consumes the approval record's router-checked HMAC token, which binds the approval window (the router enforces its expiry), and passes it as `OWRT_APPROVAL_TOKEN` with `OWRT_APPROVAL_NBF`/`OWRT_APPROVAL_EXP`; refuses without the token when the router requires approval |
+| `newton_confirm_change` | confirm a change `newton_apply_change` applied with `hold=true`, inside its window (`confirm_by`): one more verify round over a new connection first, no confirm when it fails; the router refuses a late confirm (installed OpenWrt routers only) |
 | `newton_change_status`, `newton_abort_change` | transaction state / discard |
 | `newton_grant_off` | end the easy grant on a device; it can only end or narrow a grant, never open or widen one |
 | `newton_list_tiers`, `newton_plan_tier` | list the three hardening tiers and their non-skipped batches; plan ONE ordered batch through the same `plan()` path (so it needs the same `owner_confirmed_in_chat` and `explanation`; the steps count must equal the batch's change lines and the error names that count); each batch is its own plan, approval, apply, confirm cycle |
@@ -548,7 +555,7 @@ surface. It has **no tool that runs arbitrary commands**, reboots, upgrades or i
 | `newton_plan_scan` | plan a consent-gated scan without running it: kind is `inside`, `outside` or `wifi`; profile is `quick`, `full-tcp` or `survey`; for `inside` an interface (a non-WAN router name) is required; for `wifi` profile is `survey` and the interface names the router's own radio (`radio0`, `radio1`). For an nmap scan Newton derives the exact IPv4 target from router reads and picks the inventory's single matching vantage; callers cannot supply a target, host, port, flag, or vantage. A `wifi` survey runs on that radio, sends probe requests on every channel and may disturb connected clients briefly; it keeps channel counts and look-alike network names only. Returns the stored request, which the owner then approves out of band with `newton-approve <request id>` |
 | `newton_run_scan` | run one stored scan request after the owner approved that exact request with `newton-approve`. Consent is single-use, expires after at most 30 minutes, and is consumed before the registered vantage starts. For an nmap scan only validated IPv4 addresses and open TCP ports are retained; raw nmap output, hostnames, MACs, vendors, and OS data are discarded. A `wifi` survey keeps channel counts, the strongest signal per channel and look-alike names only; every name comes back inside an `untrusted-device-data` envelope and no BSSID is kept at all |
 | `newton_list_getters` | list the experimental read-only getters (T0-exp) for one non-OpenWrt device: getter id, enabled, parameter slots and patterns, verification state, and `field_evidence` (per OS version counts of matched, mismatch and not_checked results from past local reads, plus last date). Field evidence is not verification and never changes `verified`. No device contact. OpenWrt devices use `newton_read` |
-| `newton_get_state` | experimental read-only read of one non-OpenWrt device by getter id (from `newton_list_getters`), never command text. Refuses OpenWrt devices and disabled getters. Result fields are `getter`, `tier` (`T0-exp`), `status`, `shape`, `truncated`, `caveat`, `device_role_enforced`, `data`, and `receipt_note` only when the local field receipt could not be written (the read itself is unaffected). Each run appends one receipt (platform, OS version, getter id, status, shape, date; no device output, name or address) to `field-receipts.jsonl` in the state dir; set `NEWTON_FIELD_RECEIPTS=0` to turn that off. Receipts carry the OS version seen by a successful, shape-matched `version` read of the same device in the last 15 minutes, otherwise `unknown`; a failed, mismatched or unparseable `version` read clears it, and a version that looks like a hostname or address is stored as `unknown`. Run `version` shortly before the reads you want labelled. One call every 5 s per device; show the caveat with every answer |
+| `newton_get_state` | experimental read-only read of one non-OpenWrt device by getter id (from `newton_list_getters`), never command text. Refuses OpenWrt devices and disabled getters. Result fields are `getter`, `tier` (`T0-exp`), `status`, `shape`, `truncated`, `caveat`, `device_role_enforced`, `data`, and `receipt_note` only when the local field receipt could not be written (the read itself is unaffected). Each run appends one receipt (platform, OS version, getter id, status, shape, date; no device output, name or address) to `field-receipts.jsonl` in the state dir; `NEWTON_FIELD_RECEIPTS=0` in the environment of a development server (`uv run`) turns that off, and an installed server always writes them (its launcher starts it with a fixed environment). Receipts carry the OS version seen by a successful, shape-matched `version` read of the same device in the last 15 minutes, otherwise `unknown`; a failed, mismatched or unparseable `version` read clears it, and a version that looks like a hostname or address is stored as `unknown`. Run `version` shortly before the reads you want labelled. One call every 5 s per device; show the caveat with every answer |
 
 Every change needs the owner's out-of-band approval with `newton-approve`, whatever the profile.
 The one exception is the lab carve-out (confirmed by the owner, ADR-018; see `approval_gate.py`): a
@@ -599,9 +606,9 @@ claude mcp add -s user newton -- sudo -n -u newton /usr/local/bin/newton-mcp
 # Development only (repo copy, runs as you, NO credential isolation):
 #   claude mcp add newton -- uv run --project ~/newton/mcp newton-mcp
 ```
-Audit log: `~/.local/state/newton/mcp-audit.log`. Tests: `cd mcp && uv run --extra test pytest -q` (92).
+Audit log: `~/.local/state/newton/mcp-audit.log`. Tests: `cd mcp && uv run --extra test pytest -q`.
 
-**What Newton puts on your router.** The OpenWrt install puts 6 files on the router: about 216 KB of small POSIX shell
+**What Newton puts on your router.** The OpenWrt install puts 6 files on the router: about 217 KB of small POSIX shell
 scripts. No packages are installed and nothing is compiled. It also writes the device name, the profile and the zones
 under `/etc/newton`, the WAN-health settings `/etc/config/newton_wanhealth`, the boot links `/etc/rc.d/S09newton-guard`,
 `/etc/rc.d/S95newton-wan-health` and `/etc/rc.d/K10newton-wan-health`, and 13 lines in `/etc/sysupgrade.conf`. It is there for the rollback that must
@@ -634,7 +641,7 @@ Install: a two-stage ceremony, because the working tree is not trusted.
 
 First install (once). The user opens the reviewed commit on the Git host's web page, not a local tool, and notes the full 40-hex commit id. The user opens a new terminal and starts a root shell there by typing the full path `/usr/bin/sudo -i`, so an alias or function named `sudo` is not used. Reason: the agent runs as the user's own Unix account, so it can edit the user's shell startup files, and a new terminal still reads them. The full path narrows the risk but does not remove it: a startup file the agent edited (for example a DEBUG trap) can still interfere. Full protection needs the agent to run as a separate Unix user (docs/design/04, "Install bootstrap"). In that root shell the user runs `<repo>/scripts/newton-install` once. It shows the commit id, tree id, author, subject and the remote branches that contain the commit; the user compares the commit id with the web page and types `install ` followed by the full 40-hex id. The prompt does not print the id. Uncommitted and untracked files are not installed. This first run also installs the root-owned bootstrap `/usr/local/sbin/newton-bootstrap` (and `newton-bootstrap.source`, naming the commit it came from). The plain installer refuses to run again once the bootstrap exists.
 
-Every later install or update. Again a new terminal, `/usr/bin/sudo -i` (same caveat as above), then `newton-bootstrap install <repo> <full 40-hex commit id>`. The bootstrap is owned by root, refuses to run unless its own path is root-owned and not writable by others and the environment is clean, and makes its own verified snapshot of exactly that commit. It never runs the working tree's installer and never reads the repo's config or hooks. It shows commit id, tree id, author, date, subject and the sha256 of the snapshot's installer, asks the user to type `install ` and the first 12 hex digits of the id, then runs the snapshot's `scripts/newton-install --from-snapshot` from an empty directory with a scrubbed environment, and deletes the snapshot.
+Every later install or update. Again a new terminal, `/usr/bin/sudo -i` (same caveat as above), then `newton-bootstrap install <repo> <full 40-hex commit id>`. The bootstrap is owned by root, refuses to run unless its own path is root-owned and not writable by others and the environment is clean, and makes its own verified snapshot of exactly that commit. It never runs the working tree's installer and never reads the repo's config or hooks. It shows commit id, tree id, author, date, subject and the sha256 of the snapshot's installer, asks the user to type `install ` and the first 12 hex digits of the id, then runs the snapshot's `scripts/newton-install --from-snapshot` from an empty directory with a scrubbed environment, and deletes the snapshot. Before an update, the owner confirms or aborts every held change; after it, they restart Claude Code (or run `/mcp` and reconnect `newton`) so the new server runs, and run `sudo -u newton /usr/local/bin/newton-router-setup <device> upgrade` for each router in the installed mode.
 
 To update the bootstrap itself: `newton-bootstrap self-update <repo> <full id>` shows the diff between the installed and the new bootstrap, asks for `update ` and the first 12 hex digits, replaces itself atomically and keeps the old copy as `newton-bootstrap.prev`. `newton-bootstrap version` prints its own sha256 and the commit it was installed from.
 
@@ -692,11 +699,14 @@ the owner; from a source tree, by `scripts/newton-ad-setup`.
   `sudo -u newton ssh-keygen -t ed25519 -N '' -f /var/lib/newton/.ssh/<name>`, copy each `.pub` out with
   `sudo -u newton cat` and pass that copy to `--pubkey`; pin the DC's host key into a `known_hosts` file of the
   `newton` account (`ssh-keyscan` piped into `sudo -u newton tee`, then compare the fingerprint with the one the DC
-  shows); fill the printed entry's `key_file` and `known_hosts` lines with those paths and append it with
-  `sudo -u newton tee -a /var/lib/newton/devices.toml`. The agent gives the owner these commands and never runs them.
+  shows); fill the printed entry's `key_file` and `known_hosts` lines with those paths and append it only when
+  `sudo -u newton grep -qxF '[devices.<name>]' /var/lib/newton/devices.toml` finds no such table, with
+  `sudo -u newton tee -a /var/lib/newton/devices.toml` (a second table for one name makes the whole inventory
+  unreadable). The agent gives the owner these commands and never runs them.
 - Once, on the Newton host, not on a DC: the owner runs, from their own shell,
   `sudo -u newton /usr/local/bin/newton-ad-setup approval-key <device>` for the device that stands for the domain
-  (from a source tree: `scripts/newton-ad-setup approval-key <device>`) and types, twice, the passphrase they typed on
+  (a source-tree Newton only: `scripts/newton-ad-setup approval-key <device>` stores the fingerprint in the caller's own
+  state directory, which an installed `newton-approve` never reads) and types, twice, the passphrase they typed on
   every DC of the domain. It prints the fingerprint and stores only that fingerprint, in the newton user's state
   directory, where `newton-approve` checks it. The agent gives the owner the command and never runs it.
 
@@ -921,7 +931,9 @@ takes writes only when its inventory entry has `vendor_write = true` (key auth a
 be `experimental_readonly`). Without the flag it stays read-only.
 
 1. **Same protocol, same tools.** `newton_plan_change(device, uci_batch=<the device's own config lines, one per line>, ...)`,
-   then the owner runs `newton-approve <session_id>`, then `newton_apply_change`, then confirm or abort. Plan, approval, apply,
+   then the owner runs `newton-approve <session_id>`, then `newton_apply_change`, which confirms by itself on these platforms
+   (`newton_confirm_change` is OpenWrt-only, and so is `hold=true`); `newton_abort_change` rolls back a change the apply
+   left pending. Plan, approval, apply,
    fresh-session verify and the sealed explanation work as on OpenWrt. The approval shows the candidate diff read from the device
    (there is no fw4 check on these platforms; the plan says `not-checked`).
 2. **The vendor's own undo, armed before the write.** VyOS: `commit-confirm` (T1, only when the device is in reload mode; a VyOS
