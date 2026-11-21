@@ -1365,6 +1365,38 @@ def test_approve_names_the_ad_change_word_for_an_ad_plan(monkeypatch, capsys):
     assert "scan request not found" not in err, err
 
 
+def test_an_installed_approve_names_the_ad_change_launcher(monkeypatch, capsys, tmp_path):
+    """On an installed Newton the ad-change hint is the sudo form of the
+    installed launcher, which is the one that runs there."""
+    monkeypatch.setenv("NEWTON_HOME", str(tmp_path / "home"))
+    plans = approve.state_dir() / "ad-plans"
+    plans.mkdir(parents=True)
+    (plans / f"{SID}.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(approve.sys, "stdin", TerminalInput())
+
+    assert approve.main([SID]) == 2
+
+    err = capsys.readouterr().err
+    assert f"sudo -u newton /usr/local/bin/newton-approve ad-change {SID}" in err, err
+
+
+def test_an_installed_approve_names_the_router_setup_launcher(
+    tmp_path, monkeypatch, capsys
+):
+    """A missing router fingerprint on an installed Newton names the sudo
+    form of newton-router-setup."""
+    state, _ = write_plan(tmp_path, monkeypatch)
+    monkeypatch.setenv("NEWTON_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(approve, "_getpass", lambda prompt: "made-up-no-fp")
+    monkeypatch.setattr(approve.sys, "stdin", TerminalInput(f"approve {SID[:8]}\n"))
+
+    assert approve.main([SID]) == 1
+
+    err = capsys.readouterr().err
+    assert "run sudo -u newton /usr/local/bin/newton-router-setup quasar approval-key first" in err
+    assert not (state / "approvals" / f"{SID}.json").exists()
+
+
 def test_approve_of_an_id_with_no_plan_says_to_plan_again(monkeypatch, capsys):
     """A dropped (aborted) plan or a typo is not called a scan request."""
     monkeypatch.setattr(approve.sys, "stdin", TerminalInput())

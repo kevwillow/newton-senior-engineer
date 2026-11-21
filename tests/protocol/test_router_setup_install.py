@@ -32,11 +32,14 @@ CODE_FILES = [
 	("device/openwrt/newton-guard/newton-guard.init", INIT),
 ]
 
-# design 2.3 (R9b+c): the thirteen lines in order -- the eight code/config
+# design 2.3 (R9b+c): the nineteen lines in order -- the eight code/config
 # lines, the four WAN-health lines (the rc.d start and stop symlinks the
 # init's `enable` creates, the wan-health script and its init) and the
-# approval key (a firmware upgrade used to lose it). /etc/config is kept by
-# sysupgrade by default and stays out of this list.
+# approval key (a firmware upgrade used to lose it), then the guard's
+# state (the pending change, its counters, the saved settings and the
+# quarantine), so a firmware upgrade during a pending change still rolls
+# it back. /etc/config is kept by sysupgrade by default and stays
+# out of this list.
 SYSUPGRADE_LINES = [
 	"/usr/libexec/newton/newton-router",
 	"/usr/libexec/newton/newton-safe-apply",
@@ -51,6 +54,12 @@ SYSUPGRADE_LINES = [
 	"/etc/newton/profile",
 	"/etc/newton/zones",
 	"/etc/newton/approve.key",
+	"/etc/newton/pending",
+	"/etc/newton/failed",
+	"/etc/newton/boot_attempts",
+	"/etc/newton/restore_attempts",
+	"/etc/newton/lkg/",
+	"/etc/newton/quarantine/",
 ]
 
 
@@ -322,7 +331,8 @@ def test_install_stops_when_hello_lies(setup_env, lie, reported):
 	r = run_install(env)
 	assert r.rc == 1
 	assert r.out.splitlines()[-1] == "STOPPED install r1: install step 7 failed"
-	assert "no .prev existed (first install)" in r.out
+	assert ("no .prev for /usr/libexec/newton/newton-router" in r.out
+	        and "the new version stays on the router" in r.out)
 	assert env.router.path(PROG).exists()
 	assert not env.router.path(PROG + ".prev").exists()
 	assert env.router.read("etc/newton/fixture-lie").strip() == reported

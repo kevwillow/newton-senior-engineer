@@ -145,14 +145,15 @@ Then run the bootstrap with the absolute path of your clone (never `~/newton`) a
 ```sh
 newton-bootstrap install <repo> <40-hex-commit-id>
 ```
-The bootstrap checks the commit itself and asks for `install ` and the first 12 hex characters of the id. The plain
+The bootstrap checks the commit itself and asks for `install ` and the full 40-hex id. The plain
 installer refuses to run a second time, but only after you have typed the full commit confirmation and answered the
 `lock` question; the refused run installs nothing. The root shell is what the repository's own notes use for both commands, because
 the bootstrap needs a clean environment; from such a shell the first install is `<repo>/scripts/newton-install`.
 
 Before an update, confirm or abort every held change: a held change cannot be confirmed by a server that was updated
-under it. After the update, restart Claude Code, or run `/mcp` and reconnect `newton`, so the new server runs (the old
-one keeps the old code in memory). Then, for each router in the installed mode, run
+under it. After the update, restart Claude Code, or run `/mcp` and reconnect `newton`, so the new server runs, and do not
+use Newton until you have: the running server has its old code loaded but reads the new files from disk, so a call
+before the restart can run a mix of the two. Then, for each router in the installed mode, run
 `sudo -u newton /usr/local/bin/newton-router-setup <device> upgrade`, so the router program matches the new server; a
 no-install router needs nothing.
 
@@ -169,7 +170,7 @@ For Claude Code, leave the root shell first (type `exit`). Then register the ser
 claude mcp add -s user newton -- sudo -n -u newton /usr/local/bin/newton-mcp
 ```
 Then restart Claude Code, or run `/mcp` and reconnect `newton`. The tools `newton_list_devices` and `newton_read`
-must be listed. [SETUP-CLIENTS.md](SETUP-CLIENTS.md) has the snippet for Codex, Claude Desktop and OpenCode.
+must be listed. [SETUP-CLIENTS.md](SETUP-CLIENTS.md) has the snippet for Codex and OpenCode (Claude Desktop is not supported).
 
 ## 6. Check the install
 
@@ -209,7 +210,7 @@ your own:
 
 ```sh
 sudo -u newton grep -qxF '[devices.router1]' /var/lib/newton/devices.toml 2>/dev/null && echo 'already in the inventory: router1' \
-  || printf '[devices.%s]\nplatform = "openwrt"\nhost = "%s"\nuser = "root"\n' router1 192.0.2.1 \
+  || printf '\n[devices.%s]\nplatform = "openwrt"\nhost = "%s"\nuser = "root"\n' router1 192.0.2.1 \
   | sudo -u newton tee -a /var/lib/newton/devices.toml >/dev/null
 sudo -u newton chmod 600 /var/lib/newton/devices.toml
 ```
@@ -310,19 +311,19 @@ What Newton puts on your router
 Newton's executable code is a small set of POSIX shell scripts; it also writes the configuration and service entries listed below.
 No package is installed and nothing is compiled: about 218 KB of shell in 6 files.
 
-  /usr/libexec/newton/newton-router     148 KB  the program Newton talks to
+  /usr/libexec/newton/newton-router     149 KB  the program Newton talks to
   /usr/libexec/newton/newton-safe-apply   25 KB  the change helper
   /usr/libexec/newton-guard              32 KB  the rollback guard
   /etc/init.d/newton-guard               525 B  starts the guard at boot
   /usr/libexec/newton/newton-wan-health   12 KB  the dual-WAN health check
-  /etc/init.d/newton-wan-health          641 B  starts the health check
+  /etc/init.d/newton-wan-health          846 B  starts the health check
 
 It also writes the device name, the profile and the zones under /etc/newton
 (and, once you pick an approval passphrase, the approval key), the WAN-health
 settings in /etc/config/newton_wanhealth, the boot links
 /etc/rc.d/S09newton-guard, /etc/rc.d/S95newton-wan-health and
 /etc/rc.d/K10newton-wan-health, and
-13 lines in /etc/sysupgrade.conf, so a firmware upgrade
+19 lines in /etc/sysupgrade.conf, so a firmware upgrade
 keeps them. The guard service runs at boot; the WAN-health check stays idle
 until you set newton_wanhealth.main.enabled=1 and list the WAN interfaces
 (iface) and the probe targets (target) it watches. One more line goes into
@@ -386,12 +387,35 @@ admin key, or keep another way in (LuCI or the console).
 
 After `swap-key` the inventory names Newton's key, and the tool then logs in with the root password by default. On a
 router that refuses root passwords, every later setup command (`approval-key`, `check`, `upgrade`, `rollback`,
-`uninstall`, `add-key`, `revoke`, `profile`) needs `--admin plain-key --plain-key <your admin key>` before the device
-name, with an admin key that stays on the router (your own, not the setup key `swap-key` removed). check still reports
-the refused password login as a FAIL: the password is the way back in if a key stops working.
+`uninstall`, `add-key`, `revoke`, `profile`) needs `--admin plain-key --plain-key <admin key>` before the device name,
+with an admin key that stays on the router (not the setup key `swap-key` removed) and that the `newton` account can
+read. Your own key in your home folder does not work: these commands run as `newton`, which cannot read it. Before
+`swap-key`, give `newton` an admin key of its own and add its public half to the router as in 7c:
 
-**7f.** Choose the approval passphrase. On a no-install router, step 7e already asked for it, and the authenticator
-app belongs to the installed mode, so it is not offered there; run this only to change the passphrase. On an
+```sh
+sudo -u newton ssh-keygen -t ed25519 -N '' -f /var/lib/newton/.ssh/admin
+sudo -u newton cat /var/lib/newton/.ssh/admin.pub
+```
+Then pass `--plain-key /var/lib/newton/.ssh/admin`. That key gives the `newton` account a root login while it is on
+the router, and the MCP server the agent drives runs as that account: remove it from the router's SSH-Keys page after each setup run and add it back when you need it.
+check still reports the refused password login as a FAIL: the password is the way back in if a key stops working.
+
+To change a router's profile later (lab or prod), change the inventory first, then the router. The inventory is
+`/var/lib/newton/devices.toml` and belongs to the `newton` account, so edit it as that account:
+
+```sh
+sudo -u newton vi /var/lib/newton/devices.toml
+```
+Set `profile = "prod"` (or `"lab"`) in the router's `[devices.router1]` table, then run:
+
+```sh
+sudo -u newton /usr/local/bin/newton-router-setup router1 profile prod
+```
+The profile action refuses a value the inventory does not hold, and Newton refuses a router whose profile differs from
+the inventory.
+
+**7f.** Choose the approval passphrase. On a no-install router, step 7e already asked for it and does not offer the
+authenticator app; run this only to change the passphrase, and add the app with `newton-enrol totp router1` below. On an
 installed router:
 
 ```sh
@@ -424,7 +448,7 @@ except the ones Newton always asks about. The assistant plans the change, shows 
 
 - The dialog appears in the terminal where your assistant runs. It asks for your passphrase, or for the 6 digit
   code from your authenticator app. You type the answer there. The model is not shown it, but a passphrase passes through the Claude Code process, can be
-  written to its debug log, and an installed hook could read it. An authenticator code (installed mode only) keeps your reusable passphrase out of them, but the dialog is not confidential, and a code that is still valid could be used by whoever sees it. See Known limits in
+  written to its debug log, and an installed hook could read it. An authenticator code keeps your reusable passphrase out of them, but the dialog is not confidential, and a code that is still valid could be used by whoever sees it. See Known limits in
   [SECURITY.md](../SECURITY.md).
 - The dialog waits 180 seconds. If nobody answers in that time, nothing is approved and no attempt is counted. The
   dialog can stay on the screen after that; an answer typed then is ignored, so ask for the change again.

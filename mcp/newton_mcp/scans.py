@@ -1025,24 +1025,35 @@ def make_request(
     return record
 
 
+#: The next step of a scan consent that can never be used: a consent is
+#: bound to one request and used once, so only a new request and a new
+#: approval can run the scan.
+CONSENT_NEXT_STEP = "plan a new scan request and ask the owner to approve it again"
+
+
+def _invalid(cause: str) -> str:
+    """The refusal of a consent record that cannot be used, with its cause."""
+    return f"scan consent record is invalid ({cause}); {CONSENT_NEXT_STEP}"
+
+
 def consume_consent(state: Path, request: dict[str, Any], device: str) -> dict[str, Any]:
     request_id = str(request["id"])
     path = consent_path(state, request_id)
     used = path.with_suffix(".used")
     if used.exists():
-        raise ScanError("scan consent was already used")
+        raise ScanError(f"scan consent was already used; {CONSENT_NEXT_STEP}")
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise ScanError("scan consent is required; run newton-approve with the request id") from None
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise ScanError("scan consent record is invalid") from exc
+        raise ScanError(_invalid("it cannot be read")) from exc
     if not isinstance(value, dict) or set(value) != CONSENT_KEYS:
-        raise ScanError("scan consent record is invalid")
+        raise ScanError(_invalid("its fields are not the fields of a consent"))
     if value.get("request_id") != request_id:
-        raise ScanError("scan consent does not match this request")
+        raise ScanError(f"scan consent does not match this request; {CONSENT_NEXT_STEP}")
     if value.get("device") != device or request.get("device") != device:
-        raise ScanError("scan consent is for a different device")
+        raise ScanError(f"scan consent is for a different device; {CONSENT_NEXT_STEP}")
     stored_hash = value.get("request_hash")
     request_hash = request.get("request_hash")
     if (
@@ -1050,28 +1061,28 @@ def consume_consent(state: Path, request: dict[str, Any], device: str) -> dict[s
         or not isinstance(request_hash, str)
         or not hmac.compare_digest(stored_hash, request_hash)
     ):
-        raise ScanError("scan consent does not match this request")
+        raise ScanError(f"scan consent does not match this request; {CONSENT_NEXT_STEP}")
     if not isinstance(value.get("approved_by"), str):
-        raise ScanError("scan consent record is invalid")
+        raise ScanError(_invalid("it names no approver"))
     try:
         created = datetime.fromisoformat(str(value["created_at"]))
         expiry = datetime.fromisoformat(str(value["expires_at"]))
     except (KeyError, ValueError):
-        raise ScanError("scan consent record is invalid") from None
+        raise ScanError(_invalid("its times cannot be read")) from None
     if (
         created.tzinfo is None
         or expiry.tzinfo is None
         or expiry <= created
         or (expiry - created).total_seconds() > 30 * 60
     ):
-        raise ScanError("scan consent record is invalid")
+        raise ScanError(_invalid("its window is not a forward window of at most 30 minutes"))
     if expiry <= datetime.now(timezone.utc):
         raise ScanError("scan consent expired; approve the request again")
     try:
         os.replace(path, used)
     except FileNotFoundError:
         if used.exists():
-            raise ScanError("scan consent was already used") from None
+            raise ScanError(f"scan consent was already used; {CONSENT_NEXT_STEP}") from None
         raise ScanError("scan consent is required; run newton-approve with the request id") from None
     return value
 

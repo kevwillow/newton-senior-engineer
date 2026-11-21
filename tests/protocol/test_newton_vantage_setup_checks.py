@@ -741,3 +741,18 @@ def test_check_of_an_unreachable_vantage_names_the_ssh_error(tmp_path, action, k
         "is on and reachable from this host\n"
     )
     assert len(call_blocks(log)) == 1
+
+
+def test_install_client_checks_probe_failure_names_the_ssh_error(tmp_path):
+    """The client-check tool probe names ssh's error text when the admin ssh
+    fails, not only its exit status."""
+    write_inventory(tmp_path)
+    env, _log = fake_tools(tmp_path)
+    (tmp_path / "bin" / "ssh").write_text(
+        "#!/bin/sh\n"
+        "printf 'ssh: connect to host vantage.example.test port 22: No route to host\\n' >&2\n"
+        "exit 255\n")
+    result = run_setup(env, action="install-client-checks")
+    assert result.returncode != 0
+    assert ("could not probe vantage for bash, timeout, sha256sum and base64 (admin ssh exit 255): "
+            "ssh: connect to host vantage.example.test port 22: No route to host") in result.stderr

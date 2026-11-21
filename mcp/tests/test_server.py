@@ -1345,3 +1345,36 @@ def test_the_plan_description_names_every_carve_out_condition():
     assert f"{approval_gate.LAB_SWITCH_ENV}=1" in flat
     assert "an installed Newton never applies it" in flat
     assert "rely on the plan's ``requires_approval`` field" in flat
+
+
+ALREADY_APPLIED = (
+    f"APPLYING session={SID}\n"
+    f"ERROR: apply refused: the router says session {SID} was already applied (by an earlier run); "
+    "nothing applied by this run; unless that run confirms it, the router rolls it back by itself "
+    f"when its window ends; run: owrt-change.sh status root@192.0.2.1 {SID}\n"
+)
+
+
+def test_classify_apply_calls_an_already_applied_session_unknown():
+    """An earlier apply of the session reached the router: the change may be
+    live (or confirmed), so the outcome is not known from this run."""
+    assert server.classify_apply(1, ALREADY_APPLIED, SID) == "unknown"
+    # another session's refusal says nothing about this one
+    assert server.classify_apply(1, ALREADY_APPLIED.replace(f"session {SID}", "session " + "f" * 32), SID) == "error"
+    # the words only count on the wrapper's own final line, not mid-line
+    assert server.classify_apply(
+        1, f"ERROR: x apply refused: the router says session {SID} was already applied", SID) == "error"
+
+
+def test_a_reapply_of_an_already_applied_session_says_unknown_not_not_applied(configured_lab, monkeypatch):
+    _write_plan(configured_lab, _record())
+    monkeypatch.setattr(
+        server.NewtonService, "run_script",
+        lambda *a, **k: subprocess.CompletedProcess([], 1, ALREADY_APPLIED, ""),
+    )
+    result = server.newton_apply_change("quasar", SID)
+    assert result["result"] == "unknown"
+    from newton_mcp import notice
+    line = notice.result_line(result, "quasar", SID, "summary")
+    assert line.startswith("NEWTON RESULT: UNKNOWN  quasar")
+    assert "Check the router before doing anything else." in line

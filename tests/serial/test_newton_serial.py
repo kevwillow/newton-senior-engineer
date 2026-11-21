@@ -1147,3 +1147,120 @@ def test_push_whose_heredoc_line_fails_after_sending_says_the_file_was_overwritt
     assert rc == 7, err
     assert "already overwritten" in err, err
     assert "was not written" not in err, err
+
+
+class _StallAtHeredocConsole(_UnplugConsole):
+    """Stops reading once the push sends its heredoc line, so the push
+    blocks mid-file (a full pty buffer) until the test lets it go on."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.heredoc_started = threading.Event()
+        self.resume = threading.Event()
+
+    def _run(self):
+        while not self.stop.is_set():
+            line = self._readline()
+            if line is None:
+                return
+            if line.split("\x03")[-1].startswith("cat > "):
+                self.heredoc_started.set()
+                self.resume.wait(5)
+                while self._readline() is not None:     # keep draining so the push's writes finish
+                    pass
+                return
+            line = line.split("\x03")[-1]
+            if line == "":
+                self._write("root@OpenWrt:~# ")
+                continue
+            marked = self.MARKED.match(line)
+            if marked:
+                token, body = marked.group(1), marked.group(2)
+                code = self.answers.get(body, ("", 0))[1]
+                self._write(f"{line}\r\n__NWS{token}__\r\n\r\n__NWE{token}__{code}\r\nroot@OpenWrt:~# ")
+
+
+@pytest.mark.parametrize("sig", ["SIGINT", "SIGHUP"])
+def test_push_interrupted_mid_heredoc_says_the_target_was_overwritten(tmp_path, sig):
+    """Ctrl-C (or the terminal hanging up) in the middle of a push must not
+    end in a traceback: the router shell is taken out of the heredoc with a
+    Ctrl-C, and the owner is told the target may be overwritten and where
+    the old copy is."""
+    import signal
+    f = tmp_path / "x.txt"; f.write_text("".join(f"line {i} " + "x" * 100 + "\n" for i in range(400)))
+    console = _StallAtHeredocConsole("shell", answers={"test -e /etc/config/x": ("", 0),
+                                                       "test -e /etc/config/x.newton-bak": ("", 1)}).start()
+    proc = subprocess.Popen(
+        [sys.executable, str(SCRIPT), "--port", console.path, "--timeout", "0.35",
+         "--log-dir", str(tmp_path / "logs"), "push", str(f), "/etc/config/x"],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        assert console.heredoc_started.wait(5), "push never reached its heredoc"
+        time.sleep(0.3)                                  # let the push block on the full pty buffer
+        proc.send_signal(getattr(signal, sig))
+        time.sleep(0.2)
+        console.resume.set()
+        out, err = proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        console.close()
+    assert proc.returncode == 130, (proc.returncode, err)
+    assert "Traceback" not in err, err
+    assert "interrupted" in err, err
+    assert "already overwritten" in err and "possibly cut short" in err, err
+    assert "/etc/config/x.newton-bak" in err, err
+    heredoc_at = console.received.find(b"cat > /etc/config/x")
+    assert b"\x03" in console.received[heredoc_at:], "the router shell was left inside the heredoc"
+
+
+def test_push_interrupted_before_the_heredoc_says_the_target_is_untouched(tmp_path, capsys):
+    """An interrupt while the push is still backing up leaves the target as
+    it was: the message says so and the exit is 130, not a traceback."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ns_push_int", SCRIPT)
+    ns = importlib.util.module_from_spec(spec); spec.loader.exec_module(ns)
+    real_run_marked = ns.run_marked
+
+    def interrupt_on_cp(session, command, timeout):
+        if command.startswith("cp -p "):
+            raise KeyboardInterrupt
+        return real_run_marked(session, command, timeout)
+
+    ns.run_marked = interrupt_on_cp
+    f = tmp_path / "x.txt"; f.write_text("line\n")
+    console = FakeConsole("shell", answers={"test -e /etc/config/x": ("", 0),
+                                            "test -e /etc/config/x.newton-bak": ("", 1)}).start()
+    try:
+        rc = ns.main(["--port", console.path, "--timeout", "0.35", "--log-dir", str(tmp_path / "logs"),
+                      "push", str(f), "/etc/config/x"])
+    except KeyboardInterrupt:
+        pytest.fail("the interrupt escaped the push as a traceback")
+    finally:
+        console.close()
+    err = capsys.readouterr().err
+    assert rc == 130, err
+    assert "interrupted" in err and "/etc/config/x was not written" in err, err
+    assert not any(c.startswith("cat > ") for c in console.commands)
+
+
+def test_a_retry_after_a_failed_push_names_the_first_backup_too(tmp_path):
+    """When .newton-bak already exists (an earlier push), the new timestamped
+    backup holds the file as the earlier, possibly cut-short, push left it.
+    The backup line and the failure line also name .newton-bak, which holds
+    the file as it was before Newton's first push."""
+    f = tmp_path / "x.txt"; f.write_text("new\n")
+    answers = {
+        "test -e /etc/config/x": ("", 0),
+        "test -e /etc/config/x.newton-bak": ("", 0),
+        "wc -c < /etc/config/x": ("3", 0),
+    }
+    console = _AnyBackupConsole("shell", answers=answers).start()
+    try:
+        result = invoke(console, tmp_path, "push", str(f), "/etc/config/x")
+    finally:
+        console.close()
+    assert result.returncode == 7, result.stderr
+    first = "the file as it was before Newton's first push is still in /etc/config/x.newton-bak"
+    assert first in result.stdout, result.stdout
+    assert "already overwritten" in result.stderr and first in result.stderr, result.stderr

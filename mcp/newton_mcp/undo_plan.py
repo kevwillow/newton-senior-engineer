@@ -32,6 +32,7 @@ import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -99,8 +100,12 @@ PARTIAL_CLAIM_RISK = "Not every restored value can be checked after the apply."
 NO_CLAIM_RISK = (
     "No config value could be claimed; the only check is that the router still answers."
 )
+# Restoring the change's backup would put back every config file as it was
+# before the change, reverting every later change too: the advice is a
+# reverse change instead.
+_REVERSE_CHANGE = "to undo it, plan the reverse change with newton_plan_change"
 NO_AFTER_HASH = (
-    "this change was confirmed before undo records were kept; restore its backup by hand"
+    "this change was confirmed before undo records were kept; " + _REVERSE_CHANGE
 )
 # The router confirmed the change but its answer was lost; this host learned
 # it later (a status, abort or confirm reconciled it).  The config then may
@@ -110,13 +115,20 @@ NO_AFTER_HASH = (
 NO_AFTER_HASH_RECONCILED = (
     "the router confirmed this change after the link to it dropped, so the config right "
     "after the change was never recorded (an undo now would also revert anything changed "
-    "since); restore its backup by hand"
+    "since); " + _REVERSE_CHANGE
 )
 # The wrapper could not read the router's config right after the confirm and
 # logged a NO UNDO RECORD line for the session.
 NO_AFTER_HASH_UNREAD = (
-    "the router's config could not be read right after this change was confirmed, so the "
-    "config right after the change was never recorded; restore its backup by hand"
+    "the router's config could not be read or kept right after this change was confirmed, so "
+    "the config right after the change was never recorded; " + _REVERSE_CHANGE
+)
+# The audit line the server writes when it could not keep the undo record
+# of a confirmed change (the wrapper writes its own when it cannot read the
+# config); _require_after_hash then gives NO_AFTER_HASH_UNREAD.
+NO_UNDO_RECORD_NOTE = (
+    "the config right after the confirm could not be kept on this host, so newton_plan_undo "
+    "cannot undo this change; " + _REVERSE_CHANGE
 )
 
 _SID_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -220,9 +232,13 @@ def _device_receipts(state: Path, device: str) -> list[Path]:
     return out
 
 
-def _outcome(sid: str) -> str | None:
-    """The outcome of a session, re-derived from the audit log."""
-    lines = _receipts.audit_lines(sid)
+def _outcome(sid: str, by_session: Mapping[str, list[str]] | None = None) -> str | None:
+    """The outcome of a session, re-derived from the audit log.
+
+    *by_session* is the audit log already read by ``audit_lines_by_session``,
+    for a caller that asks about many sessions (one read, not one per session).
+    """
+    lines = _receipts.audit_lines(sid) if by_session is None else by_session.get(sid, [])
     if not lines:
         return None
     return _receipts.outcome_from_lines(lines, sid)
@@ -508,15 +524,16 @@ def _later_conflicts(
         record = _read_record(path)
         if record is not None and record.get("device") == device:
             records[path.stem] = record
+    by_session = _receipts.audit_lines_by_session()
     for sid, record in sorted(records.items()):
         if sid == change_id:
-            continue
-        if _outcome(sid) != "confirmed":
             continue
         # a change is skipped only when its receipt proves it came earlier; no receipt
         # (receipts are best effort) or an equal stamp (one-second resolution) counts as later
         stamp = receipts.get(sid)
         if stamp is not None and stamp < own_stamp:
+            continue
+        if _outcome(sid, by_session) != "confirmed":
             continue
         later = _diff_packages(record) if record is not None else None
         if later is None:
@@ -977,6 +994,38 @@ def record_after_hash(state: Path, sid: str, confighash_text: str) -> bool:
     except OSError:
         return False
     return True
+
+
+def note_no_undo_record(router: str, sid: str) -> None:
+    """Append a ``NO UNDO RECORD`` line for *sid* to the wrapper's audit log.
+
+    Called when the undo record of a confirmed change could not be kept, so
+    the undo refusal names that reason.  Nothing is written when the log
+    already has such a line for the session (the wrapper's own, when it could
+    not read the config).  Best effort: a log that cannot be written is left
+    alone.  The line has the wrapper's shape: stamp, router, message.
+    """
+    if _SID_RE.fullmatch(sid) is None or _DEVICE_RE.fullmatch(router) is None:
+        return
+    marker = f"NO UNDO RECORD session={sid}: "
+    if any(line.startswith(marker) for line in _receipts.audit_lines(sid)):
+        return
+    stamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    line = f"{stamp} {router} {marker}{NO_UNDO_RECORD_NOTE}\n"
+    try:
+        fd = os.open(
+            _receipts.audit_log_path(),
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+        )
+    except OSError:
+        return
+    try:
+        os.write(fd, line.encode("utf-8"))
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _parse_confighash(text: Any) -> dict[str, str] | None:

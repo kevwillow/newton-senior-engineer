@@ -199,7 +199,9 @@ def test_envelope_untrusted_device_data_note_exact_text_and_used_as_instructions
     )
     assert envelope_mod.UNTRUSTED_DEVICE_DATA_NOTE == expected
     assert server.mcp is not None
-    assert server.mcp.instructions == envelope_mod.UNTRUSTED_DEVICE_DATA_NOTE
+    assert server.mcp.instructions == (
+        f"{envelope_mod.UNTRUSTED_DEVICE_DATA_NOTE} {server.ENVELOPE_REWRITE_NOTE}"
+    )
 
 
 @pytest.mark.parametrize("tool_name", [

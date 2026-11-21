@@ -57,6 +57,9 @@ ALL_COMMANDS = [
     for command in commands
 ]
 
+# A command several items name is read once, where it is first named.
+READ_COMMANDS = list(dict.fromkeys(ALL_COMMANDS))
+
 
 def _responses(**overrides: Any) -> dict[str, Any]:
     responses: dict[str, Any] = {
@@ -119,7 +122,7 @@ def test_happy_path_uses_only_the_existing_validated_read_path(
         for command in commands:
             assert server.validate_read(command)
 
-    assert [command for _args, _kwargs, command in calls] == ALL_COMMANDS
+    assert [command for _args, _kwargs, command in calls] == READ_COMMANDS
     for args, kwargs, command in calls:
         assert args[-3] == "--"
         assert args[-2] == "root@192.0.2.1"
@@ -224,7 +227,7 @@ def test_exit_timeout_and_read_exception_are_failed_but_do_not_abort(
     assert _read(result, "iwinfo")["exit_code"] == 1
     for command in ("cat /tmp/dhcp.leases", "uci show dhcp"):
         assert _read(result, command)["state"] == "ok"
-    assert len(calls) == len(ALL_COMMANDS) - 1
+    assert len(calls) == len(READ_COMMANDS) - 1
 
 
 @pytest.mark.parametrize(

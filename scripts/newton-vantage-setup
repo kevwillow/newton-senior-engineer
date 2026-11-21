@@ -432,7 +432,7 @@ if [ -n "$missing" ]; then
 fi
 printf "ok\\n"' 2>&1) || probe_rc=$?
 	if [[ $probe_rc -ne 0 && $missing != "missing:"* ]]; then
-		die "could not probe vantage for nmap, timeout and sha256sum (admin ssh exit $probe_rc)"
+		die "could not probe vantage for nmap, timeout and sha256sum (admin ssh exit $probe_rc): $(one_line "$missing" | grep . || printf 'no output')"
 	fi
 	if [[ $missing == "missing:"* ]]; then
 		tools=${missing#missing:}
@@ -677,6 +677,16 @@ run_check_key_ssh() {
 	ssh "${SSH_OPTIONS[@]}" "${KEY_OPTIONS[@]}" "$@"
 }
 
+# one_line TEXT -- TEXT on one printable line for an error message:
+# newlines become spaces, other control characters (a vantage's ssh
+# banner or error can carry escapes) are dropped, at most 300 characters.
+one_line() {
+	local text
+	text=$(printf '%s' "$1" | tr '\n' ' ' | tr -cd '[:print:]' | cut -c1-300)
+	text=${text%"${text##*[! ]}"}
+	printf '%s' "$text"
+}
+
 # unreachable_fail KEYWORD OUTPUT -- ssh exit 255 on the empty-command
 # probe: ssh never reached the forced command (vantage off, no route,
 # host key or login refused).  Name the first line of ssh's error, never
@@ -832,7 +842,7 @@ if [ -n "$missing" ]; then
 fi
 printf "ok\\n"' 2>&1) || probe_rc=$?
 	if [[ $probe_rc -ne 0 && $missing != "missing:"* ]]; then
-		die "could not probe vantage for bash, timeout, sha256sum and base64 (admin ssh exit $probe_rc)"
+		die "could not probe vantage for bash, timeout, sha256sum and base64 (admin ssh exit $probe_rc): $(one_line "$missing" | grep . || printf 'no output')"
 	fi
 	if [[ $missing == "missing:"* ]]; then
 		tools=${missing#missing:}

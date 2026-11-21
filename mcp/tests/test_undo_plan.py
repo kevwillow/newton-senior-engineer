@@ -1444,7 +1444,7 @@ def test_un04_a_change_without_after_hash_is_refused(env, monkeypatch):
     )
     with pytest.raises(UndoRefused) as excinfo:
         draft_undo(env.state, DEVICE, HOST, SID, current, AGENT)
-    assert "restore its backup by hand" in str(excinfo.value)
+    assert "newton_plan_change" in str(excinfo.value)
 
 
 def test_un04_a_malformed_after_hash_is_refused(env, monkeypatch):
@@ -1455,7 +1455,7 @@ def test_un04_a_malformed_after_hash_is_refused(env, monkeypatch):
     )
     with pytest.raises(UndoRefused) as excinfo:
         draft_undo(env.state, DEVICE, HOST, SID, current, AGENT)
-    assert "restore its backup by hand" in str(excinfo.value)
+    assert "newton_plan_change" in str(excinfo.value)
 
 
 def test_un04_a_change_that_is_already_undone_is_refused(env, monkeypatch):
@@ -2053,7 +2053,7 @@ def test_a_reconciled_confirm_is_refused_even_with_an_after_hash(env, monkeypatc
     with pytest.raises(UndoRefused) as excinfo:
         draft_undo(env.state, DEVICE, HOST, SID, current, AGENT)
     assert str(excinfo.value) == undo_plan.NO_AFTER_HASH_RECONCILED
-    assert "restore its backup by hand" in str(excinfo.value)
+    assert "newton_plan_change" in str(excinfo.value)
 
 
 def test_a_reconciled_confirm_without_an_after_hash_says_why(env, monkeypatch):
@@ -2104,3 +2104,79 @@ def test_a_change_with_no_after_hash_and_no_reason_keeps_the_old_reason(env, mon
     with pytest.raises(UndoRefused) as excinfo:
         draft_undo(env.state, DEVICE, HOST, SID, current, AGENT)
     assert str(excinfo.value) == undo_plan.NO_AFTER_HASH
+
+
+# ------------------------------------------- the advice in a refusal with no undo record
+
+
+@pytest.mark.parametrize("name", ["NO_AFTER_HASH", "NO_AFTER_HASH_RECONCILED", "NO_AFTER_HASH_UNREAD"])
+def test_a_refusal_with_no_undo_record_advises_a_reverse_change_not_a_backup_restore(name):
+    """Restoring the change's backup puts back every config file as it was
+    before the change, so it also reverts every later change: the refusal
+    points at a reverse change planned with newton_plan_change instead."""
+    message = getattr(undo_plan, name)
+    assert "newton_plan_change" in message
+    assert "restore its backup by hand" not in message
+    assert "/" not in message  # no file path in a refusal
+
+
+# ------------------------------------------- the audit log is read once
+
+
+def _count_audit_reads(monkeypatch) -> list[int]:
+    reads = [0]
+    real = cr.audit_log_path
+
+    def counting() -> Path:
+        reads[0] += 1
+        return real()
+
+    monkeypatch.setattr(cr, "audit_log_path", counting)
+    return reads
+
+
+def _undo_with_other_plans(env, monkeypatch, count: int) -> int:
+    _record_out, current = _change(
+        env, monkeypatch, diff="network.lan.ipaddr='10.0.0.2'",
+        before={"network": NET_BEFORE}, after={"network": NET_AFTER},
+    )
+    for n in range(count):
+        sid = f"{n:08x}" + "e" * 24
+        _write_plan(env, _record(sid=sid, diff="dhcp.lan.ignore='1'"))
+        _audit(env.root, f"APPLIED session={sid} rollback=90s", f"CONFIRMED session={sid} (3 consecutive passes)")
+    reads = _count_audit_reads(monkeypatch)
+    draft = draft_undo(env.state, DEVICE, HOST, SID, current, AGENT)
+    assert draft.batch
+    return reads[0]
+
+
+def test_the_undo_reads_the_audit_log_a_fixed_number_of_times(tmp_path, monkeypatch):
+    """The later-change check once read the whole audit log per plan record
+    (quadratic: about a minute at 3000 plans); now the count does not grow."""
+    counts = []
+    for count in (1, 40):
+        root = tmp_path / str(count)
+        state = root / "state"
+        (state / "plans").mkdir(parents=True, mode=0o700)
+        (state / "receipts" / "backups").mkdir(parents=True, mode=0o700)
+        monkeypatch.setenv("OWRT_AUDIT_LOG", str(root / "audit.log"))
+        monkeypatch.setenv("NEWTON_STATE_DIR", str(state))
+        with monkeypatch.context() as inner:
+            counts.append(_undo_with_other_plans(_Env(root, state), inner, count))
+    assert counts[0] == counts[1], counts
+
+
+def test_audit_lines_by_session_matches_audit_lines(env):
+    sid_b = "b" * 32
+    _audit(
+        env.root,
+        f"APPLIED session={SID} rollback=90s",
+        f"CONFIRMED session={OTHER_SID} (3 consecutive passes)",
+        f"NOTE session={SID} and session={sid_b}",
+        f"NOTE session={SID}0 is a longer id",
+        "no session here",
+    )
+    (env.root / "audit.log").open("a").write("unprefixed session=" + sid_b + "\n")
+    by_session = cr.audit_lines_by_session()
+    for sid in (SID, OTHER_SID, sid_b, THIRD_SID):
+        assert by_session.get(sid, []) == cr.audit_lines(sid), sid

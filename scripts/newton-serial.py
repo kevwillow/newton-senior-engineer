@@ -20,6 +20,7 @@ import os
 import posixpath
 import re
 import shlex
+import signal
 import stat
 import sys
 import time
@@ -507,6 +508,20 @@ def run_marked(session: "Session", command: str, timeout: float) -> tuple[int | 
     return None, (cleaned[start.end():] if start else cleaned).strip("\n")
 
 
+def _hangup_is_an_interrupt(signum: int, frame: object) -> None:
+    """A push whose terminal hangs up stops the way a Ctrl-C does, so it
+    still reports what it left on the device."""
+    raise KeyboardInterrupt
+
+
+def _end_heredoc(session: "Session") -> None:
+    """Best effort: a Ctrl-C takes the router shell out of a half-sent heredoc."""
+    try:
+        session.write("\x03")
+    except serial.SerialException:
+        pass
+
+
 class BootloaderError(Exception):
     pass
 
@@ -637,6 +652,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
         if not push_text.endswith("\n"):
             push_text += "\n"
+        if hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, _hangup_is_an_interrupt)
     password = None
     if args.password_file:
         try:
@@ -712,6 +729,7 @@ def main(argv: list[str] | None = None) -> int:
             return 5
         if args.subcommand == "push":
             backup = f"{args.remote}.newton-bak"
+            first_backup = ""
             try:
                 exists_rc, _ = run_marked(session, f"test -e {args.remote}", args.timeout)
                 if exists_rc not in (0, 1):
@@ -726,21 +744,27 @@ def main(argv: list[str] | None = None) -> int:
                         print(f"cannot tell whether {backup} exists (exit {bak_rc}); nothing written", file=sys.stderr)
                         return 7
                     if bak_rc == 0:
+                        first_backup = (f"; the file as it was before Newton's first push is still in "
+                                        f"{backup}")
                         backup = f"{backup}-{time.strftime('%Y%m%dT%H%M%S')}-{os.urandom(3).hex()}"
                     backup_rc, _ = run_marked(session, f"cp -p {args.remote} {backup}", args.timeout)
             except BootloaderError:
                 print("device entered its bootloader; a human must decide what to do", file=sys.stderr)
                 return 4
+            except KeyboardInterrupt:
+                _end_heredoc(session)
+                print(f"push interrupted; {args.remote} was not written", file=sys.stderr)
+                return 130
             if exists_rc == 0 and backup_rc != 0:
                 print(f"backup of {args.remote} to {backup} failed (exit {backup_rc}); nothing written", file=sys.stderr)
                 return 7
             if exists_rc == 0:
-                print(f"backup: {backup}")
+                print(f"backup: {backup}{first_backup}")
             else:
                 print(f"no earlier {args.remote}; nothing to back up")
             # until the line that writes the target is sent, the target is untouched
             if exists_rc == 0:
-                overwritten = f"{args.remote} was not written; a copy of it is in {backup}"
+                overwritten = f"{args.remote} was not written; a copy of it is in {backup}{first_backup}"
             else:
                 overwritten = f"{args.remote} was not written; there was no earlier file"
             cut_short = ""
@@ -752,7 +776,7 @@ def main(argv: list[str] | None = None) -> int:
                 # once the heredoc line is sent the target is overwritten, and a write can fail after its
                 # bytes reached the device (the flush): every failure from here on says so
                 if exists_rc == 0:
-                    overwritten = f"{args.remote} was already overwritten; the old file is in {backup}"
+                    overwritten = f"{args.remote} was already overwritten; the old file is in {backup}{first_backup}"
                 else:
                     overwritten = f"{args.remote} was already written; there was no earlier file"
                 session.write(f"cat > {args.remote} <<'{delim}'\r")
@@ -776,6 +800,10 @@ def main(argv: list[str] | None = None) -> int:
             except serial.SerialException as exc:
                 print(f"serial line failed during push ({exc}); {overwritten}{cut_short}", file=sys.stderr)
                 return 7
+            except KeyboardInterrupt:
+                _end_heredoc(session)
+                print(f"push interrupted; {overwritten}{cut_short}", file=sys.stderr)
+                return 130
             wanted_sum = hashlib.md5(push_text.encode()).hexdigest()
             fields = out.strip().splitlines()[-1].split() if out.strip() else []
             got_sum = fields[0].lower() if fields else ""

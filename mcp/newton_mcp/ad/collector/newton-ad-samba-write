@@ -116,6 +116,17 @@ RUN_DIR_MODE = 0o700
 #: The name of the lock of the transaction store.
 LOCK_NAME = ".lock"
 
+#: The subdirectory of the store a final record moves to: the sweep lists
+#: only the store itself, so it never reads an archived record again.
+ARCHIVE_NAME = "done"
+
+#: How long after its undo_at a final record stays in the store.
+ARCHIVE_AFTER_S = 7 * 86400
+
+#: The states no later run changes on its own: a record in one of them
+#: can be archived.  An armed record never is.
+FINAL_STATES = frozenset({"undone", "undo_failed", "confirmed", "refused"})
+
 #: The directory the walk of the parents of the install stops at.
 INSTALL_ROOT = "/"
 
@@ -828,6 +839,33 @@ def record_path(txid: str) -> str:
     if not isinstance(txid, str) or TXID_RE.fullmatch(txid) is None:
         raise Refused("schema", "the txid is outside its pattern")
     return os.path.join(TX_DIR, f"{txid}.json")
+
+
+def archive_dir() -> str:
+    """The directory final records move to (see ``archive_record``)."""
+    return os.path.join(TX_DIR, ARCHIVE_NAME)
+
+
+def _present(path: str) -> bool:
+    """Whether a path is there.  A check that fails for any other reason
+    than absence is never taken for absent: it raises ``Refused("error")``."""
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise Refused("error", "the record of the transaction cannot be read") from None
+    return True
+
+
+def stored_path(txid: str) -> str:
+    """The path that holds the record of one transaction: the store's, or
+    the archive's once the sweep moved it there."""
+    path = record_path(txid)
+    if _present(path):
+        return path
+    archived = os.path.join(archive_dir(), f"{txid}.json")
+    return archived if _present(archived) else path
 
 
 def _lstat(path: str):
@@ -2577,6 +2615,55 @@ def _settle_unlock(directory: Directory, record: dict[str, Any], path: str) -> t
     return False, []
 
 
+def archive_record(name: str) -> None:
+    """Move one record of the store into its archive, under the store lock.
+
+    The archive is a directory of root with the mode 0700, created when it
+    is not there.  The move is one rename, so the record is in the store or
+    in the archive and never in neither, and both directories are flushed.
+    A record already in the archive is left where it is.  Any failure
+    raises, and the record stays in the store.
+    """
+    directory = archive_dir()
+    info = _lstat(directory)
+    if info is None:
+        os.mkdir(directory, 0o700)
+        os.chmod(directory, 0o700)
+        fsync_directory(TX_DIR)
+        info = _lstat(directory)
+    if (
+        info is None
+        or info.st_uid != INSTALL_OWNER_UID
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        # (a link reads 0777 and a file is not 0700 with a rename into it
+        # failing, so the mode check refuses both)
+        raise OSError("the archive of the store is not a directory of root with the mode 0700")
+    target = os.path.join(directory, name)
+    if _lstat(target) is not None:
+        raise OSError("the archive already holds a record of this name")
+    os.rename(os.path.join(TX_DIR, name), target)
+    fsync_directory(directory)
+    fsync_directory(TX_DIR)
+
+
+def _archive_if_old(record: Mapping[str, Any], name: str, now: int) -> None:
+    """Archive a final record once ARCHIVE_AFTER_S has passed its undo_at,
+    so later sweeps no longer read it; a failure is logged and the record
+    stays for a later pass."""
+    undo_at = record.get("undo_at")
+    if record.get("state") not in FINAL_STATES:
+        return
+    if not isinstance(undo_at, int) or isinstance(undo_at, bool):
+        return
+    if undo_at + ARCHIVE_AFTER_S > now:
+        return
+    try:
+        archive_record(name)
+    except OSError:
+        _log("a final record could not be archived; it stays in the store")
+
+
 def sweep(now: int, skip: str | None = None) -> bool:
     """Run the undo of every armed record whose deadline has passed.
 
@@ -2586,6 +2673,8 @@ def sweep(now: int, skip: str | None = None) -> bool:
     another record or the mode that runs the sweep.  An undo that ran
     records ``undone`` when it restored the value and ``undo_failed``
     when it did not; ``undo_failed`` is final and is never tried again.
+    A final record (``FINAL_STATES``) whose undo_at is ``ARCHIVE_AFTER_S``
+    in the past moves to the archive, which no sweep lists.
     An unlock has no undo: it is read again and recorded ``confirmed``
     when the account shows the after-image, or left armed (never
     ``refused``: its write may still land).  An armed
@@ -2616,6 +2705,7 @@ def sweep(now: int, skip: str | None = None) -> bool:
         if record is None:
             continue
         if record.get("state") != "armed":
+            _archive_if_old(record, name, now)
             continue
         undo_at = record.get("undo_at")
         if not isinstance(undo_at, int) or isinstance(undo_at, bool):
@@ -3350,7 +3440,8 @@ def do_apply(request: Mapping[str, Any], now: int) -> dict[str, Any]:
 
     txid = str(request["txid"])
     path = record_path(txid)
-    if os.path.exists(path):
+    if os.path.exists(path) or stored_path(txid) != path:
+        # An archived record is a record of the txid all the same.
         raise Refused("replay", "the record of the transaction is already there")
 
     key = read_key()
@@ -3618,7 +3709,7 @@ def do_confirm(request: Mapping[str, Any]) -> dict[str, Any]:
     timer that fires anyway finds a confirmed record and does nothing.
     """
     txid = str(request["txid"])
-    path = record_path(txid)
+    path = stored_path(txid)
     record = read_record(path)
     if record is None:
         raise Refused("not_found", "there is no record of the transaction")
@@ -3673,7 +3764,7 @@ def do_abort(request: Mapping[str, Any]) -> dict[str, Any]:
     unlock, which has no undo.
     """
     txid = str(request["txid"])
-    path = record_path(txid)
+    path = stored_path(txid)
     record = read_record(path)
     if record is None:
         raise Refused("not_found", "there is no record of the transaction")
@@ -3696,7 +3787,7 @@ def do_abort(request: Mapping[str, Any]) -> dict[str, Any]:
 def do_status(request: Mapping[str, Any]) -> dict[str, Any]:
     """The status mode (section 6)."""
     txid = str(request["txid"])
-    record = read_record(record_path(txid))
+    record = read_record(stored_path(txid))
     if record is None:
         raise Refused("not_found", "there is no record of the transaction")
     return {
@@ -3711,7 +3802,7 @@ def do_status(request: Mapping[str, Any]) -> dict[str, Any]:
 
 def do_undo(txid: str, now: int) -> dict[str, Any]:
     """The undo of one transaction, from the timer."""
-    path = record_path(txid)
+    path = stored_path(txid)
     record = read_record(path)
     if record is None:
         raise Refused("not_found", "there is no record of the transaction")

@@ -565,3 +565,59 @@ def test_nr22_05_list_by_device_refuses_when_the_inventory_is_missing(tmp_path):
     assert result.returncode != 0
     assert result.stdout == ""
     assert f"inventory file not found: {missing}" in result.stderr
+
+
+# ---- input the inventory or the owner got wrong ----------------------------------
+
+
+@pytest.mark.parametrize("cidr", ["10.0.0.0/33", "10.0.0.0/x", "300.0.0.0/8", "10.0.0.0"])
+def test_nr20_30_a_bad_check_targets_entry_is_refused_not_a_traceback(tmp_path, cidr):
+    inventory = write_inventory(
+        tmp_path, text=INVENTORY.replace('check_targets = ["10.0.0.0/8"]', f'check_targets = ["{cidr}"]'))
+    result = add(tmp_path, "pulsar", "r-one", "iot", "reach", "10.0.0.5:80", inventory=inventory)
+    assert result.returncode == 1, result.stderr
+    assert "Traceback" not in result.stderr
+    assert f"vantage inside-a: check_targets entry {cidr!r} is not an IPv4 CIDR" in result.stderr
+    assert not rules_path(tmp_path).exists()
+
+
+def test_nr20_31_a_check_targets_entry_with_host_bits_is_read_as_its_network(tmp_path):
+    """The server accepts 10.0.0.1/8 (it checks the address and prefix
+    only), so the CLI reads it as 10.0.0.0/8 instead of crashing."""
+    inventory = write_inventory(
+        tmp_path, text=INVENTORY.replace('check_targets = ["10.0.0.0/8"]', 'check_targets = ["10.0.0.1/8"]'))
+    result = add(tmp_path, "pulsar", "r-one", "iot", "reach", "10.0.0.5:80", inventory=inventory)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("command", [["add", "pulsar", "r-one", "iot", "blocked", "router"],
+                                     ["add", "other", "r-one", "iot", "blocked", "router"],
+                                     ["remove", "pulsar", "r-one"]])
+def test_nr20_32_a_device_entry_that_is_not_a_table_is_refused(tmp_path, command):
+    inventory = write_inventory(tmp_path, text='[devices]\nother = "openwrt"\n\n' + INVENTORY)
+    assert tomllib.loads(inventory.read_text())["devices"]["other"] == "openwrt"
+    result = run_rules(tmp_path, *command, inventory=inventory)
+    assert result.returncode == 1, result.stderr
+    assert "Traceback" not in result.stderr
+    assert "inventory device other must be a table" in result.stderr
+
+
+def test_nr20_33_the_header_says_the_file_is_regenerated(tmp_path):
+    assert add_simple(tmp_path).returncode == 0
+    text = rules_path(tmp_path).read_text()
+    assert "newton-rules rewrites this file; comments are not kept (use --label)" in text
+
+
+def test_nr20_34_rewriting_a_file_with_hand_comments_says_they_are_dropped(tmp_path):
+    assert add_simple(tmp_path).returncode == 0
+    path = rules_path(tmp_path)
+    path.write_text(path.read_text() + "# keep the printer rule until spring\n")
+    path.chmod(0o600)
+    result = add(tmp_path, "pulsar", "r-two", "iot", "dns")
+    assert result.returncode == 0, result.stderr
+    assert "keep the printer rule" not in path.read_text()
+    assert ("newton-rules: note: the comments in " + str(path) + " are not kept") in result.stderr
+    # a file with only the header comment rewrites quietly
+    quiet = add(tmp_path, "pulsar", "r-three", "iot", "dhcp")
+    assert quiet.returncode == 0, quiet.stderr
+    assert "not kept" not in quiet.stderr

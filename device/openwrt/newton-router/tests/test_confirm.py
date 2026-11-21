@@ -123,14 +123,14 @@ def test_confirm_too_late_rpcd_deadline(router, uptime, expect_ok):
     """rpcd_dl is 190; the cutoff is 5 s away. At UP_NOW=186 the
     difference is 4 -> too-late; at UP_NOW=185 it is 5 -> confirms; at
     UP_NOW=191 the deadline is past -> too-late. Nothing changed on the
-    refused runs."""
+    refused runs. The refusal names the rpcd window as the cause."""
     plan = applied(router)
     router.set_uptime(uptime)
     res = router.forced(f"confirm {plan.sid}")
     if expect_ok:
         assert (res.rc, res.out, res.err) == (0, f"confirmed {plan.sid}\n", "")
     else:
-        assert (res.rc, res.err, res.out) == (3, "error too-late\n", "")
+        assert (res.rc, res.err, res.out) == (3, "error too-late rpcd-window-short\n", "")
         _nothing_changed_after_too_late(router, plan)
 
 
@@ -148,7 +148,8 @@ def test_confirm_too_late_guard_window(router, uptime, expect_ok):
     rpcd deadline far away; the guard deadline is still 221. At
     UP_NOW=217 the guard left is 4 -> too-late; at UP_NOW=216 it is 5
     -> confirms; at UP_NOW=222 the deadline is past and the guard
-    reports `pending <sid> 0`."""
+    reports `pending <sid> 0`. The refusal names the guard window as the
+    cause."""
     plan = applied(router)
     (plan.txn / "applied").write_text("100000 221 boot-one\n")
     router.set_uptime(uptime)
@@ -156,8 +157,45 @@ def test_confirm_too_late_guard_window(router, uptime, expect_ok):
     if expect_ok:
         assert (res.rc, res.out, res.err) == (0, f"confirmed {plan.sid}\n", "")
     else:
-        assert (res.rc, res.err, res.out) == (3, "error too-late\n", "")
+        assert (res.rc, res.err, res.out) == (3, "error too-late guard-window-short\n", "")
         _nothing_changed_after_too_late(router, plan)
+
+
+def _fake_guard_status(router, line):
+    """Replace the guard copy with one whose `status` prints LINE; any
+    other subcommand fails, so a confirm that got past the guard check
+    would show up as a different error."""
+    router.write(
+        "usr/libexec/newton-guard",
+        "#!/bin/sh\n"
+        f"[ \"$1\" = status ] && {{ printf '%s\\n' '{line}'; exit 0; }}\n"
+        "exit 9\n",
+        mode=0o755,
+    )
+
+
+@pytest.mark.parametrize(
+    "line,detail",
+    [
+        ("idle", "guard-not-pending"),
+        ("pending other-sid 50", "guard-not-pending"),
+        ("restored {sid} deadline", "guard-not-pending"),
+        ("pending {sid} abc", "guard-window-unreadable"),
+        ("pending {sid}", "guard-window-unreadable"),
+    ],
+    ids=["idle", "other-sid", "restored", "left-not-a-number", "left-missing"],
+)
+def test_confirm_too_late_guard_state(router, line, detail):
+    """The guard is not pending for this session, or its seconds-left
+    word is not a number: too-late, exit 3, and the detail word says
+    which; rpcd is never asked to confirm."""
+    plan = applied(router)
+    _fake_guard_status(router, line.format(sid=plan.sid))
+    res = router.forced(f"confirm {plan.sid}")
+    assert (res.rc, res.err, res.out) == (3, f"error too-late {detail}\n", "")
+    assert not router.calls_matching("ubus uci-confirm")
+    assert (plan.txn / "applied").exists()
+    assert lock_is_free(router)
 
 
 # ---- 3. not-applied (6.3 step 2) -----------------------------------------
@@ -206,7 +244,7 @@ def test_confirm_rpcd_confirm_failed(router):
     router.write("control/confirm.rc", "1\n")
     post_dhcp = (router.root / "etc/config/dhcp").read_bytes()
     res = router.forced(f"confirm {plan.sid}")
-    assert (res.rc, res.err, res.out) == (1, "error rpcd-confirm-failed 1\n", "")
+    assert (res.rc, res.err, res.out) == (1, "error rpcd-confirm-failed 1 not-lost\n", "")
     assert router.guard_status().startswith(f"pending {plan.sid} ")
     assert (router.root / "etc/config/dhcp").read_bytes() == post_dhcp
     assert (plan.txn / "applied").exists()
@@ -233,7 +271,7 @@ def test_confirm_lost_timer_shipped_program_rpcd_5(router):
     router.set_fake("ubus")
     router.write("control/confirm.rc", "5\n")
     res = router.forced(f"confirm {plan.sid}")
-    assert (res.rc, res.err, res.out) == (1, "error rpcd-confirm-failed 5\n", "")
+    assert (res.rc, res.err, res.out) == (1, "error rpcd-confirm-failed 5 not-lost\n", "")
     assert router.guard_status().startswith(f"pending {plan.sid} ")
 
 
@@ -278,7 +316,7 @@ def test_confirm_lost_timer_7_not_listed(router, tmp_path):
     router.set_fake("ubus")
     router.write("control/confirm.rc", "7\n")
     res = router.forced(f"confirm {plan.sid}")
-    assert (res.rc, res.err, res.out) == (1, "error rpcd-confirm-failed 7\n", "")
+    assert (res.rc, res.err, res.out) == (1, "error rpcd-confirm-failed 7 not-lost\n", "")
     assert router.guard_status().startswith(f"pending {plan.sid} ")
     assert not (plan.txn / "rpcd-confirmed").exists()
 
@@ -297,7 +335,7 @@ def test_confirm_lost_timer_5_config_changed(router, tmp_path):
         b"config interface 'lan'\n\toption proto 'dhcp'\n",
     )
     res = router.forced(f"confirm {plan.sid}")
-    assert (res.rc, res.err, res.out) == (1, "error rpcd-confirm-failed 5\n", "")
+    assert (res.rc, res.err, res.out) == (1, "error rpcd-confirm-failed 5 hash-mismatch\n", "")
     assert router.guard_status().startswith(f"pending {plan.sid} ")
     assert not (plan.txn / "rpcd-confirmed").exists()
 
@@ -311,7 +349,24 @@ def test_confirm_lost_timer_whole_word_match(router, tmp_path):
     router.set_fake("ubus")
     router.write("control/confirm.rc", "5\n")
     res = router.forced(f"confirm {plan.sid}")
-    assert (res.rc, res.err, res.out) == (1, "error rpcd-confirm-failed 5\n", "")
+    assert (res.rc, res.err, res.out) == (1, "error rpcd-confirm-failed 5 not-lost\n", "")
+    assert router.guard_status().startswith(f"pending {plan.sid} ")
+    assert not (plan.txn / "rpcd-confirmed").exists()
+
+
+def test_confirm_lost_timer_5_hash_unreadable(router, tmp_path):
+    """Same scratch program as the lost tests, rc=5, but the config
+    hash cannot be taken (a symlink in `etc/config`): the lost path is
+    off, the last stderr line is `error rpcd-confirm-failed 5
+    hash-unreadable`, exit 1, guard stays armed."""
+    router.scratch_program(tmp_path, "RPCD_LOST=''", "RPCD_LOST='5 6'")
+    plan = applied(router)
+    router.set_fake("ubus")
+    router.write("control/confirm.rc", "5\n")
+    (router.root / "etc/config/linked").symlink_to("dhcp")
+    res = router.forced(f"confirm {plan.sid}")
+    assert (res.rc, res.out) == (1, "")
+    assert res.err.splitlines()[-1] == "error rpcd-confirm-failed 5 hash-unreadable", res.err
     assert router.guard_status().startswith(f"pending {plan.sid} ")
     assert not (plan.txn / "rpcd-confirmed").exists()
 

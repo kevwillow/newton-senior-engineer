@@ -62,6 +62,10 @@ unlock that is written is recorded `confirmed`, or stays armed when that record 
 unlock has no undo: the sweep reads the account again and records it `confirmed` (the after-image), or
 leaves it armed (the before-image included: its write may still land, so it is never recorded `refused`). It reads an armed unlock again only for an hour
 after its `undo_at`; an unlock it could not settle by then stays armed and is not read again.
+A final record (`undone`, `undo_failed`, `confirmed` or `refused`) moves to `/var/lib/newton-ad/tx/done/`
+(root 0700, created by the helper) once seven days have passed its `undo_at`, so the sweep, which lists only the
+store itself, no longer reads it. `status`, `confirm`, `abort`, the undo and the replay check still find it there, and
+nothing is ever deleted. A record that cannot be moved stays in the store for a later pass.
 
 The undo is armed with `systemd-run` and cancelled with `systemctl stop`. Both commands run with an
 argv list, never through a shell. The one-shot timer lives under `/run`, so a reboot drops it, and an
@@ -80,6 +84,7 @@ install it.
 | `/etc/newton-ad/device.txt` | root 0644 | the name of the device that stands for the domain, the same on every DC of the domain: `^[a-z][a-z0-9-]{0,31}$` |
 | `/etc/newton-ad/ops.keytab` | root 0600 | the identity of the write account: the keytab of `newton-ops` on this DC |
 | `/var/lib/newton-ad/tx/` | root 0700 | the transaction store: one `<txid>.json` per transaction |
+| `/var/lib/newton-ad/tx/done/` | root 0700 | the archive of final records older than seven days past their `undo_at` |
 | `/run/newton-ad/` | root 0700 | the credential caches of the helper: one fresh file per bind |
 | `/etc/systemd/system/newton-ad-sweep.service` | root 0644 | runs `newton-ad-samba-write --sweep` once |
 | `/etc/systemd/system/newton-ad-sweep.timer` | root 0644 | starts that service 60 s after boot and every 60 s |

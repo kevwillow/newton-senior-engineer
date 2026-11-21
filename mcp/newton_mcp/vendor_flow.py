@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, cast
@@ -433,6 +434,33 @@ REDACTED_BACKUP_NOTE = (
 )
 
 
+def _claim_backup_name(backups: Path, stem: str, text: str) -> Path:
+    """Write ``text`` to ``<stem>.txt``, or ``<stem>-2.txt``, ``-3`` ... when
+    that name is taken (two backups in one second), and return the path.
+
+    The text goes to a private temporary file first; ``os.link`` then claims
+    the name atomically and fails when anything (a file, a symlink) already
+    has it, so no backup overwrites another and none is written through a link.
+    """
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{stem}.", suffix=".tmp", dir=backups)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        for number in range(1, 1000):
+            target = backups / (f"{stem}.txt" if number == 1 else f"{stem}-{number}.txt")
+            try:
+                os.link(temporary, target, follow_symlinks=False)
+            except FileExistsError:
+                continue
+            return target
+        raise FileExistsError(f"no free backup name for {stem} in {backups}")
+    finally:
+        os.unlink(temporary)
+
+
 def backup(
     svc: NewtonService,
     device: Device,
@@ -447,11 +475,7 @@ def backup(
         _raise(refusal)
     backups.mkdir(mode=0o700, parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    target = backups / f"{device.name}-{timestamp}.txt"
-    temporary = target.with_suffix(".txt.tmp")
-    temporary.write_text(text, encoding="utf-8")
-    os.chmod(temporary, 0o600)
-    temporary.replace(target)
+    target = _claim_backup_name(backups, f"{device.name}-{timestamp}", text)
     return {
         "backup_path": _envelope.envelope(f"{name}:backup", str(target)),
         "config_files": ["running-config"],

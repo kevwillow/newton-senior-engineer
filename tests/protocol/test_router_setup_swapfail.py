@@ -154,6 +154,27 @@ def test_swap_fail_step6_dead_man_restores(pulsar_env):
 	assert r2.out.splitlines()[-1] == "DONE swap-key pulsar"
 
 
+def test_swap_step6_lost_answer_goes_on_when_the_swap_held(pulsar_env):
+	"""The router answers the step-6 hello (so it records nonce2
+	and the dead-man switch keeps the new file) but the answer is lost on
+	the way back.  The swap held; the run must find that the new key works
+	and finish, not wait two minutes and say the router was NOT restored."""
+	env = pulsar_env
+	install_pulsar(env, program="ok")
+	env.router.add_authorized_key(EXTRA)
+	env.router.update_state(lose_reply_after=["old=$(awk", "hello "])
+	r = swap(env, "--new-key")
+	assert r.rc == 0, r.out + r.err
+	assert "NOT restored" not in r.out
+	assert "PASS swap step 6: new key confirmed" in r.out.splitlines()
+	assert "PASS swap step 8: settled" in r.out.splitlines()
+	assert last_line(r) == "DONE swap-key pulsar"
+	assert env.router.state().get("lose_reply_after") is None
+	assert not plain_key_works(env)
+	assert ('key_file = "%s"' % (env.keys_dir / "pulsar-newton-agent")
+	        in env.inventory.read_text())
+
+
 # -- 4. sub-step 7 fails (ghost blob) -------------------------------------
 
 def test_swap_fail_step7_ghost_blob(pulsar_env):
@@ -198,6 +219,32 @@ def test_swap_fail_dead_man_cannot_start(pulsar_env):
 	assert env.router.read("etc/dropbear/authorized_keys") == original
 	assert plain_key_works(env)
 	assert env.router.timers() == []
+
+
+def test_swap_step7_dropped_check_is_not_a_refusal(pulsar_env):
+	"""The plain key still works (ghost blob) but the link drops on
+	the sub-step 7 check, so ssh exits 255 without saying the login was
+	refused: the run stops saying it cannot tell, instead of passing
+	step 7 on a dropped call."""
+	env = pulsar_env
+	install_pulsar(env, program="ok")
+	pub = env.plain_key.with_name("id_ed25519.pub")
+	blob = pub.read_text().strip().split()[1]
+	env.router.update_state(ghost_blobs=[blob])
+	env.router.add_authorized_key(EXTRA)
+	inv_before = env.inventory.read_text()
+	# after the replacement (sub-step 5), the first bare `true` the plain
+	# key sends is the sub-step 7 check; it runs and its answer is lost
+	env.router.update_state(lose_reply_after=["old=$(awk", "true\ntrue"])
+	r = swap(env, "--new-key")
+	assert r.rc == 1, r.out + r.err
+	assert "PASS swap step 7: old key refused" not in r.out.splitlines()
+	assert any("whether it still works is unknown" in n
+	           for n in state_notes(r)), r.out
+	assert last_line(r) == (
+		"STOPPED swap-key pulsar: cannot tell whether the old key is refused")
+	assert env.router.state().get("lose_reply_after") is None
+	assert env.inventory.read_text() == inv_before
 
 
 # -- 5b. the replace call is lost (sub-step 5 fails, 6 and 7 decide) -------

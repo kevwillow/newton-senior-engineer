@@ -27,7 +27,7 @@ def update(tmp_path, new_bytes, typed_ok=True, prefix=""):
         env=GIT_ENV,
     ).stdout.decode().strip()
     cmd = f"{prefix}{boot} self-update /src {cid}; {SHOW}"
-    rc, out, err = fr.run(["bash", "-c", cmd], env=ENV, tty_input="update " + cid[:12] + "\n")
+    rc, out, err = fr.run(["bash", "-c", cmd], env=ENV, tty_input="update " + cid + "\n")
     return cid, rc, out, err
 
 

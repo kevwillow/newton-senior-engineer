@@ -88,6 +88,31 @@ def audit_lines(sid: str) -> list[str]:
     return out
 
 
+_ANY_SESSION_RE = re.compile(r"session=([0-9a-f]{32})(?![0-9a-f])")
+
+
+def audit_lines_by_session() -> dict[str, list[str]]:
+    """``audit_lines`` for every session at once, from one read of the log.
+
+    ``audit_lines_by_session().get(sid, [])`` equals ``audit_lines(sid)``.
+    """
+    path = audit_log_path()
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    out: dict[str, list[str]] = {}
+    for line in raw.split("\n"):
+        sids = {m.group(1) for m in _ANY_SESSION_RE.finditer(line)}
+        if not sids:
+            continue
+        match = _AUDIT_PREFIX.match(line)
+        msg = match["msg"] if match else line
+        for sid in sids:
+            out.setdefault(sid, []).append(msg)
+    return out
+
+
 def output_lines(sid: str, text: str) -> list[str]:
     """The same messages taken from the apply output, when the audit log has none."""
     pattern = _session_re(sid)
@@ -121,6 +146,11 @@ def _timestamps(sid: str) -> tuple[str, str]:
     first = last = ""
     for line in raw.split("\n"):
         if not pattern.search(line) or _RECEIPT_AUDIT_RE.search(line):
+            continue
+        match = _AUDIT_PREFIX.match(line)
+        if match and match["msg"].startswith("NO UNDO RECORD session="):
+            # the server may add this note after the receipt: it is not
+            # part of the change, so it never moves the receipt's end time
             continue
         stamp = line.split(" ", 1)[0]
         if not first and " APPLIED " in line:

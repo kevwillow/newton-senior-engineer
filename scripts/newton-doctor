@@ -577,8 +577,14 @@ check_agent_no_root_path() {
 # sudo refusing to run the command without a password; any other
 # failure (an unknown user, a sudoers parse error, the command itself
 # failing after sudo ran it) consulted no refusal.
+#
+# The first three are sudo's; the last two are sudo-rs's refusals
+# (src/common/error.rs: Error::Authorization when the rules do not
+# allow the command, Error::InteractionRequired when -n meets a
+# password prompt).
 sudo_refused() {
-	[[ $1 == *' is not allowed to execute '* || $1 == *'a password is required'* || $1 == *' may not run sudo on '* ]]
+	[[ $1 == *' is not allowed to execute '* || $1 == *'a password is required'* || $1 == *' may not run sudo on '* \
+		|| $1 == *"I'm afraid I can't do that"* || $1 == *'interactive authentication is required'* ]]
 }
 
 # sudo-only-mcp: both probes must be refused by sudo itself.  A probe
@@ -775,10 +781,11 @@ else:
 check_managed_settings_guard() {
 	local name='managed-settings-guard'
 	local file=$MANAGED_SETTINGS_FILE
-	local owner='' mode='' dir_owner='' dir_mode='' state='' reason=''
+	local owner='' mode='' dir_owner='' dir_mode='' state='' reason='' missing=0 how=''
 	if [[ -L $file ]]; then
 		reason="the Claude Code managed settings file $(escape_text "$file") is a symlink"
 	elif [[ ! -e $file ]]; then
+		missing=1
 		reason="the Claude Code managed settings file $(escape_text "$file") is missing"
 	else
 		owner=$(stat -c %u -- "$file" 2>/dev/null || true)
@@ -805,7 +812,16 @@ check_managed_settings_guard() {
 		fi
 	fi
 	if [[ -n $reason ]]; then
-		inconclusive "$name" "$reason: until it does, an agent can add a Claude Code hook that answers Newton's approval dialog for the owner. Add this line to $(escape_text "$file"): \"allowManagedHooksOnly\": true. Adding it stops your own Claude Code hooks from running; every approval still needs your passphrase or authenticator code."
+		# The advice must leave valid JSON behind: one line added to a
+		# missing file or to one that is not JSON is not a settings object.
+		if [[ $missing == 1 ]]; then
+			how="As root, create $(escape_text "$file") with this content: {\"allowManagedHooksOnly\": true}."
+		elif [[ $state == invalid ]]; then
+			how="As root, replace the content of $(escape_text "$file") with: {\"allowManagedHooksOnly\": true}."
+		else
+			how="Add this line to $(escape_text "$file"): \"allowManagedHooksOnly\": true."
+		fi
+		inconclusive "$name" "$reason: until it does, an agent can add a Claude Code hook that answers Newton's approval dialog for the owner. $how Setting it stops your own Claude Code hooks from running; every approval still needs your passphrase or authenticator code."
 		return 0
 	fi
 	pass "$name"

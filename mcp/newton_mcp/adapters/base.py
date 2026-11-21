@@ -8,13 +8,15 @@ from typing import Any, Mapping, Protocol
 
 TIER_EXPERIMENTAL = "T0-exp"
 
+# The guided audit is not among them: it reads through the OpenWrt read
+# path, so only the OpenWrt tool set offers it, and a vendor device's
+# listing never advertises a tool that would refuse it.
 READ_ONLY_TOOLS = frozenset(
     {
         "newton_list_devices",
         "newton_list_getters",
         "newton_get_state",
         "newton_guided_recommend",
-        "newton_guided_audit",
     }
 )
 

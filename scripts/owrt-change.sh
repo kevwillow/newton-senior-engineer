@@ -386,7 +386,7 @@ handshake() {
 		log "unchecked device"
 	fi
 	if [[ -n ${OWRT_EXPECT_PROFILE:-} ]]; then
-		[[ ${H[profile]-} == "$OWRT_EXPECT_PROFILE" ]] || die "router profile=$(oneline "${H[profile]:-?}") is not the expected $OWRT_EXPECT_PROFILE, the inventory profile; change profile in devices.toml or run: sudo -u newton newton-router-setup ${OWRT_EXPECT_DEVICE:-$ROUTER} profile $OWRT_EXPECT_PROFILE"
+		[[ ${H[profile]-} == "$OWRT_EXPECT_PROFILE" ]] || die "router profile=$(oneline "${H[profile]:-?}") is not the expected $OWRT_EXPECT_PROFILE, the inventory profile; change profile in ${NEWTON_INVENTORY:-/var/lib/newton/devices.toml} (owned by the newton account; edit it with sudo -u newton) or run: sudo -u newton newton-router-setup ${OWRT_EXPECT_DEVICE:-$ROUTER} profile $OWRT_EXPECT_PROFILE"
 	else
 		log "unchecked profile"
 	fi
@@ -435,7 +435,7 @@ print_config_hashes() {
 # record was kept. The CONFIRMED line the caller logs next stays last.
 confighash_after_confirm() {
 	print_config_hashes && return 0
-	log "NO UNDO RECORD session=$SID: the router's config could not be read right after the confirm, so newton_plan_undo cannot undo this change; restore its backup by hand if it must be undone"
+	log "NO UNDO RECORD session=$SID: the router's config could not be read right after the confirm, so newton_plan_undo cannot undo this change; to undo it, plan the reverse change with newton_plan_change"
 }
 validate_timeout() {
 	[[ $T =~ ^[1-9][0-9]{1,2}$ ]] && (( T >= 60 && T <= 600 )) || die "timeout must be an integer 60..600"
@@ -583,6 +583,10 @@ plan)
 			# the last apply of that session was sent and not refused by the
 			# router (a refusal logs APPLY REFUSED: nothing was applied)
 				busy_next="session $bsid of this login was applied and its window is still open; wait for that apply to end or abort it ($0 abort $ROUTER $bsid), then plan again; unless it is confirmed, the router rolls it back when its window ends"
+			elif [[ ! -r $PLANS/$bsid.sha256 ]]; then
+			# a stage whose link dropped: the session id never reached this
+			# host, so there is no plan record here and an apply cannot run
+				busy_next="session $bsid of this login is still open on the router and has no plan record on this host (a plan whose connection dropped while staging left it there), so it cannot be applied from here; abort it ($0 abort $ROUTER $bsid), then plan again; an open session left alone expires on the router after about 45 minutes"
 			else
 				busy_next="session $bsid of this login is still open on the router; apply it ($0 apply $ROUTER $bsid <its planned timeout>) or abort it ($0 abort $ROUTER $bsid), then plan again; an open session left alone expires on the router after about 45 minutes"
 			fi

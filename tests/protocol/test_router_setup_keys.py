@@ -7,6 +7,7 @@ later failing proof, the unknown-option rule for `from=`, the coexist
 labels rule and the secret rule."""
 
 import os
+import pwd
 import re
 import shlex
 import stat
@@ -645,6 +646,36 @@ def test_swap_key_without_the_plain_key_says_to_run_install_first(setup_env):
 			"the plain key that install used: run install first, or name "
 			"that key with --plain-key FILE)" % missing)
 		assert r.calls == []
+
+
+@pytest.mark.parametrize("locked", ["file", "dir"])
+def test_plain_key_this_account_cannot_read_is_not_called_missing(
+		setup_env, locked):
+	"""The owner's own key, named with --plain-key in a run as the
+	newton account, exists but that account cannot read it (the key file
+	or its folder is closed to it): the error says so instead of "file not
+	found", and no router call is made."""
+	if os.geteuid() == 0:
+		pytest.skip("root reads every file")
+	env = setup_env
+	install_ok(env)
+	folder = env.tmp / "owner-ssh"
+	folder.mkdir()
+	key = folder / "id_ed25519"
+	key.write_text("FAKE-OPENSSH-PRIVATE-KEY\n")
+	target = key if locked == "file" else folder
+	target.chmod(0)
+	try:
+		r = env.run("--plain-key", key, "r1", "swap-key", typed=(GOOD_PW,))
+	finally:
+		target.chmod(0o700)
+	assert r.rc == 2
+	last = r.err.strip().splitlines()[-1]
+	assert last.startswith(
+		"error: --plain-key: %s is not readable by the %s account" % (
+			key, pwd.getpwuid(os.geteuid()).pw_name)), last
+	assert "file not found" not in r.err
+	assert r.calls == []
 
 
 def test_uninstall_restore_command_fails_safe_off_the_newton_host(setup_env):

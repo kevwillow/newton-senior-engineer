@@ -29,6 +29,12 @@ PASSIVE_NOTE = (
 )
 
 
+FILE_NOTE = (
+    "NOTE capture file: the interface it was taken on and the time it covers "
+    "are not checked; --iface and --seconds do not apply to a file"
+)
+
+
 def run(*args, env=None):
     return subprocess.run(
         [str(SCRIPT), *args], text=True, capture_output=True, env=env, timeout=10
@@ -88,9 +94,10 @@ def test_from_file_only_allowed_sources_passes(tmp_path):
     assert result.stdout.splitlines() == [
         f"INFO {ALLOWED_MAC} dhcp-server x2 (allowed)",
         f"INFO {ALLOWED_MAC} router-advert x1 (allowed)",
-        "PASS no foreign DHCP server or router advert on eth0 in 120 s "
+        f"PASS no foreign DHCP server or router advert in capture file {capture} "
         "(3 packets from allowed sources)",
         PASSIVE_NOTE,
+        FILE_NOTE,
     ]
 
 
@@ -135,9 +142,10 @@ def test_from_file_no_packets_passes_with_zero_count(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.splitlines() == [
-        "PASS no foreign DHCP server or router advert on eth0 in 120 s "
+        f"PASS no foreign DHCP server or router advert in capture file {capture} "
         "(0 packets from allowed sources)",
         PASSIVE_NOTE,
+        FILE_NOTE,
     ]
 
 
@@ -151,18 +159,21 @@ def test_from_file_uppercase_allow_mac_is_accepted(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.splitlines() == [
         f"INFO {ALLOWED_MAC} dhcp-server x1 (allowed)",
-        "PASS no foreign DHCP server or router advert on eth0 in 120 s "
+        f"PASS no foreign DHCP server or router advert in capture file {capture} "
         "(1 packet from allowed sources)",
         PASSIVE_NOTE,
+        FILE_NOTE,
     ]
 
 
-def test_from_file_seconds_leading_zeros_prints_without_them(tmp_path):
-    capture = write_capture(tmp_path, [])
+def test_capture_seconds_leading_zeros_prints_without_them(tmp_path):
+    bindir = install_fake(tmp_path, "id", "printf '0\\n'\n")
+    install_fake(tmp_path, "tcpdump", "exit 0\n")
+    install_expiring_timeout(tmp_path)
+    env = fake_root_env(bindir)
 
     result = run(
-        "--iface", "eth0", "--allow-mac", ALLOWED_MAC,
-        "--seconds", "012", "--from-file", str(capture),
+        "--iface", "eth0", "--allow-mac", ALLOWED_MAC, "--seconds", "012", env=env
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -171,6 +182,26 @@ def test_from_file_seconds_leading_zeros_prints_without_them(tmp_path):
         "(0 packets from allowed sources)",
         PASSIVE_NOTE,
     ]
+
+
+def test_from_file_claims_no_interface_or_window(tmp_path):
+    """A capture file's interface and time span are never observed: the
+    verdict names the file, not --iface or --seconds, and a NOTE says so.
+    A live capture carries no such note."""
+    capture = write_capture(tmp_path, [dhcp_offer(ALLOWED_MAC)])
+    result = run("--iface", "eth9", "--allow-mac", ALLOWED_MAC, "--seconds", "600",
+                 "--from-file", str(capture))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "eth9" not in result.stdout and "600 s (" not in result.stdout, result.stdout
+    assert f"PASS no foreign DHCP server or router advert in capture file {capture} " in result.stdout
+    assert result.stdout.splitlines()[-1] == FILE_NOTE
+
+    foreign = write_capture(tmp_path, [dhcp_offer("aa:bb:cc:00:11:22")])
+    failed = run("--iface", "eth9", "--allow-mac", ALLOWED_MAC, "--from-file", str(foreign))
+    assert failed.returncode == 1
+    assert failed.stdout.splitlines()[-1].startswith(
+        f"FAIL foreign DHCP server or router advert in capture file {foreign} ")
+    assert FILE_NOTE not in failed.stdout
 
 
 def test_from_file_unreadable_capture_exits_2(tmp_path):
@@ -376,7 +407,7 @@ def test_from_file_any_iface_line_is_unreadable(tmp_path):
     assert "FAIL foreign" not in result.stdout
     assert "first: 17:13:20.000000  In aa:bb:cc:00:11:22" in result.stdout
     assert result.stdout.splitlines()[-1] == (
-        "INCONCLUSIVE no foreign source seen on eth0 in 120 s, but 1 line "
+        f"INCONCLUSIVE no foreign source seen in capture file {capture}, but 1 line "
         "could not be read, so the check did not pass"
     )
     assert "PASS" not in result.stdout
@@ -439,7 +470,7 @@ def test_from_file_two_unreadable_lines_are_counted(tmp_path):
     assert "INCONCLUSIVE unreadable: 2 lines could not be attributed" in result.stdout
     assert "FAIL foreign" not in result.stdout
     assert result.stdout.splitlines()[-1] == (
-        "INCONCLUSIVE no foreign source seen on eth0 in 120 s, but 2 lines "
+        f"INCONCLUSIVE no foreign source seen in capture file {capture}, but 2 lines "
         "could not be read, so the check did not pass"
     )
     assert "PASS" not in result.stdout
@@ -468,7 +499,7 @@ def test_from_file_unreadable_lines_beside_a_foreign_server_still_fail(tmp_path)
     assert "INCONCLUSIVE unreadable: 1 line could not be attributed" in result.stdout
     assert "unknown" not in result.stdout
     assert result.stdout.splitlines()[-1] == (
-        "FAIL foreign DHCP server or router advert on eth0 in 120 s "
+        f"FAIL foreign DHCP server or router advert in capture file {capture} "
         "(1 packet from foreign sources)"
     )
 
@@ -498,9 +529,10 @@ def test_from_file_banner_and_summary_lines_are_ignored(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.splitlines() == [
         f"INFO {ALLOWED_MAC} dhcp-server x1 (allowed)",
-        "PASS no foreign DHCP server or router advert on eth0 in 120 s "
+        f"PASS no foreign DHCP server or router advert in capture file {capture} "
         "(1 packet from allowed sources)",
         PASSIVE_NOTE,
+        FILE_NOTE,
     ]
 
 
@@ -593,9 +625,10 @@ def test_from_file_allowed_dhcpv6_offer_passes(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.splitlines() == [
         f"INFO {allowed} dhcpv6-server x1 (allowed)",
-        "PASS no foreign DHCP server or router advert on eth0 in 120 s "
+        f"PASS no foreign DHCP server or router advert in capture file {capture} "
         "(1 packet from allowed sources)",
         PASSIVE_NOTE,
+        FILE_NOTE,
     ]
 
 
@@ -709,9 +742,10 @@ def test_from_file_zero_packets_prints_note_on_stderr(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.splitlines() == [
-        "PASS no foreign DHCP server or router advert on eth0 in 120 s "
+        f"PASS no foreign DHCP server or router advert in capture file {capture} "
         "(0 packets from allowed sources)",
         PASSIVE_NOTE,
+        FILE_NOTE,
     ]
     assert "NOTE: no DHCP or router advert packet was seen" in result.stderr
 
@@ -748,14 +782,15 @@ def test_from_file_plural_packet_counts(tmp_path):
     )
 
     assert allowed_result.returncode == 0, allowed_result.stdout
-    assert allowed_result.stdout.splitlines()[-2:] == [
-        "PASS no foreign DHCP server or router advert on eth0 in 120 s "
+    assert allowed_result.stdout.splitlines()[-3:] == [
+        f"PASS no foreign DHCP server or router advert in capture file {allowed_capture} "
         "(2 packets from allowed sources)",
         PASSIVE_NOTE,
+        FILE_NOTE,
     ]
     assert foreign_result.returncode == 1
     assert foreign_result.stdout.splitlines()[-1] == (
-        "FAIL foreign DHCP server or router advert on eth0 in 120 s "
+        f"FAIL foreign DHCP server or router advert in capture file {foreign_capture} "
         "(2 packets from foreign sources)"
     )
 
@@ -812,8 +847,9 @@ def test_pass_is_followed_by_the_passive_note_on_stdout(tmp_path):
     result = run("--iface", "eth0", "--allow-mac", ALLOWED_MAC, "--from-file", str(capture))
     assert result.returncode == 0, result.stdout + result.stderr
     lines = result.stdout.splitlines()
-    assert lines[-2].startswith("PASS "), lines
-    assert lines[-1] == PASSIVE_NOTE, lines
+    assert lines[-3].startswith("PASS "), lines
+    assert lines[-2] == PASSIVE_NOTE, lines
+    assert lines[-1] == FILE_NOTE, lines
 
 
 def test_no_passive_note_without_a_pass(tmp_path):

@@ -600,14 +600,15 @@ def test_code_files_rows(unit):
 
 def test_sysupgrade_lines_of_design_2_3(unit):
 	# design 2.3 (R9b+c): the sysupgrade list is the eight code/config
-	# lines plus the three WAN-health lines (the script, the init and the
-	# /etc/rc.d start link the init's `enable` creates); the install /
+	# lines, the WAN-health lines, the approval key and the guard's state
+	# (so a firmware upgrade during a pending change still rolls it back);
+	# the install /
 	# uninstall / check actions all iterate over the whole array so any
 	# count works.
 	r = unit.run('printf \'%d\\n\' "${#SYSUPGRADE_LINES[@]}"\nprintf \'%s\\n\' "${SYSUPGRADE_LINES[@]}"\n')
 	assert r.returncode == 0
 	lines = r.stdout.splitlines()
-	assert lines[0] == "13"
+	assert lines[0] == "19"
 	assert lines[1:] == [
 		"/usr/libexec/newton/newton-router",
 		"/usr/libexec/newton/newton-safe-apply",
@@ -622,8 +623,14 @@ def test_sysupgrade_lines_of_design_2_3(unit):
 		"/etc/newton/profile",
 		"/etc/newton/zones",
 		"/etc/newton/approve.key",
+		"/etc/newton/pending",
+		"/etc/newton/failed",
+		"/etc/newton/boot_attempts",
+		"/etc/newton/restore_attempts",
+		"/etc/newton/lkg/",
+		"/etc/newton/quarantine/",
 	]
-	assert len(set(lines[1:])) == 13
+	assert len(set(lines[1:])) == 19
 
 
 def test_uninstall_sysupgrade_iterates_over_array(router_unit):
@@ -2257,6 +2264,12 @@ def test_install_sysupgrade_repairs_separator_without_blank(router_unit):
 				"/etc/newton/profile",
 				"/etc/newton/zones",
 				"/etc/newton/approve.key",
+				"/etc/newton/pending",
+				"/etc/newton/failed",
+				"/etc/newton/boot_attempts",
+				"/etc/newton/restore_attempts",
+				"/etc/newton/lkg/",
+				"/etc/newton/quarantine/",
 			]) + "\n")
 
 
@@ -3620,7 +3633,10 @@ def test_swap_recover_restored_when_switch_started(router_unit):
 		"newton-router-newton-agent" % BLOB_A
 	)
 	plain_line = "ssh-ed25519 %s agent@unit\n" % PLAIN_BLOB
-	router.write(rel, plain_line + SWAP_EXTRA + "\n", 0o600)
+	# no other unrestricted line: once the plain line is gone the knob
+	# denies the new key, so the proof cannot pass and only the dead-man
+	# switch (or nothing) brings the router back
+	router.write(rel, plain_line, 0o600)
 	router.write(prev_rel, plain_line, 0o600)
 	router.update_state(
 		deny_restricted_when_plain_absent=True, ghost_blobs=[])
@@ -3636,7 +3652,7 @@ def test_swap_recover_restored_when_switch_started(router_unit):
 		"swap_stage_new_line\n"
 		"swap_start_deadman %s\n" % SWAP_NONCE +
 		"swap_replace_key_lines\n"
-		"swap_recover\n"
+		"swap_recover %s\n" % SWAP_NONCE
 	)
 	assert r.returncode == 1
 	lines = r.stdout.splitlines()
@@ -3661,7 +3677,10 @@ def test_swap_recover_not_restored_without_switch(router_unit):
 		"newton-router-newton-agent" % BLOB_A
 	)
 	plain_line = "ssh-ed25519 %s agent@unit\n" % PLAIN_BLOB
-	router.write(rel, plain_line + SWAP_EXTRA + "\n", 0o600)
+	# no other unrestricted line: once the plain line is gone the knob
+	# denies the new key, so the proof cannot pass and only the dead-man
+	# switch (or nothing) brings the router back
+	router.write(rel, plain_line, 0o600)
 	router.write(prev_rel, plain_line, 0o600)
 	router.update_state(
 		deny_restricted_when_plain_absent=True, ghost_blobs=[])
@@ -3673,7 +3692,7 @@ def test_swap_recover_not_restored_without_switch(router_unit):
 		"swap_prepare\n"
 		"swap_stage_new_line\n"
 		"swap_replace_key_lines\n"
-		"swap_recover\n"
+		"swap_recover %s\n" % SWAP_NONCE
 	)
 	assert r.returncode == 1
 	lines = r.stdout.splitlines()
@@ -3894,7 +3913,9 @@ def test_action_profile_mismatch_with_inventory_is_refused(router_unit):
 	assert "NOTE state: router unchanged" in lines
 	assert lines[-1] == (
 		"STOPPED profile r1: the inventory says lab for r1; set "
-		'profile = "prod" in devices.toml first, then run profile prod again')
+		'profile = "prod" in /var/lib/newton/devices.toml (owned by the '
+		'newton account; edit it with sudo -u newton) first, then run '
+		'profile prod again')
 	assert router.read(rel) == "lab\n"
 
 

@@ -2,7 +2,7 @@
 # Check that no lab device leaks DHCP server replies or IPv6 router adverts onto a house-LAN interface.
 # Run it as: sudo scripts/newton-lab-isolation --iface eth0 --allow-mac aa:bb:cc:dd:ee:ff --seconds 300
 # PASS: a line "PASS no foreign DHCP server or router advert on <iface> in <N> s (<n> packets from allowed sources)",
-# then a "NOTE passive check: ..." line naming the first blind spot below.
+# then a "NOTE passive check: ..." line (blind spots below); --from-file says "in capture file <file>" instead.
 # FAIL: one "FAIL foreign[<mac>]: <kind> x<n> not in allow list" line per offending source, then a final FAIL line and exit 1.
 # INCONCLUSIVE: lines with no source MAC (a capture on any, tun or wg, or one taken without -e) are reported as
 # unreadable, never as a foreign source; with no FAIL, a final INCONCLUSIVE line and exit 3 (never a pass).
@@ -29,6 +29,7 @@ UNREADABLE=0
 FIRST_UNREADABLE=''
 EARLY=0
 WINDOW=0
+WHERE=''
 
 cleanup() {
 	if [[ -n $CAPTURE_DIR ]]; then
@@ -174,7 +175,8 @@ if [[ -n $FROM_FILE ]]; then
 		printf 'ERROR: cannot read capture file: %s\n' "$FROM_FILE" >&2
 		exit 2
 	}
-	WINDOW=$DURATION
+	# a file's interface and time span are never observed: name the file
+	WHERE="in capture file $FROM_FILE"
 	parse_lines <"$FROM_FILE"
 else
 	[[ $(id -u) == 0 ]] || {
@@ -207,6 +209,7 @@ else
 		exit 2
 		;;
 	esac
+	WHERE="on $IFACE in $WINDOW s"
 	parse_lines <"$CAPTURE_DIR/tcpdump.out"
 fi
 
@@ -231,8 +234,8 @@ if (( UNREADABLE > 0 )); then
 fi
 
 if (( FAILURES )); then
-	printf 'FAIL foreign DHCP server or router advert on %s in %s s (%s from foreign sources)\n' \
-		"$IFACE" "$WINDOW" "$(packets "$FOREIGN_TOTAL")"
+	printf 'FAIL foreign DHCP server or router advert %s (%s from foreign sources)\n' \
+		"$WHERE" "$(packets "$FOREIGN_TOTAL")"
 	exit 1
 fi
 
@@ -243,13 +246,16 @@ if (( EARLY )); then
 fi
 
 if (( UNREADABLE > 0 )); then
-	printf 'INCONCLUSIVE no foreign source seen on %s in %s s, but %s could not be read, so the check did not pass\n' \
-		"$IFACE" "$WINDOW" "$nlines"
+	printf 'INCONCLUSIVE no foreign source seen %s, but %s could not be read, so the check did not pass\n' \
+		"$WHERE" "$nlines"
 	exit 3
 fi
 
-pass "no foreign DHCP server or router advert on $IFACE in $WINDOW s ($(packets "$ALLOWED_TOTAL") from allowed sources)"
+pass "no foreign DHCP server or router advert $WHERE ($(packets "$ALLOWED_TOTAL") from allowed sources)"
 printf 'NOTE passive check: it sends no DHCP discover and no router solicitation, so a server that answers only a client that asks, or answers by unicast to another port, is not seen; router adverts can be up to 600 s apart, so a window shorter than that can miss them (use --seconds 600 or more)\n'
+if [[ -n $FROM_FILE ]]; then
+	printf 'NOTE capture file: the interface it was taken on and the time it covers are not checked; --iface and --seconds do not apply to a file\n'
+fi
 
 if (( ALLOWED_TOTAL == 0 )); then
 	printf 'NOTE: no DHCP or router advert packet was seen, not even from an allowed source; if the house router normally sends router adverts, check that --iface is the house-LAN interface\n' >&2

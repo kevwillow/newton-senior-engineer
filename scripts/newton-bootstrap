@@ -217,9 +217,9 @@ case $sub in
 		printf 'If this updates an installed Newton, confirm or abort every held change first: ' >&2
 		printf 'a held change cannot be confirmed by a server that was updated under it, so it rolls back. ' >&2
 		printf 'To stop now, type anything else.\n' >&2
-		printf 'Compare the commit id with what you saw on GitHub, then type "install " followed by the first 12 hex characters of the commit id to continue: ' >&2
+		printf 'Compare the commit id with what you saw on GitHub, then type "install " followed by the full 40 hex commit id you noted there to continue: ' >&2
 		conf=; IFS= read -r conf || conf=
-		[[ $conf == "install ${id:0:12}" ]] || { printf 'ERROR: confirmation did not match; nothing installed\n' >&2; exit 1; }
+		[[ $conf == "install $id" ]] || { printf 'ERROR: confirmation did not match; nothing installed\n' >&2; exit 1; }
 		workdir=$WORK/empty
 		install -d -m 0700 "$workdir" || die_inst "could not create the empty work directory"
 		( cd -- "$workdir" && env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root LANG=C.UTF-8 \
@@ -252,9 +252,9 @@ case $sub in
 		printf '\n--- %s (installed)\n+++ %s (snapshot)\n' "$SELF" "$src"
 		printf 'sha256 installed: %s\nsha256 snapshot:  %s\n' \
 			"$(sha256sum -- "$SELF" | awk '{print $1}')" "$(sha256sum -- "$src" | awk '{print $1}')"
-		printf 'Type "update " followed by the first 12 hex characters of the commit id to continue: ' >&2
+		printf 'Type "update " followed by the full 40 hex commit id you noted on GitHub to continue: ' >&2
 		conf=; IFS= read -r conf || conf=
-		[[ $conf == "update ${id:0:12}" ]] || { printf 'ERROR: confirmation did not match; nothing changed\n' >&2; exit 1; }
+		[[ $conf == "update $id" ]] || { printf 'ERROR: confirmation did not match; nothing changed\n' >&2; exit 1; }
 		rm -f -- "$SELF.new"
 		install -o root -g root -m 0755 -- "$src" "$SELF.new" || die_inst "could not write the staging copy"
 		if ! cmp -s -- "$src" "$SELF.new"; then rm -f -- "$SELF.new"; die_inst "staging copy does not match the snapshot"; fi

@@ -39,7 +39,7 @@ def test_good_install_runs_the_snapshot_installer(tmp_path):
     fr = FakeRoot(tmp_path)
     boot = fr.install_bootstrap()
     cid, tid = make_repo(fr.stage / "src")
-    rc, out, err = go(fr, boot, "/src", cid, "install " + cid[:12])
+    rc, out, err = go(fr, boot, "/src", cid, "install " + cid)
     assert rc == 0, (rc, out, err)
     assert "SNAPSHOT-INSTALLER" in out
     assert "Commit:  " + cid in out
@@ -75,7 +75,7 @@ def test_working_tree_installer_is_not_run(tmp_path):
     wt.write_text("#!/bin/bash\necho WORKTREE-INSTALLER-RAN\n")
     os.chmod(wt, 0o755)
     (fr.stage / "src" / "scripts" / "evil.sh").write_text("#!/bin/bash\necho EVIL\n")
-    rc, out, err = go(fr, boot, "/src", cid, "install " + cid[:12])
+    rc, out, err = go(fr, boot, "/src", cid, "install " + cid)
     assert rc == 0, (rc, out, err)
     assert "SNAPSHOT-INSTALLER" in out
     assert "WORKTREE-INSTALLER-RAN" not in out
@@ -88,8 +88,9 @@ def test_wrong_confirmation_installs_nothing(tmp_path):
     boot = fr.install_bootstrap()
     cid, _ = make_repo(fr.stage / "src")
     cases = [
-        "install " + cid[:11],
-        "install " + cid,
+        "install " + cid[:12],
+        "install " + cid[:39],
+        "install " + cid + "0",
         "",
         "yes",
     ]
@@ -106,7 +107,7 @@ def test_unknown_commit_id(tmp_path, cid):
     fr = FakeRoot(tmp_path)
     boot = fr.install_bootstrap()
     make_repo(fr.stage / "src")
-    rc, out, err = go(fr, boot, "/src", cid, "install " + cid[:12])
+    rc, out, err = go(fr, boot, "/src", cid, "install " + cid)
     assert rc == 1, (rc, out, err)
     assert "nothing installed" in err, err
     assert "SNAPSHOT-INSTALLER" not in out, out
@@ -117,7 +118,7 @@ def test_tree_id_given_as_commit_id_is_refused(tmp_path):
     fr = FakeRoot(tmp_path)
     boot = fr.install_bootstrap()
     _, tid = make_repo(fr.stage / "src")
-    rc, out, err = go(fr, boot, "/src", tid, "install " + tid[:12])
+    rc, out, err = go(fr, boot, "/src", tid, "install " + tid)
     assert rc == 1, (rc, out, err)
     assert "nothing installed" in err, err
     assert "SNAPSHOT-INSTALLER" not in out, out
@@ -129,7 +130,7 @@ def test_installer_exit_status_is_propagated(tmp_path):
     boot = fr.install_bootstrap()
     installer_exit_7 = SNAP_STUB.replace("${STUB_EXIT:-0}", "7")
     cid, _ = make_repo(fr.stage / "src", installer=installer_exit_7)
-    rc, out, err = go(fr, boot, "/src", cid, "install " + cid[:12])
+    rc, out, err = go(fr, boot, "/src", cid, "install " + cid)
     assert rc == 7, (rc, out, err)
     assert not _root_leftovers(out), out
 
@@ -159,7 +160,7 @@ def test_hostile_repo_config_is_not_honoured(tmp_path):
     hook.write_text("#!/bin/bash\ntouch /hook_ran\n")
     os.chmod(hook, 0o755)
 
-    rc, out, err = go(fr, boot, "/src", cid, "install " + cid[:12])
+    rc, out, err = go(fr, boot, "/src", cid, "install " + cid)
     assert rc == 0, (rc, out, err)
     assert "SNAPSHOT-INSTALLER" in out, out
     assert not _root_leftovers(out), out
@@ -172,7 +173,7 @@ def test_hostile_repo_config_is_not_honoured(tmp_path):
          f"{boot} install /src {cid}; echo rc=$?; "
          "ls /fsmonitor_ran /filter_ran /hook_ran 2>&1"],
         env=ENV,
-        tty_input="install " + cid[:12] + "\n",
+        tty_input="install " + cid + "\n",
     )
     assert "rc=0" in out2, out2
     assert out2.count("No such file") == 3, out2
@@ -188,7 +189,7 @@ def test_packed_repo_works(tmp_path):
     loose = [p for p in repo.glob(".git/objects/[0-9a-f][0-9a-f]/*") if p.is_file()]
     assert not loose, (loose,)
 
-    rc, out, err = go(fr, boot, "/src", cid, "install " + cid[:12])
+    rc, out, err = go(fr, boot, "/src", cid, "install " + cid)
     assert rc == 0, (rc, out, err)
     assert "SNAPSHOT-INSTALLER" in out, out
     assert not _root_leftovers(out), out
@@ -203,7 +204,7 @@ def test_bare_repo_install_works(tmp_path):
          str(fr.stage / "src"), str(fr.stage / "bare.git")],
         check=True,
     )
-    rc, out, err = go(fr, boot, "/bare.git", cid, "install " + cid[:12])
+    rc, out, err = go(fr, boot, "/bare.git", cid, "install " + cid)
     assert rc == 0, (rc, out, err)
     assert "SNAPSHOT-INSTALLER" in out, out
     assert not _root_leftovers(out), out
@@ -230,7 +231,7 @@ def test_identity_block_escapes_non_ascii_bidi_and_zero_width_l1(tmp_path):
         "--reset-author", "-m", subject,
         env={"GIT_AUTHOR_NAME": author, "GIT_COMMITTER_NAME": author})
     cid = git(fr.stage / "src", "rev-parse", "HEAD")
-    rc, out, err = go(fr, boot, "/src", cid, "install " + cid[:12])
+    rc, out, err = go(fr, boot, "/src", cid, "install " + cid)
     assert rc == 0, (rc, out, err)
 
     # The escaped sequences must appear as literal backslash-x text in stdout.
@@ -271,3 +272,20 @@ def test_install_prompt_warns_about_held_changes_before_the_confirmation(tmp_pat
     assert HELD_WARNING in err, err
     assert err.index(HELD_WARNING) < err.index("Compare the commit id"), err
     assert "SNAPSHOT-INSTALLER" not in out
+
+
+def test_install_needs_the_full_commit_id(tmp_path):
+    """the first install (newton-install) takes the full 40-hex id the
+    owner noted from the Git host; the bootstrap asks for the same, so a
+    12-hex prefix the tool printed itself is refused and nothing installs."""
+    fr = FakeRoot(tmp_path)
+    boot = fr.install_bootstrap()
+    cid, _ = make_repo(fr.stage / "src")
+    rc, out, err = go(fr, boot, "/src", cid, "install " + cid[:12])
+    assert rc == 1, (rc, out, err)
+    assert "confirmation did not match" in err, err
+    assert "SNAPSHOT-INSTALLER" not in out, out
+    assert "full 40 hex" in err, err
+    rc, out, err = go(fr, boot, "/src", cid, "install " + cid)
+    assert rc == 0, (rc, out, err)
+    assert "SNAPSHOT-INSTALLER" in out, out

@@ -1220,6 +1220,7 @@ def test_init_opens_expected_procd_instance_when_enabled():
         "set respawn",
         "set stdout 1",
         "set stderr 1",
+        "set file /etc/config/newton_wanhealth",
         "close",
         "trigger newton_wanhealth",
     ]
@@ -1228,6 +1229,18 @@ def test_init_opens_expected_procd_instance_when_enabled():
     assert "USE_PROCD=1" in text
     assert "START=95" in text
     assert "/usr/libexec/newton/newton-wan-health restore" in text
+
+
+def test_init_restarts_the_daemon_when_its_config_changes():
+    # procd's reload trigger re-runs start_service, but procd keeps
+    # a running instance whose parameters did not change, and the daemon
+    # reads its settings only at start. The instance must name its config
+    # file so procd restarts it when the file changes (new targets, a new
+    # interval, enabled with no targets at first).
+    result, calls = _run_init("1", host_busybox_or_skip())
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "set file /etc/config/newton_wanhealth" in calls
+    assert calls.index("set file /etc/config/newton_wanhealth") < calls.index("close")
 
 
 @pytest.mark.parametrize(

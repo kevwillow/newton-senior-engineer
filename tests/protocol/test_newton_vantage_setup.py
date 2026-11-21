@@ -1554,3 +1554,33 @@ def test_install_refuses_keys_dir_under_group_writable_parent(tmp_path):
 	assert "group- or world-writable without the sticky bit" in result.stderr
 	assert list(hostile.iterdir()) == []
 	assert not log.exists()
+
+
+def test_install_probe_failure_names_the_ssh_error(tmp_path):
+    """An admin ssh that fails on the tool probe (here: a refused login)
+    names ssh's own error text, on one printable line, not just its exit."""
+    fenv, _log, _inventory, _key_file = _admin_path_calls(None, tmp_path)
+    make_executable(
+        tmp_path / "bin" / "ssh",
+        "#!/bin/sh\n"
+        "printf 'admin@vantage.example.test: Permission denied (publickey).\\n' >&2\n"
+        "printf 'second \\033[31mline\\n' >&2\n"
+        "exit 255\n",
+    )
+    result = subprocess.run(
+        [str(SETUP), "edge", "install"], text=True, capture_output=True, env=fenv, timeout=10
+    )
+    assert result.returncode != 0
+    assert ("could not probe vantage for nmap, timeout and sha256sum (admin ssh exit 255): "
+            "admin@vantage.example.test: Permission denied (publickey). second [31mline") in result.stderr
+    assert "\x1b" not in result.stderr
+
+
+def test_install_probe_failure_with_no_output_says_so(tmp_path):
+    fenv, _log, _inventory, _key_file = _admin_path_calls(None, tmp_path)
+    make_executable(tmp_path / "bin" / "ssh", "#!/bin/sh\nexit 255\n")
+    result = subprocess.run(
+        [str(SETUP), "edge", "install"], text=True, capture_output=True, env=fenv, timeout=10
+    )
+    assert result.returncode != 0
+    assert "(admin ssh exit 255): no output" in result.stderr

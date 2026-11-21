@@ -128,7 +128,7 @@ def test_repo_problems_are_refused_with_nothing_run(tmp_path):
         if label == "colon_dropped":
             continue
         rc, out, err = fr.run(FakeRoot.RUN_THEN_LIST + [boot, "install", repo_path, GOOD],
-                              env=ENV, tty_input="install " + GOOD[:12] + "\n")
+                              env=ENV, tty_input="install " + GOOD + "\n")
         assert rc == 1, (label, rc, out, err)
         assert "nothing installed" in err, (label, err)
         assert "Commit:" not in out, (label, out)

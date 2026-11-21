@@ -16,6 +16,9 @@ start_service() {
     procd_set_param respawn
     procd_set_param stdout 1
     procd_set_param stderr 1
+    # The daemon reads its settings once at start; naming the config file
+    # makes procd restart it when the reload trigger finds the file changed.
+    procd_set_param file /etc/config/newton_wanhealth
     procd_close_instance
 }
 

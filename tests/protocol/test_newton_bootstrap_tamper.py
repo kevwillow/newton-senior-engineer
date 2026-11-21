@@ -13,7 +13,7 @@ def run_install(tmp_path, repo, cid, typed=None):
     fr = FakeRoot(tmp_path)
     boot = fr.install_bootstrap()
     rc, out, err = fr.run(FakeRoot.RUN_THEN_LIST + [boot, "install", "/src", cid], env=ENV,
-                          tty_input=(typed if typed is not None else "install " + cid[:12]) + "\n")
+                          tty_input=(typed if typed is not None else "install " + cid) + "\n")
     return rc, out, err
 
 

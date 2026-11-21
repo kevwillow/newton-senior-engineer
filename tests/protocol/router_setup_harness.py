@@ -60,6 +60,15 @@ DEFAULT_STATE = {
     # substrings of a router command: a command that contains one is not run;
     # the fake ssh closes the connection (exit 255), as when the link drops
     "drop_commands": [],
+    # one-shot form of drop_commands: the first command (or, on a key with
+    # a forced command, the request the client sent) that holds a needle
+    # is not run and the link drops (exit 255); that needle is then used up
+    "drop_once": [],
+    # [arm, needle]: once a command holding `arm` has run, the next command
+    # (or client request) holding `needle` RUNS and then the link drops
+    # before its answer comes back (exit 255), as when the reply of a call
+    # the router carried out is lost; fires once
+    "lose_reply_after": None,
     # [needle, rc] pairs: a command that contains the needle RUNS and the
     # router's shell exits with rc, as when the remote command itself fails
     # (ssh returns the remote command's exit status)
@@ -1151,6 +1160,15 @@ def _ssh_dispatch(router, argv, tool):
     if _syntax_bad(text):
         fields["syntax_error"] = True
         return 254, fields
+    hay = text + "\n" + (command or "")
+    once = list(state.get("drop_once") or [])
+    for needle in once:
+        if needle and needle in hay:
+            once.remove(needle)
+            router.update_state(drop_once=once)
+            fields["dropped"] = True
+            print("Connection closed by remote host.", file=sys.stderr)
+            return 255, fields
     for needle in state.get("drop_commands") or []:
         if needle and needle in text:
             fields["dropped"] = True
@@ -1233,6 +1251,15 @@ def _ssh_dispatch(router, argv, tool):
                 Path(trigger_path).write_bytes(b"corrupted-after-put\n")
             except OSError:
                 pass
+    lose = state.get("lose_reply_after")
+    if lose:
+        if router.state().get("lose_reply_armed") and lose[1] in hay:
+            router.update_state(lose_reply_after=None, lose_reply_armed=False)
+            fields["died_after"] = True
+            print("Connection closed by remote host.", file=sys.stderr)
+            return 255, fields
+        if lose[0] in hay:
+            router.update_state(lose_reply_armed=True)
     for needle in state.get("die_after_commands") or []:
         if needle and needle in text:
             fields["died_after"] = True

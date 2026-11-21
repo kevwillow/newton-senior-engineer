@@ -81,7 +81,9 @@ def test_profile_differing_from_the_inventory_is_refused(setup_env):
 	assert r.rc == 1, r.out + r.err
 	assert r.out.splitlines()[-1] == (
 		"STOPPED profile r1: the inventory says lab for r1; set "
-		'profile = "prod" in devices.toml first, then run profile prod again')
+		'profile = "prod" in %s (owned by the newton account; edit it '
+		'with sudo -u newton) first, then run profile prod again'
+		% env.inventory)
 	assert r.calls == []
 	assert env.router.snapshot() == before
 	assert env.router.read("etc/newton/profile") == "lab\n"
@@ -305,6 +307,27 @@ def test_upgrade_broken_program_restores_from_prev(setup_env, tmp_path):
 	notes = [l for l in lines if l.startswith("NOTE state:")]
 	assert any("restored from .prev" in n for n in notes)
 	assert any("hello after restore: ok" in n for n in notes)
+
+
+def test_upgrade_failure_note_names_the_new_files_that_stay(setup_env, tmp_path):
+	"""The guard and its init keep no .prev, so a failed upgrade
+	puts the program and helper back but leaves the new guard on the
+	router; the note says so instead of leaving it out."""
+	env = setup_env
+	install_ok(env)
+	src3_path = build_src(tmp_path / "src3", program="broken",
+	                      version="3.0.0")
+	for rel in (HELPER_REL, GUARD_REL):
+		with (src3_path / rel).open("a") as fh:
+			fh.write("# v3\n")
+	r = run(env, "upgrade", src=src3_path)
+	assert r.rc == 1, r.err
+	notes = [l for l in r.out.splitlines() if l.startswith("NOTE state:")]
+	assert any("restored from .prev" in n for n in notes), notes
+	assert any("; kept new (no .prev): /usr/libexec/newton-guard;" in n
+	           or n.endswith("; kept new (no .prev): /usr/libexec/newton-guard")
+	           for n in notes), notes
+	assert env.router.read(GUARD).endswith("# v3\n")
 
 
 # -- 6. repairing a broken first install ---------------------------------

@@ -713,3 +713,45 @@ def test_a_record_bound_to_another_device_is_refused(
         vendor_lab.service.apply("vy1", planned["session_id"])
 
     assert vendor_lab.runner.calls == []
+
+
+def test_two_backups_in_one_second_keep_both(
+    vendor_lab: VendorLab, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Backups taken within the same second each get their own file
+    (-2, -3 suffixes, as owrt-change.sh names them); none overwrites another,
+    a name already taken by a symlink is skipped and never written through,
+    and no temporary file is left behind."""
+    import newton_mcp.vendor_flow as vendor_flow
+
+    fixed = datetime(2026, 11, 21, 4, 5, 6, tzinfo=timezone.utc)
+
+    class _FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:  # type: ignore[override]
+            return fixed
+
+    monkeypatch.setattr(vendor_flow, "datetime", _FrozenClock)
+    backups = vendor_lab.state / "backups"
+    backups.mkdir(mode=0o700, parents=True, exist_ok=True)
+    outside = vendor_lab.state / "outside.txt"
+    outside.write_text("not a backup\n", encoding="utf-8")
+    os.symlink(outside, backups / "vy1-20261121T040506Z-3.txt")
+
+    paths = []
+    for marker in ("first", "second", "third"):
+        vendor_lab.runner.config = BASE_CONFIG + f"\nset system host-name '{marker}'\n"
+        paths.append(Path(vendor_lab.service.backup("vy1")["backup_path"]["text"]))
+
+    assert [p.name for p in paths] == [
+        "vy1-20261121T040506Z.txt",
+        "vy1-20261121T040506Z-2.txt",
+        "vy1-20261121T040506Z-4.txt",
+    ]
+    for marker, path in zip(("first", "second", "third"), paths):
+        assert marker in path.read_text(encoding="utf-8")
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert outside.read_text(encoding="utf-8") == "not a backup\n"
+    assert sorted(p.name for p in backups.iterdir()) == sorted(
+        [p.name for p in paths] + ["vy1-20261121T040506Z-3.txt"]
+    )

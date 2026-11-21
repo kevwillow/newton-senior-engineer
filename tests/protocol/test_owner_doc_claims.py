@@ -345,3 +345,108 @@ def test_the_approval_gate_bullet_names_both_exceptions_and_ad():
 def test_the_release_readme_chat_yes_names_the_grant():
     for line in _lines_with(_text(RELEASE_README), "said yes in the chat"):
         assert "Outside a scoped grant" in line, line
+
+
+# ---- owner-doc drift: clients, token check, reboot, Python, bootstrap id, WAN cost, TOTP --------
+
+INSTALL_DOC = REPO / "docs/INSTALL.md"
+SETUP_DOC = REPO / "SETUP.md"
+ROADMAP_DOC = REPO / "docs/ROADMAP.md"
+BOOTSTRAP = REPO / "scripts/newton-bootstrap"
+INSTALLER_SRC = REPO / "scripts/newton-install"
+WAN_HEALTH = REPO / "scripts/newton-wan-health.sh"
+READMES = [RELEASE_README] + ([DEV_README] if PRIVATE else [])
+
+
+def _flat(path: Path) -> str:
+    return " ".join(_text(path).split())
+
+
+@pytest.mark.parametrize("path", READMES + [INSTALL_DOC, ROADMAP_DOC], ids=lambda p: str(p.relative_to(REPO)))
+def test_no_doc_lists_claude_desktop_as_a_working_client(path):
+    """docs/SETUP-CLIENTS.md says Claude Desktop cannot start the
+    server; every other line that names it says it is not supported."""
+    clients = _flat(REPO / "docs/SETUP-CLIENTS.md")
+    assert "Claude Desktop is not supported" in clients
+    for line in _text(path).splitlines():
+        if "Claude Desktop" in line:
+            assert "not supported" in line, (path.name, line)
+
+
+def test_release_readme_security_model_names_the_lab_profile_skip():
+    """the router checks the token again only on a prod-profile router
+    or for a change Newton always asks about (newton-router cmd_apply)."""
+    for line in _lines_with(_text(RELEASE_README), "checks it a second time on the device"):
+        assert "router set to lab" in line, line
+        assert "only the Newton host checks" in line, line
+
+
+def test_skill_token_expiry_line_names_the_lab_profile_skip():
+    """SKILL.md's 'the router refuses a token after its expiry' holds
+    only where the router checks the token at all."""
+    for line in _lines_with(_text(SKILL), "refuses a token after its expiry"):
+        assert "router set to lab" in line, line
+
+
+@pytest.mark.parametrize("path", READMES, ids=lambda p: str(p.relative_to(REPO)))
+def test_readme_says_a_lab_router_still_refuses_changed_settings(path):
+    """cmd_apply checks the base, diff and probes on every profile and
+    skips only the token check on a lab router."""
+    router = _text(ROUTER)
+    assert '[ "$base" = "$base_sealed" ] || fail stale-base 3' in router
+    assert '[ "$diff" = "$diff_sealed" ] || fail plan-changed 3 diff' in router
+    assert '[ "$psha" = "$psha_sealed" ] || fail plan-changed 3 probes' in router
+    line = _lines_with(_text(path), "Your approval is bound to the exact change")[0]
+    assert "on every profile" in line, line
+    assert "skips only the approval-token check" in line, line
+
+
+def test_security_md_names_the_routeros_undo_reboot():
+    """the RouterOS (CHR) undo loads a saved backup, which reboots."""
+    flat = _flat(SECURITY)
+    assert "No MCP tool runs arbitrary commands, reboots" not in flat
+    assert "the only reboot is the RouterOS (CHR) undo" in flat
+
+
+@pytest.mark.parametrize("path", READMES, ids=lambda p: str(p.relative_to(REPO)))
+def test_readme_prerequisites_name_the_python_range(path):
+    """newton-install accepts Python 3.11 to 3.14 only."""
+    assert "Newton needs Python 3.11 to 3.14" in _text(INSTALLER_SRC)
+    flat = _flat(path)
+    assert "Python 3 with" not in flat
+    assert "system Python 3 with" not in flat
+    assert "Python 3.11 to 3.14" in flat, path.name
+    assert "Python-3.11%2B" not in flat
+
+
+@pytest.mark.parametrize("path", [RELEASE_README, SKILL, INSTALL_DOC, SETUP_DOC],
+                         ids=lambda p: str(p.relative_to(REPO)))
+def test_bootstrap_docs_ask_for_the_full_id(path):
+    """newton-bootstrap's install and self-update ask for the full
+    40-hex id, as the first install does."""
+    boot = _text(BOOTSTRAP)
+    assert '[[ $conf == "install $id" ]]' in boot
+    assert '[[ $conf == "update $id" ]]' in boot
+    flat = _flat(path)
+    assert "first 12 hex characters of the id" not in flat, path.name
+    assert "first 12 hex digits" not in flat, path.name
+    assert "first 12 hex characters" not in flat, path.name
+
+
+@pytest.mark.parametrize("path", [SETUP_DOC, SKILL], ids=lambda p: p.name)
+def test_wan_health_docs_name_the_probe_cost(path):
+    """every round pings each WAN, a metered backup too."""
+    assert 'ping -I "$pi_dev" -c 1' in _text(WAN_HEALTH)
+    flat = _flat(path)
+    assert "metered" in flat, path.name
+    assert "MB a month" in flat, path.name
+
+
+def test_install_doc_offers_the_authenticator_on_no_install_too():
+    """newton-enrol totp adds the authenticator in either mode (SETUP.md 7f)."""
+    flat = _flat(INSTALL_DOC)
+    assert "authenticator app belongs to the installed mode" not in flat
+    assert "(installed mode only)" not in flat
+    step = _section(_text(INSTALL_DOC), "**7f.**", "**7g.**")
+    assert "On a no-install router" in step
+    assert "newton-enrol totp router1" in " ".join(step.split()[:80])

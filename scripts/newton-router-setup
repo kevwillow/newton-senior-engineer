@@ -986,12 +986,34 @@ choose_admin_path() {
 			home=$(home_dir) || exit 2
 			PLAIN_KEY="${home}/.ssh/id_ed25519"
 		fi
+		if plain_key_unreadable "$PLAIN_KEY"; then
+			die "--plain-key: $PLAIN_KEY is not readable by the $(id -un) account (it or a folder on its path is closed to that account); give the $(id -un) account an admin key of its own on the router, or use the root password"
+		fi
 		if [[ ! -f "$PLAIN_KEY" ]]; then
 			[[ "$ACTION" == "swap-key" ]] \
 				&& die "--plain-key: file not found: $PLAIN_KEY (swap-key logs in with the plain key that install used: run install first, or name that key with --plain-key FILE)"
 			die "--plain-key: file not found: $PLAIN_KEY"
 		fi
 	fi
+}
+
+# Contract: plain_key_unreadable PATH -- exit 0 when this account cannot
+# read PATH although it may exist: PATH is a file without read permission,
+# or the nearest folder on its path that this account can see is not open
+# to it (no search permission), so a stat of PATH cannot tell; exit 1
+# otherwise (readable, or plainly missing from a folder this account can
+# search).
+plain_key_unreadable() {
+	local path="$1" dir
+	if [[ -e "$path" ]]; then
+		[[ -f "$path" && ! -r "$path" ]]
+		return
+	fi
+	dir=$(dirname -- "$path")
+	while [[ ! -d "$dir" && "$dir" != "/" && "$dir" != "." ]]; do
+		dir=$(dirname -- "$dir")
+	done
+	[[ -d "$dir" && ! -x "$dir" ]]
 }
 
 # Contract: refuse_no_install_action -- no arguments; called by main
@@ -1044,7 +1066,7 @@ validate_action_args() {
 			# from the inventory's, so the inventory changes first
 			if [[ "$PROFILE_VALUE" != "$DEV_PROFILE" ]]; then
 				STATE_NOTE='router unchanged'
-				stopped "the inventory says ${DEV_PROFILE} for ${DEVICE}; set profile = \"${PROFILE_VALUE}\" in devices.toml first, then run profile ${PROFILE_VALUE} again"
+				stopped "the inventory says ${DEV_PROFILE} for ${DEVICE}; set profile = \"${PROFILE_VALUE}\" in ${INVENTORY} (owned by the newton account; edit it with sudo -u newton) first, then run profile ${PROFILE_VALUE} again"
 			fi
 			;;
 		approval-key)
@@ -2010,41 +2032,60 @@ swap_confirm_new_key() {
 }
 
 # Contract: swap_old_key_refused -- swap-key sub-step 7 (design 8.3):
-# rsh_key "$PLAIN_KEY" true </dev/null must exit 255 (the plain key is no
-# longer accepted); any other status returns 1.
+# runs rsh_key "$PLAIN_KEY" true </dev/null with its stderr captured;
+# returns 0 only when ssh exits 255 AND says "Permission denied" (the
+# router refused the plain key), 1 when the command ran (exit 0: the
+# plain key still works), and 2 for anything else (a dropped link, a
+# timeout, a host key problem): an exit 255 alone is no proof that the
+# plain key stopped working.
 swap_old_key_refused() {
-	local rc
-	rsh_key "$PLAIN_KEY" true </dev/null 2>/dev/null
+	local rc err
+	err=$(rsh_key "$PLAIN_KEY" true </dev/null 2>&1 >/dev/null)
 	rc=$?
-	[[ $rc -eq 255 ]] || return 1
-	return 0
+	if [[ $rc -eq 255 && "$err" == *"Permission denied"* ]]; then
+		return 0
+	fi
+	[[ $rc -eq 0 ]] && return 1
+	return 2
 }
 
 # Contract: swap_settle -- swap-key sub-step 8 (design 8.3): wait_router
-# 95, then a fresh-nonce hello_key with KEYFILE must pass the same field
-# check as swap_confirm_new_key and the plain key must still be refused;
-# returns 0 on success, 1 on any failure.
+# 95, then up to three tries, 5 s apart: a fresh-nonce hello_key with
+# KEYFILE must pass the same field check as swap_confirm_new_key and
+# swap_old_key_refused must return 0 (a refusal ssh reported) in the same
+# try; returns 0 on the first try that passes both, 1 when none does (one
+# dropped call is not a failed swap).
 swap_settle() {
-	local nonce
+	local nonce i
 	wait_router 95
-	nonce=$(new_nonce)
-	swap_confirm_new_key "$nonce" || return 1
-	swap_old_key_refused || return 1
-	return 0
+	for i in 1 2 3; do
+		nonce=$(new_nonce)
+		if swap_confirm_new_key "$nonce" && swap_old_key_refused; then
+			return 0
+		fi
+		[[ $i -lt 3 ]] && wait_router 5
+	done
+	return 1
 }
 
-# Contract: swap_recover -- failure path of swap-key sub-step 6 (design
-# 8.3): up to 24 rounds of wait_router 5 then
+# Contract: swap_recover NONCE2 -- failure path of swap-key sub-step 6
+# (design 8.3): up to 24 rounds of wait_router 5 then
 # rsh_key "$PLAIN_KEY" true </dev/null (24 * 5 = 120 s of recovery time);
 # whenever the plain key works, one rsh_admin call compares the sha256 of
 # ${RR}${R_AUTH_KEYS} and ${RR}${R_AUTH_KEYS}.newton-prev on the router
 # (sha256sum only, no cmp): equal sets STATE_NOTE='restored by the dead-man
-# switch; the old key works again' and stops; different keeps waiting. After
-# the 24th try, report either that the plain key worked but the files differ,
-# or that the router was NOT restored. Every case ends in stopped "the new
-# key was not proven in time" (the action prints NOTE state: then STOPPED).
+# switch; the old key works again' and stops; different keeps waiting.
+# When the plain key does not work, the round sends the sub-step 6 proof
+# again (swap_confirm_new_key NONCE2): the step-6 answer may have been
+# lost after the router recorded NONCE2, so the swap held and no restore
+# will come; a passing proof returns 0 and the action goes on with
+# sub-steps 7 and 8, which still check the plain key and the settle.
+# After the 24th try, report either that the plain key worked but the
+# files differ, or that the router was NOT restored. Every case but the
+# passing proof ends in stopped "the new key was not proven in time" (the
+# action prints NOTE state: then STOPPED).
 swap_recover() {
-	local i rc out sha_live sha_prev plain_worked=0
+	local nonce2="$1" i rc out sha_live sha_prev plain_worked=0
 	for i in $(seq 1 24); do
 		wait_router 5
 		rsh_key "$PLAIN_KEY" true </dev/null 2>/dev/null
@@ -2058,6 +2099,8 @@ swap_recover() {
 				STATE_NOTE='restored by the dead-man switch; the old key works again'
 				stopped "the new key was not proven in time"
 			fi
+		elif swap_confirm_new_key "$nonce2"; then
+			return 0
 		fi
 	done
 	if [[ $plain_worked -eq 1 ]]; then
@@ -2361,12 +2404,18 @@ action_swap_key() {
 		info "swap step 5: authorized_keys replace failed"
 	fi
 	if ! swap_confirm_new_key "$nonce2"; then
-		swap_recover
+		swap_recover "$nonce2"
 	fi
 	pass "swap step 6: new key confirmed"
-	if ! swap_old_key_refused; then
+	swap_old_key_refused
+	rc=$?
+	if [[ $rc -eq 1 ]]; then
 		STATE_NOTE='both keys work; nothing was lost'
 		stopped "the old key still works"
+	fi
+	if [[ $rc -ne 0 ]]; then
+		STATE_NOTE='the new key works; the link failed while checking that the plain key is refused, so whether it still works is unknown; run swap-key again without --new-key'
+		stopped "cannot tell whether the old key is refused"
 	fi
 	pass "swap step 7: old key refused"
 	if ! swap_settle; then
@@ -2987,8 +3036,37 @@ EOF
 	)
 	out=$(rsh_admin "$script" </dev/null 2>/dev/null)
 	rc=$?
-	[[ $rc -eq 0 ]] || return "$rc"
+	# the records come before the removal: a link that drops after the mv
+	# still delivered them, and they are the only restore advice left
 	UNINSTALL_REMOVED_KEYS="$out"
+	return "$rc"
+}
+
+# Contract: uninstall_report_removed_keys -- no arguments; one line per
+# removed_key= record of UNINSTALL_REMOVED_KEYS: INFO with the add-key
+# restore command when label and role are valid, else a WARN; other lines
+# are ignored and no unvalidated field is printed.
+uninstall_report_removed_keys() {
+	local line fields label role
+	while IFS= read -r line; do
+		[[ -n "$line" ]] || continue
+		case "$line" in
+			removed_key=*)
+				fields=${line#removed_key=}
+				label=${fields%% *}
+				role=${fields#* }
+				if valid_label "$label" && valid_role "$role"; then
+					info "removed Newton key ${label} (role ${role}); to restore it, on the Newton host that holds this key run: sudo -u newton /usr/local/bin/newton-router-setup ${DEVICE} add-key ${label} ${role}"
+				elif valid_label "$label"; then
+					warn "removed Newton key ${label} whose role cannot be read; re-add it with add-key ${label} <role>"
+				else
+					warn "removed a Newton key whose label or role cannot be read; re-add it with add-key"
+				fi
+				;;
+			*)
+				;;
+		esac
+	done <<<"$UNINSTALL_REMOVED_KEYS"
 }
 
 # Contract: uninstall_init_disable -- ONE rsh_admin call (fixed text,
@@ -3099,7 +3177,7 @@ uninstall_config() {
 # removes the rpcd login section, the rpcd sessions and the host-side
 # credentials.
 action_uninstall() {
-	local restart_marker line fields label role
+	local restart_marker
 	if [[ "$DEV_ACCESS" == "no-install" ]]; then
 		uninstall_no_install
 		return 0
@@ -3127,29 +3205,19 @@ action_uninstall() {
 		stopped "the password-only login failed; nothing was removed"
 	fi
 	if ! uninstall_authorized_keys; then
+		if [[ "$UNINSTALL_REMOVED_KEYS" == *removed_key=* ]]; then
+			warn "the router listed these Newton key lines before the call failed; they may already be removed, so keep the restore commands"
+			uninstall_report_removed_keys
+		fi
 		STATE_NOTE='uninstall stopped half way; run it again'
 		stopped "uninstall step 1 failed"
 	fi
 	pass "uninstall step 1: authorized_keys cleaned"
-	while IFS= read -r line; do
-		[[ -n "$line" ]] || continue
-		case "$line" in
-			removed_key=*)
-				fields=${line#removed_key=}
-				label=${fields%% *}
-				role=${fields#* }
-				if valid_label "$label" && valid_role "$role"; then
-					info "removed Newton key ${label} (role ${role}); to restore it, on the Newton host that holds this key run: sudo -u newton /usr/local/bin/newton-router-setup ${DEVICE} add-key ${label} ${role}"
-				elif valid_label "$label"; then
-					warn "removed Newton key ${label} whose role cannot be read; re-add it with add-key ${label} <role>"
-				else
-					warn "removed a Newton key whose label or role cannot be read; re-add it with add-key"
-				fi
-				;;
-			*)
-				;;
-		esac
-	done <<<"$UNINSTALL_REMOVED_KEYS"
+	if [[ "$UNINSTALL_REMOVED_KEYS" == *removed_key=* ]]; then
+		uninstall_report_removed_keys
+	else
+		note "no Newton key line was on the router; if an earlier uninstall was cut off, the key files in ${KEYS_DIR} name the labels it removed (re-add one with add-key LABEL ROLE)"
+	fi
 	if ! uninstall_init_disable; then
 		STATE_NOTE='uninstall stopped half way; run it again'
 		stopped "uninstall step 2 failed"
@@ -3768,8 +3836,11 @@ EXTRA_FILES=(
 # The lines install and upgrade append to /etc/sysupgrade.conf when missing
 # (design 2.3, R9b+c): the eight code/config paths, the four WAN-health ones
 # (the rc.d start and stop symlinks the init's `enable` creates on install,
-# the wan-health script and its init) and the approval key, which a
-# firmware upgrade used to lose. /etc/config is kept by sysupgrade by
+# the wan-health script and its init), the approval key, which a
+# firmware upgrade used to lose, and the guard's state (the pending change,
+# its failed mark and counters, the saved settings in lkg/ and the
+# quarantine), without which a firmware upgrade during a pending change
+# would drop the rollback. /etc/config is kept by sysupgrade by
 # default and stays out of this list. Every site that uses this array
 # iterates over the whole thing -- install, upgrade, uninstall -- so a
 # count change here is picked up by all of them.
@@ -3787,6 +3858,12 @@ SYSUPGRADE_LINES=(
 	"${R_NEWTON_DIR}/profile"
 	"${R_NEWTON_DIR}/zones"
 	"${R_NEWTON_DIR}/approve.key"
+	"${R_NEWTON_DIR}/pending"
+	"${R_NEWTON_DIR}/failed"
+	"${R_NEWTON_DIR}/boot_attempts"
+	"${R_NEWTON_DIR}/restore_attempts"
+	"${R_NEWTON_DIR}/lkg/"
+	"${R_NEWTON_DIR}/quarantine/"
 )
 
 # The G0 tool names of design 9.4 the check action probes with command -v.
@@ -5515,9 +5592,11 @@ prove_restricted_key() {
 # Contract: install_restore -- the failure path of 3.2: restores every
 # entry of INSTALL_REPLACED that has a .prev (`cp -p REMOTE.prev
 # REMOTE.new`, chmod 755, mv); runs hello_direct again with a fresh
-# nonce and sets STATE_NOTE to say which files were restored, or that
-# no .prev existed (first install) and the broken file is still on the
-# router, with the hello result; the WAN-health extras (rotate=yes,
+# nonce and sets STATE_NOTE to say which files were restored and which
+# replaced files had no .prev (the guard and its init never keep one, so
+# their new version stays even when the program is put back), or, when
+# nothing was restored, which files had no .prev and stay new, with the
+# hello result; the WAN-health extras (rotate=yes,
 # R9b+c) follow the same path: when the file already existed (upgrade)
 # a .prev was made and is copied back, when it did not (first install)
 # it is stopped, disabled and rm -f'd (each step checked) so the router is
@@ -5573,8 +5652,11 @@ install_restore() {
 	fi
 	if [[ -n "$restored" ]]; then
 		STATE_NOTE="restored from .prev: ${restored% }; hello after restore: ${hello}"
+		if [[ -n "$no_prev" ]]; then
+			STATE_NOTE+="; kept new (no .prev): ${no_prev% }"
+		fi
 	elif [[ -n "$no_prev" ]]; then
-		STATE_NOTE="no .prev existed (first install); the broken file is still on the router; hello: ${hello}"
+		STATE_NOTE="no .prev for ${no_prev% }: the new version stays on the router; hello: ${hello}"
 	elif [[ -n "$extras_to_remove" && $((stop_failed + disable_failed + remove_failed)) -eq 0 ]]; then
 		STATE_NOTE="removed the wan-health extras: ${extras_to_remove% }; hello after restore: ${hello}"
 	elif [[ -n "$extras_to_remove" ]]; then
@@ -5622,10 +5704,11 @@ swap_prepare() {
 
 # Contract: swap_router_done -- no arguments; exit 0 only when a fresh
 # hello_key with KEYFILE has caller=$LABEL role=change door=ssh mode=prod,
-# AND rsh_key with PLAIN_KEY running `true` </dev/null exits 255 (the plain
-# key is refused); anything else exit 1. No password is involved.
+# AND swap_old_key_refused returns 0 (ssh reported that the router refused
+# the plain key; a dropped link is not a refusal); anything else exit 1.
+# No password is involved.
 swap_router_done() {
-	local nonce reply rc
+	local nonce reply
 	nonce=$(new_nonce)
 	reply=$(hello_key "$KEYFILE" "$nonce" </dev/null 2>/dev/null) || return 1
 	if [[ "$(hello_field "$reply" caller 2>/dev/null)" != "$LABEL" \
@@ -5634,9 +5717,7 @@ swap_router_done() {
 		|| "$(hello_field "$reply" mode 2>/dev/null)" != "prod" ]]; then
 		return 1
 	fi
-	rsh_key "$PLAIN_KEY" true </dev/null 2>/dev/null
-	rc=$?
-	[[ $rc -eq 255 ]] || return 1
+	swap_old_key_refused || return 1
 	return 0
 }
 

@@ -210,6 +210,37 @@ def test_uninstall_idempotent(setup_env):
     assert env.router.snapshot() == before
 
 
+# -- 4b. a cut link in step 1 keeps the restore advice ------------------
+
+def test_uninstall_cut_after_the_key_removal_keeps_the_restore_advice(setup_env):
+	"""The router removed the Newton key line but the link dropped before
+	the answer came back: the run prints the restore command for every key
+	the router listed (with a warning that they may be gone already), and
+	a second run, which finds no Newton key line, says where the labels
+	are still named."""
+	env = setup_env
+	install_ok(env)
+	assert _run(env, "add-key", "--new-key", "newton-agent", "change").rc == 0
+	env.router.update_state(die_after_commands=['print "removed_key="'])
+	r = _run(env, "uninstall")
+	assert r.rc == 1, r.out + r.err
+	assert r.out.splitlines()[-1] == "STOPPED uninstall r1: uninstall step 1 failed"
+	assert env.router.authorized_keys() == []
+	restore = ("sudo -u newton /usr/local/bin/newton-router-setup r1 "
+	           "add-key newton-agent change")
+	assert any(l.startswith("WARN ") and "may already be removed" in l
+	           for l in r.out.splitlines()), r.out
+	assert any(restore in l for l in r.out.splitlines()), r.out
+
+	env.router.update_state(die_after_commands=[])
+	r2 = _run(env, "uninstall")
+	assert r2.rc == 0, r2.out + r2.err
+	assert ("NOTE no Newton key line was on the router; if an earlier "
+	        "uninstall was cut off, the key files in %s name the labels it "
+	        "removed (re-add one with add-key LABEL ROLE)" % env.keys_dir
+	        ) in r2.out.splitlines(), r2.out
+
+
 # -- 5a. uninstall refused by a pending guard ------------------------------
 
 def test_uninstall_refused_pending_guard(setup_env, tmp_path):

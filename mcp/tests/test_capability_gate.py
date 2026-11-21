@@ -251,14 +251,12 @@ def test_mv1_3_01_device_tool_refuses_vyos_before_any_process(
 def test_mv1_3_02_guided_audit_refuses_vyos_before_openwrt_reads(
     capability_lab: _GateLab,
 ) -> None:
-    """No OpenWrt audit getter may run on another platform."""
+    """No OpenWrt audit getter may run on another platform: the guided audit
+    is not in the vendor tool set, so the capability gate refuses it."""
     result = server.newton_guided_audit(device="vy1")
 
     assert result == {
-        "error": (
-            "newton_guided_audit on platform vyos needs audit getters, "
-            "which are not built yet"
-        )
+        "error": "newton_guided_audit is not available for platform vyos"
     }
     assert capability_lab.calls == []
 
@@ -447,7 +445,6 @@ def test_mv1_3_06_registry_declares_experimental_read_only_platforms() -> None:
         "newton_list_getters",
         "newton_get_state",
         "newton_guided_recommend",
-        "newton_guided_audit",
     }
     openwrt = registry.capabilities("openwrt")
     assert openwrt.writes is True
@@ -552,10 +549,7 @@ def test_mv1_3_08_real_inventory_reaches_the_capability_gate(
 
     audit = server.newton_guided_audit(device="vy1")
     assert audit == {
-        "error": (
-            "newton_guided_audit on platform vyos needs audit getters, "
-            "which are not built yet"
-        )
+        "error": "newton_guided_audit is not available for platform vyos"
     }
     assert real_capability_lab.calls == []
 

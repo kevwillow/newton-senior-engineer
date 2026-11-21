@@ -30,7 +30,7 @@ def update(tmp_path, new_text=NEW, typed=None, prefix=""):
     fr = FakeRoot(tmp_path)
     boot = fr.install_bootstrap()
     cid, _ = make_repo(fr.stage / "src", files={"scripts/newton-bootstrap": new_text})
-    typed = "update " + cid[:12] if typed is None else typed
+    typed = "update " + cid if typed is None else typed
     cmd = f"{prefix}{boot} self-update /src {cid}; {SHOW}"
     rc, out, err = fr.run(["bash", "-c", cmd], env=ENV, tty_input=typed + "\n")
     return cid, rc, out, err
@@ -143,7 +143,7 @@ def test_crash_between_write_and_rename_leaves_the_old_bootstrap_working(tmp_pat
     fr = FakeRoot(tmp_path)
     boot = fr.install_bootstrap()
     cid, _ = make_repo(fr.stage / "src", files={"scripts/newton-bootstrap": NEW})
-    typed = "update " + cid[:12]
+    typed = "update " + cid
     cmd = f"{PREFIX_6}{boot} self-update /src {cid}; {SHOW}; {INST} version"
     rc, out, err = fr.run(["bash", "-c", cmd], env=ENV, tty_input=typed + "\n")
     h_old = hashlib.sha256(OLD.encode()).hexdigest()
@@ -166,7 +166,7 @@ def test_second_update_keeps_the_latest_previous_copy(tmp_path):
     cid_a, _ = make_repo(fr.stage / "src", files={"scripts/newton-bootstrap": NEW})
     new_b = NEW + "# v3\n"
     cid_b, _ = make_repo(fr.stage / "src2", files={"scripts/newton-bootstrap": new_b})
-    typed = f"update {cid_a[:12]}\nupdate {cid_b[:12]}\n"
+    typed = f"update {cid_a}\nupdate {cid_b}\n"
     cmd = f"{boot} self-update /src {cid_a}; {boot} self-update /src2 {cid_b}; {SHOW}"
     rc, out, err = fr.run(["bash", "-c", cmd], env=ENV, tty_input=typed)
 
@@ -187,3 +187,19 @@ def test_second_update_keeps_the_latest_previous_copy(tmp_path):
         "newton-bootstrap.prev",
         "newton-bootstrap.source",
     ]
+
+
+@pytest.mark.parametrize("full", [False, True])
+def test_update_confirmation_is_the_full_id(tmp_path, full):
+    fr = FakeRoot(tmp_path)
+    boot = fr.install_bootstrap()
+    cid, _ = make_repo(fr.stage / "src", files={"scripts/newton-bootstrap": NEW})
+    typed = "update " + (cid if full else cid[:12])
+    cmd = f"{boot} self-update /src {cid}; {SHOW}"
+    rc, out, err = fr.run(["bash", "-c", cmd], env=ENV, tty_input=typed + "\n")
+    assert "full 40 hex" in err, err
+    if full:
+        assert "rc=0" in out.splitlines(), (out, err)
+    else:
+        assert "rc=1" in out.splitlines(), (out, err)
+        assert "confirmation did not match" in err, err

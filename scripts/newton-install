@@ -143,6 +143,13 @@ INSTALL_PYTHON_FOUND=
 # top-level assignments, re-aimable by a sourcing test.
 BOOTSTRAP_DEST=/usr/local/sbin/newton-bootstrap
 BOOTSTRAP_SOURCE=/usr/local/sbin/newton-bootstrap.source
+# 1 while the plain mode installs the bootstrap after the rest of
+# Newton: a failure then makes the EXIT trap say that Newton is
+# installed but the bootstrap is not.
+BOOTSTRAP_PENDING=0
+# 1 when perform_install leaves the closing text to its caller: the
+# plain mode prints it only after the bootstrap is installed too.
+INSTALL_CLOSING_DEFERRED=0
 
 # The Claude Code managed-settings guard.
 #
@@ -197,13 +204,20 @@ cleanup() {
 	if (( CODE_ROOT_PENDING )); then
 		rm -rf -- "$CODE_ROOT" || true
 		if [[ -n ${CODE_ROOT_BACKUP:-} ]]; then
-			mv -T -- "$CODE_ROOT_BACKUP" "$CODE_ROOT" || true
-			printf 'WARNING: previous installation was restored after a failed upgrade\n' >&2
+			if mv -T -- "$CODE_ROOT_BACKUP" "$CODE_ROOT"; then
+				printf 'WARNING: previous installation was restored after a failed upgrade\n' >&2
+			else
+				printf 'ERROR: the upgrade failed and the previous installation could not be moved back; it should be in %s: move it to %s as root\n' "$CODE_ROOT_BACKUP" "$CODE_ROOT" >&2
+			fi
 		else
 			printf 'WARNING: this install failed before completion; no Newton code was installed, but the newton user, group and home %s may already exist (a run after the fix reuses them)\n' "${NEWTON_HOME:-/var/lib/newton}" >&2
 		fi
 		CODE_ROOT_PENDING=0
 		CODE_ROOT_BACKUP=
+	fi
+	if (( BOOTSTRAP_PENDING )); then
+		printf 'ERROR: Newton was installed but newton-bootstrap was not; remove %s if it is there and run this installer again\n' "$BOOTSTRAP_DEST" >&2
+		BOOTSTRAP_PENDING=0
 	fi
 	if [[ -n ${WORK:-} ]]; then
 		rm -rf -- "$WORK"
@@ -611,7 +625,7 @@ confirm_install() {
 # machine.  Only the exact word "lock" sets the guard; anything else,
 # or the end of the input, skips it and says how to set it later.
 ask_managed_settings() {
-	local answer='' file=${MANAGED_SETTINGS:-/etc/claude-code/managed-settings.json}
+	local answer='' how='' file=${MANAGED_SETTINGS:-/etc/claude-code/managed-settings.json}
 	printf '%s\n' 'Optional: lock Claude Code on this machine to system hooks only (allowManagedHooksOnly).'
 	printf '%s\n' "Yes: no tool can add a hook that answers Newton's approval dialog. Your own Claude Code hooks stop running."
 	printf '%s\n' "No: your hooks keep working. Each approval still needs your passphrase or authenticator code."
@@ -623,8 +637,16 @@ ask_managed_settings() {
 		return 0
 	fi
 	MANAGED_SETTINGS_LOCK=0
-	printf 'The Claude Code managed settings guard was not set. newton-doctor will report managed-settings-guard as INCONCLUSIVE; to set it later, as root, add the line "allowManagedHooksOnly": true to %s.\n' \
-		"$file"
+	# The advice must leave valid JSON behind: a line added to a missing
+	# file or to one that is not JSON is not a settings object.
+	if [[ ! -e $file && ! -L $file ]]; then
+		how="as root, create $file with this content: $MANAGED_SETTINGS_CONTENT"
+	elif [[ -f $file && -r $file && $(managed_settings_state "$file") == invalid ]]; then
+		how="as root, replace the content of $file, which is not valid JSON, with: $MANAGED_SETTINGS_CONTENT"
+	else
+		how="as root, add the line \"allowManagedHooksOnly\": true to $file."
+	fi
+	printf 'The Claude Code managed settings guard was not set. newton-doctor will report managed-settings-guard as INCONCLUSIVE; to set it later, %s\n' "$how"
 	return 0
 }
 
@@ -1274,6 +1296,15 @@ EOF
 		install_managed_settings
 	fi
 
+	if (( INSTALL_CLOSING_DEFERRED == 0 )); then
+		print_install_closing
+	fi
+}
+
+# The closing text of an install or update: the success line and the
+# steps that follow it.  perform_install prints it, except in the plain
+# mode, which prints it after the bootstrap is installed as well.
+print_install_closing() {
 	if (( INSTALL_IS_UPDATE )); then printf 'Newton updated successfully.\n'; fi
 	(( INSTALL_IS_UPDATE )) || printf 'Newton installed successfully.\n'
 	printf 'Run the isolation check yourself, in your own terminal as the agent user: %s --router root@<router-ip>\n' "$DOCTOR_LAUNCHER"
@@ -1286,14 +1317,14 @@ EOF
 }
 
 # The steps that finish an update (docs/INSTALL.md, "Later updates"):
-# the running server keeps the old code in memory, and an installed
+# the running server must not be used until it is restarted, and an installed
 # router keeps the old router program until its upgrade.  The held
 # changes come first, and the bootstrap says so before its prompt.
 print_update_steps() {
 	cat <<EOF
 
 To finish the update:
-  1. Restart Claude Code, or run /mcp and reconnect newton, so the new server runs (the old one keeps the old code in memory).
+  1. Restart Claude Code, or run /mcp and reconnect newton, so the new server runs. Do not use Newton until you have: the running server has its old code loaded but reads the new files from disk, so a call before the restart can run a mix of the two.
   2. For each router in the installed mode, run: sudo -u newton $SETUP_LAUNCHER <device> upgrade
      (a no-install router needs nothing).
 A change that was held during the update cannot be confirmed by the new server; it rolls back when its timer ends.
@@ -1412,11 +1443,13 @@ install_managed_settings() {
 		fi
 		if [[ $state == invalid ]]; then
 			printf 'WARNING: %s is not valid JSON; it was left untouched (Newton never overwrites it).\n' "$file" >&2
+			printf 'Replace its content with this, as root:\n' >&2
+			printf '  %s\n' "$MANAGED_SETTINGS_CONTENT" >&2
 		else
 			printf 'WARNING: %s does not set "allowManagedHooksOnly": true; it was left untouched (Newton never overwrites it).\n' "$file" >&2
+			printf 'Add this line to %s yourself:\n' "$file" >&2
+			printf '  "allowManagedHooksOnly": true\n' >&2
 		fi
-		printf 'Add this line to %s yourself:\n' "$file" >&2
-		printf '  "allowManagedHooksOnly": true\n' >&2
 		printf "Until you do, an agent can add a Claude Code hook that answers Newton's approval dialog for you.\n" >&2
 		return 0
 	fi
@@ -1728,8 +1761,12 @@ EOF
 		printf 'ERROR: newton-bootstrap is already installed; use: newton-bootstrap install <repo> <commit id> (to reinstall the bootstrap itself, remove the file first)\n' >&2
 		exit 1
 	fi
+	INSTALL_CLOSING_DEFERRED=1
 	perform_install
+	BOOTSTRAP_PENDING=1
 	install_bootstrap
+	BOOTSTRAP_PENDING=0
+	print_install_closing
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

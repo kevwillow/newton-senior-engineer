@@ -2951,13 +2951,13 @@ cmd_confirm() {
 	guard_status
 	# shellcheck disable=SC2086  # word split for the three words of guard status
 	set -- $G_LINE
-	[ "${1-}" = pending ] && [ "${2-}" = "$sid" ] || fail too-late 3
+	[ "${1-}" = pending ] && [ "${2-}" = "$sid" ] || fail too-late 3 guard-not-pending
 	guard_left=${3-}
 	case "$guard_left" in
-		''|*[!0-9]*) fail too-late 3 ;;
+		''|*[!0-9]*) fail too-late 3 guard-window-unreadable ;;
 	esac
-	[ "$guard_left" -ge 5 ] || fail too-late 3
-	[ "$(( rpcd_dl - UP_NOW ))" -ge 5 ] || fail too-late 3
+	[ "$guard_left" -ge 5 ] || fail too-late 3 guard-window-short
+	[ "$(( rpcd_dl - UP_NOW ))" -ge 5 ] || fail too-late 3 rpcd-window-short
 	LOST=0
 	if "$UBUS" call uci confirm "{\"ubus_rpc_session\":\"$sid\"}" >/dev/null 2>&1; then
 		printf '%s\n' ok > "$txn/rpcd-confirmed"
@@ -2983,13 +2983,13 @@ cmd_confirm() {
 					crash_point
 					LOST=1
 				else
-					fail rpcd-confirm-failed 1 "$rc"
+					fail rpcd-confirm-failed 1 "$rc" hash-mismatch
 				fi
 			else
-				fail rpcd-confirm-failed 1 "$rc"
+				fail rpcd-confirm-failed 1 "$rc" hash-unreadable
 			fi
 		else
-			fail rpcd-confirm-failed 1 "$rc"
+			fail rpcd-confirm-failed 1 "$rc" not-lost
 		fi
 	fi
 	gout=$("$GUARD" confirm "$sid" </dev/null 2>/dev/null)

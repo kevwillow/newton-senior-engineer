@@ -3634,13 +3634,32 @@ def test_handshake_refuses_device_mismatch(protocol):
 def test_handshake_refuses_profile_mismatch(protocol):
     set_router_state(protocol, hello_overrides={"profile": "lab"})
     result = run_status(protocol, extra_env={"OWRT_EXPECT_PROFILE": "prod",
-                                             "OWRT_EXPECT_DEVICE": "lab-r1"})
+                                             "OWRT_EXPECT_DEVICE": "lab-r1",
+                                             "NEWTON_INVENTORY": "/srv/inv/devices.toml"})
     assert_hello_only(
         protocol,
         result,
         "router profile=lab is not the expected prod, the inventory profile; "
-        "change profile in devices.toml or run: "
+        "change profile in /srv/inv/devices.toml (owned by the newton account; "
+        "edit it with sudo -u newton) or run: "
         "sudo -u newton newton-router-setup lab-r1 profile prod",
+    )
+
+
+def test_handshake_profile_mismatch_names_the_default_inventory(protocol):
+    set_router_state(protocol, hello_overrides={"profile": "lab"})
+    env = {"OWRT_EXPECT_PROFILE": "prod", "OWRT_EXPECT_DEVICE": "lab-r1"}
+    saved = protocol["env"].pop("NEWTON_INVENTORY", None)
+    try:
+        result = run_status(protocol, extra_env=env)
+    finally:
+        if saved is not None:
+            protocol["env"]["NEWTON_INVENTORY"] = saved
+    assert_hello_only(
+        protocol,
+        result,
+        "change profile in /var/lib/newton/devices.toml (owned by the newton "
+        "account; edit it with sudo -u newton) or run:",
     )
 
 

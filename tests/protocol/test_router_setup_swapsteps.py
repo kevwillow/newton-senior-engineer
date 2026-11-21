@@ -189,7 +189,7 @@ def test_swap_recover_says_so_when_the_file_is_not_the_prev(router_unit):
 	router = router_unit.router
 	# the plain key works at once, and there is no prev (or a different one)
 	router.write(PREV, "something else entirely\n", 0o600)
-	r = router_unit.run("ACTION=swap-key\nswap_recover\n")
+	r = router_unit.run("ACTION=swap-key\nswap_recover %s\n" % SWAP_NONCE)
 	assert r.returncode == 1
 	lines = r.stdout.splitlines()
 	assert any(l.startswith("NOTE state:") and "differs" in l for l in lines), lines
@@ -206,7 +206,7 @@ def test_swap_recover_waits_for_deadman_when_plain_key_already_works(router_unit
 	r = router_unit.run(
 		"ACTION=swap-key\n"
 		"swap_start_deadman 0123456789abcdef0123456789abcdef\n"
-		"swap_recover\n"
+		"swap_recover 0123456789abcdef0123456789abcdef\n"
 	)
 	assert r.returncode == 1
 	assert "NOTE state: restored by the dead-man switch; the old key works again" in r.stdout
@@ -231,3 +231,75 @@ def test_swap_replace_leaves_the_live_file_mode_600(router_unit):
 	assert r.stdout.splitlines()[-1] == "rc=0"
 	assert (router.path(AK).stat().st_mode & 0o777) == 0o600
 	assert not router.path(AK + ".new").exists()
+
+
+# A step-6 hello whose answer is lost after the router recorded
+# nonce2 leaves the swap in place (the dead-man switch finds its proof
+# line), so the recovery must notice that the new key works instead of
+# waiting 120 s for a restore that never comes and saying NOT restored
+
+def test_swap_recover_goes_on_when_the_new_key_works(router_unit):
+	keyfile, _ = _hand_swap(router_unit)
+	r = router_unit.run(
+		"ACTION=swap-key\nLABEL=newton-agent\nKEYFILE=%s\nswap_prepare\n"
+		"swap_recover %s; echo rc=$?\n" % (keyfile, SWAP_NONCE))
+	assert r.returncode == 0, (r.stdout, r.stderr)
+	lines = r.stdout.splitlines()
+	assert lines[-1] == "rc=0", lines
+	assert not any(l.startswith("STOPPED") for l in lines)
+	assert router_unit.router.clock() < 120
+	# the proof went out with nonce2, so a pending dead-man switch finds it
+	hello = router_unit.router.read("tmp/newton/hello")
+	assert any(l.startswith(SWAP_NONCE + " ") for l in hello.splitlines())
+
+
+def test_swap_recover_still_stops_when_the_new_key_lies(router_unit):
+	keyfile, _ = _hand_swap(router_unit)
+	router_unit.router.write("etc/newton/fixture-lie", "caller=somebody-else\n")
+	r = router_unit.run(
+		"ACTION=swap-key\nLABEL=newton-agent\nKEYFILE=%s\nswap_prepare\n"
+		"swap_recover %s; echo rc=$?\n" % (keyfile, SWAP_NONCE))
+	assert r.returncode == 1
+	assert r.stdout.splitlines()[-1] == (
+		"STOPPED swap-key r1: the new key was not proven in time")
+
+
+def test_swap_settle_rides_out_one_dropped_call(router_unit):
+	keyfile, _ = _hand_swap(router_unit)
+	# the first hello after the 95 s wait meets a dropped link
+	router_unit.router.update_state(drop_once=["hello "])
+	assert _confirm(router_unit, keyfile, "swap_settle; echo rc=$?\n") == "rc=0"
+	assert router_unit.router.state()["drop_once"] == []
+
+
+# An exit 255 is a refusal only when ssh says the login was
+# refused; a dropped link is not proof that the plain key stopped working
+
+def test_swap_old_key_refused_needs_a_real_refusal(router_unit):
+	# the plain key still works, but the link drops on the check
+	router_unit.router.update_state(drop_commands=["true"])
+	r = router_unit.run("swap_old_key_refused; echo rc=$?\n")
+	assert r.returncode == 0, r.stderr
+	assert r.stdout.splitlines()[-1] == "rc=2"
+
+
+def test_swap_old_key_refused_passes_on_a_refused_login(router_unit):
+	router = router_unit.router
+	lines = [l for l in router.authorized_keys() if PLAIN_BLOB not in l]
+	router.write(AK, "\n".join(lines) + ("\n" if lines else ""), 0o600)
+	r = router_unit.run("swap_old_key_refused; echo rc=$?\n")
+	assert r.stdout.splitlines()[-1] == "rc=0"
+
+
+def test_swap_old_key_refused_says_when_the_plain_key_works(router_unit):
+	r = router_unit.run("swap_old_key_refused; echo rc=$?\n")
+	assert r.stdout.splitlines()[-1] == "rc=1"
+
+
+def test_swap_router_done_needs_a_real_refusal(router_unit):
+	keyfile, _ = _hand_swap(router_unit)
+	# the plain line is back and the link drops on the plain-key check
+	router_unit.router.add_authorized_key(
+		"ssh-ed25519 %s agent@unit" % PLAIN_BLOB)
+	router_unit.router.update_state(drop_commands=["true"])
+	assert _already(router_unit, keyfile, keyfile) == "rc=1"

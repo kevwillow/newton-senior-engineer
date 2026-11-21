@@ -589,6 +589,28 @@ def test_scan_approval_names_a_damaged_fingerprint_file(tmp_path, monkeypatch, c
     assert not (tmp_path / "state" / "scan-consents" / f"{REQUEST_ID}.json").exists()
 
 
+def test_an_installed_scan_approval_names_the_router_setup_launcher(
+    tmp_path, monkeypatch, capsys
+):
+    """A scan whose router has no fingerprint on an installed Newton names
+    the sudo form of the installed newton-router-setup."""
+    _write_inventory(tmp_path, monkeypatch, vantages=(("outside-a", "outside"),))
+    _write_request(tmp_path, _request())
+    monkeypatch.setenv("NEWTON_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(approve, "_getpass", lambda prompt: "synthetic scan approval phrase")
+    monkeypatch.setattr(
+        approve.sys, "stdin", TerminalInput(f"approve {REQUEST_ID[:8]}\n")
+    )
+
+    assert approve.main([REQUEST_ID]) == 1
+    err = capsys.readouterr().err
+    assert (
+        "run sudo -u newton /usr/local/bin/newton-router-setup router approval-key first; "
+        "consent not created"
+    ) in err
+    assert not (tmp_path / "state" / "scan-consents" / f"{REQUEST_ID}.json").exists()
+
+
 def test_scan_approval_fails_closed_on_an_unknown_fingerprint_answer(tmp_path, monkeypatch, capsys):
     _write_inventory(tmp_path, monkeypatch, vantages=(("outside-a", "outside"),))
     _write_request(tmp_path, _request())
@@ -1062,3 +1084,128 @@ def test_a_timed_out_scan_keeps_its_partial_bytes_output(tmp_path, monkeypatch):
     assert result["result"] == "incomplete"
     assert result["host_count"] == 1
     assert result["port_count"] == 1
+
+
+# ---- every scan consent refusal names its cause and the next step ----
+
+CONSENT_NEXT = "plan a new scan request and ask the owner to approve it again"
+
+
+def _consent_consent(tmp_path: Path, change) -> tuple[Path, dict[str, object]]:
+    record = _request()
+    record["id"] = REQUEST_ID
+    path = _write_consent(tmp_path, record)
+    value = json.loads(path.read_text())
+    change(value, path)
+    if path.exists():
+        path.write_text(json.dumps(value) if isinstance(value, dict) else value)
+    return tmp_path / "state", record
+
+
+def _consent_raw(text: str):
+    def change(value: dict[str, object], path: Path) -> None:
+        value.clear()
+        path.write_text(text)
+    return change
+
+
+def _consent_set(key: str, new: object):
+    def change(value: dict[str, object], path: Path) -> None:
+        if new is _CONSENT_DROP:
+            del value[key]
+        else:
+            value[key] = new
+    return change
+
+
+_CONSENT_DROP = object()
+
+
+def _consent_window(minutes: int):
+    def change(value: dict[str, object], path: Path) -> None:
+        created = datetime.fromisoformat(str(value["created_at"]))
+        value["expires_at"] = (created + timedelta(minutes=minutes)).isoformat()
+    return change
+
+
+@pytest.mark.parametrize(
+    ("change", "cause"),
+    [
+        (_consent_set("extra", 1), "fields"),
+        (_consent_set("approved_by", 7), "approver"),
+        (_consent_set("created_at", "not a time"), "times"),
+        (_consent_window(31), "window"),
+        (_consent_set("request_id", "f" * 32), "does not match this request"),
+        (_consent_set("request_hash", "0" * 64), "does not match this request"),
+        (_consent_set("device", "other"), "different device"),
+    ],
+)
+def test_consent_a_refused_scan_consent_names_its_cause_and_the_next_step(
+    tmp_path, change, cause
+):
+    state, record = _consent_consent(tmp_path, change)
+
+    with pytest.raises(scans.ScanError) as refusal:
+        scans.consume_consent(state, record, "router")
+
+    message = str(refusal.value)
+    assert cause in message
+    assert CONSENT_NEXT in message
+
+
+def test_consent_an_unreadable_scan_consent_names_the_next_step(tmp_path):
+    state, record = _consent_consent(tmp_path, lambda value, path: None)
+    scans.consent_path(state, REQUEST_ID).write_text("{not json")
+
+    with pytest.raises(scans.ScanError) as refusal:
+        scans.consume_consent(state, record, "router")
+
+    message = str(refusal.value)
+    assert "cannot be read" in message
+    assert CONSENT_NEXT in message
+
+
+def test_consent_the_five_invalid_causes_have_five_messages(tmp_path):
+    messages = set()
+    for index, change in enumerate(
+        [
+            _consent_set("extra", 1),
+            _consent_set("approved_by", 7),
+            _consent_set("created_at", "not a time"),
+            _consent_window(31),
+        ]
+    ):
+        state, record = _consent_consent(tmp_path / str(index), change)
+        with pytest.raises(scans.ScanError) as refusal:
+            scans.consume_consent(state, record, "router")
+        messages.add(str(refusal.value))
+    state, record = _consent_consent(tmp_path / "raw", lambda value, path: None)
+    scans.consent_path(state, REQUEST_ID).write_text("{not json")
+    with pytest.raises(scans.ScanError) as refusal:
+        scans.consume_consent(state, record, "router")
+    messages.add(str(refusal.value))
+
+    assert len(messages) == 5
+
+
+@pytest.mark.parametrize("where", ["before", "race"])
+def test_consent_a_used_scan_consent_names_the_next_step(tmp_path, monkeypatch, where):
+    state, record = _consent_consent(tmp_path, lambda value, path: None)
+    path = scans.consent_path(state, REQUEST_ID)
+    if where == "before":
+        path.with_suffix(".used").write_text("{}")
+    else:
+        real_replace = os.replace
+
+        def raced(source, target):
+            real_replace(source, target)
+            raise FileNotFoundError(source)
+
+        monkeypatch.setattr(scans.os, "replace", raced)
+
+    with pytest.raises(scans.ScanError) as refusal:
+        scans.consume_consent(state, record, "router")
+
+    message = str(refusal.value)
+    assert "already used" in message
+    assert CONSENT_NEXT in message

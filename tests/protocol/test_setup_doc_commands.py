@@ -434,7 +434,10 @@ def test_refused_password_router_needs_the_admin_key_on_every_later_action(doc, 
     text = doc.read_text(encoding="utf-8")
     part = " ".join(text[text.index(start):text.index(end)].split())
     assert "every later setup command" in part, part
-    assert "--admin plain-key --plain-key <your admin key>" in part, part
+    assert "--admin plain-key --plain-key <admin key>" in part, part
+    # the commands run as newton, so the key must be one newton can read
+    assert "account can read" in part, part
+    assert "/var/lib/newton/.ssh/admin" in part, part
     assert "check still reports the refused password login as a FAIL" in part, part
 
 
@@ -574,3 +577,20 @@ def test_setup_clients_desktop_entry_says_it_is_unsupported():
     assert "same machine" not in section, section
     assert "cannot start the server" in section, section
     assert "not supported" in section, section
+
+
+# ---- the router append survives an inventory without a final newline ----
+
+@pytest.mark.parametrize("doc", [SETUP, INSTALL], ids=["SETUP", "INSTALL"])
+def test_router_inventory_append_survives_an_inventory_without_a_final_newline(doc, tmp_path):
+    """The owner hand-edited devices.toml and saved it without a final
+    newline: step 7b must still put the new table on a line of its own."""
+    inv = tmp_path / "devices.toml"
+    inv.write_text('[devices.other]\nplatform = "openwrt"\nhost = "192.0.2.9"\nuser = "root"')
+    block = _inventory_block(doc).replace("<name>", "router1").replace("<router-ip>", "192.0.2.1")
+    for _ in range(2):
+        _run_append(block, inv, tmp_path)
+    data = tomllib.loads(inv.read_text())
+    assert set(data["devices"]) == {"other", "router1"}
+    assert data["devices"]["other"]["user"] == "root"
+    assert inv.read_text().count("[devices.router1]") == 1

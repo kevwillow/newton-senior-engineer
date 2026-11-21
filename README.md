@@ -27,7 +27,7 @@ part below holds only in the modes it names:
 
 - **The undo is armed on the device before it writes.** On an OpenWrt router a timer on the router puts the settings back when a check fails or the change is not confirmed in time, so it still fires if the agent, its session or your PC goes away. In the **installed** mode the undo also survives a reboot: Newton's guard on the router's flash puts the last good settings back at boot. When the guard, not rpcd, puts a change back while the router keeps running, the files go back but running firewall, network and rpcd settings can stay changed until a reboot, so check the router or reboot it. In the **no-install** mode it is OpenWrt's own rpcd timer, which lives in the router's RAM, so a router that reboots, or whose web service restarts, in the middle of a change keeps the change. On Active Directory the domain controller arms its own undo before it writes, for every change but an unlock, which has nothing to put back. One undo can fail: a new user whose ID the domain controller did not record stays written, recorded as `undo_failed` (the details are under [Active Directory](#active-directory)).
 - **A check from a client can roll a change back.** A router change is kept only after fresh connections prove the network still works. In the **installed** mode a plan can also claim what a client in a zone sees (DNS, DHCP, the internet, an address that must stay blocked), checked from a client machine you register as a vantage; a check that fails, or cannot run, stops the confirm and the router rolls the change back. Client checks have run in the virtual lab only, and Newton notices only the breaks its checks test for.
-- **Your approval is bound to the exact change and the state it was planned against.** In the **installed** mode the router itself checks the approval against the plan's digest, which covers the router's settings at plan time, the change and its checks, and refuses the apply if any of them changed; it does so on a router set to the prod profile (the default) or for a change Newton always asks about, while a router set to lab skips that check by design and only the Newton host checks the approval. In the **no-install** mode Newton reads the settings the change touches again just before the write and stops if they changed. On Active Directory the domain controller checks the approval itself.
+- **Your approval is bound to the exact change and the state it was planned against.** In the **installed** mode the router refuses the apply on every profile if its settings, the change or its checks changed since the plan. On a router set to the prod profile (the default), or for a change Newton always asks about, the router itself checks the approval against the plan's digest, which covers the router's settings at plan time, the change and its checks; a router set to lab skips only the approval-token check, by design, and there only the Newton host checks the approval. In the **no-install** mode Newton reads the settings the change touches again just before the write and stops if they changed. On Active Directory the domain controller checks the approval itself.
 - **An honest unknown instead of an invented success.** When Newton cannot tell what happened, because the connection dropped in the middle of an apply for example, it says the outcome is unknown and how to read the status, on a router in either mode and on Active Directory.
 
 Newton is an operational skill for an AI agent plus an MCP server (`newton-mcp`). Both speak the same change protocol, so
@@ -76,19 +76,19 @@ What Newton puts on your router
 Newton's executable code is a small set of POSIX shell scripts; it also writes the configuration and service entries listed below.
 No package is installed and nothing is compiled: about 218 KB of shell in 6 files.
 
-  /usr/libexec/newton/newton-router     148 KB  the program Newton talks to
+  /usr/libexec/newton/newton-router     149 KB  the program Newton talks to
   /usr/libexec/newton/newton-safe-apply   25 KB  the change helper
   /usr/libexec/newton-guard              32 KB  the rollback guard
   /etc/init.d/newton-guard               525 B  starts the guard at boot
   /usr/libexec/newton/newton-wan-health   12 KB  the dual-WAN health check
-  /etc/init.d/newton-wan-health          641 B  starts the health check
+  /etc/init.d/newton-wan-health          846 B  starts the health check
 
 It also writes the device name, the profile and the zones under /etc/newton
 (and, once you pick an approval passphrase, the approval key), the WAN-health
 settings in /etc/config/newton_wanhealth, the boot links
 /etc/rc.d/S09newton-guard, /etc/rc.d/S95newton-wan-health and
 /etc/rc.d/K10newton-wan-health, and
-13 lines in /etc/sysupgrade.conf, so a firmware upgrade
+19 lines in /etc/sysupgrade.conf, so a firmware upgrade
 keeps them. The guard service runs at boot; the WAN-health check stays idle
 until you set newton_wanhealth.main.enabled=1 and list the WAN interfaces
 (iface) and the probe targets (target) it watches. One more line goes into
@@ -163,13 +163,13 @@ approval passphrase there. On a router in the installed mode you can also scan a
 and approve with 6-digit codes instead; the setup offers the codes on installed-mode routers only. Last, the agent runs a
 read-only checkup.
 
-Prerequisites: Linux with `sudo`, `git`, an SSH client, Python 3 with `venv` (Debian/Ubuntu:
+Prerequisites: Linux with `sudo`, `git`, an SSH client, Python 3.11 to 3.14 as `/usr/bin/python3` with its `venv` module (Debian/Ubuntu:
 `sudo apt install python3-venv`) and Claude Code's `claude` command on your PATH. `qrencode` is optional: it shows
 the authenticator QR code. Prefer to do it by hand? See [Manual install](docs/INSTALL.md).
 
 Updating: every install after the first goes through `/usr/local/sbin/newton-bootstrap`, from a root shell:
 `newton-bootstrap install <repo> <40-hex-commit-id>`. It checks the commit itself and asks you to type `install `
-and the first 12 hex characters of the id. [Manual install](docs/INSTALL.md) has the steps.
+and the full 40-hex id. [Manual install](docs/INSTALL.md) has the steps.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![OpenWrt 25.12](https://img.shields.io/badge/OpenWrt-25.12-00B5E2)](#supported-devices)
@@ -253,7 +253,7 @@ with no recorded run on a real router.
 - ◇ An abort of a change that was already confirmed is refused and points to `newton_plan_undo`, instead of reporting success while the change stays live. When the router no longer knows the session, Newton asks for its status and records a rollback only when the router says it rolled back; otherwise it says the outcome is not known.
 
 **Approvals you control**
-- ✓ An approval dialog in Claude Code, asking for your passphrase, or for an authenticator code (TOTP) on an installed-mode router.
+- ✓ An approval dialog in Claude Code, asking for your passphrase, or for an authenticator code (TOTP) once you add one with `newton-enrol totp`.
 - ✓ `newton-approve` in a terminal, as the fallback for any client without dialogs: you type `approve` and the first 8 characters of the plan id, then your passphrase.
 - ✓ HIGH changes (management access, internet exposure, options that run commands) need a second typed confirmation, `<device> HIGH`, in the dialog every time. OpenWrt changes are either HIGH or not; there is no LOW/MEDIUM scale. The `newton-approve` terminal fallback does not ask the second question for router changes.
 - ✓ A first-approval warning per device, shown in the approval dialog or in the terminal until your first approval on that device succeeds.
@@ -268,12 +268,12 @@ with no recorded run on a real router.
 
 **Security**
 - ✓ The router keys belong to a separate `newton` account. The AI's user can't read them, and `newton-doctor` checks this. The launchers run only as `newton`, in a clean environment. Only `newton-mcp` runs without your password, and it takes no arguments; every other launcher asks for your sudo password each time, and the installer checks its sudoers file with `visudo`. The separation holds only if the AI's user has no passwordless sudo or other root path of its own: `newton-doctor` reports that, but cannot fix it.
-- ✓ An MCP server with seventeen tools (`newton_list_devices`, `newton_read`, `newton_backup`, `newton_plan_change`, `newton_plan_undo`, `newton_apply_change`, `newton_change_status`, `newton_abort_change`, `newton_grant_off`, `newton_list_tiers`, `newton_plan_tier`, `newton_guided_recommend`, `newton_guided_audit`, `newton_plan_scan`, `newton_run_scan`, `newton_list_getters` and `newton_get_state`) and no tool that runs arbitrary commands, reboots, upgrades or installs packages. `newton_list_getters` and `newton_get_state` are experimental read-only reads of non-OpenWrt devices by fixed getter id (never command text). The main branch adds seven more: `newton_confirm_change`, which keeps a change applied with hold, and the six `newton_ad_*` tools for Active Directory (see [Active Directory](#active-directory)).
+- ✓ An MCP server with seventeen tools (`newton_list_devices`, `newton_read`, `newton_backup`, `newton_plan_change`, `newton_plan_undo`, `newton_apply_change`, `newton_change_status`, `newton_abort_change`, `newton_grant_off`, `newton_list_tiers`, `newton_plan_tier`, `newton_guided_recommend`, `newton_guided_audit`, `newton_plan_scan`, `newton_run_scan`, `newton_list_getters` and `newton_get_state`) and no tool that runs arbitrary commands, upgrades or installs packages; the only reboot is the RouterOS (CHR) undo. `newton_list_getters` and `newton_get_state` are experimental read-only reads of non-OpenWrt devices by fixed getter id (never command text). The main branch adds seven more: `newton_confirm_change`, which keeps a change applied with hold, and the six `newton_ad_*` tools for Active Directory (see [Active Directory](#active-directory)).
 - ✓ No Newton tool can run a shell command. Reads go through a fixed list, and the router program has a closed grammar of 25 subcommands, so a factory reset, a raw flash write, a bootloader change or a firewall flush cannot be expressed. The "never" and "ask first" lists in `SKILL.md` are instructions to the agent; the serial console script is the only Newton code with a command blocklist.
 - ✓ Wi-Fi keys and passwords in fields and values masked before they reach the AI. A secret written out as prose is not detected.
 - ✓ Device text (hostnames, Wi-Fi names, logs, scan results) marked as untrusted data, with prompt-injection tests. The marking tells the model the text is data; the model is still trusted to treat it that way.
 - ✓ A small on-router program with a closed command grammar that refuses anything not in it.
-- ✓ A verified install: the first install asks you to type the full 40-hex commit id of the release, and stops if it does not match. Updates through `newton-bootstrap` check the commit themselves and ask for the first 12 hex characters of the id.
+- ✓ A verified install: the first install asks you to type the full 40-hex commit id of the release, and stops if it does not match. Updates through `newton-bootstrap` check the commit themselves and ask for the full 40-hex id too.
 - ✓ An optional question about Claude Code's managed settings (`allowManagedHooksOnly`): the default is no, and only the exact answer `lock` sets it, so only hooks from the system settings run and no agent hook can answer the approval dialog for you. An existing settings file is never overwritten. Covered by tests.
 
 **Easy to use**
@@ -318,7 +318,7 @@ with no recorded run on a real router.
 - ✓ 96 scenario files in [`lab/scenarios`](lab/scenarios) for the virtual router (no full run of them is recorded in this repository), and a separate real-router suite in [`lab/scenarios-pulsar`](lab/scenarios-pulsar) (Wi-Fi included, through a USB adapter on the test client); its README lists which scenarios are ported. Its full run passed 97 of 97 scenarios on the Asus RT-AX57M (2026-10-23).
 - ✓ A lab isolation check (`scripts/newton-lab-isolation`): it watches a home-network interface for DHCP server replies and IPv6 router adverts and fails on any from a source not on its allow list. Its allow list is by MAC address, so a lab device that spoofs an allowed address passes.
 - ✓ A support table generated from test results, with each device's undo method and what is untested.
-- ✓ Works with Claude Code, Codex, OpenCode, Claude Desktop and any MCP client.
+- ✓ Works with Claude Code, Codex, OpenCode and any MCP client that runs on the Newton host (Claude Desktop is not supported: it has no Linux build).
 - ✓ On-demand reference docs for OpenWrt, nftables and networking concepts.
 
 ### Active Directory
@@ -488,7 +488,7 @@ references/               on-demand OpenWrt, nftables and networking-concepts do
 
 The AI is treated as an untrusted planner, and deterministic code decides. The router keys belong to a separate OS
 account. An approval is a single-use token bound to the exact change and the router's current config, and it
-expires. On an installed OpenWrt router the router program checks it a second time on the device; in the no-install mode and on VyOS, RouterOS and Junos only the Newton host checks it. For an Active Directory change (on the main branch) the domain controller checks the token itself before it arms its undo. The full threat model is in
+expires. On an installed OpenWrt router set to the prod profile (the default), or for a change Newton always asks about, the router program checks it a second time on the device; a router set to lab skips that check by design, and there only the Newton host checks it. In the no-install mode and on VyOS, RouterOS and Junos only the Newton host checks it. For an Active Directory change (on the main branch) the domain controller checks the token itself before it arms its undo. The full threat model is in
 [`docs/design/04-SECURITY-AND-SAFETY-MODEL.md`](docs/design/04-SECURITY-AND-SAFETY-MODEL.md). Found a hole?
 See [`SECURITY.md`](SECURITY.md).
 
@@ -535,7 +535,7 @@ Planned, with no dates:
 
 ## Works with
 
-Built and tested with **Claude Code**. Any MCP client can use the server (Codex, OpenCode, Claude Desktop), and
+Built and tested with **Claude Code**. Any MCP client on the Newton host can use the server (Codex, OpenCode; Claude Desktop is not supported), and
 [`docs/SETUP-CLIENTS.md`](docs/SETUP-CLIENTS.md) shows how. Clients without approval dialogs use `newton-approve` in
 a terminal.
 

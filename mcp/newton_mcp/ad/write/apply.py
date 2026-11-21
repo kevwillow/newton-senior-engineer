@@ -438,6 +438,24 @@ DC_REFUSED_NEXT_STEPS: dict[str, str] = {
         "The DC's write helper did not accept the form of the request: check "
         "that the DC runs the write setup of this Newton version."
     ),
+    "not_found": (
+        "The target of the change is not on the DC as the plan names it (it "
+        "was deleted or moved since the plan): read it with the admin tools "
+        "and plan the change again if it still needs one."
+    ),
+    "denied": (
+        "The DC's write helper does not allow this change on the target as "
+        "it is now (the change does not fit the live object, or the target "
+        "is one Newton never writes, such as the write account, krbtgt or a "
+        "trust account): read the target with the admin tools and plan the "
+        "change again if it still needs one."
+    ),
+    "unavailable": (
+        "The DC's write helper could not run the change: its install, its "
+        "approval key or the timer of its undo is not usable. Run the DC's "
+        "write setup again, then plan the change again: the DC keeps a "
+        "record of this plan, so it refuses the same plan a second time."
+    ),
 }
 #: For a user-create the password left the plan record with this apply, so
 #: an approval step cannot help: the same plan can never be applied again.
@@ -446,7 +464,18 @@ DC_REFUSED_USER_CREATE_STEP = (
     "this plan cannot be applied again: fix the cause and plan the new user "
     "again."
 )
-DC_REFUSED_USER_CREATE_CODES = frozenset({"expired", "bad_token"})
+#: The codes whose own next step applies the same plan again: for a
+#: user-create it is left out, and only DC_REFUSED_USER_CREATE_STEP is said.
+DC_REFUSED_USER_CREATE_CODES = frozenset({"expired", "bad_token", "unavailable"})
+#: A retry of a user-create whose earlier apply the DC refused before
+#: writing it: the password left the plan with that apply, so nothing is sent.
+SECRET_SPENT_MESSAGE = (
+    "The domain controller refused an earlier apply of this plan before "
+    "writing it, so nothing was written, and the password of the new user "
+    "left the plan record with that apply: this plan cannot be applied "
+    "again, and Newton sent nothing. Fix the cause of the earlier refusal "
+    "(its receipt keeps its message) and plan the new user again."
+)
 #: The DC refused with conflict and no other armed change: the target's
 #: live value is not the plan's before-image, so somebody changed it.
 STALE_TARGET_MESSAGE = (
@@ -477,11 +506,13 @@ ALREADY_HELD_MESSAGE = (
 
 def _dc_refused_message(code: object, verb: object) -> str:
     """DC_REFUSED_MESSAGE with the next step of the code the DC named."""
-    if not isinstance(code, str):
-        return DC_REFUSED_MESSAGE
-    if verb == "user-create" and code in DC_REFUSED_USER_CREATE_CODES:
-        return f"{DC_REFUSED_MESSAGE} {DC_REFUSED_USER_CREATE_STEP}"
-    step = DC_REFUSED_NEXT_STEPS.get(code)
+    step = DC_REFUSED_NEXT_STEPS.get(code) if isinstance(code, str) else None
+    if verb == "user-create":
+        # The password left the plan record with this apply, whatever the
+        # code: the next step is always a new plan of the user.
+        if step is None or code in DC_REFUSED_USER_CREATE_CODES:
+            return f"{DC_REFUSED_MESSAGE} {DC_REFUSED_USER_CREATE_STEP}"
+        return f"{DC_REFUSED_MESSAGE} {step} {DC_REFUSED_USER_CREATE_STEP}"
     return DC_REFUSED_MESSAGE if step is None else f"{DC_REFUSED_MESSAGE} {step}"
 REPLAY_MESSAGE = (
     "The domain controller already holds this transaction: an earlier apply "
@@ -575,6 +606,13 @@ PENDING_NOT_FOUND_MESSAGE = (
     "an apply sent before Newton stopped is still on its way to the DC. Read "
     "the status again before changing the target another way; apply the same "
     "plan again to send it."
+)
+#: A status the DC answers not_found when the receipt is not a pending one.
+NOT_FOUND_MESSAGE = (
+    "The domain controller holds no record of this change that it can read: "
+    "as far as the DC shows, no apply of this plan reached its write (the plan "
+    "was never applied, or the DC refused it before writing anything). A plan "
+    "that was never applied can be applied with newton_ad_apply_change."
 )
 STATUS_LOST_MESSAGE = (
     "The connection to the domain controller failed, so the status could "
@@ -734,6 +772,20 @@ def _earlier_apply(plan_id: str, plan: Mapping[str, Any]) -> tuple[bool, str | N
     if isinstance(receipt, dict) and receipt.get("pending") is True:
         return secret_gone, state, True
     return state != STATE_REFUSED or secret_gone, state, False
+
+
+def _dc_refused_receipt(plan_id: str) -> bool:
+    """Whether the plan's receipt is a refusal the DC answered before its
+    write (its message is the DC_REFUSED_MESSAGE one): that apply reached
+    the DC, so it sent the password of a user-create."""
+    try:
+        receipt = store.read_json(store.receipt_path(plan_id))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(receipt, dict) or receipt.get("state") != STATE_REFUSED:
+        return False
+    message = receipt.get("message")
+    return isinstance(message, str) and message.startswith(DC_REFUSED_MESSAGE)
 
 
 def _write_pending(plan_id: str, plan: Mapping[str, Any], created: datetime) -> bool:
@@ -953,6 +1005,27 @@ def _apply_change(
             {"v": 1, "mode": "status", "device": plan["device"], "txid": plan["txid"]},
         )
         earlier = not (isinstance(record, dict) and record.get("code") == "not_found")
+    if (
+        earlier
+        and not pending
+        and earlier_state == STATE_REFUSED
+        and plan.get("verb") == "user-create"
+        and not isinstance(plan.get("secret"), str)
+        and _dc_refused_receipt(plan_id)
+    ):
+        # The DC refused the earlier apply before its write and the password
+        # left with it: nothing was written, so the answer never says the
+        # change may be, and the refused receipt is kept as it is.  A refused
+        # receipt of an apply that never left this host kept the password,
+        # so another apply sent it: that one keeps EARLIER_APPLY_MESSAGE.
+        return {
+            "result": "error",
+            "plan_id": plan_id,
+            "state": STATE_REFUSED,
+            "code": "not_sent",
+            "message": SECRET_SPENT_MESSAGE,
+            "dcs": {},
+        }
     if earlier:
         # A second apply of the same plan is never sent: the txid is spent
         # and a user-create's secret is gone, so the DC could only answer
@@ -1497,10 +1570,12 @@ def change_status(
     }
     if answer.get("code") == "error":
         result["message"] = STATUS_ERROR_MESSAGE
-    if answer.get("code") == "not_found" and _receipt_pending(plan_id):
-        # The DC holds no record of the txid, and the receipt says only that
-        # an apply was about to be sent: only now is nothing changed known.
-        result["message"] = PENDING_NOT_FOUND_MESSAGE
+    if answer.get("code") == "not_found":
+        # The DC holds no record of the txid.  With a pending receipt (an
+        # apply was about to be sent) only now is nothing changed known.
+        result["message"] = (
+            PENDING_NOT_FOUND_MESSAGE if _receipt_pending(plan_id) else NOT_FOUND_MESSAGE
+        )
     if plan.get("verb") == "unlock" and answer.get("state") == "armed":
         # An unlock arms no undo: its armed record is one the DC could not
         # settle, and nothing runs at its undo_at.

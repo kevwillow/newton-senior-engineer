@@ -703,7 +703,9 @@ def test_install_restore_failure_note_keeps_no_prev(
 	assert r.rc == 1, r.out + r.err
 	lines = r.out.splitlines()
 	note = next(line for line in lines if line.startswith("NOTE state: "))
-	assert "no .prev existed (first install)" in note
+	assert "no .prev for /usr/libexec/newton/newton-router" in note
+	assert "the new version stays on the router" in note
+	assert "first install" not in note
 	assert "hello: " in note
 	assert expected[failed_step] in note
 	assert f"/{WANHEALTH}" in note
@@ -789,7 +791,7 @@ def test_install_restore_stop_failure_with_only_wan_health_extras(
 	            if line.startswith("NOTE state: "))
 	assert "removed the wan-health extras" not in note
 	assert "restored from .prev:" not in note
-	assert "no .prev existed" not in note
+	assert "no .prev for" not in note
 	assert "wan-health stop failed; files remain: " in note
 	assert f"/{WANHEALTH}" in note
 	assert f"/{WANHEALTH_INIT}" in note

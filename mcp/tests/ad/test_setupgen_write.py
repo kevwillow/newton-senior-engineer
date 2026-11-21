@@ -1844,3 +1844,52 @@ def test_the_bad_token_next_step_names_a_key_the_dc_holds_from_another_passphras
     assert "every DC" in step
     assert "setup" in step
     assert "approval-key" in step
+
+
+# ---- an installed Newton names the launcher that runs ----------------
+
+
+def test_an_installed_approval_key_names_the_router_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ad_inventory: Path,
+) -> None:
+    """On an installed Newton a bare newton-router-setup is refused by the
+    launchers: the hint names the sudo form of the installed launcher."""
+    monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("NEWTON_HOME", str(tmp_path / "home"))
+
+    assert _key_run(monkeypatch, "router1", "domain-pass") == 2
+
+    err = capsys.readouterr().err
+    assert "sudo -u newton /usr/local/bin/newton-router-setup router1 approval-key" in err
+
+
+def test_an_installed_approval_key_of_a_second_dc_names_the_ad_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ad_inventory: Path,
+) -> None:
+    monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("NEWTON_HOME", str(tmp_path / "home"))
+
+    assert _key_run(monkeypatch, "windc2", PASSPHRASE) == 2
+
+    err = capsys.readouterr().err
+    assert "sudo -u newton /usr/local/bin/newton-ad-setup approval-key windc1" in err
+
+
+def test_a_source_tree_approval_key_names_the_scripts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ad_inventory: Path,
+) -> None:
+    """Outside an install the hints name the source tree's scripts, never
+    the installed launcher."""
+    monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("NEWTON_HOME", raising=False)
+
+    assert _key_run(monkeypatch, "router1", "domain-pass") == 2
+    assert _key_run(monkeypatch, "windc2", PASSPHRASE) == 2
+
+    err = capsys.readouterr().err
+    assert "scripts/newton-router-setup router1 approval-key" in err
+    assert "scripts/newton-ad-setup approval-key windc1" in err
+    assert "/usr/local/bin" not in err

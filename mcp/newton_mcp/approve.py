@@ -47,6 +47,18 @@ class ApprovalRefused(Exception):
     """
 
 
+
+def _launcher(name: str) -> str:
+    """The command an owner types for one of Newton's tools.
+
+    An installed Newton (its launchers set NEWTON_HOME) refuses the bare
+    name: the hint is the sudo form of the installed launcher.  A source
+    tree keeps the bare name.
+    """
+    if os.environ.get("NEWTON_HOME"):
+        return f"sudo -u newton /usr/local/bin/{name}"
+    return name
+
 def derive_k(passphrase: bytes, device: str) -> str:
     """Derive the router approval key K (design 5.4).
 
@@ -985,7 +997,7 @@ def _approve_scan(request_id: str) -> int:
     if fingerprint_status == APPROVAL_FP_MISSING:
         print(
             "newton-approve: no approval fingerprint on record for "
-            f"{_sanitize_terminal_value(device)}; run newton-router-setup "
+            f"{_sanitize_terminal_value(device)}; run {_launcher('newton-router-setup')} "
             f"{_sanitize_terminal_value(device)} approval-key first; consent not created",
             file=sys.stderr,
         )
@@ -1126,7 +1138,7 @@ def _ask_proof(
     if status == approval_proof.PASS_NO_FINGERPRINT:
         return None, (
             f"no approval fingerprint on record for {safe_device}; run "
-            f"newton-router-setup {safe_device} approval-key first; "
+            f"{_launcher('newton-router-setup')} {safe_device} approval-key first; "
             "approval not created"
         )
     if status == approval_proof.PASS_DAMAGED:
@@ -1543,7 +1555,7 @@ def main(argv: list[str] | None = None) -> int:
         if (state_dir() / "ad-plans" / f"{plan_id}.json").exists():
             print(
                 "newton-approve: this is an Active Directory plan; approve it "
-                f"with the ad-change word: newton-approve ad-change {plan_id}",
+                f"with the ad-change word: {_launcher('newton-approve')} ad-change {plan_id}",
                 file=sys.stderr,
             )
             return 2

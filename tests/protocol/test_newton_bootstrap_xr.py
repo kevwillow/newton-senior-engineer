@@ -67,7 +67,7 @@ def test_selfupdate_provenance_failure_is_reported_truthfully(tmp_path):
         f"{boot} self-update /src {cid}; echo rc=$?; "
         f"{boot} version"
     )
-    typed = "update " + cid[:12]
+    typed = "update " + cid
     rc, out, err = fr.run(["bash", "-c", cmd], env=ENV, tty_input=typed + "\n")
 
     assert "rc=1" in out
@@ -113,7 +113,7 @@ def test_snapshot_listing_failure_is_fatal(tmp_path):
     )
 
     cmd = f"{bind_cmd}; {boot} install /src {cid}; echo rc=$?"
-    typed = "install " + cid[:12]
+    typed = "install " + cid
     rc, out, err = fr.run(["bash", "-c", cmd], env=ENV, tty_input=typed + "\n")
 
     assert "rc=1" in out, (out, err)  # rc of the bootstrap itself (bash -c reports the echo)

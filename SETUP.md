@@ -70,8 +70,8 @@ this line, with `<repo>` replaced by the path from step 2:
 Tell them what to expect, in these words or close to them:
 - It shows the commit id; compare it with the one you confirmed in step 2, then type `install ` and the full 40-hex id.
 - It creates a separate `newton` account that holds the router keys, installs Newton under `/opt/newton`, and sets up
-  the approval commands. Later updates use `newton-bootstrap install <repo> <40-hex>`; it asks for `install ` and the first 12 hex
-  characters of the id.
+  the approval commands. Later updates use `newton-bootstrap install <repo> <40-hex>`; it asks for `install ` and the full
+  40-hex id.
 - It asks one optional question about Claude Code's managed settings (`allowManagedHooksOnly`), so only system-level hooks
   run; this is the guard that stops another tool from answering Newton's approval dialog for you. The default is no: the
   user's own Claude Code hooks keep working, and every approval still needs their passphrase or authenticator code. If
@@ -102,7 +102,7 @@ a. Ask for the router's address and which name to use (lower case letters, digit
 b. The router entry. The user adds it to Newton's inventory, which the `newton` account owns:
    ```sh
    sudo -u newton grep -qxF '[devices.<name>]' /var/lib/newton/devices.toml 2>/dev/null && echo 'already in the inventory: <name>' \
-     || printf '[devices.%s]\nplatform = "openwrt"\nhost = "%s"\nuser = "root"\n' <name> <router-ip> \
+     || printf '\n[devices.%s]\nplatform = "openwrt"\nhost = "%s"\nuser = "root"\n' <name> <router-ip> \
      | sudo -u newton tee -a /var/lib/newton/devices.toml >/dev/null
    sudo -u newton chmod 600 /var/lib/newton/devices.toml
    ```
@@ -132,9 +132,19 @@ e. Choose the access mode with the user. The **no-install** mode is the default 
    and asks before it changes anything; without a terminal it needs `--remove-plain-key`.
    After swap-key the inventory names Newton's key, and the tool then logs in with the root password by default. On a
    router that refuses root passwords, every later setup command (approval-key, check, upgrade, rollback, uninstall,
-   add-key, revoke, profile) needs `--admin plain-key --plain-key <your admin key>` before the device name, with an
-   admin key that stays on the router (your own, not the setup key swap-key removed). check still reports the refused
-   password login as a FAIL: the password is the way back in if a key stops working.
+   add-key, revoke, profile) needs `--admin plain-key --plain-key <admin key>` before the device name, with an admin
+   key that stays on the router (not the setup key swap-key removed) and that the `newton` account can read. The
+   user's own key in their home folder does not work: the commands run as `newton`, which cannot read it. Give `newton`
+   an admin key of its own before swap-key (`sudo -u newton ssh-keygen -t ed25519 -N '' -f
+   /var/lib/newton/.ssh/admin`, then the user adds `/var/lib/newton/.ssh/admin.pub` to the router as in step c) and
+   pass `--plain-key /var/lib/newton/.ssh/admin`. That key gives the `newton` account a root login while it is on the
+   router, and newton-mcp runs as that account: have the user remove it from the router's SSH-Keys page after each
+   setup run. check still reports the
+   refused password login as a FAIL: the password is the way back in if a key stops working.
+   To change a device's profile later, edit `profile = "..."` in `/var/lib/newton/devices.toml` first (the file
+   belongs to the `newton` account: `sudo -u newton vi /var/lib/newton/devices.toml`), then run
+   `sudo -u newton /usr/local/bin/newton-router-setup <name> profile <lab|prod>`; the profile action refuses a value
+   the inventory does not hold.
    Before you run the install, tell the user what it puts on the router (this is the text the install prints, with the
    sizes of the files it uploads) and that they have to type `yes` to go on. Anything else stops the install with
    "nothing was changed", and the router is not touched:
@@ -145,19 +155,19 @@ What Newton puts on your router
 Newton's executable code is a small set of POSIX shell scripts; it also writes the configuration and service entries listed below.
 No package is installed and nothing is compiled: about 218 KB of shell in 6 files.
 
-  /usr/libexec/newton/newton-router     148 KB  the program Newton talks to
+  /usr/libexec/newton/newton-router     149 KB  the program Newton talks to
   /usr/libexec/newton/newton-safe-apply   25 KB  the change helper
   /usr/libexec/newton-guard              32 KB  the rollback guard
   /etc/init.d/newton-guard               525 B  starts the guard at boot
   /usr/libexec/newton/newton-wan-health   12 KB  the dual-WAN health check
-  /etc/init.d/newton-wan-health          641 B  starts the health check
+  /etc/init.d/newton-wan-health          846 B  starts the health check
 
 It also writes the device name, the profile and the zones under /etc/newton
 (and, once you pick an approval passphrase, the approval key), the WAN-health
 settings in /etc/config/newton_wanhealth, the boot links
 /etc/rc.d/S09newton-guard, /etc/rc.d/S95newton-wan-health and
 /etc/rc.d/K10newton-wan-health, and
-13 lines in /etc/sysupgrade.conf, so a firmware upgrade
+19 lines in /etc/sysupgrade.conf, so a firmware upgrade
 keeps them. The guard service runs at boot; the WAN-health check stays idle
 until you set newton_wanhealth.main.enabled=1 and list the WAN interfaces
 (iface) and the probe targets (target) it watches. One more line goes into
@@ -214,6 +224,11 @@ restore removes the WAN-health run-time state in /var/run/newton-wan-health
 only a <wan>.wasdown mark for each WAN that was down at the stop, so a
 restart demotes that WAN again in its first round.
 ```
+
+Once enabled, the WAN-health check pings a target from every WAN it watches in each round (every 5 s by default,
+`interval`), a metered backup WAN too: about 85 MB a month per WAN at the default. Raise `interval`, or leave a
+metered WAN out of `iface`. After changing its settings, run `reload_config` on the router: the service restarts when
+/etc/config/newton_wanhealth changed.
 
    ### No-install access (release 1.1)
 

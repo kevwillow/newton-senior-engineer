@@ -119,6 +119,10 @@ def test_a_stage_that_loses_the_connection_says_the_outcome_is_not_known(protoco
 
 def test_a_plan_refused_busy_with_this_logins_session_names_it_and_the_next_step(protocol, tmp_path):
     other = "f" * 32
+    record = protocol["root"] / "state" / "network-agent" / "plans" / f"{other}.sha256"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text("0" * 64 + "\n")
+    _prepare_state_dirs(protocol)
     set_router_state(protocol, stage_fail={"rc": 3, "stderr": f"error busy root {other}\n"})
     result = protocol["run_plan"](write_changes(tmp_path))
     assert result.returncode == 1
@@ -128,6 +132,23 @@ def test_a_plan_refused_busy_with_this_logins_session_names_it_and_the_next_step
     assert f"{SCRIPT} apply {ROUTER} {other}" in final
     assert f"{SCRIPT} abort {ROUTER} {other}" in final
     assert "then plan again" in final
+
+
+def test_a_plan_refused_busy_with_a_session_with_no_plan_record_here_says_to_abort_it(protocol, tmp_path):
+    """A stage whose link dropped leaves a session on the router whose id
+    never reached this host, so no plan record exists for it here: an apply
+    of it always dies 'no plan record', so the only next step is abort."""
+    other = "f" * 32
+    set_router_state(protocol, stage_fail={"rc": 3, "stderr": f"error busy root {other}\n"})
+    result = protocol["run_plan"](write_changes(tmp_path))
+    assert result.returncode == 1
+    final = _final(result)
+    assert final.startswith(f"ERROR: staging rejected: error busy root {other}; ")
+    assert f"session {other} of this login is still open on the router" in final
+    assert "has no plan record on this host" in final
+    assert f"{SCRIPT} abort {ROUTER} {other}" in final
+    assert "then plan again" in final
+    assert f"{SCRIPT} apply {ROUTER} {other}" not in final
 
 
 def test_a_plan_refused_busy_with_this_logins_held_session_says_to_confirm_or_abort_it(protocol, tmp_path):
@@ -672,8 +693,8 @@ def test_an_abort_of_a_gone_session_applied_here_still_says_it_may_be_live(proto
 
 
 NO_UNDO_RECORD = (f"NO UNDO RECORD session={SID}: the router's config could not be read right after the "
-                  "confirm, so newton_plan_undo cannot undo this change; restore its backup by hand if it "
-                  "must be undone")
+                  "confirm, so newton_plan_undo cannot undo this change; to undo it, plan the reverse change "
+                  "with newton_plan_change")
 GOOD_HASHES = ("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb dhcp\n"
                "cccccccccccccccccccccccccccccccc firewall\n"
                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa network")

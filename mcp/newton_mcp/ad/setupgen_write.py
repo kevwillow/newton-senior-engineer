@@ -414,6 +414,16 @@ def write_fingerprint(device: str, fingerprint: str) -> Path:
     return path
 
 
+def _launcher(name: str) -> str:
+    """The command an owner types for one of Newton's setup scripts: the
+    sudo form of the installed launcher on an installed Newton (its
+    launchers set NEWTON_HOME, and refuse the bare name), the script of
+    the source tree otherwise."""
+    if os.environ.get("NEWTON_HOME"):
+        return f"sudo -u newton /usr/local/bin/{name}"
+    return f"scripts/{name}"
+
+
 def _check_domain_entry(device: str) -> None:
     """The device must be the AD write entry that stands for a domain.
 
@@ -438,13 +448,13 @@ def _check_domain_entry(device: str) -> None:
             f"{device} is not an AD write entry of the inventory, so nothing "
             "was asked or written. approval-key records the key of the write "
             "entry that stands for an AD domain; for a router, run "
-            f"newton-router-setup {device} approval-key instead"
+            f"{_launcher('newton-router-setup')} {device} approval-key instead"
         )
     domain = getattr(entry, "ad_domain", None)
     if domain != device:
         raise SetupError(
             f"{device} is a write entry of the domain {domain}: run "
-            f"approval-key {domain}, the entry that stands for the domain, "
+            f"{_launcher('newton-ad-setup')} approval-key {domain}, the entry that stands for the domain, "
             "whose fingerprint newton-approve reads"
         )
 
