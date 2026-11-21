@@ -104,7 +104,7 @@ no-install login.
 
 **no-install:** Newton puts nothing on the router except one web-interface user. Every change uses OpenWrt's own undo timer. Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays. Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval. Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run.
 
-**installed:** Newton puts a program on the router: a small set of shell scripts (6 files, about 217 KB), no packages and no compiled code. Newton's key can run that program and nothing else, so the agent never gets a root shell. If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck. More checks can run, and fewer changes need a script. uninstall removes Newton's program and key; it keeps the guard's saved settings and the rest of /etc/newton (its lock and log), the program directory, the WAN-health settings in /etc/config/newton_wanhealth, the keys from before swap-key and the sysupgrade file: the saved settings and the copy of your keys are what you restore by hand.
+**installed:** Newton puts a program on the router: a small set of shell scripts (6 files, about 218 KB), no packages and no compiled code. Newton's key can run that program and nothing else, so the agent never gets a root shell. If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck. More checks can run, and fewer changes need a script. uninstall removes Newton's program and key; it keeps the guard's saved settings and the rest of /etc/newton (its lock and log), the program directory, the WAN-health settings in /etc/config/newton_wanhealth, the keys from before swap-key and the sysupgrade file: the saved settings and the copy of your keys are what you restore by hand.
 
 The no-install mode is **not** as safe as the installed mode. Its rollback is OpenWrt's own, the
 same one LuCI uses, and Newton only applies the changes that are acceptable if they stay. Never
@@ -308,7 +308,9 @@ rounds. If the affected path cannot be tested from the router or the agent host,
 ask the user to test from a client, then call `newton_confirm_change` to keep it or
 `newton_abort_change` to roll it back before the window closes. Plan a change you will hold with a longer
 `timeout_s` (300, say): the hold ends at `timeout_s` minus 15 s, and the verify rounds use part of that, so the
-90 s default leaves well under a minute to test.
+90 s default leaves well under a minute to test. A rollback puts back every `/etc/config` file as it was before the
+apply, so it also undoes any other setting saved during the window (in LuCI or with uci commit): ask the owner not to
+change other settings while testing.
 
 **Touched controls run their live checks (ADR-010).** `newton_plan_change` seals the probes of every
 manifest control the change applies, without `manifest_checks`: a control matches only when every value
@@ -336,7 +338,7 @@ restart in the window lost the rollback, or someone confirmed the change) is an 
 packages, never `ROLLBACK WINDOW PASSED`; rpcd restores the files byte for byte, so an ordinary
 rollback compares equal. Text from the router or the check is flattened to one line with the outcome
 words masked before it is printed. If the router is unreachable or the status is unexpected, tell the user
-immediately and point them to the latest backup (restore with `sysupgrade -r` from a wired client, or LuCI →
+immediately and point them to the backup the plan took, its `backup_path`, which the ALERT line names (restore with `sysupgrade -r` from a wired client, or LuCI →
 System → Backup). A dropped connection during `apply` or `confirm` is reported as
 **OUTCOME UNKNOWN**: run `status` before assuming either result.
 
@@ -351,8 +353,10 @@ This limit goes when the contract release ships the guard's reload events and lo
 
 `newton_change_status` after a rolled-back window now names the real restorer on the `guard=` field:
 `restored:rpcd` (rpcd's rollback restored it during abort), `restored:guard` (the guard restored it),
-`restored:already-base` (the config was already back at its base when abort ran), and `restored:abort`
-(the router could not tell, e.g. its `/tmp` record was lost by a reboot).
+`restored:already-base` (the config was already back at its base when abort ran), `restored:abort`
+(the router could not tell, e.g. its `/tmp` record was lost by a reboot), `restored:deadline` (the window
+ran out and the guard restored it) and `restored:reboot` (a reboot ended the window and the guard restored
+it at boot). Other `restored:<reason>` values carry the guard's own reason word.
 
 Rollback restores config, not state. After a reverted DHCP, VLAN, bridge or wifi change, clients
 may hold stale leases or need to reassociate. For those changes, make sure the agent host is on
@@ -617,7 +621,7 @@ claude mcp add -s user newton -- sudo -n -u newton /usr/local/bin/newton-mcp
 ```
 Audit log: `~/.local/state/newton/mcp-audit.log`. Tests: `cd mcp && uv run --extra test pytest -q`.
 
-**What Newton puts on your router.** The OpenWrt install puts 6 files on the router: about 217 KB of small POSIX shell
+**What Newton puts on your router.** The OpenWrt install puts 6 files on the router: about 218 KB of small POSIX shell
 scripts. No packages are installed and nothing is compiled. It also writes the device name, the profile and the zones
 under `/etc/newton`, the WAN-health settings `/etc/config/newton_wanhealth`, the boot links `/etc/rc.d/S09newton-guard`,
 `/etc/rc.d/S95newton-wan-health` and `/etc/rc.d/K10newton-wan-health`, and 13 lines in `/etc/sysupgrade.conf`. It is there for the rollback that must
@@ -638,7 +642,7 @@ saved copies of the owner's settings) with the rest of `/etc/newton` (the guard'
 and the `/etc/sysupgrade.conf` file (the Newton lines go out of it); the run-time files in `/tmp/newton` and
 `/tmp/owrt-safe-apply.lock` are in memory and go at the next reboot, and the uninstall stops the WAN-health
 check first, so its restore removes the WAN-health run-time state in `/var/run/newton-wan-health` (every
-`*.state` file and `all_down.flag`) and leaves the directory itself empty. The
+`*.state` file and `all_down.flag`) and leaves the directory itself, holding only a `<wan>.wasdown` mark for each WAN that was down at the stop. The
 block gives the one `rm -rf` line that removes them. Say these facts to
 the owner before you suggest the router install.
 

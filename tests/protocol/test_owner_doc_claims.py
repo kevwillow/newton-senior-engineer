@@ -291,3 +291,57 @@ def test_the_lab_example_header_says_where_lab_toml_is_kept():
         )
         if tracked.returncode == 0:
             assert '"lab/lab.toml",' in _text(SCRUB_RULES)
+
+
+# ---- where lab/lab.toml lives, in every doc that says it -----------------------
+
+LAB_TOML_DOCS = [LAB_EXAMPLE, REPO / "lab/scenarios-pulsar/README.md", REPO / "docs/TESTING-METHOD.md"]
+
+
+@pytest.mark.parametrize("path", LAB_TOML_DOCS, ids=lambda p: p.name)
+def test_no_doc_says_lab_toml_is_not_in_the_repository(path):
+    flat = " ".join(re.sub(r"^\s*#\s?", "", _text(path), flags=re.M).split())
+    assert not re.search(r"not (?:part of|in) (?:this|the) repository", flat), path.name
+    assert "kept out of every published copy" in flat, path.name
+
+
+# ---- the router's own approval check is a prod-profile check -------------------
+
+ROUTER_CHECK_CLAIMS = [
+    (RELEASE_README, "the router itself checks the approval"),
+    (RELEASE_README, "the router program checks it again"),
+    (SECURITY, "the router program checks it again on the device"),
+]
+if PRIVATE:
+    ROUTER_CHECK_CLAIMS += [
+        (DEV_README, "the router itself checks the approval"),
+        (DEV_README, "by its own clock"),
+    ]
+
+
+def test_the_router_side_approval_check_names_the_profile():
+    """cmd_apply checks the token only on a prod-profile router or for a plan
+    with leash codes; a router set to lab skips it (newton-router cmd_apply)."""
+    router = _text(ROUTER)
+    assert 'if [ "$profile" = prod ] || [ "$lrc" -ne 1 ]; then' in router
+    for path, needle in ROUTER_CHECK_CLAIMS:
+        for line in _lines_with(_text(path), needle):
+            assert "router set to lab" in line, (path.name, line)
+            assert "only the Newton host checks" in line, (path.name, line)
+
+
+# ---- every approval exception is named, and the AD gate is its own -------------
+
+
+@dev_only
+def test_the_approval_gate_bullet_names_both_exceptions_and_ad():
+    line = _lines_with(_text(DEV_README), "Approval gate in code.")[0]
+    assert "The one exception" not in line, line
+    assert "scoped grant" in line, line
+    assert "lab carve-out" in line, line
+    assert "newton-approve ad-change" in line, line
+
+
+def test_the_release_readme_chat_yes_names_the_grant():
+    for line in _lines_with(_text(RELEASE_README), "said yes in the chat"):
+        assert "Outside a scoped grant" in line, line

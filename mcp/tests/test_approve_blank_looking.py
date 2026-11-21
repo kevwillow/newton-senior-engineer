@@ -305,6 +305,11 @@ def test_approve_scan_screen_escapes_blank_looking_in_target(
         "created_at": "2026-10-18T12:00:00+00:00",
         "request_hash": "f" * 64,
     }
+    # main() sends an id to the scan approval only when a request file
+    # is there; the patched load_request answers for it
+    request_file = scans.request_path(approve.state_dir(), SCAN_REQUEST_ID)
+    request_file.parent.mkdir(parents=True, exist_ok=True)
+    request_file.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(scans, "load_request", lambda state, request_id: malformed_request)
     monkeypatch.setattr(approve, "_getpass", lambda p: pytest.fail("getpass must not be called"))
     monkeypatch.setattr(approve.sys, "stdin", TerminalInput("no\n"))

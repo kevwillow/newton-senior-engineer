@@ -157,7 +157,8 @@ def test_a_plan_refused_busy_with_this_logins_applied_session_says_it_rolls_back
     """An apply this host started is in its window: it is not applied again,
     and unless it is confirmed the router rolls it back when that window ends."""
     other = "f" * 32
-    protocol["audit"].write_text(f"2026-11-19T10:00:00+00:00 {ROUTER} APPLYING session={other}\n")
+    protocol["audit"].write_text(f"2026-11-19T10:00:00+00:00 {ROUTER} APPLYING session={other}\n"
+                                 f"2026-11-19T10:00:01+00:00 {ROUTER} APPLIED session={other} rollback=90s\n")
     set_router_state(protocol, stage_fail={"rc": 3, "stderr": f"error busy root {other}\n"})
     result = protocol["run_plan"](write_changes(tmp_path))
     assert result.returncode == 1
@@ -409,7 +410,7 @@ def test_a_second_abort_of_a_session_aborted_here_says_nothing_to_do(protocol):
 def test_an_abort_after_a_gone_abort_line_is_not_taken_as_aborted(protocol):
     """The failure branch logs `ABORTED session=<sid> (gone)` when the router no
     longer had the session: that rolled nothing back."""
-    _audit(protocol, f"ABORTED session={SID} (gone)")
+    _audit(protocol, f"APPLYING session={SID}", f"ABORTED session={SID} (gone)")
     set_router_state(protocol, abort_how="gone", status=f"gone sid={SID} guard=idle rpcd=- config=other boot=-")
     result = run_script(protocol, ["abort", ROUTER, SID])
     assert result.returncode == 1
@@ -446,8 +447,9 @@ def test_status_records_a_confirm_the_router_reports_for_an_apply_of_this_host(p
     lines = result.stdout.splitlines()
     rec = [l for l in lines if l.startswith(RECONCILED)]
     assert rec == [f"{RECONCILED}the router's status says confirmed)"], result.stdout
-    hashes = [l for l in lines if l.startswith("CONFIGHASH ")]
-    assert len(hashes) == 3 and lines.index(hashes[-1]) < lines.index(rec[0])
+    # the config now is not the config right after the confirm (a
+    # later change or an edit outside Newton may sit in it), so no hashes
+    assert [l for l in lines if l.startswith("CONFIGHASH ")] == []
     assert rec[0] in protocol["audit"].read_text()
     assert not plan_record(protocol, ".sha256").exists()
     assert not plan_record(protocol, ".held").exists()
@@ -551,3 +553,233 @@ def test_a_confirm_whose_verify_fails_on_an_armed_session_still_says_it_rolls_ba
     assert "the router rolls the change back when its window ends" in final
     assert plan_record(protocol, ".held").exists()
     assert RECONCILED not in result.stdout
+
+
+# --- a refused apply is not an applied one ---
+
+
+def test_a_plan_busy_with_a_session_whose_apply_was_refused_says_it_is_still_open(protocol, tmp_path):
+    """The router refused the apply (exit 3): nothing was applied, so the busy
+    gate names the staged advice, never a window that is not open."""
+    set_router_state(protocol, apply_rc=3, apply_stderr="error needs-approval")
+    refused = protocol["run"]()
+    assert refused.returncode == 1
+    assert "apply refused, nothing applied" in _final(refused)
+    set_router_state(protocol, apply_rc=0, stage_fail={"rc": 3, "stderr": f"error busy root {SID}\n"})
+    result = protocol["run_plan"](write_changes(tmp_path))
+    assert result.returncode == 1
+    final = _final(result)
+    assert "its window is still open" not in final
+    assert f"session {SID} of this login is still open on the router" in final
+    assert f"{SCRIPT} apply {ROUTER} {SID}" in final
+
+
+def test_a_plan_busy_with_a_session_whose_apply_outcome_is_unknown_says_its_window_is_open(
+    protocol, tmp_path
+):
+    """An apply whose answer was lost may be live: the busy gate keeps the
+    window-open advice for it."""
+    set_router_state(protocol, apply_rc=1, apply_stderr="ssh: broken pipe")
+    unknown = protocol["run"]()
+    assert "OUTCOME UNKNOWN" in _final(unknown)
+    set_router_state(protocol, apply_rc=0, stage_fail={"rc": 3, "stderr": f"error busy root {SID}\n"})
+    result = protocol["run_plan"](write_changes(tmp_path))
+    assert result.returncode == 1
+    assert f"session {SID} of this login was applied and its window is still open" in _final(result)
+
+
+def test_a_refused_apply_then_a_lost_one_says_its_window_is_open(protocol, tmp_path):
+    """Only the last apply of the session counts: a refusal before it does not
+    hide an apply whose answer was lost."""
+    _audit(protocol, f"APPLYING session={SID}", f"APPLY REFUSED session={SID}", f"APPLYING session={SID}")
+    set_router_state(protocol, stage_fail={"rc": 3, "stderr": f"error busy root {SID}\n"})
+    result = protocol["run_plan"](write_changes(tmp_path))
+    assert f"session {SID} of this login was applied and its window is still open" in _final(result)
+
+
+# --- a second apply of a confirmed session ---
+
+
+def test_a_second_apply_of_a_confirmed_session_says_it_was_already_confirmed(protocol):
+    _plan_record_for_apply(protocol)
+    first = run_script(protocol, ["apply", ROUTER, SID, "60"])
+    assert first.returncode == 0, first.stdout
+    assert _final(first).startswith(f"CONFIRMED session={SID} ")
+    calls_before = len(remote_calls(protocol))
+    second = run_script(protocol, ["apply", ROUTER, SID, "60"])
+    assert second.returncode == 1
+    final = _final(second)
+    assert final == (f"ERROR: session {SID} was already confirmed; nothing applied "
+                     f"(run: {SCRIPT} status {ROUTER} {SID})")
+    assert "run plan first" not in second.stdout
+    assert len(remote_calls(protocol)) == calls_before
+
+
+# --- a diff read cut short is not a changed diff ---
+
+
+def test_a_diff_read_cut_short_once_is_read_again_and_the_apply_goes_on(protocol):
+    diff = json.loads(protocol["router"].read_text())["diff"]
+    set_router_state(protocol, diff_seq=[diff[: len(diff) // 2]])
+    result = protocol["run"]()
+    assert result.returncode == 0, result.stdout
+    assert _final(result).startswith(f"CONFIRMED session={SID} ")
+    assert remote_calls(protocol).count(f"{PROG} diff {SID}") == 2
+    # the DIFF audit lines come from the read that matched the plan
+    assert f"DIFF session={SID}: {diff.rstrip()}" in protocol["audit"].read_text()
+
+
+def test_a_diff_that_still_does_not_match_names_a_cut_short_read_and_the_abort(protocol):
+    diff = json.loads(protocol["router"].read_text())["diff"]
+    set_router_state(protocol, diff_seq=[diff[:3], diff[:5]])
+    result = protocol["run"]()
+    assert result.returncode == 1
+    final = _final(result)
+    assert final == (f"ERROR: the staged diff does not match the plan, or the read of it was cut short; "
+                     f"nothing applied; abort session {SID} ({SCRIPT} abort {ROUTER} {SID}), "
+                     "then plan the change again and approve it again")
+    assert remote_calls(protocol).count(f"{PROG} diff {SID}") == 2
+    assert not any(c.startswith(f"{PROG} apply ") for c in remote_calls(protocol))
+
+
+# --- a second abort of a session that was only staged ---
+
+
+def test_an_abort_of_a_gone_session_never_applied_here_says_it_was_only_staged(protocol):
+    _plan_record(protocol)
+    _audit(protocol, f"STAGED session={SID} from x")
+    set_router_state(protocol, abort_how="gone", status=f"gone sid={SID} guard=idle rpcd=- config=other boot=-")
+    result = run_script(protocol, ["abort", ROUTER, SID])
+    assert result.returncode == 0, result.stdout
+    assert "may still be live" not in result.stdout
+    assert _final(result) == (f"the router no longer has session {SID}, and this host never applied it "
+                              "(its audit log has no APPLYING line for it): it was only staged, so "
+                              "nothing of it is live from this host and this abort had nothing to roll back")
+    assert not plan_record(protocol, ".sha256").exists()
+
+
+def test_an_abort_of_a_gone_session_applied_here_still_says_it_may_be_live(protocol):
+    _plan_record(protocol)
+    _audit(protocol, f"STAGED session={SID} from x", f"APPLYING session={SID}")
+    set_router_state(protocol, abort_how="gone", status=f"gone sid={SID} guard=idle rpcd=- config=other boot=-")
+    result = run_script(protocol, ["abort", ROUTER, SID])
+    assert result.returncode == 1
+    assert "the change may still be live" in _final(result)
+    assert "only staged" not in result.stdout
+
+
+# --- the undo record when the config cannot be read after the confirm ---
+
+
+NO_UNDO_RECORD = (f"NO UNDO RECORD session={SID}: the router's config could not be read right after the "
+                  "confirm, so newton_plan_undo cannot undo this change; restore its backup by hand if it "
+                  "must be undone")
+GOOD_HASHES = ("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb dhcp\n"
+               "cccccccccccccccccccccccccccccccc firewall\n"
+               "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa network")
+
+
+@pytest.mark.parametrize("after", ["fail", "fail:error confighash-unreadable", "garbage",
+                                   "a" * 32 + " a name with spaces"])
+def test_an_apply_whose_config_read_after_the_confirm_fails_says_no_undo_record(protocol, after):
+    set_router_state(protocol, confighash=[GOOD_HASHES, after])
+    result = protocol["run"]()
+    assert result.returncode == 0, result.stdout
+    lines = [l for l in result.stdout.splitlines() if l.strip()]
+    assert lines[-1].startswith(f"CONFIRMED session={SID} ")
+    assert lines[-2] == NO_UNDO_RECORD
+    assert NO_UNDO_RECORD in protocol["audit"].read_text()
+    assert not any(l.startswith("CONFIGHASH ") for l in lines)
+
+
+def test_an_apply_whose_config_read_after_the_confirm_works_has_no_warning(protocol):
+    result = protocol["run"]()
+    assert result.returncode == 0, result.stdout
+    assert "NO UNDO RECORD" not in result.stdout
+    assert sum(l.startswith("CONFIGHASH ") for l in result.stdout.splitlines()) == 3
+
+
+def test_a_held_confirm_whose_config_read_fails_says_no_undo_record(protocol):
+    _plan_record_for_apply(protocol)
+    # the apply reads the config once before it applies; the confirm reads it after
+    set_router_state(protocol, confighash=[GOOD_HASHES, "fail"])
+    held = run_script(protocol, ["apply", ROUTER, SID, "120", "--hold"])
+    assert held.returncode == 0, held.stdout
+    result = run_script(protocol, ["confirm", ROUTER, SID])
+    assert result.returncode == 0, result.stdout
+    lines = [l for l in result.stdout.splitlines() if l.strip()]
+    assert lines[-1].startswith(f"CONFIRMED session={SID} ")
+    assert lines[-2] == NO_UNDO_RECORD
+
+
+# --- the ALERT lines name this plan's backup ---
+
+
+def _plan_then(protocol, tmp_path):
+    plan = protocol["run_plan"](write_changes(tmp_path))
+    assert plan.returncode == 0, plan.stdout
+    backup = next(l.split(" ", 2)[1] for l in plan.stdout.splitlines() if l.startswith("BACKUP "))
+    return Path(backup)
+
+
+def test_the_plan_records_the_backup_it_took(protocol, tmp_path):
+    backup = _plan_then(protocol, tmp_path)
+    assert backup.is_file()
+    assert plan_record(protocol, ".backup").read_text() == f"{backup}\n"
+
+
+def test_an_alert_names_the_backup_this_plan_took(protocol, tmp_path):
+    backup = _plan_then(protocol, tmp_path)
+    # another router's backup, newer than this plan's
+    newer = protocol["root"] / "backups" / "OpenWrt-29991231-235959.tar.gz"
+    newer.write_bytes(b"another router")
+    set_router_state(protocol, status="staged")
+    fail_verify_rounds(protocol)
+    result = run_script(protocol, ["apply", ROUTER, SID, "90"])
+    assert result.returncode == 1
+    final = _final(result)
+    assert final == (f"ALERT session={SID} status=staged after rollback window — check the router now; "
+                     f"compare it with the backup this plan took, {backup}")
+    assert "latest backup" not in result.stdout
+
+
+def test_an_alert_without_a_backup_record_does_not_point_at_the_latest_backup(protocol):
+    set_router_state(protocol, status="staged")
+    fail_verify_rounds(protocol)
+    result = protocol["run"]()
+    assert result.returncode == 1
+    final = _final(result)
+    backups = protocol["root"] / "backups"
+    assert final == (f"ALERT session={SID} status=staged after rollback window — check the router now; "
+                     f"compare it with the backup this plan took (this host has no record of it; {backups} "
+                     "holds the backups of every router, so pick this router's by its name and the time "
+                     "of the plan)")
+
+
+def test_a_gone_abort_names_the_backup_this_plan_took(protocol, tmp_path):
+    backup = _plan_then(protocol, tmp_path)
+    _audit(protocol, f"APPLYING session={SID}")
+    set_router_state(protocol, abort_how="gone", status=f"gone sid={SID} guard=idle rpcd=- config=other boot=-")
+    result = run_script(protocol, ["abort", ROUTER, SID])
+    assert result.returncode == 1
+    assert _final(result).endswith(f"and compare the router's config with the backup this plan took, {backup}")
+
+
+@pytest.mark.parametrize("case", ["held-record", "status-inconsistent", "status-unreadable"])
+def test_an_abort_of_a_gone_session_is_called_only_staged_only_when_nothing_says_otherwise(protocol, case):
+    """A hold record means this host applied it; a status other than gone (or
+    none) is not the router saying it no longer has the session."""
+    _plan_record(protocol)
+    _audit(protocol, f"STAGED session={SID} from x")
+    status = f"gone sid={SID} guard=idle rpcd=- config=other boot=-"
+    if case == "held-record":
+        plan_record(protocol, ".held").write_text(f"0 0 {int(time.time()) + 300}\n")
+    elif case == "status-inconsistent":
+        status = f"inconsistent sid={SID} guard=failed:x rpcd=- config=other boot=same"
+    else:
+        set_router_state(protocol, status_ssh=["fail"])
+    set_router_state(protocol, abort_how="gone", status=status)
+    result = run_script(protocol, ["abort", ROUTER, SID])
+    assert result.returncode == 1
+    assert "the change may still be live" in _final(result)
+    assert "only staged" not in result.stdout

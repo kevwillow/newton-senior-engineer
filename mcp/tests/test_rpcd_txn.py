@@ -412,6 +412,61 @@ def test_apply_raises_when_the_router_answers_5(engine, router) -> None:
         engine.apply(_ops(), 30, CREDENTIALS)
 
 
+@pytest.mark.parametrize("code", [2, 8, 9])
+def test_a_refused_apply_that_applied_nothing_is_refused(engine, router, code) -> None:
+    """rpcd answered the apply with an error and the values are not on
+    the router: that is a refusal, never an unknown."""
+    router.live[("dhcp", "lab", "limit")] = "100"
+    router.apply_code = code
+    result = engine.apply(_ops(), 30, CREDENTIALS)
+
+    assert result.state == txn.REFUSED, result
+    assert "refused" in (result.reason or ""), result
+
+
+def test_a_refused_apply_whose_values_are_on_the_router_is_not_a_refusal(
+    engine, router
+) -> None:
+    """An error answer after rpcd applied the change is resolved, never
+    called a refusal: the change may be live."""
+    real_call = router.call
+
+    # the router applied the change and opened its window, then answered
+    # with an error
+    def call(session, obj, fn, args=None):
+        if obj == "uci" and fn == "apply":
+            real_call(session, obj, fn, args)
+            raise rpcd.RpcdCallFailed(9)
+        return real_call(session, obj, fn, args)
+
+    router.call = call
+    result = engine.apply(_ops(), 30, CREDENTIALS)
+
+    assert result.state == txn.LOST, result
+    assert result.resolve == txn.OWN, result
+
+
+def test_a_refused_apply_that_cannot_be_read_back_is_unknown(engine, router) -> None:
+    """An error answer whose values cannot be read back proves nothing:
+    it is never called a refusal."""
+    real_call = router.call
+
+    def call(session, obj, fn, args=None):
+        if obj == "uci" and fn == "apply":
+            def login(*_args, **_kwargs):
+                raise rpcd.RpcdTransportError("the router is gone", sent=False)
+
+            router.login = login
+            raise rpcd.RpcdCallFailed(9)
+        return real_call(session, obj, fn, args)
+
+    router.call = call
+    result = engine.apply(_ops(), 30, CREDENTIALS)
+
+    assert result.state == txn.LOST, result
+    assert result.resolve == txn.UNKNOWN, result
+
+
 def test_the_session_is_spent_after_the_apply(engine, router) -> None:
     result = engine.apply(_ops(), 30, CREDENTIALS)
     session = result.session

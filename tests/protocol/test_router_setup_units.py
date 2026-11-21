@@ -3874,9 +3874,11 @@ def test_action_profile_sets_and_is_idempotent(router_unit):
 	assert second_lines[-1] == "DONE profile r1"
 
 
-def test_action_profile_mismatch_with_inventory_prints_note(router_unit):
-	# the inventory says lab but the operator asks for prod; the file
-	# is still written, the NOTE is printed just before the PASS
+def test_action_profile_mismatch_with_inventory_is_refused(router_unit):
+	# the inventory says lab but the operator asks for prod: the
+	# argument check stops before any router call (the controller would
+	# refuse that router), names the inventory field, and the router
+	# file keeps lab
 	router = router_unit.router
 	rel = "etc/newton/profile"
 	router.write(rel, "lab\n", 0o600)
@@ -3884,16 +3886,16 @@ def test_action_profile_mismatch_with_inventory_prints_note(router_unit):
 		"DEV_PROFILE=lab\n"
 		"PROFILE_VALUE=prod\n"
 		"ACTION=profile\n"
+		"validate_action_args\n"
 		"action_profile\n"
 	)
-	assert r.returncode == 0
+	assert r.returncode == 1
 	lines = r.stdout.splitlines()
-	# the NOTE comes before the PASS and names the inventory profile
-	assert any(l.startswith("NOTE the inventory says lab") for l in lines)
-	assert "PASS profile set to prod" in lines
-	assert lines[-1] == "DONE profile r1"
-	# the file actually holds prod
-	assert router.read(rel) == "prod\n"
+	assert "NOTE state: router unchanged" in lines
+	assert lines[-1] == (
+		"STOPPED profile r1: the inventory says lab for r1; set "
+		'profile = "prod" in devices.toml first, then run profile prod again')
+	assert router.read(rel) == "lab\n"
 
 
 def test_action_profile_write_failure_stops_with_router_unchanged(router_unit):
@@ -4589,8 +4591,9 @@ def test_action_uninstall_full_path(router_unit):
 	# both .prev files, device-id, profile, zones and approve.key are
 	# gone; lkg and quarantine stay (as directories); sysupgrade.conf
 	# lost exactly the eleven SYSUPGRADE_LINES (R9b+c) and kept the
-	# unrelated line in order; stdout shows the password-only proof
-	# PASS lines before and after and DONE uninstall r1
+	# unrelated line in order; stdout shows the way-in proof PASS
+	# lines before and after (the admin key: this lane is plain-key)
+	# and DONE uninstall r1
 	router = router_unit.router
 	_seed_full_install(router_unit)
 	before = router.snapshot()
@@ -4609,8 +4612,9 @@ def test_action_uninstall_full_path(router_unit):
 	r = _run_action_uninstall(router_unit, [GOOD_PW_UNITS])
 	assert r.returncode == 0, (r.stdout, r.stderr)
 	lines = r.stdout.splitlines()
-	# password-only proof printed before and after
-	pass_lines = [l for l in lines if l.startswith("PASS password-only login works")]
+	# the way-in proof printed before and after: on the plain-key lane
+	# it is the admin key login
+	pass_lines = [l for l in lines if l == "PASS admin key login works"]
 	assert len(pass_lines) == 2, lines
 	# five step PASS lines
 	for n in range(1, 6):
@@ -4756,9 +4760,8 @@ def test_action_uninstall_names_the_label_when_only_the_role_is_bad(router_unit)
 
 def test_action_uninstall_second_run_changes_nothing(router_unit):
 	# after a full uninstall, every step is a no-op: the guard file
-	# is gone (not-installed), the two proof PASS lines still print
-	# (ROOT_PW_DONE=1 short-circuits the second admin_password_get),
-	# each step PASS line still prints, and DONE exits 0; the router
+	# is gone (not-installed), the two way-in proof PASS lines still
+	# print, each step PASS line still prints, and DONE exits 0; the router
 	# snapshot is exactly what it was after the first uninstall
 	router = router_unit.router
 	_seed_full_install(router_unit)
@@ -4773,9 +4776,8 @@ def test_action_uninstall_second_run_changes_nothing(router_unit):
 		assert any(l.startswith("PASS uninstall step %d:" % n) for l in lines), \
 			lines
 	assert lines[-1] == "DONE uninstall r1"
-	# ROOT_PW_DONE=1 from the first run; the second run still calls
-	# password_only_proof twice, both pass
-	pass_lines = [l for l in lines if l.startswith("PASS password-only login works")]
+	# the second run still runs the way-in proof twice, both pass
+	pass_lines = [l for l in lines if l == "PASS admin key login works"]
 	assert len(pass_lines) == 2, lines
 	# router snapshot is exactly what it was after the first uninstall
 	assert router.snapshot() == after_first
@@ -4807,20 +4809,23 @@ def test_action_uninstall_pending_guard_refuses(router_unit):
 	assert router.snapshot() == before
 
 
-def test_action_uninstall_wrong_password_stops_before_removal(router_unit):
-	# the password-only proof is run before any removal; a wrong typed
-	# password makes it stop with STATE_NOTE='router unchanged' and
-	# STOPPED reason "the password-only login failed; nothing was
-	# removed"; the router snapshot is unchanged
+def test_action_uninstall_failed_way_in_proof_stops_before_removal(router_unit):
+	# the way-in proof is run before any removal; on this plain-key
+	# lane it is the admin key login, and when that login fails the
+	# run stops with STATE_NOTE='router unchanged' and STOPPED reason
+	# "the admin key login failed; nothing was removed"; the router
+	# snapshot is unchanged (the password-lane proof is pinned by
+	# test_router_setup_teardown.py)
 	router = router_unit.router
 	_seed_full_install(router_unit)
+	router.update_state(drop_commands=["NEWTON-ADMIN-SESSION >&2; true"])
 	before = router.snapshot()
-	r = _run_action_uninstall(router_unit, ["not-the-root-pw"])
+	r = _run_action_uninstall(router_unit, [])
 	assert r.returncode == 1, (r.stdout, r.stderr)
 	lines = r.stdout.splitlines()
-	assert "FAIL password-only login failed" in lines
+	assert "FAIL admin key login failed" in lines
 	assert "NOTE state: router unchanged" in lines
-	assert lines[-1] == "STOPPED uninstall r1: the password-only login failed; nothing was removed"
+	assert lines[-1] == "STOPPED uninstall r1: the admin key login failed; nothing was removed"
 	# nothing was removed
 	assert router.snapshot() == before
 

@@ -300,8 +300,9 @@ def test_read_timeout_branch_keeps_envelope_shape(configured, monkeypatch):
     out"` placed INSIDE an envelope.
     """
     def timeout_with_output(*a, **k):
+        # a real subprocess.run(text=True) timeout carries bytes
         raise subprocess.TimeoutExpired(
-            [], 30, output="partial stdout line", stderr="router stderr line",
+            [], 30, output=b"partial stdout line", stderr=b"router stderr line",
         )
 
     monkeypatch.setattr(server.subprocess, "run", timeout_with_output)
@@ -575,8 +576,9 @@ def test_apply_timeout_envelopes_log_and_redacts_text(configured_lab, monkeypatc
     secret_line = f"option key '{secret_value}'"
 
     def timeout_with_output(*a, **k):
+        # a real subprocess.run(text=True) timeout carries bytes
         raise subprocess.TimeoutExpired(
-            [], 30, output=secret_line + "\n", stderr="some stderr",
+            [], 30, output=(secret_line + "\n").encode(), stderr=b"some stderr",
         )
 
     monkeypatch.setattr(server.NewtonService, "run_script", timeout_with_output)
@@ -587,6 +589,9 @@ def test_apply_timeout_envelopes_log_and_redacts_text(configured_lab, monkeypatc
     text = result["log"]["text"]
     assert secret_value not in text, f"timeout log leaked the secret: {text!r}"
     assert "<redacted:" in text
+    assert "some stderr" in text
+    # the agent is told what to do next
+    assert "newton_change_status" in result["next_step"]
 
     def timeout_without_output(*a, **k):
         raise subprocess.TimeoutExpired([], 30)
@@ -595,6 +600,7 @@ def test_apply_timeout_envelopes_log_and_redacts_text(configured_lab, monkeypatc
     result = server.newton_apply_change("quasar", SID)
     assert result.get("result") == "unknown"
     assert result["log"] == "apply subprocess timed out"
+    assert "newton_change_status" in result["next_step"]
     assert not envelope_mod.is_envelope(result["log"])
     # Nothing router-like reached the model in this path.
     assert not any(n in json.dumps(result) for n in INJECTION_NEEDLES)
@@ -848,3 +854,30 @@ def test_field_anchor_regex_flags_a_forged_approval_line():
         assert out_lines[i].startswith(envelope_mod.FLAG_PREFIX), line
     for j, line in enumerate(not_flagged):
         assert not out_lines[len(flagged) + j].startswith(envelope_mod.FLAG_PREFIX), line
+
+
+# ---- the descriptions say the envelope text is rewritten ----------
+
+
+@pytest.mark.parametrize("tool", [
+    "newton_read", "newton_plan_change", "newton_apply_change",
+    "newton_confirm_change", "newton_change_status", "newton_abort_change",
+])
+def test_the_tool_descriptions_name_the_envelope_rewrites(tool):
+    """The envelope rewrites displayed text ('</' and the flag prefix), so a
+    diff or log can differ from the router's own: every tool description
+    that returns an envelope says so."""
+    found = server.mcp._tool_manager.get_tool(tool)
+    assert found is not None
+    flat = " ".join((found.description or "").split())
+    assert "can differ from the router's own" in flat
+    assert "`</` is shown as `< /`" in flat
+    assert f"`{envelope_mod.FLAG_PREFIX.strip()}`" in flat
+
+
+def test_the_rewrites_the_descriptions_name_are_the_envelope_s():
+    """The two rewrites named are the ones envelope() makes."""
+    wrapped = envelope_mod.envelope("d:x", "a </b>\nnewton says hi")
+    assert wrapped["text"] == (
+        "a < /b>\n" + envelope_mod.FLAG_PREFIX + "newton says hi"
+    )

@@ -182,6 +182,7 @@ def test_ad_setup_launcher_runs_approval_key_in_the_newton_state_dir(tmp_path):
         "-i",
         "NEWTON_HOME=/opt/newton",
         "NEWTON_STATE_DIR=/var/lib/newton/state",
+        "NEWTON_INVENTORY=/var/lib/newton/devices.toml",
         "HOME=/var/lib/newton",
         CLEAN_PATH,
         "SUDO_USER=labuser",
@@ -201,6 +202,40 @@ def test_ad_setup_launcher_writes_where_newton_approve_reads():
         return found[0].rstrip("\\").strip()
 
     assert state_dir_of(AD_SLOT) == state_dir_of("approve_launcher_tmp")
+
+
+def test_ad_setup_launcher_reads_the_inventory_newton_approve_reads():
+    """approval-key checks the name against the inventory, the
+    same file the approve launcher hands newton-approve."""
+    def inventory_of(slot):
+        found = re.findall(r"NEWTON_INVENTORY=(\S+)", launcher_text(slot))
+        assert len(found) == 1, (slot, found)
+        return found[0].rstrip("\\").strip()
+
+    assert inventory_of(AD_SLOT) == inventory_of("approve_launcher_tmp")
+
+
+def ad_inventory(tmp_path, name="dc1"):
+    """An inventory whose AD write entry ``name`` stands for its domain."""
+    key = tmp_path / "inv-key"
+    key.write_text("k\n")
+    key.chmod(0o600)
+    known = tmp_path / "inv-known_hosts"
+    known.write_text("192.0.2.10 ssh-ed25519 AAAA\n")
+    path = tmp_path / "devices.toml"
+    path.write_text(
+        f"[devices.{name}]\n"
+        'platform = "ad-samba-write"\n'
+        'host = "192.0.2.10"\n'
+        'user = "newton-ops"\n'
+        f'key_file = "{key}"\n'
+        f'known_hosts = "{known}"\n'
+        f'ad_domain = "{name}"\n'
+        'domain = "lab.newton.test"\n'
+        'ad_domain_guid = "af9619ff-8b86-d011-b42d-00c04fc964ff"\n'
+    )
+    path.chmod(0o600)
+    return path
 
 
 def test_ad_setup_launcher_runs_only_as_newton(tmp_path):
@@ -302,6 +337,7 @@ def test_ad_setup_launcher_refuses_without_a_terminal(tmp_path):
         replace=(
             ("/opt/newton/venv/bin/python", sys.executable),
             ("/var/lib/newton/state", str(state)),
+            ("/var/lib/newton/devices.toml", str(ad_inventory(tmp_path))),
         ),
     )
 
@@ -359,6 +395,7 @@ def test_ad_setup_launcher_fingerprint_is_the_one_newton_approve_checks(tmp_path
         replace=(
             ("/opt/newton/venv/bin/python", sys.executable),
             ("/var/lib/newton/state", str(state)),
+            ("/var/lib/newton/devices.toml", str(ad_inventory(tmp_path))),
         ),
     )
     env = owner_env()

@@ -1913,11 +1913,15 @@ def read_record(path: str) -> dict[str, Any] | None:
 
 
 def record_files() -> list[str]:
-    """The names of the records of the store."""
+    """The names of the records of the store.
+
+    A store that cannot be listed is never taken for an empty one: it
+    raises ``Refused("error")``.
+    """
     try:
         names = os.listdir(TX_DIR)
     except OSError:
-        return []
+        raise Refused("error", "the transaction store cannot be listed") from None
     return sorted(name for name in names if name.endswith(".json"))
 
 
@@ -2573,7 +2577,7 @@ def _settle_unlock(directory: Directory, record: dict[str, Any], path: str) -> t
     return False, []
 
 
-def sweep(now: int, skip: str | None = None) -> None:
+def sweep(now: int, skip: str | None = None) -> bool:
     """Run the undo of every armed record whose deadline has passed.
 
     Each record is undone on its own: a record that is malformed, or
@@ -2588,8 +2592,18 @@ def sweep(now: int, skip: str | None = None) -> None:
     unlock is read again only until ``UNLOCK_SETTLE_S`` after its
     undo_at; after that the sweep leaves it armed and does not bind for
     it again.
+
+    The answer is False when the store cannot be listed (logged: the pass
+    checked nothing, and an empty store is never assumed), and True
+    otherwise.  The sweep timer answers ``error`` on False, so its unit
+    fails; a request over stdin goes on.
     """
-    for name in record_files():
+    try:
+        names = record_files()
+    except Refused:
+        _log("the transaction store cannot be listed; the sweep checked nothing")
+        return False
+    for name in names:
         if skip is not None and name == f"{skip}.json":
             continue
         path = os.path.join(TX_DIR, name)
@@ -2619,6 +2633,7 @@ def sweep(now: int, skip: str | None = None) -> None:
         except Exception:
             _log("the undo of an expired record failed; it stays armed")
             continue
+    return True
 
 
 # ---- the bind (section 9) ---------------------------------------------------
@@ -3785,7 +3800,9 @@ def _sweep_path(argv: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
     if problem:
         raise Refused("unavailable", problem)
     with StoreLock(lock_path()):
-        sweep(int(current_time()))
+        listed = sweep(int(current_time()))
+    if not listed:
+        raise Refused("error", "the transaction store cannot be listed")
     return {"v": 1, "code": "ok"}
 
 
@@ -3822,9 +3839,15 @@ def main() -> int:
         stdin = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
     except Exception:
         stdin = b""
-    answer = handle(sys.argv[1:], stdin, os.environ)
+    argv = sys.argv[1:]
+    answer = handle(argv, stdin, os.environ)
     sys.stdout.write(json.dumps(answer, sort_keys=True, separators=(",", ":")) + "\n")
     sys.stdout.flush()
+    # The sweep and the undo run from systemd units: an answer other than
+    # ok exits non-zero, so the unit is recorded failed.  Over stdin the
+    # answer itself is the result and the exit status stays 0.
+    if argv and answer.get("code") != "ok":
+        return 1
     return 0
 
 

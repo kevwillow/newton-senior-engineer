@@ -25,10 +25,11 @@ Run these and report which are missing. Do not install anything yourself.
 ```sh
 uname -s                      # must print Linux
 command -v sudo git ssh python3
-/usr/bin/python3 -c 'import sys, venv, ensurepip; sys.exit(0 if sys.version_info >= (3, 11) else "Python 3.11 or newer is needed, found " + sys.version.split()[0])'
+/usr/bin/python3 -c 'import sys, venv, ensurepip; v = sys.version_info[:2]; sys.exit(0 if (3, 11) <= v <= (3, 14) else "Python 3.11 to 3.14 is needed, found %d.%d" % v)'
 ```
-The installer builds its venv with `/usr/bin/python3`, which must be Python 3.11 or newer (Ubuntu 22.04 and RHEL 9
-ship an older one); the last line prints the version it found when it is older. If something is missing, stop
+The installer builds its venv with `/usr/bin/python3`, which must be Python 3.11 to 3.14 (Ubuntu 22.04 and RHEL 9
+ship an older one, and the locked dependencies have no wheels for 3.15 yet); the last line prints the version it
+found when it is outside that range. If something is missing, stop
 and give the user the exact line for their system, then wait:
 - Debian/Ubuntu: `sudo apt install git openssh-client python3 python3-venv sudo`
 - Fedora/RHEL: `sudo dnf install git openssh-clients python3 sudo`
@@ -77,7 +78,7 @@ Tell them what to expect, in these words or close to them:
   the user answers `lock`, the file is written (root-owned, mode 0644) and the user's own Claude Code hooks stop running
   on this machine; say so plainly. An existing managed-settings file is never overwritten: the installer prints the one
   line to add instead.
-- It does not ask for the approval passphrase yet; the user picks it in step 7f when the first router is added.
+- It does not ask for the approval passphrase yet; the user picks it when the first router is added, in step 7e (no-install) or step 7f (installed).
 Wait until the user says it finished. If it printed an error, ask them to paste the error text and stop.
 
 ## 5. Register the server
@@ -129,6 +130,11 @@ e. Choose the access mode with the user. The **no-install** mode is the default 
    device name. swap-key removes that plain key from the router, so use a separate setup key that is on the router
    (step c), not your own admin key, or keep another way in (LuCI or the console). swap-key says which key it removes
    and asks before it changes anything; without a terminal it needs `--remove-plain-key`.
+   After swap-key the inventory names Newton's key, and the tool then logs in with the root password by default. On a
+   router that refuses root passwords, every later setup command (approval-key, check, upgrade, rollback, uninstall,
+   add-key, revoke, profile) needs `--admin plain-key --plain-key <your admin key>` before the device name, with an
+   admin key that stays on the router (your own, not the setup key swap-key removed). check still reports the refused
+   password login as a FAIL: the password is the way back in if a key stops working.
    Before you run the install, tell the user what it puts on the router (this is the text the install prints, with the
    sizes of the files it uploads) and that they have to type `yes` to go on. Anything else stops the install with
    "nothing was changed", and the router is not touched:
@@ -137,13 +143,13 @@ e. Choose the access mode with the user. The **no-install** mode is the default 
 What Newton puts on your router
 
 Newton's executable code is a small set of POSIX shell scripts; it also writes the configuration and service entries listed below.
-No package is installed and nothing is compiled: about 217 KB of shell in 6 files.
+No package is installed and nothing is compiled: about 218 KB of shell in 6 files.
 
   /usr/libexec/newton/newton-router     148 KB  the program Newton talks to
   /usr/libexec/newton/newton-safe-apply   25 KB  the change helper
   /usr/libexec/newton-guard              32 KB  the rollback guard
   /etc/init.d/newton-guard               525 B  starts the guard at boot
-  /usr/libexec/newton/newton-wan-health   11 KB  the dual-WAN health check
+  /usr/libexec/newton/newton-wan-health   12 KB  the dual-WAN health check
   /etc/init.d/newton-wan-health          641 B  starts the health check
 
 It also writes the device name, the profile and the zones under /etc/newton
@@ -204,7 +210,9 @@ lines are left in it.
 The run-time files in /tmp/newton and /tmp/owrt-safe-apply.lock are in memory and go at
 the next reboot. The uninstall stops the WAN-health check first, and its
 restore removes the WAN-health run-time state in /var/run/newton-wan-health
-(every *.state file and all_down.flag); the directory itself stays, empty.
+(every *.state file and all_down.flag); the directory itself stays, holding
+only a <wan>.wasdown mark for each WAN that was down at the stop, so a
+restart demotes that WAN again in its first round.
 ```
 
    ### No-install access (release 1.1)
@@ -238,7 +246,7 @@ restore removes the WAN-health run-time state in /var/run/newton-wan-health
    NOTE no-install: Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays.
    NOTE no-install: Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval.
    NOTE no-install: Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run.
-   NOTE installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 217 KB), no packages and no compiled code.
+   NOTE installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 218 KB), no packages and no compiled code.
    NOTE installed: Newton's key can run that program and nothing else, so the agent never gets a root shell.
    NOTE installed: If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck.
    NOTE installed: More checks can run, and fewer changes need a script.
@@ -308,7 +316,9 @@ f. `sudo -u newton /usr/local/bin/newton-router-setup <name> approval-key`: the 
    types it twice. On an installed device it then offers an authenticator app (6-digit codes instead of the passphrase
    in the approval dialog); the user answers y or n there. Say the choice plainly: the passphrase is the default; the
    authenticator is optional and can be added later with `sudo -u newton /usr/local/bin/newton-enrol totp <name>`.
-   On a no-install device approval-key does not offer the authenticator: it ends after the passphrase, so do not
+   On a no-install device, skip this step: the no-install setup in step e already asked for the passphrase, and
+   approval-key there replaces it with the one typed now, so run it only to change the passphrase. On a no-install
+   device approval-key does not offer the authenticator: it ends after the passphrase, so do not
    describe a y/n question; if the user wants the app, the same `newton-enrol totp <name>` command adds it afterwards.
    Never see or relay the seed or the QR code.
 g. Read-only checkup: call `newton_list_devices`, then, for a no-install device, `newton_read` for the device (the

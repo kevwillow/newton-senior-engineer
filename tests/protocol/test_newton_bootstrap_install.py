@@ -251,3 +251,23 @@ def test_identity_block_escapes_non_ascii_bidi_and_zero_width_l1(tmp_path):
     assert identity_lines, out
     for line in identity_lines:
         assert all(b <= 0x7e for b in line.encode()), (line, line.encode())
+
+HELD_WARNING = (
+    "If this updates an installed Newton, confirm or abort every held change first: "
+    "a held change cannot be confirmed by a server that was updated under it, "
+    "so it rolls back. To stop now, type anything else."
+)
+
+
+def test_install_prompt_warns_about_held_changes_before_the_confirmation(tmp_path):
+    """`newton-bootstrap install` is also the update path.  The
+    held-change step INSTALL.md asks for comes before the typed
+    confirmation, while the owner can still stop."""
+    fr = FakeRoot(tmp_path)
+    boot = fr.install_bootstrap()
+    cid, _ = make_repo(fr.stage / "src")
+    rc, out, err = go(fr, boot, "/src", cid, "no")
+    assert rc == 1, (rc, out, err)
+    assert HELD_WARNING in err, err
+    assert err.index(HELD_WARNING) < err.index("Compare the commit id"), err
+    assert "SNAPSHOT-INSTALLER" not in out

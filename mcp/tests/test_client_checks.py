@@ -489,6 +489,25 @@ def test_vc11_02_a_claim_that_could_not_be_tested_is_not_a_pass():
     }
 
 
+@pytest.mark.parametrize(("word", "hint"), [
+    ("no-control", "add a check_controls entry"),
+    ("target-dead", "did not connect either"),
+])
+def test_a_blocked_check_without_a_working_control_names_the_fix(word, hint):
+    """A blocked-port check that timed out with no control (no-control) or a
+    control that did not connect (target-dead) tells the owner what to do,
+    not only the bare word."""
+    expect = stored_expect([C_UCI, C_BLOCKED_ROUTER])
+    probes = [["uci-equals", "dhcp.skilltest.name", "skilltest"]]
+    log = local_check_log([f"vantage-check: claim 2 NOT-TESTED {word}"])
+    out = ex.failed_claim(log, SID, probes, expect)
+    assert out is not None
+    assert out["claim"] == 2
+    assert out["text"].startswith(f"expect claim 2 could not be tested: {word}: ")
+    assert hint in out["text"]
+    assert "docs/INSTALL.md" in out["text"]
+
+
 def test_vc11_03_a_passing_claim_names_nothing():
     expect = stored_expect([C_UCI, C_DNS])
     probes = [["uci-equals", "dhcp.skilltest.name", "skilltest"]]

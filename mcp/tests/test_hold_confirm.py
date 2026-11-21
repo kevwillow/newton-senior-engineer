@@ -322,8 +322,9 @@ def test_a_confirm_past_its_timeout_is_outcome_unknown_with_the_status_step(conf
     _write_plan(configured_lab, _record())
 
     def run(self, device, *args, **kwargs):
+        # a real subprocess.run(text=True) timeout carries bytes
         raise subprocess.TimeoutExpired(cmd="owrt-change.sh", timeout=180,
-                                        output=f"verify pass 1 for {SID}\n", stderr="")
+                                        output=f"verify pass 1 for {SID}\n".encode(), stderr=b"")
     monkeypatch.setattr(server.NewtonService, "run_script", run)
 
     result = server.newton_confirm_change("quasar", SID)
@@ -333,3 +334,21 @@ def test_a_confirm_past_its_timeout_is_outcome_unknown_with_the_status_step(conf
     assert "newton_change_status" in result["next_step"]
     assert "not known" in result["next_step"]
     assert "untrusted-device-data" in str(result["log"])
+    # the partial log the timed-out run printed is kept
+    assert f"verify pass 1 for {SID}" in result["log"]["text"]
+
+
+def test_the_held_next_step_and_skill_warn_a_rollback_reverts_other_edits():
+    """The rollback puts back every /etc/config file from its arm-time copy,
+    so a setting the owner saves while testing is lost too: the agent is
+    told so, in the result and in SKILL.md's held-apply text."""
+    warning = (
+        "also undoes any other setting saved during the window (in LuCI or with uci commit)"
+    )
+    text = " ".join(server.HELD_NEXT_STEP.split())
+    assert warning in text
+    assert "not to change other settings while testing" in text
+    skill = (Path(__file__).resolve().parents[2] / "SKILL.md").read_text(encoding="utf-8")
+    flat = " ".join(skill.split())
+    assert warning in flat
+    assert "not to change other settings while testing" in flat

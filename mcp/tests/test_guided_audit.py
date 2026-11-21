@@ -337,3 +337,74 @@ def test_unknown_device_is_a_plain_error_before_any_read(configured_newton, monk
 
     assert result == {"error": "unknown device: missing"}
     assert calls == []
+
+
+# ---- the audit result has a total size budget ----------------------
+
+
+def _text_size(result: dict[str, Any]) -> int:
+    total = 0
+    for item in result["items"]:
+        for read in item["reads"]:
+            total += len(read["output"]["text"])
+            stderr = read["stderr"]
+            total += len(stderr["text"] if isinstance(stderr, dict) else stderr)
+    return total
+
+
+def test_large_reads_past_the_budget_are_left_out_and_marked(
+    configured_newton, monkeypatch
+):
+    """Fourteen large reads would pass a client's output limit: the reads that
+    no longer fit the budget are left out with a visible state, every read is
+    still listed, and the result says it was cut and how to read the rest."""
+    big = "x" * 20_000 + "\n"
+    responses = {command: (0, big, "") for command in set(ALL_COMMANDS)}
+    _fake_ssh(monkeypatch, responses)
+
+    result = server.newton_guided_audit("quasar")
+
+    assert result["result"] == "ok"
+    assert _text_size(result) <= server.GUIDED_AUDIT_BUDGET_CHARS
+    reads = [read for item in result["items"] for read in item["reads"]]
+    assert [read["command"] for read in reads] == ALL_COMMANDS
+    assert reads[0]["state"] == "ok"
+    assert reads[0]["output"]["text"] == big
+    cut = [read for read in reads if read["state"] == "truncated"]
+    assert cut, "nothing was left out"
+    for read in cut:
+        assert read["output"]["text"] == ""
+        assert read["exit_code"] == 0
+    assert result["truncated"] is True
+    assert "newton_read" in result["truncated_note"]
+
+
+def test_one_huge_read_is_left_out_and_the_small_ones_stay(
+    configured_newton, monkeypatch
+):
+    huge = "r" * (64 * 1024)
+    _fake_ssh(monkeypatch, _responses(**{"nft list ruleset": (0, huge, "")}))
+
+    result = server.newton_guided_audit("quasar")
+
+    assert _read(result, "nft list ruleset")["state"] == "truncated"
+    assert _read(result, "uci show dhcp")["state"] == "ok"
+    assert _read(result, "cat /tmp/dhcp.leases")["state"] == "ok"
+    assert result["truncated"] is True
+
+
+def test_a_small_audit_is_not_marked_truncated(configured_newton, monkeypatch):
+    _fake_ssh(monkeypatch, _responses())
+    result = server.newton_guided_audit("quasar")
+    assert result["truncated"] is False
+    assert result["truncated_note"] is None
+    assert all(
+        read["state"] != "truncated" for item in result["items"] for read in item["reads"]
+    )
+
+
+def test_the_description_states_the_budget():
+    tool = server.mcp._tool_manager.get_tool("newton_guided_audit")
+    flat = " ".join((tool.description or "").split())
+    assert f"{server.GUIDED_AUDIT_BUDGET_CHARS} characters" in flat
+    assert "truncated" in flat

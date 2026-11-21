@@ -1113,3 +1113,207 @@ def test_a_request_refused_before_it_is_sent_says_nothing_was_sent(refusal: str)
     assert "nothing was sent" in str(result["message"])
     receipt = store.read_json(store.receipt_path(plan_id))
     assert receipt["state"] == ad_apply.STATE_REFUSED
+
+
+# ---- the read-back is bounded per DC and as a whole --------
+
+
+def _lab_of(count: int) -> harness.Lab:
+    """A lab whose domain has ``count`` write DCs, all sharing the directory."""
+    import fake_helper
+
+    lab = _lab()
+    for index in range(3, count + 1):
+        name = f"win-dc{index}"
+        lab.helpers[name] = fake_helper.FakeHelper(
+            name,
+            configured=harness.DOMAIN,
+            pdc=False,
+            key_hex=harness.KEY_HEX,
+            objects=lab.objects,
+        )
+        lab.devices[name] = harness._device(name)
+    return lab
+
+
+def test_each_dc_has_its_own_read_back_timeout() -> None:
+    """A DC that needs most of TIMEOUT_S does not use up the next DC's time:
+    win-dc1 answers its first match at 100 s and win-dc2 at 200 s, each
+    inside its own 120 s, so the change is confirmed."""
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+    lab.lag()
+    clock = FakeClock()
+    modes: list[str] = []
+
+    def send(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        mode = str(request_body["mode"])
+        modes.append(mode)
+        name = getattr(target, "name")
+        if mode == "read" and name == "win-dc1" and clock.now - 1000.0 < 100.0:
+            return {"v": 1, "code": "error"}
+        if mode == "read" and name == "win-dc2" and clock.now - 1000.0 >= 200.0:
+            lab.helpers["win-dc2"].objects = lab.objects
+        return lab.send(target, request_body)  # type: ignore[arg-type]
+
+    result = ad_apply.apply_change(
+        plan_id, send=send, devices=lab.devices, sleep=clock.sleep, clock=clock
+    )
+
+    assert result["dcs"]["win-dc1"]["state"] == "matched"
+    assert result["dcs"]["win-dc2"]["state"] == "matched"
+    assert "confirm" in modes and "abort" not in modes
+
+
+def _slow_transport(
+    lab: harness.Lab, clock: FakeClock, reads: list[tuple[str, float, float]], sent: list[tuple[str, float]]
+) -> object:
+    """A transport whose read sessions all hang until their timeout."""
+    from newton_mcp.ad.write import transport
+
+    def send(
+        target: object, request_body: dict[str, object], *, timeout_s: float = transport.TIMEOUT_S
+    ) -> dict[str, object]:
+        mode = str(request_body["mode"])
+        if mode == "read":
+            reads.append((getattr(target, "name"), clock.now, float(timeout_s)))
+            clock.sleep(float(timeout_s))
+            raise transport.TransportError("unavailable", "the write helper did not answer")
+        sent.append((mode, clock.now))
+        if mode == "apply":
+            # the apply session itself takes a minute: the DC's undo_at
+            # counts from when it was sent
+            clock.sleep(60.0)
+        return lab.send(target, request_body)  # type: ignore[arg-type]
+
+    return send
+
+
+def test_the_whole_read_back_ends_in_time_for_the_confirm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Six DCs whose read sessions hang: the read-back as a whole stops in
+    time for the confirm or abort session to end before the DC's undo
+   , and no read session outlasts what is left of it."""
+    from newton_mcp.ad.write import transport
+
+    lab = _lab_of(6)
+    plan_id = _approved_plan(lab)
+    window = float(store.read_json(store.plan_path(plan_id))["window"])
+    clock = FakeClock()
+    reads: list[tuple[str, float, float]] = []
+    sent: list[tuple[str, float]] = []
+    monkeypatch.setattr(transport, "send", _slow_transport(lab, clock, reads, sent))
+
+    result = ad_apply.apply_change(
+        plan_id,
+        devices=lab.devices,
+        preflight=lambda target, payload: None,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+
+    assert result["state"] == "not_tested"
+    start = next(at for mode, at in sent if mode == "apply")
+    abort_at = next(at for mode, at in sent if mode == "abort")
+    # the abort session itself may take TIMEOUT_S and must end before undo_at
+    assert abort_at - start + transport.TIMEOUT_S < window
+    assert all(at + timeout <= start + window - transport.TIMEOUT_S for _, at, timeout in reads)
+    assert len(reads) >= 1
+
+
+def test_the_read_back_of_many_dcs_stops_with_an_injected_sender_too() -> None:
+    """Without the session bound, the read-back still starts no read once
+    its whole budget is spent: the DCs after it are not tested."""
+    lab = _lab_of(8)
+    plan_id = _approved_plan(lab)
+    clock = FakeClock()
+    sent: list[tuple[str, float]] = []
+
+    def send(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        mode = str(request_body["mode"])
+        if mode == "read":
+            clock.sleep(120.0)
+            return {"v": 1, "code": "error"}
+        sent.append((mode, clock.now))
+        return lab.send(target, request_body)  # type: ignore[arg-type]
+
+    result = ad_apply.apply_change(
+        plan_id, send=send, devices=lab.devices, sleep=clock.sleep, clock=clock
+    )
+
+    assert result["state"] == "not_tested"
+    abort_at = next(at for mode, at in sent if mode == "abort")
+    assert abort_at - 1000.0 <= 600.0 - 120.0
+
+
+def test_a_long_per_dc_timeout_never_sleeps_past_the_whole_read_back() -> None:
+    """A per-DC timeout longer than the whole budget is cut to it: the last
+    poll sleeps only up to the end of the read-back."""
+    lab = _lab()
+    plan_id = _approved_plan(lab)
+    lab.lag()
+    clock = FakeClock()
+    sent: list[tuple[str, float]] = []
+
+    def send(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        mode = str(request_body["mode"])
+        if mode != "read":
+            sent.append((mode, clock.now))
+        return lab.send(target, request_body)  # type: ignore[arg-type]
+
+    ad_apply.apply_change(
+        plan_id, send=send, devices=lab.devices, sleep=clock.sleep, clock=clock,
+        poll_s=7.0, timeout_s=500.0,
+    )
+
+    abort_at = next(at for mode, at in sent if mode == "abort")
+    assert abort_at - 1000.0 <= 600.0 - ad_apply.READBACK_RESERVE_S
+
+
+# ---- a move whose current parent the DC cannot read ---------------
+
+
+def _move_plan() -> tuple[harness.Lab, str]:
+    lab = harness.Lab()
+    lab.add_user(uac=4194818, parent=harness.DOMAIN_GUID)
+    lab.add_domain_head()
+    lab.add_other(kind="ou", object_class=["organizationalUnit"])
+    return lab, _approved_plan(lab, "move", value=harness.OTHER_GUID)
+
+
+@pytest.mark.parametrize("parent", ["", None])
+def test_a_move_conflict_on_a_parent_the_dc_cannot_read_is_not_called_a_stale_target(
+    parent: object,
+) -> None:
+    """Windows answers {"parent": ""} and Samba {"parent": null} when the
+    object's parent is gone or unreadable to the write account: the target
+    may not have changed, so the result never says another change reached
+    it, and it names the parent and the write account's read rights."""
+    lab, plan_id = _move_plan()
+
+    def send(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        if request_body["mode"] == "apply":
+            return {"v": 1, "code": "conflict", "live": {"parent": parent}}
+        return lab.send(target, request_body)  # type: ignore[arg-type]
+
+    result = ad_apply.apply_change(plan_id, send=send, devices=lab.devices, timeout_s=0.0)
+
+    assert result["state"] == "conflict"
+    assert result["message"] == ad_apply.UNREADABLE_PARENT_MESSAGE
+    assert result["message"] != ad_apply.STALE_TARGET_MESSAGE
+    assert "parent" in result["message"]
+    receipt = store.read_json(store.receipt_path(plan_id))
+    assert receipt["message"] == ad_apply.UNREADABLE_PARENT_MESSAGE
+
+
+def test_a_move_conflict_on_a_readable_other_parent_is_still_a_stale_target() -> None:
+    """The control: a parent the DC read, and not the plan's, is stale."""
+    lab, plan_id = _move_plan()
+
+    def send(target: object, request_body: dict[str, object]) -> dict[str, object]:
+        if request_body["mode"] == "apply":
+            return {"v": 1, "code": "conflict", "live": {"parent": harness.SEED_GUID}}
+        return lab.send(target, request_body)  # type: ignore[arg-type]
+
+    result = ad_apply.apply_change(plan_id, send=send, devices=lab.devices, timeout_s=0.0)
+
+    assert result["message"] == ad_apply.STALE_TARGET_MESSAGE

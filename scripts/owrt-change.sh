@@ -301,13 +301,16 @@ aborted_here() {
 # reconcile_confirmed WHY: the router says session $SID is confirmed, but
 # this host never logged it (the link dropped after the router confirmed,
 # before its answer arrived). For a session this host applied (its plan
-# or hold record is still here), print the config hashes and log the
-# CONFIRMED line the server writes the receipt from. Returns 1, recording
-# nothing, for a session confirmed here already or not applied from here.
+# or hold record is still here), log the CONFIRMED line the server writes
+# the receipt from. Returns 1, recording nothing, for a session confirmed
+# here already or not applied from here.
+# No config hashes are printed: the config now is not the config right
+# after the confirm (a later change, or an edit outside Newton, may sit in
+# it), and an undo built on it would revert that too. The undo planner
+# refuses a reconciled change and says why.
 reconcile_confirmed() {
 	confirmed_here "$SID" && return 1
 	[[ -e $PLANS/$SID.sha256 || -e $PLANS/$SID.held ]] || return 1
-	print_config_hashes
 	log "CONFIRMED session=$SID (reconciled: $1)"
 	rm -f "$PLANS/$SID.sha256" "$PLANS/$SID.held"
 }
@@ -321,6 +324,18 @@ held_closed_rolled_back() {
 	rm -f "$PLANS/$SID.held"
 }
 HELD_UNKNOWN_NEXT="the router's status does not say rolled-back, so the outcome is not known from here"
+# plan_backup: the backup the plan of session $SID took, as words for an
+# ALERT or die line. $BACKUPS is shared by every router and by vendor
+# backups, so "the latest backup" there can be another router's config.
+plan_backup() {
+	local p=
+	[[ -r $PLANS/$SID.backup ]] && { IFS= read -r p < "$PLANS/$SID.backup" || true; }
+	if [[ -n $p && -f $p ]]; then
+		printf 'the backup this plan took, %s' "$(printf '%s' "$p" | LC_ALL=C tr '\000-\037\177' ' ')"
+	else
+		printf "the backup this plan took (this host has no record of it; %s holds the backups of every router, so pick this router's by its name and the time of the plan)" "$BACKUPS"
+	fi
+}
 # router_says_confirmed STATUS: the router's own status line says this
 # session is confirmed (a confirm reached it after this host stopped
 # waiting, so no CONFIRMED line was logged here)
@@ -371,7 +386,7 @@ handshake() {
 		log "unchecked device"
 	fi
 	if [[ -n ${OWRT_EXPECT_PROFILE:-} ]]; then
-		[[ ${H[profile]-} == "$OWRT_EXPECT_PROFILE" ]] || die "router profile=$(oneline "${H[profile]:-?}") is not the expected $OWRT_EXPECT_PROFILE; check OWRT_EXPECT_PROFILE and the router address $ROUTER"
+		[[ ${H[profile]-} == "$OWRT_EXPECT_PROFILE" ]] || die "router profile=$(oneline "${H[profile]:-?}") is not the expected $OWRT_EXPECT_PROFILE, the inventory profile; change profile in devices.toml or run: sudo -u newton newton-router-setup ${OWRT_EXPECT_DEVICE:-$ROUTER} profile $OWRT_EXPECT_PROFILE"
 	else
 		log "unchecked profile"
 	fi
@@ -395,15 +410,17 @@ valid_config_hashes() {
 #
 # The router is asked once ("$PROG confighash"); its stderr goes to a file
 # under $TMPD, never to the terminal.  A confighash that fails, or that
-# answers something which is not a list of hashes, prints NOTHING and changes
-# NOTHING: the outcome of the apply and the exit code never depend on it.
+# answers something which is not a list of hashes, prints NOTHING and returns
+# 1; the outcome of the apply and the exit code never depend on it.
 # Only the lines that match ^[0-9a-f]{32} [A-Za-z0-9_-]+$ are printed (a name
 # with a space or a control character in it is dropped), and at most 200 of
 # them.  These lines go to stdout only: the audit log never sees them.
+# Returns 1 when it printed no line, so the caller can say that no undo
+# record was kept (confighash_after_confirm).
 print_config_hashes() {
 	local out line name n=0
-	out=$(r "$PROG confighash" </dev/null 2>"$TMPD/confighash.print.err") || return 0
-	valid_config_hashes "$out" || return 0
+	out=$(r "$PROG confighash" </dev/null 2>"$TMPD/confighash.print.err") || return 1
+	valid_config_hashes "$out" || return 1
 	while IFS= read -r line; do
 		( LC_ALL=C; [[ $line =~ ^[0-9a-f]{32}\ [A-Za-z0-9_-]+$ ]] ) || continue
 		n=$((n + 1))
@@ -411,7 +428,14 @@ print_config_hashes() {
 		name=${line#* }
 		printf 'CONFIGHASH %s %s\n' "${line%% *}" "$name"
 	done <<< "$out"
-	return 0
+	(( n > 0 ))
+}
+# confighash_after_confirm: print the config hashes right after a confirm;
+# when none could be read, say (on stdout and in the audit log) that no undo
+# record was kept. The CONFIRMED line the caller logs next stays last.
+confighash_after_confirm() {
+	print_config_hashes && return 0
+	log "NO UNDO RECORD session=$SID: the router's config could not be read right after the confirm, so newton_plan_undo cannot undo this change; restore its backup by hand if it must be undone"
 }
 validate_timeout() {
 	[[ $T =~ ^[1-9][0-9]{1,2}$ ]] && (( T >= 60 && T <= 600 )) || die "timeout must be an integer 60..600"
@@ -512,6 +536,7 @@ backup_now() {
 	r "$PROG backup" </dev/null > "$bk"
 	tar -tzf "$bk" >/dev/null 2>&1 || die "backup failed or corrupt (the partial file was removed): $(oneline "$bk")"
 	BK_PARTIAL=
+	PLAN_BACKUP=$bk
 	log "BACKUP $(printf '%s' "$bk" | LC_ALL=C tr '\000-\037\177' ' ') ($(tar -tzf "$bk" | grep -c '^etc/config/[^/][^/]*$') config files)"
 }
 
@@ -554,7 +579,9 @@ plan)
 			# already applied, and the router rolls it back at its window end
 			if [[ -e $PLANS/$bsid.held ]]; then
 				busy_next="session $bsid of this login is applied and held on the router, not confirmed; confirm it ($0 confirm $ROUTER $bsid) or abort it ($0 abort $ROUTER $bsid), then plan again; left alone, the router rolls it back when its window ends"
-			elif [[ -r $AUDIT ]] && grep -qE -- " APPLYING session=$bsid\$" "$AUDIT"; then
+			elif [[ -r $AUDIT ]] && [[ $(grep -E -- "^[^ ]+ [^ ]+ (APPLYING|APPLY REFUSED) session=$bsid\$" "$AUDIT" | tail -n 1) == *" APPLYING session=$bsid" ]]; then
+			# the last apply of that session was sent and not refused by the
+			# router (a refusal logs APPLY REFUSED: nothing was applied)
 				busy_next="session $bsid of this login was applied and its window is still open; wait for that apply to end or abort it ($0 abort $ROUTER $bsid), then plan again; unless it is confirmed, the router rolls it back when its window ends"
 			else
 				busy_next="session $bsid of this login is still open on the router; apply it ($0 apply $ROUTER $bsid <its planned timeout>) or abort it ($0 abort $ROUTER $bsid), then plan again; an open session left alone expires on the router after about 45 minutes"
@@ -604,6 +631,9 @@ plan)
 	staged_check "$SID"
 	printf '%s\n' "$SEAL_DIFF" > "$PLANS/$SID.sha256"
 	printf '%s\n' "$SEAL_BASE" > "$PLANS/$SID.base"
+	# the backup this plan took: ALERT and die lines name it, never "the
+	# latest backup" (the backup directory is shared by every router)
+	printf '%s\n' "$PLAN_BACKUP" > "$PLANS/$SID.backup"
 	# the probe count of the seal line, read back at apply time for the CONFIRMED line (design 7.1 rows 344-345)
 	printf '%s\n' "$SEAL_PROBES_N" > "$PLANS/$SID.probes"
 	log "STAGED session=$SID from $F"
@@ -736,6 +766,7 @@ apply)
 	}
 	need_sid "$SID"
 	validate_timeout
+	confirmed_here "$SID" && die "session $SID was already confirmed; nothing applied (run: $0 status $ROUTER $SID)"
 	[[ -r $PLANS/$SID.sha256 ]] || die "no plan record for $SID — run plan first"
 	# the probe count the plan printed (seal's `probes <n> <sha>` line); the router reports no count at apply time
 	PROBE_N=
@@ -752,14 +783,20 @@ apply)
 		(( HOLD == 0 )) || die "--hold cannot be used with client checks (OWRT_LOCAL_CHECK): they would not run again before the confirm; nothing applied, session $SID is still staged"
 	fi
 	handshake
-	# ONE diff fetch: the sha256 must equal the plan record's, then the masked DIFF audit lines (rows 261-263)
-	DIFF_RAW=$(r "$PROG diff $SID" </dev/null 2>"$TMPD/read.err") || read_refused $? "cannot read staged diff"
-	if [[ -n $DIFF_RAW ]]; then
-		DIFF_SHA=$(printf '%s\n' "$DIFF_RAW" | sha256sum | cut -d' ' -f1)
-	else
-		DIFF_SHA=$(sha256sum </dev/null | cut -d' ' -f1)
-	fi
-	[[ $DIFF_SHA == "$(cat "$PLANS/$SID.sha256")" ]] || die "staged diff changed since plan — re-plan and re-approve"
+	# the diff fetch: its sha256 must equal the plan record's, then the masked DIFF audit lines (rows 261-263).
+	# A read the link cut short can still exit 0, so a mismatch is read once more; the second read must
+	# match exactly too, and the DIFF lines come from the read that matched.
+	PLAN_DIFF_SHA=$(cat "$PLANS/$SID.sha256")
+	for diff_read in 1 2; do
+		DIFF_RAW=$(r "$PROG diff $SID" </dev/null 2>"$TMPD/read.err") || read_refused $? "cannot read staged diff"
+		if [[ -n $DIFF_RAW ]]; then
+			DIFF_SHA=$(printf '%s\n' "$DIFF_RAW" | sha256sum | cut -d' ' -f1)
+		else
+			DIFF_SHA=$(sha256sum </dev/null | cut -d' ' -f1)
+		fi
+		[[ $DIFF_SHA == "$PLAN_DIFF_SHA" ]] && break
+		(( diff_read == 2 )) && die "the staged diff does not match the plan, or the read of it was cut short; nothing applied; abort session $SID ($0 abort $ROUTER $SID), then plan the change again and approve it again"
+	done
 	while IFS= read -r line || [[ -n $line ]]; do log "DIFF session=$SID: $(mask_secrets "$line")"; done <<< "$DIFF_RAW"
 	operator=${OWRT_OPERATOR:-${SUDO_USER:-${USER:-unknown}}}
 	log "OPERATOR session=$SID: $(oneline "$operator")"
@@ -807,6 +844,7 @@ apply)
 		:
 	elif (( arc == 3 )); then
 		first=; IFS= read -r first < "$TMPD/apply.err" || true
+		log "APPLY REFUSED session=$SID"
 		die "apply refused, nothing applied: $(oneline "$first"); $(refusal_next_step "$first")"
 	elif (( arc == 1 )) && IFS= read -r first < "$TMPD/apply.err" && [[ $first == "error already-applied" ]]; then
 		# the router refuses before it touches anything: an earlier run
@@ -880,9 +918,9 @@ apply)
 			[[ $out == "confirmed $SID rpcd-timer-lost" ]] && lost_note='; rpcd had lost its rollback timer, the guard held the window'
 			# the hashes of the committed config, read once more after the
 			# confirmation and printed on stdout for the caller.
-			# A confighash problem prints nothing and changes nothing: the
-			# CONFIRMED line below stays the last line of stdout.
-			print_config_hashes
+			# A confighash problem prints a NO UNDO RECORD line and changes
+			# nothing else: the CONFIRMED line below stays the last line of stdout.
+			confighash_after_confirm
 			log "CONFIRMED session=$SID ($PASSES consecutive passes: fresh ssh + router-side ping, dns, health and $PROBE_N probes${OWRT_LOCAL_CHECK:+ + local check})$lost_note"
 			rm -f "$PLANS/$SID.sha256"
 		elif (( crc == 3 )); then
@@ -964,7 +1002,7 @@ apply)
 				log "ABORTED session=$SID ($(oneline "$abort_how"))"
 			else
 				first=; IFS= read -r first < "$TMPD/abort.err" || true
-				log "ALERT session=$SID abort did not report success: $(oneline "$first") — check the router now; latest backup in $BACKUPS"
+				log "ALERT session=$SID abort did not report success: $(oneline "$first") — check the router now; compare it with $(plan_backup)"
 			fi
 			sleep 5
 			rollback_reason=
@@ -1056,20 +1094,20 @@ apply)
 			safe_st=$(oneline "$st")
 			safe_config_diff=$(oneline "$CONFIG_DIFF")
 			if [[ -n $CONFIG_DIFF ]]; then
-				log "ALERT session=$SID status=$safe_st after the rollback window, but the committed config differs from its state before the apply in: $safe_config_diff — the change may still be live (rpcd restarted during the window, or the change was confirmed outside Newton)${rollback_reason:+; also: $rollback_reason} — check the router now; latest backup in $BACKUPS (abort: $(oneline "$abort_how"))"
+				log "ALERT session=$SID status=$safe_st after the rollback window, but the committed config differs from its state before the apply in: $safe_config_diff — the change may still be live (rpcd restarted during the window, or the change was confirmed outside Newton)${rollback_reason:+; also: $rollback_reason} — check the router now; compare it with $(plan_backup) (abort: $(oneline "$abort_how"))"
 			elif [[ -z $rollback_reason ]]; then
 				log "ROLLBACK WINDOW PASSED session=$SID — router reachable; the committed config matches its state before the apply ($CONFIG_COUNT packages compared); rolled back by $rollback_cause"
 			else
-				log "ALERT session=$SID rolled back, but $rollback_reason — check the router now; latest backup in $BACKUPS (abort: $(oneline "$abort_how"))"
+				log "ALERT session=$SID rolled back, but $rollback_reason — check the router now; compare it with $(plan_backup) (abort: $(oneline "$abort_how"))"
 			fi
 			;;
 		confirmed)
-			log "ALERT session=$SID status=confirmed after the rollback window — the change was confirmed outside this run; check the router now; latest backup in $BACKUPS"
+			log "ALERT session=$SID status=confirmed after the rollback window — the change was confirmed outside this run; check the router now; compare it with $(plan_backup)"
 			;;
 		staged|inconsistent|unreachable)
-			log "ALERT session=$SID status=$st after rollback window — check the router now; latest backup in $BACKUPS"
+			log "ALERT session=$SID status=$st after rollback window — check the router now; compare it with $(plan_backup)"
 			;;
-		*) log "ALERT session=$SID status=unexpected ($(oneline "$st")) after rollback window — check the router now; latest backup in $BACKUPS" ;;
+		*) log "ALERT session=$SID status=unexpected ($(oneline "$st")) after rollback window — check the router now; compare it with $(plan_backup)" ;;
 		esac
 		rm -f "$PLANS/$SID.sha256"
 		exit 1
@@ -1085,7 +1123,7 @@ status)
 			echo "NOTE session=$SID: the window of its held apply has passed and $(confirmed_live)"
 		else
 			held_closed_rolled_back "$out" \
-				|| echo "NOTE session=$SID: the window of its held apply ended unconfirmed and $HELD_UNKNOWN_NEXT; compare the router's config with the latest backup in $BACKUPS, or run this status again"
+				|| echo "NOTE session=$SID: the window of its held apply ended unconfirmed and $HELD_UNKNOWN_NEXT; compare the router's config with $(plan_backup), or run this status again"
 		fi
 	fi
 	if router_says_confirmed "$out"; then
@@ -1113,7 +1151,7 @@ confirm)
 			&& die "the window of session $SID has closed; nothing confirmed by this run; $(confirmed_live)"
 		held_closed_rolled_back "$st" \
 			&& die "the window of session $SID has closed; nothing confirmed: the router rolled the change back (its status says rolled-back)"
-		die "the window of session $SID has closed; nothing confirmed; $HELD_UNKNOWN_NEXT; run: $0 status $ROUTER $SID, and compare the router's config with the latest backup in $BACKUPS"
+		die "the window of session $SID has closed; nothing confirmed; $HELD_UNKNOWN_NEXT; run: $0 status $ROUTER $SID, and compare the router's config with $(plan_backup)"
 	fi
 	# check_failed WHAT MSG: a check before the confirm failed (WHAT says
 	# which, MSG is the refusal when the session is still armed). An earlier
@@ -1148,7 +1186,7 @@ confirm)
 	if (( crc == 0 )) && [[ $out == "confirmed $SID" || $out == "confirmed $SID rpcd-timer-lost" ]]; then
 		lost_note=
 		[[ $out == "confirmed $SID rpcd-timer-lost" ]] && lost_note='; rpcd had lost its rollback timer, the guard held the window'
-		print_config_hashes
+		confighash_after_confirm
 		log "CONFIRMED session=$SID (held apply: $PASSES consecutive passes, then one more fresh ssh + router-side round before the confirm${OWRT_LOCAL_CHECK:+ + local check})$lost_note"
 		rm -f "$PLANS/$SID.sha256" "$HELD_FILE"
 	elif (( crc == 3 )) || [[ $crc == 1 && ( $first == 'error rpcd-confirm-failed'* || $first == 'error confirm-incomplete'* ) ]]; then
@@ -1178,7 +1216,7 @@ abort)
 	elif (( arc == 0 )) && [[ $out == "aborted $SID gone" ]] && (( ! audit_readable )); then
 		# without this host's audit log the confirmed check cannot run:
 		# nothing was rolled back by this abort, so it never says ABORTED
-		die "the router no longer has session $SID and this host's audit log ($AUDIT) cannot be read, so whether the change was confirmed, rolled back or is still live is not known from this host; this abort rolled nothing back. Check: $0 status $ROUTER $SID, and compare the router's config with the latest backup in $BACKUPS"
+		die "the router no longer has session $SID and this host's audit log ($AUDIT) cannot be read, so whether the change was confirmed, rolled back or is still live is not known from this host; this abort rolled nothing back. Check: $0 status $ROUTER $SID, and compare the router's config with $(plan_backup)"
 	elif (( arc == 0 )) && [[ $out == "aborted $SID gone" ]]; then
 		# "gone" rolled nothing back: the router no longer had the session
 		# (a later session or a reboot), and a confirm killed before this
@@ -1198,7 +1236,16 @@ abort)
 			log "the router no longer has session $SID and its status says rolled-back; this abort rolled nothing back"
 			exit 0
 		fi
-		die "the router no longer has session $SID; this abort rolled nothing back, and $HELD_UNKNOWN_NEXT: the change may still be live. Check: $0 status $ROUTER $SID, and compare the router's config with the latest backup in $BACKUPS"
+		if [[ $st =~ ^gone\ sid=$SID\  && ! -e $PLANS/$SID.held ]] \
+			&& ! grep -qE -- "^[^ ]+ [^ ]+ APPLYING session=$SID\$" "$AUDIT"; then
+			# the router's status says gone, and no apply of it was ever sent
+			# from this host (the first abort's answer was lost, so no ABORTED
+			# line was logged): it was only staged
+			rm -f "$PLANS/$SID.sha256"
+			echo "the router no longer has session $SID, and this host never applied it (its audit log has no APPLYING line for it): it was only staged, so nothing of it is live from this host and this abort had nothing to roll back"
+			exit 0
+		fi
+		die "the router no longer has session $SID; this abort rolled nothing back, and $HELD_UNKNOWN_NEXT: the change may still be live. Check: $0 status $ROUTER $SID, and compare the router's config with $(plan_backup)"
 	elif (( arc == 0 )) && [[ $out == "aborted $SID "* ]]; then
 		log "ABORTED session=$SID ($(oneline "${out#aborted $SID }"))"
 		# a line of its own (router text never starts a line): the server

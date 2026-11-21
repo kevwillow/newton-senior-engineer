@@ -1617,6 +1617,85 @@ def test_the_settle_survives_a_login_that_always_fails(tmp_path: Path) -> None:
     assert clock.now >= started + 180 + owner_verify.SETTLE_GRACE_S
 
 
+def test_a_router_never_reached_is_not_said_to_hold_an_open_window(
+    tmp_path: Path,
+) -> None:
+    """A router Newton never read is not said to be "still waiting for
+    confirmation": the window may have closed long ago."""
+    started = time.time()
+    clock = SettleClock(started)
+    router = FakeRouter(BEFORE, refuse_login=True)
+    verdict = owner_verify.settle(
+        _device(tmp_path),
+        _record(),
+        _backup(),
+        {"started_at": started},
+        _factory(router),
+        now=clock,
+        sleep=clock.sleep,
+    )
+    assert verdict.state == owner_verify.UNKNOWN
+    assert not any("still waiting" in note for note in verdict.notes), verdict.notes
+    assert any("could not read" in note for note in verdict.notes), verdict.notes
+
+
+def test_a_window_that_cannot_be_read_is_not_said_to_be_open(
+    tmp_path: Path,
+) -> None:
+    """A login that works but a pending read that fails proves nothing
+    about the window either."""
+    from newton_mcp.adapters import openwrt_rpcd as rpcd
+
+    started = time.time()
+    clock = SettleClock(started)
+
+    def fail_listing(obj: str, fn: str, _args: dict[str, Any]) -> None:
+        if (obj, fn) == ("file", "list"):
+            raise rpcd.RpcdCallFailed(6)
+
+    router = FakeRouter(BEFORE, on_call=fail_listing)
+    verdict = owner_verify.settle(
+        _device(tmp_path),
+        _record(),
+        _backup(),
+        {"started_at": started},
+        _factory(router),
+        now=clock,
+        sleep=clock.sleep,
+    )
+    assert verdict.state == owner_verify.UNKNOWN
+    assert not any("still waiting" in note for note in verdict.notes), verdict.notes
+    assert any("could not read" in note for note in verdict.notes), verdict.notes
+
+
+def test_a_router_lost_after_an_open_window_is_not_said_to_hold_it(
+    tmp_path: Path,
+) -> None:
+    """The window was read open once, then the router went away: what
+    the router did after that is not known, so it is not stated."""
+    started = time.time()
+    clock = SettleClock(started)
+
+    def gone_after_the_first_read(obj: str, fn: str, _args: dict[str, Any]) -> None:
+        if (obj, fn) == ("file", "list"):
+            router.refuse_login = True
+
+    router = FakeRouter(BEFORE, pending=True, on_call=gone_after_the_first_read)
+    verdict = owner_verify.settle(
+        _device(tmp_path),
+        _record(),
+        _backup(),
+        {"started_at": started},
+        _factory(router),
+        now=clock,
+        sleep=clock.sleep,
+    )
+    # the window was read once before the router went away
+    assert router.refuse_login
+    assert verdict.state == owner_verify.UNKNOWN
+    assert not any("still waiting" in note for note in verdict.notes), verdict.notes
+
+
 # ---- the internet check (the installed program's own check) ----------------
 
 

@@ -1050,6 +1050,58 @@ def scrub_read_text(
     return out_san.text, err_san.text, out_san.truncated or err_san.truncated
 
 
+# The time limit of one owrt-change.sh run that names none: a plan
+# is a backup plus a few ssh calls, a status or abort one or two.  The apply
+# and the confirm set their own.
+SCRIPT_TIMEOUT_S = 180
+
+BACKUP_TIMEOUT_ERROR = (
+    "the backup did not finish in time, so no backup was taken; a partial file may be "
+    "left in the backups directory. Check that the router answers (newton_read uptime), "
+    "then try again"
+)
+PLAN_TIMEOUT_ERROR = (
+    "planning did not finish in time, so whether the change was staged on the router is "
+    "not known; plan again (if the router then says it is busy with a session of this "
+    "login, abort that session with newton_abort_change, then plan again)"
+)
+STATUS_TIMEOUT_NEXT_STEP = (
+    "The router did not answer in time, so nothing new is known about this change. Call "
+    "newton_change_status again; unless the change was confirmed, the router rolls it back "
+    "when its window ends."
+)
+ABORT_TIMEOUT_NEXT_STEP = (
+    "The abort did not finish in time, so whether it rolled the change back is not known "
+    "from here. Call newton_change_status to see where it stands; unless the change was "
+    "confirmed, the router rolls it back when its window ends."
+)
+
+
+# The total characters of device text one guided audit returns,
+# its reads' stdout and stderr together; the AD audit has its own budget.
+# Each read is capped at FIELD_CAP per field, but fourteen of them were not.
+GUIDED_AUDIT_BUDGET_CHARS = 60_000
+
+GUIDED_AUDIT_TRUNCATED_NOTE = (
+    "the audit's output passed its budget: the reads in state truncated are left out; "
+    "read each of them with newton_read"
+)
+
+
+def _timeout_text(value: object) -> str:
+    """The partial output a ``subprocess.TimeoutExpired`` carries, as text.
+
+    ``subprocess.run(text=True)`` still raises with BYTES in ``stdout`` and
+    ``stderr`` when it times out, so bytes are decoded (bad bytes
+    replaced), a str is kept and anything else is empty.
+    """
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return ""
+
+
 def returned_approval_reasons(reasons: list[str], uci_batch: str, diff: str) -> list[str]:
     """Approval reasons safe to return to the model, deduped, order kept.
 
@@ -1170,9 +1222,11 @@ class NewtonService:
         self,
         device: Device,
         *args: str,
-        timeout: int | None = None,
+        timeout: int = SCRIPT_TIMEOUT_S,
         extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        # every run has a time limit: a router that holds the
+        # connection open and never answers must not hold the call forever
         if device.platform != "openwrt":
             raise NewtonError(
                 f"OpenWrt change script is not available for platform {device.platform}"
@@ -1607,8 +1661,8 @@ class NewtonService:
             # can never be read as an option.
             cp = subprocess.run(args + ["--", device.destination, remote], text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=30, env=env, check=False)
         except subprocess.TimeoutExpired as exc:
-            out_raw = exc.stdout if isinstance(exc.stdout, str) else ""
-            err_raw = exc.stderr if isinstance(exc.stderr, str) else ""
+            out_raw = _timeout_text(exc.stdout)
+            err_raw = _timeout_text(exc.stderr)
             out_text, err_text, truncated = self._scrub_read(scrub_tokens, out_raw, err_raw)
             err_msg = err_text or "read command timed out"
             return {
@@ -1646,6 +1700,8 @@ class NewtonService:
             )
 
         items: list[dict[str, Any]] = []
+        budget_left = GUIDED_AUDIT_BUDGET_CHARS
+        truncated = False
         package_command = "apk list -I miniupnpd-nftables"
         package_name = "miniupnpd-nftables"
 
@@ -1685,13 +1741,28 @@ class NewtonService:
                     stderr = str(exc)
                     output_text = ""
 
-                item["reads"].append({
-                    "command": command,
-                    "state": state,
-                    "exit_code": exit_code,
-                    "output": output,
-                    "stderr": stderr,
-                })
+                size = len(output["text"]) + len(
+                    stderr["text"] if isinstance(stderr, dict) else stderr
+                )
+                if size <= budget_left:
+                    budget_left -= size
+                    item["reads"].append({
+                        "command": command,
+                        "state": state,
+                        "exit_code": exit_code,
+                        "output": output,
+                        "stderr": stderr,
+                    })
+                else:
+                    # past the budget: listed, its text left out
+                    truncated = True
+                    item["reads"].append({
+                        "command": command,
+                        "state": "truncated",
+                        "exit_code": exit_code,
+                        "output": _envelope.envelope(source, ""),
+                        "stderr": "",
+                    })
 
                 if command == package_command and state != "failed":
                     installed = any(
@@ -1709,6 +1780,8 @@ class NewtonService:
             "device": device_name,
             "items": items,
             "not_checked": [],
+            "truncated": truncated,
+            "truncated_note": GUIDED_AUDIT_TRUNCATED_NOTE if truncated else None,
         }
 
     def plan_scan(
@@ -1871,7 +1944,7 @@ class NewtonService:
             completed = _scans.run_vantage(vantage, command)
             stdout_text = completed.stdout or ""
         except subprocess.TimeoutExpired as exc:
-            stdout_text = exc.stdout if isinstance(exc.stdout, str) else ""
+            stdout_text = _timeout_text(exc.stdout)
         except OSError:
             stopped = datetime.now(timezone.utc)
             self._scan_audit(request, consent, started, stopped, 0, 0, "runner-error")
@@ -2118,7 +2191,10 @@ class NewtonService:
         device = self.device_for("newton_backup", device_name)
         if device.platform != "openwrt":
             return vendor_flow.backup(self, device, device_name)
-        cp = self.run_script(device, "backup", device.destination)
+        try:
+            cp = self.run_script(device, "backup", device.destination)
+        except subprocess.TimeoutExpired:
+            raise NewtonError(BACKUP_TIMEOUT_ERROR) from None
         parsed = parse_backup(cp.stdout + cp.stderr)
         if cp.returncode or not parsed:
             log = script_log(cp)
@@ -2304,9 +2380,12 @@ class NewtonService:
                 with os.fdopen(cp_fd, "w", encoding="utf-8") as f:
                     f.write(uci_batch)
                 cp_probe_filename = write_probe_file(cp_norm)
-                cp_cp = self.run_script(
-                    device, "plan", device.destination, cp_filename, str(timeout_s), cp_probe_filename
-                )
+                try:
+                    cp_cp = self.run_script(
+                        device, "plan", device.destination, cp_filename, str(timeout_s), cp_probe_filename
+                    )
+                except subprocess.TimeoutExpired:
+                    raise NewtonError(PLAN_TIMEOUT_ERROR) from None
             finally:
                 for path in (cp_filename, cp_probe_filename):
                     if path is not None:
@@ -2524,7 +2603,10 @@ class NewtonService:
         # the owner's yes comes before any device contact, also the backup below.
         if owner_confirmed_in_chat is not True:
             raise NewtonError(OWNER_CONFIRMATION_HELP)
-        cp = self.run_script(device, "backup", device.destination)
+        try:
+            cp = self.run_script(device, "backup", device.destination)
+        except subprocess.TimeoutExpired:
+            raise NewtonError(BACKUP_TIMEOUT_ERROR) from None
         parsed = parse_backup(cp.stdout + cp.stderr)
         if cp.returncode or not parsed:
             log = script_log(cp)
@@ -2967,7 +3049,7 @@ class NewtonService:
                 # router; treat it as reached so the approval is
                 # burned and the next apply cannot replay it.
                 reached_router = True
-                log = ((exc.stdout or "") if isinstance(exc.stdout, str) else "") + ((exc.stderr or "") if isinstance(exc.stderr, str) else "")
+                log = _timeout_text(exc.stdout) + _timeout_text(exc.stderr)
                 timed_out_log = log
             else:
                 # split on "\n" only -- device text is untrusted and
@@ -2987,9 +3069,16 @@ class NewtonService:
                     self.settle_approval(session_id, reached_router=reached_router)
             if timed_out_log is not None:
                 self._write_change_receipt(device_name, record, "unknown", timed_out_log)
-                if timed_out_log:
-                    return {"result": "unknown", "log": _envelope.envelope(f"{device_name}:apply", timed_out_log)}
-                return {"result": "unknown", "log": "apply subprocess timed out"}
+                timed_out: dict[str, Any] = {
+                    "result": "unknown",
+                    "log": (
+                        _envelope.envelope(f"{device_name}:apply", timed_out_log)
+                        if timed_out_log
+                        else "apply subprocess timed out"
+                    ),
+                    "next_step": APPLY_TIMEOUT_NEXT_STEP,
+                }
+                return timed_out
             assert cp is not None  # only reached on the non-timeout path
             stdout, confighash_text = _remove_config_hashes(cp.stdout or "")
             log = stdout + (cp.stderr or "")
@@ -3241,7 +3330,15 @@ class NewtonService:
             from . import noinstall_flow
 
             return noinstall_flow.status(self, device_name, session_id)
-        cp = self.run_script(device, "status", device.destination, session_id)
+        try:
+            cp = self.run_script(device, "status", device.destination, session_id)
+        except subprocess.TimeoutExpired as exc:
+            partial = _timeout_text(exc.stdout) + _timeout_text(exc.stderr)
+            return {
+                "exit_code": 124,
+                "log": _envelope.envelope(f"{device_name}:status", partial or "status timed out"),
+                "next_step": STATUS_TIMEOUT_NEXT_STEP,
+            }
         self._record_held_rollback(device_name, session_id, cp)
         self._record_reconciled_confirm(device_name, session_id, cp)
         stdout, _hashes = _remove_config_hashes(cp.stdout or "")
@@ -3305,8 +3402,7 @@ class NewtonService:
             )
         except subprocess.TimeoutExpired as exc:
             # the run may have reached the router's confirm: not known
-            partial = ((exc.stdout or "") if isinstance(exc.stdout, str) else "") + (
-                (exc.stderr or "") if isinstance(exc.stderr, str) else "")
+            partial = _timeout_text(exc.stdout) + _timeout_text(exc.stderr)
             record = self._plan_record_for(device_name, session_id)
             if record is not None:
                 self._write_change_receipt(device_name, record, "unknown", partial)
@@ -3388,7 +3484,16 @@ class NewtonService:
             from . import noinstall_flow
 
             return noinstall_flow.abort(self, device_name, session_id)
-        cp = self.run_script(device, "abort", device.destination, session_id)
+        try:
+            cp = self.run_script(device, "abort", device.destination, session_id)
+        except subprocess.TimeoutExpired as exc:
+            partial = _timeout_text(exc.stdout) + _timeout_text(exc.stderr)
+            return {
+                "exit_code": 124,
+                "result": "unknown",
+                "log": _envelope.envelope(f"{device_name}:abort", partial or "abort timed out"),
+                "next_step": ABORT_TIMEOUT_NEXT_STEP,
+            }
         abort_stdout, _hashes = _remove_config_hashes(cp.stdout or "")
         result: dict[str, Any] = {
             "exit_code": cp.returncode,
@@ -3615,6 +3720,12 @@ def classify_apply(returncode: int, stdout: str, session_id: str) -> str:
     return "error"
 
 
+APPLY_TIMEOUT_NEXT_STEP = (
+    "The apply did not finish in time, so whether the change was applied or confirmed is not "
+    "known from here. Call newton_change_status with this device and session_id to see where "
+    "it stands; the router rolls the change back when its window ends unless it was confirmed."
+)
+
 HELD_NEXT_STEP = (
     "The change is live and NOT confirmed: the router rolls it back on its own when its window "
     "ends (confirm_by, UNIX seconds). Ask the owner to test it now, from a client if the router "
@@ -3622,7 +3733,10 @@ HELD_NEXT_STEP = (
     "it, or newton_abort_change to roll it back, before the window ends. The window is the "
     "plan's timeout_s (90 s by default, 60 to 600), and the verify rounds already used part of "
     "it; if that is too short for a client test, abort and plan the change again with a longer "
-    "timeout_s."
+    "timeout_s. A rollback (the window ending unconfirmed, or newton_abort_change) puts back "
+    "every /etc/config file as it was before the apply, so it also undoes any other setting "
+    "saved during the window (in LuCI or with uci commit): ask the owner not to change other "
+    "settings while testing."
 )
 
 
@@ -3883,9 +3997,18 @@ def call_tool(tool: str, device: str, fn: Any) -> dict[str, Any]:
 mcp = FastMCP("Newton OpenWrt", instructions=_envelope.UNTRUSTED_DEVICE_DATA_NOTE)
 
 
+# The envelope rewrites the text it holds, so what a tool shows can
+# differ from the router: said in every description that returns one.
+ENVELOPE_REWRITE_NOTE = (
+    "Newton rewrites that text, so it can differ from the router's own: control bytes and "
+    "ANSI escapes are removed, every `</` is shown as `< /`, and a line that names Newton or "
+    f"imitates a Newton field starts with `{_envelope.FLAG_PREFIX.strip()}`."
+)
+
+
 def _envelope_docstring(prefix: str) -> str:
     """Build a tool description that embeds the UNTRUSTED_DEVICE_DATA_NOTE."""
-    return f"{prefix}\n\n{_envelope.UNTRUSTED_DEVICE_DATA_NOTE}\n"
+    return f"{prefix}\n\n{_envelope.UNTRUSTED_DEVICE_DATA_NOTE} {ENVELOPE_REWRITE_NOTE}\n"
 
 
 @mcp.tool()
@@ -3894,7 +4017,7 @@ def newton_list_devices() -> dict[str, Any]:
     return call_tool("newton_list_devices", "-", lambda s: s.list_devices())
 
 
-@mcp.tool(description=_envelope_docstring(
+_READ_DESCRIPTION = _envelope_docstring(
     "Read one read-only command from a device. The command must be one verb\n"
     "with plain arguments (no shell operators, no quotes); the accepted forms\n"
     "are exactly:\n"
@@ -3915,9 +4038,18 @@ def newton_list_devices() -> dict[str, Any]:
     "refused by name and say what installed access would be needed.\n"
     "Returns the result inside an untrusted-device-data envelope (see server\n"
     "description)."
-))
+)
+
+
 def newton_read(device: str, command: str) -> dict[str, Any]:
     return call_tool("newton_read", device, lambda s: _model_read(s, device, command))
+
+
+@mcp.tool(name="newton_read", description=_READ_DESCRIPTION)
+async def _read_tool(device: str, command: str) -> dict[str, Any]:
+    # off the event loop: a router that does not answer must not
+    # hold a confirm, abort or status of another change behind it
+    return await asyncio.to_thread(newton_read, device, command)
 
 
 def _model_read(service: NewtonService, device: str, command: str) -> dict[str, Any]:
@@ -3935,15 +4067,24 @@ def _model_read(service: NewtonService, device: str, command: str) -> dict[str, 
     return service.read(device, command)
 
 
-@mcp.tool(description=_envelope_docstring(
+_BACKUP_DESCRIPTION = _envelope_docstring(
     "Snapshot a device's /etc/config to the local backup dir. On a VyOS, RouterOS or "
     "Junos device it saves the running configuration with every secret replaced by "
     "'<redacted>': a reference copy, not a backup to restore (its result says redacted: "
     "true). The returned backup_path comes from the device and is returned inside an "
     "untrusted-device-data envelope."
-))
+)
+
+
 def newton_backup(device: str) -> dict[str, Any]:
     return call_tool("newton_backup", device, lambda s: s.backup(device))
+
+
+@mcp.tool(name="newton_backup", description=_BACKUP_DESCRIPTION)
+async def _backup_tool(device: str) -> dict[str, Any]:
+    # off the event loop: a router that does not answer must not
+    # hold a confirm, abort or status of another change behind it
+    return await asyncio.to_thread(newton_backup, device)
 
 
 _PROBE_TABLE_DOC = """\
@@ -4005,8 +4146,10 @@ the plan hash, so changing it needs a new plan and a new approval.
 
 Every change needs the owner's approval (the lab carve-out below aside): the
 plan needs approval unless the device is flagged ``lab = true`` with
-``profile = "lab"`` and neither the router's leash/profile nor the host policy
-says so. When the result has
+``profile = "lab"``, the server runs from a source checkout with
+``NEWTON_LAB_APPROVAL_CARVEOUT=1`` set, and neither the router's leash/profile
+nor the host policy says so; an installed Newton never applies it. Do not work
+this out yourself: rely on the plan's ``requires_approval`` field. When the result has
 ``requires_approval`` true, tell the user to run
 ``sudo -u newton /usr/local/bin/newton-approve <session_id>`` (the
 session_id this plan returned) in their own terminal, then call
@@ -4014,7 +4157,9 @@ session_id this plan returned) in their own terminal, then call
 device and are returned inside untrusted-device-data envelopes."""
 
 
-@mcp.tool(description=_envelope_docstring(_PROBE_TABLE_DOC))
+_PLAN_CHANGE_DESCRIPTION = _envelope_docstring(_PROBE_TABLE_DOC)
+
+
 def newton_plan_change(
     device: str,
     uci_batch: str,
@@ -4034,13 +4179,33 @@ def newton_plan_change(
     )
 
 
-@mcp.tool(description=_envelope_docstring(
+@mcp.tool(name="newton_plan_change", description=_PLAN_CHANGE_DESCRIPTION)
+async def _plan_change_tool(
+    device: str,
+    uci_batch: str,
+    timeout_s: int | None = None,
+    probes: list[list[str]] | None = None,
+    manifest_checks: list[str] | None = None,
+    explanation: dict[str, Any] | None = None,
+    owner_confirmed_in_chat: bool | None = None,
+) -> dict[str, Any]:
+    # off the event loop: a router that does not answer must not
+    # hold a confirm, abort or status of another change behind it
+    return await asyncio.to_thread(
+        newton_plan_change, device, uci_batch, timeout_s, probes, manifest_checks,
+        explanation, owner_confirmed_in_chat,
+    )
+
+
+_PLAN_UNDO_DESCRIPTION = _envelope_docstring(
     "Undo a CONFIRMED change by id. Newton builds the changes; give only "
     "intent and risk in explanation; conflicts with later changes REFUSE "
     "the whole undo and are listed; packages, passwords, reboots and client "
     "leases are not undone; needs the owner's yes in chat and newton-approve "
     "like any change."
-))
+)
+
+
 def newton_plan_undo(
     device: str,
     change_id: str,
@@ -4056,6 +4221,20 @@ def newton_plan_undo(
             explanation,
             owner_confirmed_in_chat,
         ),
+    )
+
+
+@mcp.tool(name="newton_plan_undo", description=_PLAN_UNDO_DESCRIPTION)
+async def _plan_undo_tool(
+    device: str,
+    change_id: str,
+    explanation: dict[str, Any] | None = None,
+    owner_confirmed_in_chat: bool | None = None,
+) -> dict[str, Any]:
+    # off the event loop: a router that does not answer must not
+    # hold a confirm, abort or status of another change behind it
+    return await asyncio.to_thread(
+        newton_plan_undo, device, change_id, explanation, owner_confirmed_in_chat
     )
 
 
@@ -4214,13 +4393,15 @@ def _plan_summary(session_id: str) -> str:
     return lines[0] if lines else "(plan not available)"
 
 
-@mcp.tool(description=_envelope_docstring(
+_CONFIRM_CHANGE_DESCRIPTION = _envelope_docstring(
     "Confirm a change that newton_apply_change applied with hold=true, before its window ends "
     "(confirm_by). Newton runs one more verify round over a new connection first and does not "
     "confirm when it fails; the router refuses a confirm after the window. Use it only after the "
     "owner tested the change and said to keep it. The log field comes from the device and is "
     "returned inside an untrusted-device-data envelope."
-))
+)
+
+
 def newton_confirm_change(device: str, session_id: str) -> dict[str, Any]:
     from . import notice
 
@@ -4244,20 +4425,45 @@ def newton_confirm_change(device: str, session_id: str) -> dict[str, Any]:
     return result
 
 
-@mcp.tool(description=_envelope_docstring(
+@mcp.tool(name="newton_confirm_change", description=_CONFIRM_CHANGE_DESCRIPTION)
+async def _confirm_change_tool(device: str, session_id: str) -> dict[str, Any]:
+    # off the event loop: a router that does not answer must not
+    # hold a confirm, abort or status of another change behind it
+    return await asyncio.to_thread(newton_confirm_change, device, session_id)
+
+
+_CHANGE_STATUS_DESCRIPTION = _envelope_docstring(
     "Query the live status of an applied session. The log field comes from "
     "the device and is returned inside an untrusted-device-data envelope."
-))
+)
+
+
 def newton_change_status(device: str, session_id: str) -> dict[str, Any]:
     return call_tool("newton_change_status", device, lambda s: s.status(device, session_id))
 
 
-@mcp.tool(description=_envelope_docstring(
+@mcp.tool(name="newton_change_status", description=_CHANGE_STATUS_DESCRIPTION)
+async def _change_status_tool(device: str, session_id: str) -> dict[str, Any]:
+    # off the event loop: a router that does not answer must not
+    # hold a confirm, abort or status of another change behind it
+    return await asyncio.to_thread(newton_change_status, device, session_id)
+
+
+_ABORT_CHANGE_DESCRIPTION = _envelope_docstring(
     "Abort an in-flight session. The log field comes from the device and is "
     "returned inside an untrusted-device-data envelope."
-))
+)
+
+
 def newton_abort_change(device: str, session_id: str) -> dict[str, Any]:
     return call_tool("newton_abort_change", device, lambda s: s.abort(device, session_id))
+
+
+@mcp.tool(name="newton_abort_change", description=_ABORT_CHANGE_DESCRIPTION)
+async def _abort_change_tool(device: str, session_id: str) -> dict[str, Any]:
+    # off the event loop: a router that does not answer must not
+    # hold a confirm, abort or status of another change behind it
+    return await asyncio.to_thread(newton_abort_change, device, session_id)
 
 
 @mcp.tool(description=_envelope_docstring(
@@ -4381,19 +4587,32 @@ def newton_plan_tier(
     )
 
 
-@mcp.tool(description=_envelope_docstring(
+_GUIDED_AUDIT_DESCRIPTION = _envelope_docstring(
     "Run the fixed six-item guided read-only audit for one device: listeners, "
     "services, port forwards, UPnP, Wi-Fi settings, and DHCP devices. Every "
     "router access delegates to the same validated newton_read path; one "
     "failed read is recorded and does not stop the remaining reads. Device "
     "stdout and stderr stay inside untrusted-device-data envelopes, and the "
     "result distinguishes successful non-empty, successful empty, and failed "
-    "reads. This tool performs no scans and makes no changes."
-))
+    "reads. The result is bounded: the reads' stdout and stderr take at most "
+    f"{GUIDED_AUDIT_BUDGET_CHARS} characters together; a read that no longer fits "
+    "is listed in state truncated with its text left out, `truncated` is true and "
+    "`truncated_note` says so; read those with newton_read. This tool performs no "
+    "scans and makes no changes."
+)
+
+
 def newton_guided_audit(device: str) -> dict[str, Any]:
     return call_tool(
         "newton_guided_audit", device, lambda s: s.guided_audit(device)
     )
+
+
+@mcp.tool(name="newton_guided_audit", description=_GUIDED_AUDIT_DESCRIPTION)
+async def _guided_audit_tool(device: str) -> dict[str, Any]:
+    # off the event loop: a router that does not answer must not
+    # hold a confirm, abort or status of another change behind it
+    return await asyncio.to_thread(newton_guided_audit, device)
 
 
 @mcp.tool(description=_envelope_docstring(

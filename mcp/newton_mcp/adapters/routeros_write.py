@@ -1120,6 +1120,10 @@ class RouterosOps:
         self._wait = wait
         self._now = now
 
+    def window_s(self, timeout_s: int) -> int:
+        """The revert window the apply arms: never less than two minutes."""
+        return _window_s(timeout_s)
+
     def snapshot(self, run: Run) -> Snapshot:
         """Read the configuration, the counts and the pending state.
 

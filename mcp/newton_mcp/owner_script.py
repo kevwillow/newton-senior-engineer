@@ -390,7 +390,8 @@ def _touches_line(plan: ScriptPlan) -> list[str]:
 def _undo_line(plan: ScriptPlan) -> list[str]:
     if plan.kind == KIND_APPLY:
         return [
-            "# To undo it later, on the Newton computer: newton-router-setup "
+            "# To undo it later, on the Newton computer: sudo -u newton "
+            "/usr/local/bin/newton-router-setup "
             "{0} owner-run {1}".format(plan.device, plan.restore_sid)
         ]
     return []
@@ -482,8 +483,11 @@ _REBOOT_RE = re.compile(
     r"the change stays\.$"
 )
 _TOUCHES_RE = re.compile(r"^# Touches: (.+)$")
+# The sudo form is the one rendered; the bare form is what scripts
+# planned before it carry, and their bytes are pinned by their plans.
 _UNDO_RE = re.compile(
-    r"^# To undo it later, on the Newton computer: newton-router-setup "
+    r"^# To undo it later, on the Newton computer: "
+    r"(?:sudo -u newton /usr/local/bin/)?newton-router-setup "
     r"([A-Za-z0-9._-]{1,64}) owner-run ([0-9a-f]{32})$"
 )
 _PLAN_VAR_RE = re.compile(r"^PLAN='([0-9a-f]{32})'$")

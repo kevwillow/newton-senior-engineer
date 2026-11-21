@@ -56,6 +56,18 @@ def test_help_exit_zero(tmp_path, flag):
     assert r.stderr == ""
 
 
+def test_help_says_rollback_is_a_router_program_rollback(tmp_path):
+    """The usage text says what rollback rolls back and that this
+    controller must match the router afterwards."""
+    env = base_env(tmp_path, tmp_path / "unused.toml")
+    r = run_tool(env, "--help")
+    assert r.returncode == 0
+    text = " ".join(r.stdout.split())
+    assert ("rollback puts the router program from before the last upgrade "
+            "back; Newton calls then fail until this host runs the same "
+            "version") in text, r.stdout
+
+
 def test_no_args(tmp_path):
     env = base_env(tmp_path, tmp_path / "devices.toml")
     r = run_tool(env)

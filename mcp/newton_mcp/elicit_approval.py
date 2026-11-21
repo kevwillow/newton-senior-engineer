@@ -131,19 +131,23 @@ def _declined(message: str, session_id: str) -> Outcome:
     return Outcome("declined", _with_hint(message, session_id))
 
 
-def _wrong(device_name: str, remaining: int, session_id: str) -> Outcome:
+def _left(device_name: str, remaining: int) -> str:
+    """What a counted failure leaves: the wait, or the attempts left."""
     if remaining > 0:
         minutes = max(1, math.ceil(remaining / 60))
-        message = f"wrong approval answer; try again in {minutes} min"
-    else:
-        record, unreadable = approval_proof._load_lockout(device_name)
-        attempts = 0
-        if record is not None and not unreadable:
-            attempts = max(
-                0,
-                approval_proof.LOCK_FREE_MISSES - int(record.get("misses", 0)),
-            )
-        message = f"wrong approval answer; {attempts} attempts remain"
+        return f"try again in {minutes} min"
+    record, unreadable = approval_proof._load_lockout(device_name)
+    attempts = 0
+    if record is not None and not unreadable:
+        attempts = max(
+            0,
+            approval_proof.LOCK_FREE_MISSES - int(record.get("misses", 0)),
+        )
+    return f"{attempts} attempts remain"
+
+
+def _wrong(device_name: str, remaining: int, session_id: str) -> Outcome:
+    message = f"wrong approval answer; {_left(device_name, remaining)}"
     return Outcome("wrong", _with_hint(message, session_id))
 
 
@@ -307,13 +311,7 @@ def _dialog_text(
     elif classification.grantable:
         parts.extend(_grant_dialog_text(device_name, classification.classes))
     if first_time:
-        parts.append(
-            "FIRST APPROVAL ON THIS DEVICE\n"
-            "Newton will change this live router.\n"
-            "Every change auto-undoes unless confirmed.\n"
-            "Only you can approve.\n"
-            "The agent can be wrong."
-        )
+        parts.append(approve.FIRST_APPROVAL_WARNING)
     if level == approval_proof.LEVEL_PASSPHRASE:
         parts.append("Enter your approval passphrase")
     else:
@@ -663,11 +661,12 @@ async def _collect_locked(
 
     if not approval_proof.dwell_ok(elapsed):
         try:
-            approval_proof.record_failure(device_name)
+            remaining = approval_proof.record_failure(device_name)
         except Exception:
             return _fallback("the failed approval could not be recorded", session_id)
         return _fallback(
-            "answer came back too fast to be a person",
+            "answer came back too fast to be a person; it counted as a "
+            f"wrong answer; {_left(device_name, remaining)}",
             session_id,
         )
 

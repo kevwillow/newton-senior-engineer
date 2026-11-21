@@ -113,6 +113,9 @@ def test_approval_key_login_failure_does_not_say_run_install_first(setup_env):
 	login_fail_line(r)
 	assert "run install first" not in r.err
 	assert "error: the admin login failed (see the FAIL line above)" in r.err
+	# the error itself names the way out on the password path
+	assert ("if the router refuses root passwords, rerun with --admin "
+	        "plain-key --plain-key <your admin key>") in r.err
 	assert not env.router.path("etc/newton/approve.key").exists()
 
 

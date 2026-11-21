@@ -203,8 +203,11 @@ def test_a_live_session_is_aborted_even_if_its_id_was_confirmed_here(protocol):
 
 
 def _gone_not_confirmed_here(protocol, status, held):
-    # this host's audit log is there and readable, and holds no CONFIRMED line
-    protocol["audit"].write_text(f"2026-11-18T09:00:00+00:00 {ROUTER} STAGED session={SID}\n")
+    # this host's audit log is there and readable, and holds no CONFIRMED
+    # line; the apply was sent from here (a session only staged here is
+    # another case: it cannot be live)
+    protocol["audit"].write_text(f"2026-11-18T09:00:00+00:00 {ROUTER} STAGED session={SID}\n"
+                                 f"2026-11-18T09:00:01+00:00 {ROUTER} APPLYING session={SID}\n")
     if held:
         _plan(protocol)
         plan_record(protocol, ".held").write_text(f"0 0 {int(time.time()) + 300}\n")

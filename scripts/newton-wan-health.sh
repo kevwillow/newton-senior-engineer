@@ -165,16 +165,19 @@ route_present() {
             [ "$1" = "default" ] || continue
             rp_via=0
             rp_dev_ok=0
-            rp_metric_ok=0
+            # the kernel prints no metric token for a metric-0 route
+            rp_line_metric=0
             rp_prev=
             for rp_word in "$@"; do
-                case "$rp_prev $rp_word" in
-                    "via $rp_gw") rp_via=1 ;;
-                    "dev $rp_dev") rp_dev_ok=1 ;;
-                    "metric $rp_metric") rp_metric_ok=1 ;;
+                case "$rp_prev" in
+                    via) [ "$rp_word" = "$rp_gw" ] && rp_via=1 ;;
+                    dev) [ "$rp_word" = "$rp_dev" ] && rp_dev_ok=1 ;;
+                    metric) rp_line_metric=$rp_word ;;
                 esac
                 rp_prev=$rp_word
             done
+            rp_metric_ok=0
+            [ "$rp_line_metric" = "$rp_metric" ] && rp_metric_ok=1
             if [ "$rp_via" = 1 ] && [ "$rp_dev_ok" = 1 ] && [ "$rp_metric_ok" = 1 ]; then
                 rp_found=1
             fi
@@ -202,6 +205,17 @@ restore_wan() {
     rw_high=$(( $3 + 1000 ))
     route_present "$1" "$2" "$rw_high" \
         && ip route del default via "$1" dev "$2" metric "$rw_high" >/dev/null 2>&1
+}
+
+# Log a skip reason once per iface, not every round: the flag file holds the
+# last reason logged and is cleared when the iface validates or goes down.
+log_invalid_once() {
+    li_flag="$STATE_DIR/$1.invalid"
+    li_prev=
+    [ -f "$li_flag" ] && read -r li_prev < "$li_flag"
+    [ "$li_prev" = "$2" ] && return 0
+    log_msg "$2"
+    printf '%s\n' "$2" > "$li_flag"
 }
 
 probe_iface() {
@@ -232,18 +246,23 @@ do_round() {
         if [ -f "$st_file" ]; then
             # shellcheck disable=SC1090
             . "$st_file"
+        elif [ -f "$STATE_DIR/$iface.wasdown" ]; then
+            # down when the daemon last stopped: keep it down across a restart
+            s_mark=down
         fi
+        rm -f "$STATE_DIR/$iface.wasdown"
 
         status="$(ubus call "network.interface.$iface" status 2>/dev/null)" || continue
         up_val="$(printf '%s' "$status" | jsonfilter -e '@.up' 2>/dev/null)"
         if [ "$up_val" != "true" ]; then
+            rm -f "$STATE_DIR/$iface.invalid"
             write_state "$iface" "$s_dev" "$s_gw" "$s_metric" \
                 "$s_fail" "$s_good" "$s_mark" 0
             continue
         fi
         s_dev="$(printf '%s' "$status" | jsonfilter -e '@.l3_device' 2>/dev/null)"
         if ! valid_device "$s_dev"; then
-            log_msg "invalid ubus device; skipping interface"
+            log_invalid_once "$iface" "invalid ubus device; skipping interface"
             write_state "$iface" "$s_dev" "$s_gw" "$s_metric" \
                 "$s_fail" "$s_good" "$s_mark" 0
             continue
@@ -251,18 +270,19 @@ do_round() {
         s_gw="$(printf '%s' "$status" \
             | jsonfilter -e '@.route[@.target="0.0.0.0"].nexthop' 2>/dev/null)"
         if ! valid_ipv4 "$s_gw"; then
-            log_msg "invalid ubus gateway; skipping interface"
+            log_invalid_once "$iface" "invalid ubus gateway; skipping interface"
             write_state "$iface" "$s_dev" "$s_gw" "$s_metric" \
                 "$s_fail" "$s_good" "$s_mark" 0
             continue
         fi
         s_metric="$(printf '%s' "$status" | jsonfilter -e '@.metric' 2>/dev/null)"
         if ! valid_metric "$s_metric"; then
-            log_msg "invalid ubus metric; skipping interface"
+            log_invalid_once "$iface" "invalid ubus metric; skipping interface"
             write_state "$iface" "$s_dev" "$s_gw" "$s_metric" \
                 "$s_fail" "$s_good" "$s_mark" 0
             continue
         fi
+        rm -f "$STATE_DIR/$iface.invalid"
 
         if probe_iface "$s_dev"; then
             s_good=$(( s_good + 1 ))
@@ -330,10 +350,13 @@ restore_all() {
         if valid_device "$s_dev" && valid_ipv4 "$s_gw" && valid_metric "$s_metric" \
             && [ "$s_mark" = "down" ]; then
             restore_wan "$s_gw" "$s_dev" "$s_metric"
+            # a restart (stop, then start) demotes it again in its first round
+            st_iface=${st_file##*/}
+            : > "$STATE_DIR/${st_iface%.state}.wasdown"
         fi
         rm -f "$st_file"
     done
-    rm -f "$STATE_DIR/all_down.flag"
+    rm -f "$STATE_DIR/all_down.flag" "$STATE_DIR"/*.invalid
 }
 
 idle_loop() {

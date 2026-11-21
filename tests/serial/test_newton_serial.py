@@ -382,6 +382,47 @@ def test_factory_reset_shapes_are_hard_blocked(console, tmp_path, command):
 
 
 @pytest.mark.parametrize("command", [
+    # raw flash or block-device writes not spelled as mtd/dd/ubiformat/ubirmvol
+    "ubiupdatevol /dev/ubi0_1 -t", "ubimkvol /dev/ubi0 -N x -m", "ubirsvol /dev/ubi0 -N rootfs_data -s 1",
+    "cat /tmp/x > /dev/ubi0_1", "echo x > /dev/mtd5", "cat /dev/zero >/dev/mtdblock3",
+    "cat /tmp/x >> '/dev/mmcblk0p2'", "exec 3>/dev/sda1", "tee /dev/mtd3 < /tmp/fw.bin",
+    "cat /tmp/fw.bin | tee -a /tmp/copy /dev/mtd3", "mkfs.ext4 /dev/mmcblk0p2", "mkfs -t f2fs /dev/sda1",
+    "mke2fs /dev/sda1", "dd if=/dev/zero of=/dev/nvme0n1", "timeout 9 ubiupdatevol /dev/ubi0_1 -t",
+    "sh -c 'echo x > /dev/mtd5'",
+    # flash writers, partition and discard tools, a copy onto a node, a quoted dd target
+    "cp fw.bin /dev/mtdblock3", "mv fw.bin /dev/mtd3", "flashcp fw.bin /dev/mtd3", "flash_erase /dev/mtd3 0 0",
+    "flash_eraseall /dev/mtd3", "nandwrite /dev/mtd3 f", "dd if=x of=\"/dev/mtd3\"", "dd if=x of='/dev/sda'",
+    "wipefs -a /dev/sda", "parted /dev/sda rm 1", "sfdisk /dev/sda < t", "fdisk /dev/mmcblk0",
+    "sgdisk -Z /dev/sda", "blkdiscard /dev/nvme0n1", "mtd_debug erase /dev/mtd3 0 1",
+    "mtd_debug write /dev/mtd3 0 4 f",
+])
+def test_flash_and_block_device_writes_are_hard_blocked(console, tmp_path, command):
+    """SKILL.md's hard blacklist names writes to /dev/ubi* and raw
+    flash writes; each listed write to a flash or block device node is
+    refused, even with --approved (a guard rail, not a sandbox)."""
+    result = invoke(console, tmp_path, "--approved", "run", command)
+    assert result.returncode == 2, (command, result.stderr)
+    assert "hard-blocked" in result.stderr
+    time.sleep(0.03)
+    assert not console.received
+
+
+@pytest.mark.parametrize("command", [
+    # reads of a flash or block device, and writes that only mention one
+    "dd if=/dev/mtd0 of=/tmp/mtd0.bin", "cat /dev/mtd0 > /tmp/backup.bin", "ls /dev/sd* > /tmp/disks",
+    "hexdump -C /dev/mtdblock3 | tee /tmp/dump", "logread 2>/dev/null", "dd if=/dev/zero of=/dev/null bs=1M count=8",
+    "ubinfo -a", "cat /proc/mtd", "dmesg | tee /tmp/dmesg.txt; hexdump -C /dev/mtd0 | head",
+    "fdisk -l", "fdisk -l /dev/sda", "parted -l", "sfdisk -l /dev/mmcblk0", "mtd_debug info /dev/mtd0",
+    "mtd_debug read /dev/mtd0 0 65536 /tmp/m0", "cp /dev/mtd3 /tmp/mtd3.bin",
+])
+def test_flash_reads_are_not_hard_blocked(command):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ns", SCRIPT)
+    ns = importlib.util.module_from_spec(spec); spec.loader.exec_module(ns)
+    assert ns.safe_command(command, True) is None, command
+
+
+@pytest.mark.parametrize("command", [
     "poweroff", "halt", "shutdown -h now", "timeout 5 poweroff",
     "opkg remove dropbear", "opkg upgrade luci", "opkg --force-depends remove x",
     "/etc/init.d/dropbear disable", "/etc/init.d/dropbear stop", "/etc/init.d/firewall disable",
@@ -1077,3 +1118,32 @@ def test_log_dir_under_sticky_parent_is_accepted(console, tmp_path):
     assert result.returncode == 0, result.stderr
     assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
     assert next(log_dir.glob("*.log")).is_file()
+
+
+def test_push_whose_heredoc_line_fails_after_sending_says_the_file_was_overwritten(tmp_path, capsys):
+    """A write can fail after its bytes reached the device (the flush after
+    os.write). If that happens on the `cat >` line, the router may already have
+    truncated the target, so the message must not say it was not written."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ns_push", SCRIPT)
+    ns = importlib.util.module_from_spec(spec); spec.loader.exec_module(ns)
+    real_write = ns.Session.write
+
+    def write_then_fail_on_heredoc(self, data, *rest):
+        real_write(self, data, *rest)
+        if data.startswith("cat > "):
+            raise ns.serial.SerialException("write failed: (5, 'Input/output error')")
+
+    ns.Session.write = write_then_fail_on_heredoc
+    f = tmp_path / "x.txt"; f.write_text("line\n")
+    console = FakeConsole("shell", answers={"test -e /etc/config/x": ("", 0),
+                                            "test -e /etc/config/x.newton-bak": ("", 1)}).start()
+    try:
+        rc = ns.main(["--port", console.path, "--timeout", "0.35", "--log-dir", str(tmp_path / "logs"),
+                      "push", str(f), "/etc/config/x"])
+    finally:
+        console.close()
+    err = capsys.readouterr().err
+    assert rc == 7, err
+    assert "already overwritten" in err, err
+    assert "was not written" not in err, err

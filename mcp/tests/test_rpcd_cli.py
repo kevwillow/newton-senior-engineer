@@ -561,3 +561,51 @@ def test_the_owner_finish_of_a_change_that_was_never_applied_writes_no_receipt(
     receipts = state / change_receipt.RECEIPT_DIR
     written = sorted(receipts.glob("*.md")) if receipts.exists() else []
     assert written == [], "a change that was never applied leaves no receipt"
+
+
+# ---- the owner finish of a change the router kept ----------
+
+
+def test_the_owner_finish_of_a_kept_change_writes_a_receipt_that_says_it_is_live(
+    tmp_path, monkeypatch
+) -> None:
+    """KEPT is a final state: the change is on the router and stayed.
+
+    The receipt says so; it does not call the outcome uncertain and send
+    the owner to a status that can never settle it.
+    """
+    from newton_mcp import change_receipt
+    from newton_mcp import owner_verify
+
+    sid = "3f9a1c0be2d44b17a1c3d5e7f9012345"
+    state = tmp_path / "state"
+    (state / "plans").mkdir(parents=True)
+    (state / "plans" / f"{sid}.json").write_text(
+        json.dumps({"device": "r1", "session_id": sid}), encoding="utf-8"
+    )
+    device = type("Device", (), {"name": "r1", "host": "10.1.2.3"})()
+    service = _FakeService(state, {"r1": device})
+    monkeypatch.setattr(rpcd_cli, "_service", lambda: service)
+    monkeypatch.setattr(
+        rpcd_cli.owner_backup, "load", lambda _state, _sid: object()
+    )
+    monkeypatch.setattr(
+        rpcd_cli.owner_verify,
+        "finish",
+        lambda *args, **kwargs: owner_verify.Verdict(
+            state=owner_verify.KEPT,
+            checks=(),
+            deadline=1700000000.0,
+        ),
+    )
+
+    args = type("Args", (), {"device": "r1", "session_id": sid, "reached": "yes"})()
+    code = rpcd_cli._owner_finish(args)
+
+    assert code == rpcd_cli.EXIT_OK
+    written = sorted((state / change_receipt.RECEIPT_DIR).glob("*.md"))
+    assert len(written) == 1, written
+    text = written[0].read_text(encoding="utf-8")
+    assert "Outcome: KEPT" in text, text
+    assert "The outcome is not certain" not in text, text
+    assert "The change is live" in text, text

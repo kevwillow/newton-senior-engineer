@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Check that no lab device leaks DHCP server replies or IPv6 router adverts onto a house-LAN interface.
 # Run it as: sudo scripts/newton-lab-isolation --iface eth0 --allow-mac aa:bb:cc:dd:ee:ff --seconds 300
-# PASS: a line "PASS no foreign DHCP server or router advert on <iface> in <N> s (<n> packets from allowed sources)".
+# PASS: a line "PASS no foreign DHCP server or router advert on <iface> in <N> s (<n> packets from allowed sources)",
+# then a "NOTE passive check: ..." line naming the first blind spot below.
 # FAIL: one "FAIL foreign[<mac>]: <kind> x<n> not in allow list" line per offending source, then a final FAIL line and exit 1.
 # INCONCLUSIVE: lines with no source MAC (a capture on any, tun or wg, or one taken without -e) are reported as
 # unreadable, never as a foreign source; with no FAIL, a final INCONCLUSIVE line and exit 3 (never a pass).
-# Blind spots: an RA behind IPv6 extension headers is not matched (ip6[40]); the allow list is by source MAC,
-# so a device that spoofs an allowed MAC passes; only Ethernet interfaces work.
+# Blind spots: the capture is passive (it sends no DHCP discover and no router solicitation), so a server that answers
+# only a client that asks, or by unicast, is not seen, and router adverts can be up to 600 s apart, so a shorter window
+# can miss them; an RA behind IPv6 extension headers is not matched (ip6[40]); the allow list is by source MAC, so a
+# device that spoofs an allowed MAC passes; only Ethernet interfaces work.
 set -uo pipefail
 
 MAC_RE='^([0-9a-f]{2}:){5}[0-9a-f]{2}$'
@@ -246,6 +249,7 @@ if (( UNREADABLE > 0 )); then
 fi
 
 pass "no foreign DHCP server or router advert on $IFACE in $WINDOW s ($(packets "$ALLOWED_TOTAL") from allowed sources)"
+printf 'NOTE passive check: it sends no DHCP discover and no router solicitation, so a server that answers only a client that asks, or answers by unicast to another port, is not seen; router adverts can be up to 600 s apart, so a window shorter than that can miss them (use --seconds 600 or more)\n'
 
 if (( ALLOWED_TOTAL == 0 )); then
 	printf 'NOTE: no DHCP or router advert packet was seen, not even from an allowed source; if the house router normally sends router adverts, check that --iface is the house-LAN interface\n' >&2

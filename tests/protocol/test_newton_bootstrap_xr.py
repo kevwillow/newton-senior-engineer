@@ -177,3 +177,41 @@ def test_sudoers_keyword_lowercase_passes(tmp_path):
     boot = fr.install_bootstrap()
     rc, _, _ = fr.run(["bash", "-c", f"{boot} version"], env={"SUDO_USER": "alice"})
     assert rc == 0
+
+def test_version_names_a_missing_provenance_file_with_a_matching_staged_copy(tmp_path):
+    """After a self-update whose provenance rename failed, the
+    provenance file is missing and newton-bootstrap.source.new holds the
+    running file's hash.  version says exactly that, never "does not
+    match" with two equal hashes."""
+    fr = FakeRoot(tmp_path)
+    boot = fr.install_bootstrap()
+    sha = hashlib.sha256(SCRIPT.read_bytes()).hexdigest()
+    sbin = fr.stage / "usr" / "local" / "sbin"
+    sbin.mkdir(parents=True, exist_ok=True)
+    assert not (sbin / "newton-bootstrap.source").exists()
+    (sbin / "newton-bootstrap.source.new").write_text(f"commit {'ab' * 20}\nsha256 {sha}\n")
+
+    rc, out, err = fr.run(["bash", "-c", f"{boot} version"], env=ENV)
+
+    assert rc == 0, (out, err)
+    assert "does not match" not in out + err
+    assert "commit unknown" in out
+    assert (
+        "WARNING: the provenance file /usr/local/sbin/newton-bootstrap.source is missing; "
+        "/usr/local/sbin/newton-bootstrap.source.new matches this file: rename it to "
+        "/usr/local/sbin/newton-bootstrap.source to finish the update" in out
+    ), out
+
+
+def test_version_stays_quiet_about_a_staged_copy_that_does_not_match(tmp_path):
+    fr = FakeRoot(tmp_path)
+    boot = fr.install_bootstrap()
+    sbin = fr.stage / "usr" / "local" / "sbin"
+    sbin.mkdir(parents=True, exist_ok=True)
+    (sbin / "newton-bootstrap.source.new").write_text(f"commit {'ab' * 20}\nsha256 {'0' * 64}\n")
+
+    rc, out, err = fr.run(["bash", "-c", f"{boot} version"], env=ENV)
+
+    assert rc == 0, (out, err)
+    assert "commit unknown" in out
+    assert "matches this file" not in out

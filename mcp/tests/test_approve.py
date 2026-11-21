@@ -1346,3 +1346,97 @@ def test_spaces_around_the_confirmation_are_ignored(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(approve.sys, "stdin", TerminalInput(f" approve {SID[:8]} \n"))
     assert approve.main([SID]) == 0, capsys.readouterr().err
     assert (state / "approvals" / f"{SID}.json").exists()
+
+
+# ---- an id that names no router plan -------------------------------
+
+
+def test_approve_names_the_ad_change_word_for_an_ad_plan(monkeypatch, capsys):
+    """An AD plan id without ``ad-change`` is not called a scan request."""
+    plans = approve.state_dir() / "ad-plans"
+    plans.mkdir(parents=True)
+    (plans / f"{SID}.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(approve.sys, "stdin", TerminalInput())
+
+    assert approve.main([SID]) == 2
+
+    err = capsys.readouterr().err
+    assert f"newton-approve ad-change {SID}" in err, err
+    assert "scan request not found" not in err, err
+
+
+def test_approve_of_an_id_with_no_plan_says_to_plan_again(monkeypatch, capsys):
+    """A dropped (aborted) plan or a typo is not called a scan request."""
+    monkeypatch.setattr(approve.sys, "stdin", TerminalInput())
+
+    assert approve.main([SID]) == 1
+
+    err = capsys.readouterr().err
+    assert "no plan or scan request with this id" in err, err
+    assert "plan the change again" in err, err
+    assert "scan request not found" not in err, err
+
+
+def test_approve_of_a_damaged_scan_request_still_says_why(monkeypatch, capsys):
+    """A scan request file that is there goes to the scan approval, which
+    names what is wrong with it."""
+    requests = approve.state_dir() / "scan-requests"
+    requests.mkdir(parents=True)
+    (requests / f"{SID}.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(approve.sys, "stdin", TerminalInput())
+
+    assert approve.main([SID]) == 1
+
+    err = capsys.readouterr().err
+    assert "scan request was modified or is invalid" in err, err
+
+
+# ---- the first-approval warning in the terminal --------------------
+
+
+def _approve_in_terminal(tmp_path, monkeypatch, confirmation=None):
+    state, _record = write_plan(tmp_path, monkeypatch)
+    passphrase = "made-up-e2e-pass"
+    write_fingerprint(state, "quasar", approve.derive_k(passphrase.encode("utf-8"), "quasar"))
+    monkeypatch.setattr(approve, "_getpass", lambda prompt: passphrase)
+    typed = confirmation if confirmation is not None else f"approve {SID[:8]}"
+    monkeypatch.setattr(approve.sys, "stdin", TerminalInput(typed + "\n"))
+    return approve.main([SID])
+
+
+def test_the_first_terminal_approval_shows_the_warning_and_stores_the_ack(
+    tmp_path, monkeypatch, capsys
+):
+    """ADR-019 item 4 holds in the terminal too: the first approval of a
+    device shows the warning, and only a successful one stores the
+    acknowledgement."""
+    import newton_mcp.approval_proof as proof
+
+    assert _approve_in_terminal(tmp_path, monkeypatch) == 0
+
+    out = capsys.readouterr().out
+    assert "FIRST APPROVAL ON THIS DEVICE" in out
+    assert "The agent can be wrong." in out
+    assert out.index("FIRST APPROVAL ON THIS DEVICE") < out.index("Approved plan")
+    assert proof.has_ack("quasar")
+
+
+def test_a_terminal_approval_after_the_ack_has_no_warning(
+    tmp_path, monkeypatch, capsys
+):
+    import newton_mcp.approval_proof as proof
+
+    proof.write_ack("quasar")
+
+    assert _approve_in_terminal(tmp_path, monkeypatch) == 0
+
+    assert "FIRST APPROVAL ON THIS DEVICE" not in capsys.readouterr().out
+
+
+def test_a_failed_terminal_approval_stores_no_ack(tmp_path, monkeypatch, capsys):
+    import newton_mcp.approval_proof as proof
+
+    assert _approve_in_terminal(tmp_path, monkeypatch, "approve deadbeef") == 1
+
+    assert "FIRST APPROVAL ON THIS DEVICE" in capsys.readouterr().out
+    assert not proof.has_ack("quasar")

@@ -377,3 +377,85 @@ def test_the_roadmap_plans_hosts_and_the_persona_before_more_vendors() -> None:
     backlog = rows[index("| Backlog |")]
     for needle in ("read-only local dashboard", "policy engine", "maintenance windows"):
         assert needle in backlog, needle
+
+
+# ---- the reboot rail, guard= values, support plans, guard-only restore ----------------------------
+
+GUARD_PROGRAM = REPO_ROOT / "device" / "openwrt" / "newton-guard" / "newton-guard"
+PLATFORMS_TOML = REPO_ROOT / "docs" / "support" / "platforms.toml"
+STALE_REBOOT_CLAIM = "A `reboot` wipes rollback state in tmpfs while the applied config stays on disk."
+
+
+def _flat(path: Path) -> str:
+    return " ".join(path.read_text(encoding="utf-8").split())
+
+
+def test_the_reboot_rail_is_scoped_to_the_mode() -> None:
+    """A reboot keeps the change only in the no-install mode; the installed
+    guard restores the last-known-good config at boot."""
+    for path in _owner_docs():
+        assert STALE_REBOOT_CLAIM not in path.read_text(encoding="utf-8"), path.name
+    if not PRIVATE_LAYOUT:
+        return  # the rail is in the dev README, which the release build drops
+    line = next(
+        line for line in README_MD.read_text(encoding="utf-8").splitlines()
+        if "group-B" in line and "transaction is open" in line
+    )
+    assert "**no-install** mode" in line, line
+    assert "**installed** mode" in line, line
+    assert "restores the last-known-good config" in line, line
+
+
+def test_the_skill_names_every_guard_restore_reason() -> None:
+    """The router passes the guard's own reason through as restored:<reason>;
+    the guard's expiry path writes deadline or reboot."""
+    reasons = set(re.findall(r"reason=([a-z]+)", GUARD_PROGRAM.read_text(encoding="utf-8")))
+    assert {"deadline", "reboot"} <= reasons, reasons
+    text = _flat(SKILL_MD)
+    para = text[text.index("`newton_change_status` after a rolled-back window"):]
+    para = para[:para.index("Rollback restores config, not state.")]
+    for reason in sorted(reasons):
+        assert f"`restored:{reason}`" in para, reason
+    assert "`restored:<reason>`" in para, para
+
+
+def test_the_support_table_plans_match_the_roadmap() -> None:
+    """The support table names the release the roadmap plans hosts and
+    firmware upgrades for."""
+    import tomllib
+
+    rows = _planned_rows()
+
+    def release_of(needle: str) -> str:
+        found = [row for row in rows if needle in row]
+        assert len(found) == 1, (needle, found)
+        return found[0].strip("|").split("|")[0].strip()
+
+    hosts = release_of("Hosts:")
+    firmware = release_of("OpenWrt firmware upgrades")
+    data = tomllib.loads(PLATFORMS_TOML.read_text(encoding="utf-8"))["platforms"]
+    assert data["linux"]["release"] == hosts
+    assert data["linux"]["untested"] == [f"Every shape: planned for {hosts}, tested per network stack"]
+    untested = [u for p in data.values() for u in p.get("untested", []) if u.startswith("Firmware upgrade")]
+    assert untested, "no firmware row"
+    for u in untested:
+        assert u == f"Firmware upgrade (planned for {firmware.lower()})", u
+    for path in (PLATFORMS_TOML, SUPPORT_MD):
+        text = path.read_text(encoding="utf-8")
+        assert "planned for 1.3" not in text and "planned for 1.4" not in text, path.name
+
+
+def test_the_guard_only_restore_limit_reaches_the_owner_docs() -> None:
+    """The READMEs' undo bullet and SECURITY.md's undo line carry the
+    guard-only restore limit, not only SKILL.md and the guard README."""
+    readmes = [README_MD] + ([RELEASE_README] if PRIVATE_LAYOUT else [])
+    for path in readmes:
+        bullet = next(
+            line for line in path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("- **The undo is armed on the device before it writes.**")
+        )
+        assert GUARD_ONLY_LIMIT in bullet, path.name
+    model = SECURITY_MD.read_text(encoding="utf-8")
+    model = model[model.index("## Security model in brief"):model.index("## Known limits")]
+    undo = next(line for line in model.splitlines() if "arms an undo" in line)
+    assert GUARD_ONLY_LIMIT in undo, undo

@@ -82,15 +82,20 @@ def send(
     request: Mapping[str, Any],
     *,
     runner: Callable[[SessionSpec], RunOut] | None = None,
+    timeout_s: float = TIMEOUT_S,
 ) -> dict[str, Any]:
     """Send one request to one write helper and return its answer.
 
     The request is written as one JSON object on stdin.  The answer is
-    one JSON object; anything else raises ``TransportError``.
+    one JSON object; anything else raises ``TransportError``.  A caller
+    with less time left passes ``timeout_s``: the session then times out
+    after that many whole seconds, never more than ``TIMEOUT_S`` and
+    never under one.
     """
     payload = _payload(request)
     if runner is None:
-        runner = SshSessionRunner(target, stdout_cap=STDOUT_CAP, timeout_s=TIMEOUT_S)
+        session_s = max(1, min(TIMEOUT_S, int(timeout_s)))
+        runner = SshSessionRunner(target, stdout_cap=STDOUT_CAP, timeout_s=session_s)
     out = runner(SessionSpec(remote="", stdin=payload))
     if out.status != "ok":
         raise TransportError("unavailable", "the write helper did not answer")

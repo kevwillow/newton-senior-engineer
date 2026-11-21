@@ -2396,7 +2396,9 @@ def _clock(*values: float) -> Callable[[], float]:
 
 
 def test_a_confirm_too_close_to_the_window_end_is_not_sent() -> None:
-    """Less than the margin left: the driver takes the revert, no confirm."""
+    """Less than the margin left of the window the device armed (VyOS: the
+    plan timeout rounded up to the minute, 180 s for 150 s): the driver
+    takes the revert, no confirm."""
     ops = FakeOps(
         snapshots=[
             _snapshot(BASE_CONFIG),
@@ -2404,7 +2406,7 @@ def test_a_confirm_too_close_to_the_window_end_is_not_sent() -> None:
             _snapshot(BASE_CONFIG),
         ]
     )
-    elapsed = 150 - vc.CONFIRM_MARGIN_S + 1
+    elapsed = 180 - vc.CONFIRM_MARGIN_S + 1
     outcome = vc.apply_plan(
         ops,
         FakeRunner(),
@@ -2428,7 +2430,7 @@ def test_a_confirm_inside_the_margin_is_sent() -> None:
             _snapshot(CHANGED_CONFIG),
         ]
     )
-    elapsed = 150 - vc.CONFIRM_MARGIN_S
+    elapsed = 180 - vc.CONFIRM_MARGIN_S
     outcome = vc.apply_plan(
         ops,
         FakeRunner(),
@@ -2460,3 +2462,236 @@ def test_the_window_clock_starts_before_the_apply() -> None:
 
     apply_at = ops.events.index("apply")
     assert order[0] == f"now@{apply_at}"
+
+
+# ---- the confirm margin counts against the window the device armed
+
+
+def test_a_confirm_past_the_plan_timeout_but_inside_the_device_window_is_sent() -> None:
+    """The plan timeout minus the margin has passed, but the device (VyOS,
+    150 s rounded up to 3 minutes) still has 44 s of its window: the change
+    is confirmed, never thrown away with a log that says the window ended."""
+    ops = FakeOps(
+        snapshots=[
+            _snapshot(BASE_CONFIG),
+            _snapshot(CHANGED_CONFIG),
+            _snapshot(CHANGED_CONFIG),
+        ]
+    )
+    elapsed = 150 - vc.CONFIRM_MARGIN_S + 1
+    outcome = vc.apply_plan(
+        ops,
+        FakeRunner(),
+        _plan(timeout_s=150),
+        [],
+        now=_clock(1000.0, 1000.0 + elapsed),
+    )
+
+    assert "confirm" in ops.events
+    assert outcome.result == "confirmed"
+
+
+class _WindowOps(FakeOps):
+    """Ops that say which window they arm, the way RouterOS does."""
+
+    def __init__(self, window: int, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.window = window
+        self.asked: list[int] = []
+
+    def window_s(self, timeout_s: int) -> int:
+        self.asked.append(timeout_s)
+        return self.window
+
+
+@pytest.mark.parametrize(("elapsed", "confirmed"), [(300 - 15, True), (300 - 15 + 1, False)])
+def test_the_margin_counts_against_the_window_the_ops_arm(elapsed: int, confirmed: bool) -> None:
+    ops = _WindowOps(
+        300,
+        snapshots=[
+            _snapshot(BASE_CONFIG),
+            _snapshot(CHANGED_CONFIG),
+            _snapshot(CHANGED_CONFIG if confirmed else BASE_CONFIG),
+        ],
+    )
+    outcome = vc.apply_plan(
+        ops,
+        FakeRunner(),
+        _plan(timeout_s=60),
+        [],
+        now=_clock(1000.0, 1000.0 + elapsed),
+    )
+
+    assert ops.asked == [60]
+    assert ("confirm" in ops.events) is confirmed
+    assert outcome.result == ("confirmed" if confirmed else "rolled_back")
+
+
+def test_the_window_of_a_long_timeout_is_the_clamped_device_window() -> None:
+    """VyOS and Junos clamp the window to ten minutes: a 900 s plan timeout
+    arms 600 s, so a confirm 590 s after the apply is never sent."""
+    ops = FakeOps(
+        snapshots=[
+            _snapshot(BASE_CONFIG),
+            _snapshot(CHANGED_CONFIG),
+            _snapshot(BASE_CONFIG),
+        ]
+    )
+    outcome = vc.apply_plan(
+        ops,
+        FakeRunner(),
+        _plan(timeout_s=900),
+        [],
+        now=_clock(1000.0, 1590.0),
+    )
+
+    assert "confirm" not in ops.events
+    assert outcome.result == "rolled_back"
+
+
+def test_the_vendor_ops_say_the_window_they_arm() -> None:
+    from newton_mcp.adapters import routeros_write
+
+    assert vw.VyosOps().window_s(150) == 180
+    assert vw.VyosOps().window_s(900) == 600
+    assert routeros_write.RouterosOps().window_s(60) == 120
+    assert routeros_write.RouterosOps().window_s(150) == 150
+
+
+# ---- the recovery waits count the time of the sessions too --------
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+SESSION_S = 120.0
+
+
+class _HangingOps(FakeOps):
+    """Ops whose sessions hang until their 120 s timeout once ``hang`` names
+    the operation: each call runs one session that times out."""
+
+    def __init__(self, clock: _Clock, hang: set[str], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.clock = clock
+        self.hang = hang
+        self.hanging = False
+        self.sessions = 0
+
+    def _session(self, run: vc.Run, name: str) -> None:
+        self.sessions += 1
+        self.clock.sleep(SESSION_S)
+        run(vw.SessionSpec(remote=f"hang-{name}", stdin=""))
+
+    def apply(self, run: vc.Run, stmts: list[list[str]], timeout_s: int) -> str:
+        result = super().apply(run, stmts, timeout_s)
+        self.hanging = True
+        return result
+
+    def snapshot(self, run: vc.Run) -> vc.Snapshot:
+        result = super().snapshot(run)
+        if self.hanging and "snapshot" in self.hang:
+            self._session(run, "snapshot")
+        return result
+
+    def pending(self, run: vc.Run) -> str:
+        result = super().pending(run)
+        if self.hanging and "pending" in self.hang:
+            self._session(run, "pending")
+        return result
+
+    def abort(self, run: vc.Run) -> bool:
+        super().abort(run)
+        if self.hanging and "abort" in self.hang:
+            self._session(run, "abort")
+            return False
+        return self.abort_result
+
+
+def _hung_runner(spec: vw.SessionSpec) -> vc.RunOut:
+    """A hung session times out; an abort session answers that the
+    configuration database is locked, after its full time."""
+    if spec.remote == "hang-abort":
+        return vc.RunOut(status="ok", stdout="error: configuration database locked\n", stderr="", exit_code=0)
+    if spec.remote.startswith("hang-"):
+        return vc.RunOut(status="timed_out", stdout="", stderr="", exit_code=None)
+    return vc.RunOut(status="ok", stdout="", stderr="", exit_code=0)
+
+
+
+def _bounded(clock: _Clock, started: float, recover_wait_s: int) -> bool:
+    """At most one session round past the bound, never one per sleep."""
+    return clock.now - started <= recover_wait_s + 3 * SESSION_S + 5
+
+
+@pytest.mark.parametrize(
+    ("case", "apply_result", "hang", "runner"),
+    [
+        ("config_is_base", "line_error", {"snapshot"}, _hung_runner),
+        ("recover", "committed", {"snapshot"}, _hung_runner),
+        ("abort_with_retry", "committed", {"snapshot", "abort"}, _hung_runner),
+    ],
+)
+def test_a_recovery_wait_whose_sessions_hang_keeps_its_bound(
+    case: str, apply_result: str, hang: set[str], runner: Any
+) -> None:
+    """recover_wait_s bounds the wait on the clock, sessions included: a
+    device whose sessions all hang does not hold the tool call for hours."""
+    clock = _Clock()
+    ops = _HangingOps(
+        clock, hang,
+        snapshots=[_snapshot(BASE_CONFIG), _snapshot(CHANGED_CONFIG)],
+        apply_result=apply_result,
+        pending_result="armed",
+    )
+
+    started = clock.now
+    outcome = vc.apply_plan(
+        ops, runner, _plan(), [], wait=clock.sleep, now=clock, recover_wait_s=150
+    )
+
+    assert outcome.result == "unknown"
+    assert _bounded(clock, started, 150), (case, clock.now - started, ops.sessions)
+
+
+def test_the_pending_wait_after_a_confirm_keeps_its_bound() -> None:
+    clock = _Clock()
+    ops = _HangingOps(
+        clock, set(),
+        snapshots=[_snapshot(BASE_CONFIG), _snapshot(CHANGED_CONFIG), _snapshot(CHANGED_CONFIG)],
+    )
+
+    def confirm(run: vc.Run) -> bool:
+        ops.events.append("confirm")
+        ops.hang.add("pending")
+        return True
+
+    ops.confirm = confirm  # type: ignore[method-assign]
+    started = clock.now
+    outcome = vc.apply_plan(
+        ops, _hung_runner, _plan(), [], wait=clock.sleep, now=clock, recover_wait_s=150
+    )
+
+    assert outcome.result == "confirmed"
+    assert _bounded(clock, started, 150), clock.now - started
+
+
+def test_the_abort_of_a_change_keeps_its_bound_when_the_device_stays_locked() -> None:
+    clock = _Clock()
+    ops = _HangingOps(clock, {"abort"}, snapshots=[_snapshot(BASE_CONFIG)], pending_result="armed")
+    ops.hanging = True
+
+    started = clock.now
+    vc.abort_change(
+        ops, _hung_runner, BASE_HASH, wait=clock.sleep, now=clock, recover_wait_s=150
+    )
+
+    assert _bounded(clock, started, 150), clock.now - started

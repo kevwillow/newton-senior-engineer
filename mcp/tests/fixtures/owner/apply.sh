@@ -5,7 +5,7 @@
 # It changes /etc/config only through one `uci apply`, with the router's own undo timer of 180 s.
 # If the router reboots or its web service restarts in those 180 s, the change stays.
 # Touches: firewall.cfg0a1b2c.dest_port
-# To undo it later, on the Newton computer: newton-router-setup lab-r1 owner-run 9e8d7c6b5a4938271605f4e3d2c1b0a9
+# To undo it later, on the Newton computer: sudo -u newton /usr/local/bin/newton-router-setup lab-r1 owner-run 9e8d7c6b5a4938271605f4e3d2c1b0a9
 set -u
 PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
 LC_ALL=C; export LC_ALL

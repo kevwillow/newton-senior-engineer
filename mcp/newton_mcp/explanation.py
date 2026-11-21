@@ -853,6 +853,22 @@ _LOCAL_CLAIM_LINE = re.compile(
 )
 
 
+# What the owner can do about a NOT-TESTED word of a blocked-port check:
+# fixed text, keyed by the runner's fixed words.
+_NOT_TESTED_HINTS = {
+    "no-control": (
+        "the port timed out and this client has no control port for that address; add a "
+        "check_controls entry (a port that answers on that address from this client) to the "
+        "vantage in the inventory (docs/INSTALL.md, step 11c)"
+    ),
+    "target-dead": (
+        "the port timed out and the control port of that address did not connect either; check "
+        "that the address is up, or that its check_controls entry names a port that answers "
+        "from this client (docs/INSTALL.md, step 11c)"
+    ),
+}
+
+
 def _local_check_failure(
     lines: list[str], expect: list[dict[str, Any]]
 ) -> dict[str, Any] | None:
@@ -876,9 +892,11 @@ def _local_check_failure(
                 "claim": number,
                 "text": f"expect claim {number} failed: {describe_claim(claim)} ({word})",
             }
+        hint = _NOT_TESTED_HINTS.get(word)
         return {
             "claim": number,
-            "text": f"expect claim {number} could not be tested: {word}",
+            "text": f"expect claim {number} could not be tested: {word}"
+            + (f": {hint}" if hint else ""),
         }
     return None
 

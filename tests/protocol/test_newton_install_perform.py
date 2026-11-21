@@ -104,7 +104,7 @@ def test_perform_install_is_shared_by_both_modes():
         # the visudo -cf call -- only in perform_install
         '"$VISUDO" -cf "$sudoers_tmp"',
         # bootstrap-only sudoers printf template -- unique to perform_install
-        "printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \"$SUDOERS_MCP_LINE\"",
+        "printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \"$SUDOERS_MCP_LINE\"",
     ]
     for marker in bootstrap_markers:
         assert marker in perform_install_body, \
@@ -138,6 +138,7 @@ export SETUP_LAUNCHER="$T/bin/newton-router-setup"
 export VANTAGE_SETUP_LAUNCHER="$T/bin/newton-vantage-setup"
 export ENROL_LAUNCHER="$T/bin/newton-enrol"
 export AD_SETUP_LAUNCHER="$T/bin/newton-ad-setup"
+export RULES_LAUNCHER="$T/bin/newton-rules"
 export DOCTOR_LAUNCHER="$T/bin/newton-doctor"
 export SUDOERS="$T/sudoers.d/newton-mcp"
 export MANAGED_SETTINGS="$T/etc/claude-code/managed-settings.json"
@@ -154,6 +155,8 @@ SUDOERS_ENROL_LINE="alice ALL=(newton) /usr/local/bin/newton-enrol"
 SUDOERS_ENROL_DEFAULTS_LINE="Defaults!/usr/local/bin/newton-enrol timestamp_timeout=0"
 SUDOERS_AD_SETUP_LINE="alice ALL=(newton) /usr/local/bin/newton-ad-setup"
 SUDOERS_AD_SETUP_DEFAULTS_LINE="Defaults!/usr/local/bin/newton-ad-setup timestamp_timeout=0"
+SUDOERS_RULES_LINE="alice ALL=(newton) /usr/local/bin/newton-rules"
+SUDOERS_RULES_DEFAULTS_LINE="Defaults!/usr/local/bin/newton-rules timestamp_timeout=0"
 invoking_user=alice
 SNAP="$T/snap"
 mkdir -p "$T/work" "$T/bin" "$T/home" "$T/sudoers.d"
@@ -239,6 +242,7 @@ def test_perform_install_writes_everything(tmp_path):
         tmp_path / "bin/newton-vantage-setup",
         tmp_path / "bin/newton-enrol",
         tmp_path / "bin/newton-ad-setup",
+        tmp_path / "bin/newton-rules",
         tmp_path / "bin/newton-doctor",
     ]:
         assert launcher.exists(), f"missing launcher {launcher}"
@@ -254,8 +258,8 @@ def test_perform_install_writes_everything(tmp_path):
     sudoers = tmp_path / "sudoers.d/newton-mcp"
     assert sudoers.exists(), f"missing sudoers file {sudoers}"
     lines = sudoers.read_text().splitlines()
-    assert len(lines) == 11, \
-        f"sudoers.d/newton-mcp should have exactly 11 lines, got {len(lines)}: {lines!r}"
+    assert len(lines) == 13, \
+        f"sudoers.d/newton-mcp should have exactly 13 lines, got {len(lines)}: {lines!r}"
     assert " NOPASSWD: " in lines[0], \
         f"first sudoers line (mcp) must contain NOPASSWD: {lines[0]!r}"
     for ln in lines[1:]:
@@ -265,6 +269,8 @@ def test_perform_install_writes_everything(tmp_path):
     assert "Defaults!/usr/local/bin/newton-enrol timestamp_timeout=0" in lines
     assert "alice ALL=(newton) /usr/local/bin/newton-ad-setup" in lines
     assert "Defaults!/usr/local/bin/newton-ad-setup timestamp_timeout=0" in lines
+    assert "alice ALL=(newton) /usr/local/bin/newton-rules" in lines
+    assert "Defaults!/usr/local/bin/newton-rules timestamp_timeout=0" in lines
 
     visudo_log = tmp_path / "visudo-log"
     assert visudo_log.exists(), "visudo stub was not called"
@@ -364,6 +370,45 @@ def test_the_install_prints_the_credential_steps_for_a_legacy_set(tmp_path):
     assert "Move devices.toml and each password file into " in r.stdout
     assert "On a new machine there is nothing to move." in r.stdout
     assert "MCP client command (all harnesses):" in r.stdout
+
+
+# ---- an update prints the update steps ----------------------
+
+
+def run_perform_update(tmp_path):
+    """perform_install over an existing code root: the update path."""
+    (tmp_path / "opt" / "scripts").mkdir(parents=True)
+    (tmp_path / "opt" / "scripts" / "old").write_text("previous release\n")
+    return run_perform_install(tmp_path)
+
+
+@needs_ns
+def test_an_update_prints_the_update_steps_and_not_the_first_install_text(tmp_path):
+    r = run_perform_update(tmp_path)
+    assert r.returncode == 0, (
+        f"perform_install failed rc={r.returncode}\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+    )
+    assert not (tmp_path / "opt" / "scripts" / "old").exists()
+    out = r.stdout
+    assert "Newton updated successfully." in out, out
+    assert "Newton installed successfully." not in out, out
+    assert "If you ran Newton from your own account before" not in out, out
+    assert "To finish the update:" in out, out
+    assert "Restart Claude Code, or run /mcp and reconnect newton" in out, out
+    assert (
+        f"sudo -u newton {tmp_path}/bin/newton-router-setup <device> upgrade" in out
+    ), out
+    assert "A change that was held during the update cannot be confirmed" in out, out
+    assert "MCP client command (all harnesses):" in out, out
+
+
+@needs_ns
+def test_a_first_install_prints_no_update_steps(tmp_path):
+    r = run_perform_install(tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "Newton installed successfully." in r.stdout
+    assert "To finish the update:" not in r.stdout
+    assert "Newton updated successfully." not in r.stdout
 
 
 def test_the_from_snapshot_mode_never_asks_the_guard_question():

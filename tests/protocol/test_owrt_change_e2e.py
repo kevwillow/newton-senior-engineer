@@ -310,6 +310,10 @@ UBUS_FAKE = textwrap.dedent(
         if m:
             timeout = int(m.group(1))
         sid = os.environ.get("FAKE_SSH_SID", "0123456789abcdef0123456789abcdef")
+        # control/next-sid: a test that plans again gets a new session id
+        next_sid = ROOT / "control" / "next-sid"
+        if next_sid.exists():
+            sid = next_sid.read_text().strip()
         sys.stdout.write(json.dumps({"ubus_rpc_session": sid,
                                       "timeout": timeout}) + "\\n")
         sys.stdout.flush()
@@ -892,7 +896,7 @@ def test_c_hash_pins_after_plan_and_mutation_refuses_apply(e2e):
     Then change what the host hashes (run the host script copy with
     `printf '%s\\n'` replaced by `printf '%s'` in the diff hash line, in
     a tmp copy of scripts/ and mcp/ and device/ layout) and show the
-    apply is refused with ``staged diff changed since plan``, proving
+    apply is refused with ``the staged diff does not match the plan``, proving
     the pin is real.
     """
     _prep_plannable(e2e)
@@ -973,7 +977,7 @@ def test_c_hash_pins_after_plan_and_mutation_refuses_apply(e2e):
     # Make the diff hash include an extra leading character so it no longer
     # matches the plan record (which was hashed from the unmodified diff
     # bytes). The apply runs the mutated script; the host's printed
-    # "staged diff changed since plan" appears when its hash of the real
+    # "the staged diff does not match the plan" appears when its hash of the real
     # diff bytes no longer equals the plan record.
     mutated = (tmp_copy / "scripts/owrt-change.sh").read_text()
     target = "DIFF_SHA=$(printf '%s\\n' \"$DIFF_RAW\" | sha256sum | cut -d' ' -f1)"
@@ -1001,7 +1005,7 @@ def test_c_hash_pins_after_plan_and_mutation_refuses_apply(e2e):
         timeout=300, stdin=subprocess.DEVNULL,
     )
     assert res_apply.returncode != 0, res_apply.stdout
-    assert "staged diff changed since plan" in res_apply.stdout, res_apply.stdout
+    assert "the staged diff does not match the plan" in res_apply.stdout, res_apply.stdout
     # Nothing applied: session still staged
     assert (e2e.router.root / "tmp/owrt-safe-apply.lock" / f"{sid}.txn" / "sealed").exists()
 
@@ -1225,8 +1229,13 @@ def test_f_approval_positive_and_negative(e2e):
     assert "confirmed " in res_status.stdout, res_status.stdout
 
     # Helper: plan a fresh approval-required change for the negative
-    # cases; the previous confirm removed the txn.
+    # cases; the previous confirm removed the txn. Each plan gets a new
+    # session id, as rpcd gives one: this host refuses to apply a session id
+    # it already logged CONFIRMED.
+    fresh_sids = iter(f"{n:032x}" for n in range(1, 100))
+
     def _plan_again():
+        (e2e.router.root / "control" / "next-sid").write_text(next(fresh_sids) + "\n")
         res = e2e.run_plan(changes=changes, timeout=60)
         assert res.returncode == 0, (res.returncode, res.stdout)
         m2, _ = _parse_plan_stdout(res.stdout)
@@ -1573,7 +1582,8 @@ def test_a_confirm_whose_answer_is_lost_is_recorded_by_the_next_status_or_abort(
     rec = _reconciled(res.stdout, sid)
     assert len(rec) == 1, res.stdout
     lines = res.stdout.splitlines()
-    assert any(l.startswith("CONFIGHASH ") for l in lines[: lines.index(rec[0])]), res.stdout
+    # no hashes: the config now is not the config right after the confirm
+    assert not any(l.startswith("CONFIGHASH ") for l in lines), res.stdout
     assert rec[0] in e2e.audit.read_text()
     assert not (e2e.state_plans / f"{sid}.sha256").exists()
     if next_command == "abort":

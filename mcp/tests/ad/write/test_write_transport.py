@@ -167,3 +167,27 @@ def test_the_preflight_makes_the_checks_of_send_and_sends_nothing() -> None:
     assert seen["target"] == "dc"
     assert seen["spec"].remote == ""
     assert json.loads(seen["spec"].stdin) == {"v": 1, "mode": "apply"}
+
+
+def test_a_caller_can_shorten_the_session_timeout() -> None:
+    """The read-back passes what is left of its budget: the session
+    timeout is that, never more than 120 seconds and never under 1."""
+    seen: list[Any] = []
+
+    class FakeRunner:
+        def __init__(self, target: Any, **kwargs: Any) -> None:
+            seen.append(kwargs["timeout_s"])
+
+        def __call__(self, spec: Any) -> RunOut:
+            return _out()
+
+    original = transport.SshSessionRunner
+    transport.SshSessionRunner = FakeRunner  # type: ignore[assignment]
+    try:
+        transport.send(DEVICE, {"v": 1}, timeout_s=37.6)
+        transport.send(DEVICE, {"v": 1}, timeout_s=500)
+        transport.send(DEVICE, {"v": 1}, timeout_s=0.2)
+    finally:
+        transport.SshSessionRunner = original  # type: ignore[assignment]
+
+    assert seen == [37, 120, 1]

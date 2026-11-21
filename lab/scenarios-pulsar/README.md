@@ -14,8 +14,8 @@ off again once its `reset_after` has restored Pulsar.
    admin key, restricted runner key, baseline archive) and `baseline_sha256`. The file lists every step, var and check
    these scenarios use; `lab/tests/test_pulsar_example.py` fails if a scenario names one that is missing.
    Replace the placeholder addresses too: the Proxmox host in `[pve]` and in the `[ssh] proxy`, the two agent-host
-   addresses in `[vars.agent_ip]` and `[vars.agent_nonlocal_ip]` (the live values live in `lab/lab.toml`, a file that is not
-   part of this repository), and the `lab-client` and `lab-wifi` user names. A scenario never carries an
+   addresses in `[vars.agent_ip]` and `[vars.agent_nonlocal_ip]` (the live values live in `lab/lab.toml`, the lab's own file, which is
+   kept out of every published copy of Newton), and the `lab-client` and `lab-wifi` user names. A scenario never carries an
    address or a user name of its own: it names a var, and the var carries the value, so the copy is the only place one
    is set.
    Set `lab = true` on the device (the loader refuses a physical device without it) and `board_name` (required; read it from `/tmp/sysinfo/board_name` on the router). Key

@@ -595,7 +595,25 @@ class RpcdTransaction:
                     raise NothingStaged(
                         "the router has nothing staged to apply"
                     ) from None
-                raise
+                # Any other answer is a refusal rpcd gave, but rpcd may
+                # have done part of the apply before it answered.  The
+                # values are read back: only a change that is provably
+                # not on the router is a refusal.
+                reason = f"the router refused the apply: {exc}"
+                try:
+                    verdict = self.resolve(ops, deadline)
+                except RpcdError as err:
+                    return ApplyResult(
+                        LOST,
+                        deadline=deadline,
+                        reason=f"{reason}; {err}",
+                        resolve=UNKNOWN,
+                    )
+                if verdict == NOT_APPLIED:
+                    return ApplyResult(REFUSED, reason=reason)
+                return ApplyResult(
+                    LOST, deadline=deadline, reason=reason, resolve=verdict
+                )
             except RpcdTransportError as exc:
                 if not exc.sent:
                     # the request never left Newton: nothing applied

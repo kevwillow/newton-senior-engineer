@@ -96,7 +96,7 @@ def test_lab_whole_session_secrets_and_known_hosts(setup_env):
 	assert env.router.read("etc/newton/approve.key").rstrip("\n") == k
 	step("add-key", "--new-key", "newton-agent", "change")
 	step("add-key", "--new-key", "lab-runner", "change")
-	step("profile", "prod")
+	# the inventory says lab: profile prod is refused
 	step("profile", "lab")
 	step("upgrade", src=second)
 	step("rollback")

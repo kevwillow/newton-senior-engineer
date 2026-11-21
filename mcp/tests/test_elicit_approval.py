@@ -600,6 +600,32 @@ def test_an_answer_at_once_falls_back_and_counts_a_miss(clock):
     assert not _approval_path().exists()
 
 
+def test_an_answer_at_once_says_it_counted_and_what_is_left(clock):
+    """A too-fast answer counts as a wrong one: the message says so and
+    names the attempts left, as a wrong answer does."""
+    _write_plan(_plan())
+    _write_fingerprint()
+
+    outcome = _run_approval(_FakeContext(clock, delay=0.1))
+
+    assert "counted as a wrong answer" in outcome.message, outcome.message
+    left = proof.LOCK_FREE_MISSES - 1
+    assert f"{left} attempts remain" in outcome.message, outcome.message
+
+
+def test_the_answer_at_once_that_locks_the_dialog_names_the_wait(clock):
+    """The too-fast answer that takes the last attempt names the wait."""
+    _write_plan(_plan())
+    _write_fingerprint()
+    for _ in range(proof.LOCK_FREE_MISSES - 1):
+        proof.record_failure(DEVICE)
+
+    outcome = _run_approval(_FakeContext(clock, delay=0.1))
+
+    assert "counted as a wrong answer" in outcome.message, outcome.message
+    assert "try again in 5 min" in outcome.message, outcome.message
+
+
 def test_first_approval_warning_is_present_only_before_the_ack(clock):
     _write_plan(_plan())
     _write_fingerprint()

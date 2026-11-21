@@ -1187,8 +1187,38 @@ def test_a_run_without_a_location_is_refused() -> None:
 # ---- the approval key on this host ------------------------------------------
 
 
+@pytest.fixture
+def ad_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An inventory with a router, the write entry that stands for a domain
+    (windc1) and a second DC of that domain (windc2)."""
+    key = tmp_path / "inv-key"
+    key.write_text("k\n", encoding="utf-8")
+    key.chmod(0o600)
+    known = tmp_path / "inv-known_hosts"
+    known.write_text("192.0.2.10 ssh-ed25519 AAAA\n", encoding="utf-8")
+    blocks = [
+        "[devices.router1]\nplatform = \"openwrt\"\nhost = \"192.0.2.1\"\n"
+        f"user = \"root\"\nkey_file = \"{key}\"\n",
+    ]
+    for name, host in (("windc1", "192.0.2.10"), ("windc2", "192.0.2.11")):
+        blocks.append(
+            f"[devices.{name}]\nplatform = \"ad-windows-write\"\nhost = \"{host}\"\n"
+            "user = \"newton-ops@win.newton.test\"\n"
+            f"key_file = \"{key}\"\nknown_hosts = \"{known}\"\n"
+            "ad_domain = \"windc1\"\ndomain = \"win.newton.test\"\n"
+            f"ad_domain_guid = \"{WIN_DOMAIN_GUID}\"\n"
+        )
+    path = tmp_path / "inv-devices.toml"
+    path.write_text("\n".join(blocks), encoding="utf-8")
+    path.chmod(0o600)
+    monkeypatch.setenv("NEWTON_INVENTORY", str(path))
+    return path
+
+
+
 def test_the_approval_key_stores_only_the_fingerprint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ad_inventory: Path,
 ) -> None:
     """The file holds the fingerprint of the key and nothing else."""
     monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
@@ -1209,7 +1239,8 @@ def test_the_approval_key_stores_only_the_fingerprint(
 
 
 def test_the_approval_key_refuses_an_empty_passphrase(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ad_inventory: Path,
 ) -> None:
     """An empty passphrase is a refusal and nothing is written."""
     monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
@@ -1224,7 +1255,8 @@ def test_the_approval_key_refuses_an_empty_passphrase(
 
 
 def test_the_approval_key_refuses_two_different_passphrases(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ad_inventory: Path,
 ) -> None:
     """Two different passphrases are a refusal and nothing is written."""
     monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
@@ -1252,7 +1284,8 @@ def test_the_approval_key_refuses_a_device_that_is_not_one(
 
 
 def test_the_approval_key_refuses_a_stdin_that_is_not_a_terminal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ad_inventory: Path,
 ) -> None:
     """The passphrase is read from a terminal, never from a pipe."""
     monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
@@ -1571,3 +1604,243 @@ def test_skill_md_says_every_dc_takes_the_same_passphrase() -> None:
         "same approval passphrase on every DC" in line
         for line in text.splitlines()
     )
+
+
+# ---- approval-key names an AD domain entry and never overwrites in silence --
+
+
+def _key_run(
+    monkeypatch: pytest.MonkeyPatch, device: str, phrase: str, answer: str | None = None
+) -> int:
+    monkeypatch.setattr(write, "_getpass", lambda prompt: phrase)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=True)
+    asked: list[str] = []
+
+    def ask(prompt: str) -> str:
+        asked.append(prompt)
+        if answer is None:
+            raise AssertionError("approval-key asked to replace a fingerprint")
+        return answer
+
+    monkeypatch.setattr(write, "_ask", ask, raising=False)
+    return write.main(["approval-key", device])
+
+
+def _fp(phrase: str, device: str) -> str:
+    return approve.approval_fingerprint(approve.derive_k(phrase.encode("utf-8"), device))
+
+
+def test_the_approval_key_refuses_a_router_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ad_inventory: Path,
+) -> None:
+    """A router's fingerprint is never written by newton-ad-setup:
+    the name must be an AD write entry, and the refusal names the router
+    command."""
+    monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
+    path = tmp_path / "state" / "approval-fp" / "router1"
+    path.parent.mkdir(parents=True, mode=0o700)
+    path.write_text(f"v1 {_fp('router-pass', 'router1')}\n", encoding="ascii")
+
+    code = _key_run(monkeypatch, "router1", "domain-pass")
+
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "not an AD write entry" in err
+    assert "newton-router-setup router1 approval-key" in err
+    assert path.read_text(encoding="ascii") == f"v1 {_fp('router-pass', 'router1')}\n"
+
+
+def test_the_approval_key_refuses_a_name_not_in_the_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ad_inventory: Path,
+) -> None:
+    monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
+
+    code = _key_run(monkeypatch, "nosuchdc", PASSPHRASE)
+
+    assert code == 2
+    assert "not an AD write entry" in capsys.readouterr().err
+    assert not (tmp_path / "state" / "approval-fp" / "nosuchdc").exists()
+
+
+def test_the_approval_key_of_a_second_dc_names_the_domain_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ad_inventory: Path,
+) -> None:
+    """Only the entry that stands for the domain has a fingerprint that
+    newton-approve reads: a second DC's name is refused and the domain
+    entry is named."""
+    monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
+
+    code = _key_run(monkeypatch, "windc2", PASSPHRASE)
+
+    assert code == 2
+    assert "approval-key windc1" in capsys.readouterr().err
+    assert not (tmp_path / "state" / "approval-fp" / "windc2").exists()
+
+
+def test_the_approval_key_refuses_without_a_readable_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("NEWTON_INVENTORY", str(tmp_path / "no-such-devices.toml"))
+
+    code = _key_run(monkeypatch, DEVICE, PASSPHRASE)
+
+    assert code == 2
+    assert "inventory" in capsys.readouterr().err
+    assert not (tmp_path / "state" / "approval-fp" / DEVICE).exists()
+
+
+def test_the_approval_key_again_with_the_same_passphrase_changes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ad_inventory: Path,
+) -> None:
+    monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
+    assert _key_run(monkeypatch, DEVICE, PASSPHRASE) == 0
+
+    code = _key_run(monkeypatch, DEVICE, PASSPHRASE)
+
+    assert code == 0
+    path = tmp_path / "state" / "approval-fp" / DEVICE
+    assert path.read_text(encoding="ascii") == f"v1 {_fp(PASSPHRASE, DEVICE)}\n"
+
+
+def test_the_approval_key_asks_before_it_replaces_another_fingerprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ad_inventory: Path,
+) -> None:
+    """A different passphrase never replaces the fingerprint in silence: an
+    answer other than replace leaves the recorded one as it was."""
+    monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
+    assert _key_run(monkeypatch, DEVICE, PASSPHRASE) == 0
+    capsys.readouterr()
+
+    code = _key_run(monkeypatch, DEVICE, PASSPHRASE + " typo", answer="no")
+
+    assert code == 2
+    assert "nothing was changed" in capsys.readouterr().err
+    path = tmp_path / "state" / "approval-fp" / DEVICE
+    assert path.read_text(encoding="ascii") == f"v1 {_fp(PASSPHRASE, DEVICE)}\n"
+
+
+def test_the_approval_key_replaces_a_fingerprint_when_the_owner_says_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ad_inventory: Path,
+) -> None:
+    monkeypatch.setenv("NEWTON_STATE_DIR", str(tmp_path / "state"))
+    assert _key_run(monkeypatch, DEVICE, PASSPHRASE) == 0
+
+    code = _key_run(monkeypatch, DEVICE, "a new passphrase", answer="replace")
+
+    assert code == 0
+    path = tmp_path / "state" / "approval-fp" / DEVICE
+    assert path.read_text(encoding="ascii") == f"v1 {_fp('a new passphrase', DEVICE)}\n"
+
+
+# ---- step 3 on the DC never changes the key in silence ------------
+
+
+def _approval_program(samba_script: str) -> dict[str, object]:
+    namespace: dict[str, object] = {"__name__": "newton_approval"}
+    source = _embedded_python(samba_script, "approval.py")
+    exec(compile(source, "approval.py", "exec"), namespace)
+    return namespace
+
+
+def _run_approval(
+    samba_script: str, monkeypatch: pytest.MonkeyPatch, path: Path, phrase: str
+) -> int:
+    import getpass as getpass_module
+
+    monkeypatch.setattr(getpass_module, "getpass", lambda prompt: phrase)
+    program = _approval_program(samba_script)
+    return program["main"](["approval.py", DEVICE, str(path)])  # type: ignore[operator]
+
+
+def test_step_3_on_samba_writes_a_new_key(
+    samba_script: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "approval.key"
+
+    assert _run_approval(samba_script, monkeypatch, path, PASSPHRASE) == 0
+
+    key = approve.derive_k(PASSPHRASE.encode("utf-8"), DEVICE)
+    assert path.read_text(encoding="ascii") == key + "\n"
+    assert capsys.readouterr().out.strip() == approve.approval_fingerprint(key)
+
+
+def test_step_3_on_samba_again_with_the_same_passphrase_changes_nothing(
+    samba_script: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "approval.key"
+    assert _run_approval(samba_script, monkeypatch, path, PASSPHRASE) == 0
+    path.chmod(0o400)  # a write would fail: the rerun must not write
+    capsys.readouterr()
+
+    assert _run_approval(samba_script, monkeypatch, path, PASSPHRASE) == 0
+
+    key = approve.derive_k(PASSPHRASE.encode("utf-8"), DEVICE)
+    assert path.read_text(encoding="ascii") == key + "\n"
+    assert capsys.readouterr().out.strip() == approve.approval_fingerprint(key)
+
+
+def test_step_3_on_samba_refuses_a_different_passphrase_and_keeps_the_key(
+    samba_script: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A rerun with a mistyped passphrase never replaces the DC's key: every
+    later apply would be refused with bad_token."""
+    path = tmp_path / "approval.key"
+    assert _run_approval(samba_script, monkeypatch, path, PASSPHRASE) == 0
+    before = path.read_text(encoding="ascii")
+    capsys.readouterr()
+
+    code = _run_approval(samba_script, monkeypatch, path, PASSPHRASE + " typo")
+
+    assert code != 0
+    assert path.read_text(encoding="ascii") == before
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "different approval key" in captured.err
+    assert "nothing was changed" in captured.err.lower()
+
+
+def test_step_3_on_windows_compares_an_installed_key_before_it_writes(
+    windows_script: str,
+) -> None:
+    """The Windows step reads an installed key first: the same key is not
+    written again, and a different one stops the script with the key kept.
+    (Static: no PowerShell on the test host runs this step.)"""
+    step = _step(windows_script, 3)
+    check = step.index("Test-Path -LiteralPath $ApprovalKeyPath")
+    write_at = step.index("[System.IO.File]::WriteAllText($ApprovalKeyPath")
+
+    assert check < write_at
+    assert "this DC already holds a different approval key" in step
+    assert "nothing was changed" in step.lower()
+    guarded = step[check:write_at]
+    assert "throw" in guarded
+    assert "-ne $keyHex" in guarded
+    # the write runs only when no key was installed
+    assert re.search(
+        r"if \(\$null -eq \$installedKey\) \{\s*\[System\.IO\.File\]::WriteAllText\(\$ApprovalKeyPath",
+        step,
+    )
+
+
+def test_the_bad_token_next_step_names_a_key_the_dc_holds_from_another_passphrase() -> None:
+    """A DC whose key came from another passphrase answers bad_token to every
+    approval: approving again cannot fix it, so the next step names the DC
+    setup with the domain's passphrase and approval-key."""
+    from newton_mcp.ad.write import apply as ad_apply
+
+    step = ad_apply.DC_REFUSED_NEXT_STEPS["bad_token"]
+
+    assert "approve the plan again" in step
+    assert "every DC" in step
+    assert "setup" in step
+    assert "approval-key" in step

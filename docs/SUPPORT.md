@@ -23,7 +23,7 @@ Shapes: a = happy path (a confirmed change); b = management IP lockout rolls bac
 | OpenWrt | 25.12.6 | GL.iNet Beryl AX (GL-MT3000) (hardware) | installed | 1.0 | on-router guard | pass | pass | pass | pass | pass | pass | pass | 2026-11-16 |
 | OpenWrt | 25.12.5 | Asus RT-AX57M (hardware) | no-install | 1.1 | timer (OpenWrt's own undo timer, RAM only) | pass | pass | pass | pass | pass | pass | pass | 2026-11-02 |
 
-Untested: Hardware other than the Asus RT-AX57M and the GL.iNet Beryl AX; Dual WAN on the GL.iNet Beryl and a satellite-WAN uplink (planned for the first 1.x release with the hardware); Firmware upgrade (planned for 1.4); Other OpenWrt releases than the one in each row; The no-install mode: b and c are refused when the change is planned, not rolled back (a change that cuts off Newton's own access to the router could never be confirmed), so nothing is applied.
+Untested: Hardware other than the Asus RT-AX57M and the GL.iNet Beryl AX; Dual WAN on the GL.iNet Beryl and a satellite-WAN uplink (planned for the first 1.x release with the hardware); Firmware upgrade (planned for later); Other OpenWrt releases than the one in each row; The no-install mode: b and c are refused when the change is planned, not rolled back (a change that cuts off Newton's own access to the router could never be confirmed), so nothing is applied.
 
 ## VyOS
 
@@ -63,7 +63,7 @@ Untested: Tested on a virtual image only, no hardware.
 
 ## Linux hosts
 
-Release: 1.3. Undo type: timer.
+Release: 1.6. Undo type: timer.
 
 Shapes: a = happy path (a confirmed change); b = management IP lockout rolls back; c = management firewall drop rolls back; d = injection in a change is rejected; e = bad syntax is rejected; f = a service is reachable after the change; g = uplinks down rolls back.
 
@@ -71,4 +71,4 @@ Shapes: a = happy path (a confirmed change); b = management IP lockout rolls bac
 |---|---|---|---|---|---|---|---|---|---|---|
 | Linux hosts | - | no recorded run (untested) | not run | not run | not run | not run | not run | not run | not run | - |
 
-Untested: Every shape: planned for 1.3, tested per network stack.
+Untested: Every shape: planned for 1.6, tested per network stack.

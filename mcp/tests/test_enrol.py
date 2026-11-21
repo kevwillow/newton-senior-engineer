@@ -103,6 +103,17 @@ def no_qrencode(monkeypatch):
     monkeypatch.setattr("newton_mcp.enrol.shutil.which", lambda name: None)
 
 
+@pytest.fixture(autouse=True)
+def inventory(tmp_path, monkeypatch):
+    """The inventory the installed launcher passes: it names DEVICE."""
+    path = tmp_path / "devices.toml"
+    path.write_text(
+        f'[devices.{DEVICE}]\nplatform = "openwrt"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("NEWTON_INVENTORY", str(path))
+    return path
+
+
 def _type_passphrase(monkeypatch, passphrase: str = PASSPHRASE):
     monkeypatch.setattr(approve, "_getpass", lambda prompt: passphrase)
 
@@ -508,3 +519,68 @@ def test_grant_off_without_a_grant_says_there_was_none(monkeypatch, capsys):
 
     out = capsys.readouterr()
     assert "no easy grant" in out.out.lower()
+
+
+# ---- a device the inventory does not name --------------------------
+
+
+TYPO = "pulsr"
+
+
+def test_grant_off_of_an_unknown_device_fails_and_leaves_the_real_grant(
+    monkeypatch, capsys
+):
+    """A typo is not 'no easy grant': the real grant stays open, so the
+    owner must hear that the name is wrong."""
+    grants.open_grant(
+        DEVICE, ["dns"], 1, "ab" * 32, "0123456789abcdef0123456789abcdef"
+    )
+    monkeypatch.setattr(sys, "stdin", FakeStdin(tty=False))
+
+    assert enrol.main(["grant-off", TYPO]) == 2
+
+    err = capsys.readouterr().err
+    assert "unknown device" in err, err
+    assert DEVICE in err, err
+    assert grants.load_live_grant(DEVICE) is not None
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["level", TYPO, "passphrase"], ["totp", TYPO], ["rotate", TYPO]],
+)
+def test_the_other_commands_refuse_an_unknown_device(monkeypatch, capsys, argv):
+    monkeypatch.setattr(sys, "stdin", FakeStdin())
+
+    assert enrol.main(argv) == 2
+
+    assert "unknown device" in capsys.readouterr().err
+    assert not proof._level_path(TYPO).exists()
+
+
+def test_grant_off_ends_a_grant_of_a_device_no_longer_in_the_inventory(
+    monkeypatch, capsys
+):
+    """Ending a grant is always safe: a grant whose device left the
+    inventory is still ended."""
+    grants.open_grant(
+        TYPO, ["dns"], 1, "ab" * 32, "0123456789abcdef0123456789abcdef"
+    )
+    monkeypatch.setattr(sys, "stdin", FakeStdin(tty=False))
+
+    assert enrol.main(["grant-off", TYPO]) == 0
+
+    assert "ended" in capsys.readouterr().out.lower()
+    assert grants.load_live_grant(TYPO) is None
+
+
+def test_an_unreadable_inventory_is_said_and_sets_no_level(
+    monkeypatch, capsys, inventory
+):
+    inventory.unlink()
+    monkeypatch.setattr(sys, "stdin", FakeStdin())
+
+    assert enrol.main(["level", DEVICE, "passphrase"]) == 1
+
+    assert "inventory" in capsys.readouterr().err
+    assert not proof._level_path(DEVICE).exists()

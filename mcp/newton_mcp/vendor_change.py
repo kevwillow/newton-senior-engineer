@@ -186,10 +186,23 @@ _DIFFERS_AFTER_CONFIRM = "the device differs from the verified change after the 
 _WINDOW_ENDING = "the revert window was about to end, so the confirm was not sent"
 
 # The confirm is sent only while at least this much of the revert window
-# is left.  The window is the plan timeout counted from before the apply;
-# every vendor arms at least that long (VyOS and Junos round up to the
-# minute, a CHR never less than two minutes).
+# is left.  The window is the one the device arms, counted from before the
+# apply: ``device_window_s``.
 CONFIRM_MARGIN_S = 15
+
+
+def device_window_s(ops: Any, timeout_s: int) -> int:
+    """The revert window the device arms for a plan timeout, in seconds.
+
+    Ops that arm another window say so with ``window_s`` (RouterOS: never
+    less than two minutes).  Without it the window is the commit-confirm
+    minutes of VyOS and Junos: the timeout rounded up to the minute and
+    clamped to 1..10 minutes, so a long timeout arms less than it asks.
+    """
+    window_s = getattr(ops, "window_s", None)
+    if window_s is not None:
+        return int(window_s(timeout_s))
+    return minutes_for(timeout_s) * 60
 
 # The messages a device prints when it refuses a session because its
 # configuration database is locked.  A session that died while it held
@@ -342,11 +355,44 @@ def _read_pending(ops: VendorOps, run: Run) -> str | None:
     return pending
 
 
+class _BoundedWait:
+    """The bounded wait of the recovery: ``recover_wait_s`` in all.
+
+    The bound counts the time of the sessions as well as the sleeps: a
+    device whose sessions hang until their timeout would otherwise hold
+    one tool call for hours while only the five-second steps were
+    counted.  The time spent is the clock's, or the sum of the sleeps when
+    that is more (an injected wait that does not move the clock).  A
+    session already running is never cut, so the wait can pass the bound
+    by at most the sessions of one try.
+    """
+
+    STEP_S = 5
+
+    def __init__(
+        self, wait: Callable[[float], None], now: Callable[[], float], bound_s: int
+    ) -> None:
+        self._wait = wait
+        self._now = now
+        self._bound_s = bound_s
+        self._start = now()
+        self._slept = 0.0
+
+    def spent(self) -> bool:
+        """True once the bound is used up."""
+        elapsed = max(self._now() - self._start, self._slept)
+        return elapsed >= self._bound_s
+
+    def step(self) -> None:
+        """Sleep one step of the wait."""
+        self._wait(self.STEP_S)
+        self._slept += self.STEP_S
+
+
 def _abort_with_retry(
     ops: VendorOps,
     run: Run,
-    wait: Callable[[float], None],
-    recover_wait_s: int,
+    bounded: _BoundedWait,
 ) -> bool:
     """Run the abort and retry it while the database of the device is locked.
 
@@ -361,7 +407,6 @@ def _abort_with_retry(
     and then the abort is not run again: a second rollback would roll
     back the commit of somebody else.
     """
-    elapsed = 0
     while True:
         abort_run = _Recorder(run)
         aborted = ops.abort(abort_run)
@@ -371,10 +416,9 @@ def _abort_with_retry(
             # the revert is not armed any more: the device rolled the
             # change back by itself and the abort must not run again.
             return False
-        if elapsed >= recover_wait_s:
+        if bounded.spent():
             return False
-        wait(5)
-        elapsed += 5
+        bounded.step()
 
 
 def _recover(
@@ -384,10 +428,13 @@ def _recover(
     failed_probe: list[str] | None,
     wait: Callable[[float], None],
     recover_wait_s: int,
+    now: Callable[[], float],
     restored_log: str = "the device restored the base configuration",
 ) -> ApplyOutcome:
+    # One bound for the whole recovery: the abort and the read back.
+    bounded = _BoundedWait(wait, now, recover_wait_s)
     try:
-        aborted = _abort_with_retry(ops, run, wait, recover_wait_s)
+        aborted = _abort_with_retry(ops, run, bounded)
     except Exception:
         return _unknown("the rollback state is unknown", failed_probe)
     # The ops know whether the revert worked.  A CHR reboots into the
@@ -396,7 +443,6 @@ def _recover(
     # of the ops is what counts and the hash below is the proof.
     abort_ok = aborted
 
-    elapsed = 0
     snapshot_run: _Recorder | None = None
     snapshot: Snapshot | None = None
     while True:
@@ -408,10 +454,9 @@ def _recover(
             snapshot = None
         if snapshot_run is not None and snapshot_run.ok:
             break
-        if elapsed >= recover_wait_s:
+        if bounded.spent():
             return _unknown("the rollback state is unknown", failed_probe)
-        wait(5)
-        elapsed += 5
+        bounded.step()
 
     restored = (
         abort_ok
@@ -436,6 +481,7 @@ def _config_is_base(
     base_hash: str,
     wait: Callable[[float], None],
     recover_wait_s: int,
+    now: Callable[[], float],
 ) -> bool:
     """Read the configuration hash back; True when it is the base hash.
 
@@ -450,7 +496,7 @@ def _config_is_base(
     and the same bound).  A read that succeeds ends the wait: a hash that
     is not the base hash is an answer and not a failure.
     """
-    elapsed = 0
+    bounded = _BoundedWait(wait, now, recover_wait_s)
     while True:
         try:
             snapshot_run = _Recorder(run)
@@ -460,10 +506,9 @@ def _config_is_base(
             snapshot = None
         if snapshot_run is not None and snapshot_run.ok:
             return snapshot.base_hash == base_hash
-        if elapsed >= recover_wait_s:
+        if bounded.spent():
             return False
-        wait(5)
-        elapsed += 5
+        bounded.step()
 
 
 def _pending_after_confirm(
@@ -471,6 +516,7 @@ def _pending_after_confirm(
     run: Run,
     wait: Callable[[float], None],
     recover_wait_s: int,
+    now: Callable[[], float],
 ) -> str | None:
     """Wait for the commit-confirm timer to say idle; None when it does.
 
@@ -479,15 +525,14 @@ def _pending_after_confirm(
     uses (a step of five seconds and the same bound) is enough.  When the
     bound runs out, the note is returned and the change stays confirmed.
     """
-    elapsed = 0
+    bounded = _BoundedWait(wait, now, recover_wait_s)
     while True:
         pending = _read_pending(ops, run)
         if pending == "idle":
             return None
-        if elapsed >= recover_wait_s:
+        if bounded.spent():
             return _PENDING_NOT_IDLE
-        wait(5)
-        elapsed += 5
+        bounded.step()
 
 
 def apply_plan(
@@ -541,7 +586,7 @@ def apply_plan(
         # nothing to undo.  The ops removed the backup it had made, so the
         # driver must not load it: the hash is read back instead, and the
         # base hash says that nothing was committed.
-        if not _config_is_base(ops, run, base_hash, wait, recover_wait_s):
+        if not _config_is_base(ops, run, base_hash, wait, recover_wait_s, now):
             return _unknown("the rollback state is unknown", None)
         return ApplyOutcome(
             result="rolled_back",
@@ -560,7 +605,7 @@ def apply_plan(
             log = "a statement was rejected by the device; nothing was committed"
         else:
             log = f"statement {line} was rejected by the device; nothing was committed"
-        if not _config_is_base(ops, run, base_hash, wait, recover_wait_s):
+        if not _config_is_base(ops, run, base_hash, wait, recover_wait_s, now):
             return _unknown("the rollback state is unknown", None)
         return ApplyOutcome(
             result="rolled_back",
@@ -577,6 +622,7 @@ def apply_plan(
             None,
             wait,
             recover_wait_s,
+            now,
         )
 
     verify_run = _Recorder(run)
@@ -589,6 +635,7 @@ def apply_plan(
             ["snapshot"],
             wait,
             recover_wait_s,
+            now,
         )
 
     # The ops that stage a candidate tell the driver what the candidate
@@ -606,6 +653,7 @@ def apply_plan(
             None,
             wait,
             recover_wait_s,
+            now,
         )
 
     for probe in probes:
@@ -621,6 +669,7 @@ def apply_plan(
                     list(probe),
                     wait,
                     recover_wait_s,
+                    now,
                 )
         elif not ops.has_line(verify_snapshot.text, value):
             return _recover(
@@ -630,9 +679,10 @@ def apply_plan(
                 list(probe),
                 wait,
                 recover_wait_s,
+                now,
             )
 
-    if now() - applied_at > timeout_s - CONFIRM_MARGIN_S:
+    if now() - applied_at > device_window_s(ops, timeout_s) - CONFIRM_MARGIN_S:
         return _recover(
             ops,
             run,
@@ -640,6 +690,7 @@ def apply_plan(
             None,
             wait,
             recover_wait_s,
+            now,
             restored_log=_WINDOW_ENDING,
         )
 
@@ -653,6 +704,7 @@ def apply_plan(
             None,
             wait,
             recover_wait_s,
+            now,
         )
 
     # The confirm does not prove that the change is still on the device:
@@ -693,7 +745,7 @@ def apply_plan(
     ):
         return _unknown(_DIFFERS_AFTER_CONFIRM, None)
 
-    pending_note = _pending_after_confirm(ops, run, wait, recover_wait_s)
+    pending_note = _pending_after_confirm(ops, run, wait, recover_wait_s, now)
 
     save_run = _Recorder(run)
     try:
@@ -783,6 +835,7 @@ def abort_change(
     *,
     wait: Callable[[float], None] = time.sleep,
     recover_wait_s: int = 150,
+    now: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     """Abort an armed change, then read back whether the base hash returned.
 
@@ -792,7 +845,7 @@ def abort_change(
     refused until the device lets go of the lock.
     """
     try:
-        aborted = _abort_with_retry(ops, run, wait, recover_wait_s)
+        aborted = _abort_with_retry(ops, run, _BoundedWait(wait, now, recover_wait_s))
     except Exception:
         return {"aborted": False, "restored": None}
     # The ops know whether the revert worked; a CHR reboots into the

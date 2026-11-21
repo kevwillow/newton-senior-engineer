@@ -547,3 +547,21 @@ def test_nr24_the_description_claims_no_enforcement_the_plan_does_not_do():
     assert "adds every rule" not in doc
     assert "blocks the confirm" not in doc
     assert "does not read" in doc
+
+
+def test_nr22_04_list_refuses_when_the_inventory_is_missing(tmp_path):
+    """A "no rules" read from the wrong place is a false answer.
+    With no inventory at the path, list names the path and stops."""
+    missing = tmp_path / "nowhere" / "devices.toml"
+    result = run_rules(tmp_path, "list", inventory=missing)
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert f"inventory file not found: {missing}" in result.stderr
+
+
+def test_nr22_05_list_by_device_refuses_when_the_inventory_is_missing(tmp_path):
+    missing = tmp_path / "nowhere" / "devices.toml"
+    result = run_rules(tmp_path, "list", "pulsar", inventory=missing)
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert f"inventory file not found: {missing}" in result.stderr

@@ -592,3 +592,31 @@ def test_shellcheck_is_clean_of_warnings(name):
         check=False,
     )
     assert done.returncode == 0, done.stdout + done.stderr
+
+
+def test_the_undo_line_is_the_command_the_installed_launcher_runs():
+    """The undo hint in the script is the working form.
+
+    The installed newton-router-setup runs only as the newton user, so
+    the bare command is refused; every other surface prints the sudo
+    form, and so does the script.
+    """
+    apply_lines = owner_script.render_script(APPLY_PLAN).decode().split("\n")
+    assert apply_lines[7] == (
+        "# To undo it later, on the Newton computer: sudo -u newton "
+        "/usr/local/bin/newton-router-setup "
+        f"{APPLY_PLAN.device} owner-run {APPLY_PLAN.restore_sid}"
+    )
+
+
+def test_a_script_with_the_old_undo_line_still_parses():
+    """A script planned before the sudo form is still read: its bytes are
+    pinned by its plan's hash."""
+    data = owner_script.render_script(APPLY_PLAN).decode()
+    old = data.replace(
+        "sudo -u newton /usr/local/bin/newton-router-setup ",
+        "newton-router-setup ",
+        1,
+    )
+    assert old != data
+    assert owner_script.parse_script(old.encode()) == APPLY_PLAN

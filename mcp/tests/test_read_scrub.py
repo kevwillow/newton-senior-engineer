@@ -14,7 +14,10 @@ SECRET = "ObviousFakeReadSecret987"
 def _run_read(monkeypatch, *, command, stdout="", stderr="", returncode=0, timeout=False):
     def fake_run(args, **kwargs):
         if timeout:
-            raise subprocess.TimeoutExpired(args, 30, output=stdout, stderr=stderr)
+            # subprocess.run(text=True) still raises with bytes
+            raise subprocess.TimeoutExpired(
+                args, 30, output=stdout.encode(), stderr=stderr.encode()
+            )
         return subprocess.CompletedProcess(args, returncode, stdout, stderr)
     monkeypatch.setattr(server.subprocess, "run", fake_run)
     return server.newton_read("quasar", command)

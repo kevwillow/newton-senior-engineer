@@ -1845,7 +1845,25 @@ def test_the_helper_starts_with_the_isolated_interpreter() -> None:
 
 
 def test_the_helper_answers_with_one_document_and_exits_zero(tmp_path: Path) -> None:
-    """Run the helper as the script it is."""
+    """Run the helper as the script it is: over stdin (the SSH channel) it
+    exits 0 whatever the outcome (SPEC-1.4-REQUEST section 1)."""
+    result = subprocess.run(
+        [sys.executable, "-I", str(HELPER_PATH)],
+        input=b"{}",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=120,
+    )
+
+    assert result.returncode == 0
+    answer = json.loads(result.stdout.decode("utf-8"))
+    assert answer["v"] == 1
+    assert answer["code"] in ("denied", "unavailable")
+
+
+def test_the_helper_run_by_a_unit_exits_non_zero_when_refused(tmp_path: Path) -> None:
+    """Run the helper as the undo unit runs it: a refused undo still
+    answers with one document, and the exit status tells systemd it failed."""
     result = subprocess.run(
         [sys.executable, "-I", str(HELPER_PATH), "--undo", "a" * 32],
         stdin=subprocess.DEVNULL,
@@ -1854,7 +1872,7 @@ def test_the_helper_answers_with_one_document_and_exits_zero(tmp_path: Path) -> 
         timeout=120,
     )
 
-    assert result.returncode == 0
+    assert result.returncode != 0
     answer = json.loads(result.stdout.decode("utf-8"))
     assert answer["v"] == 1
     assert answer["code"] in ("denied", "unavailable")
@@ -3523,3 +3541,112 @@ def test_an_undo_failed_record_is_final_and_never_swept_again(dc: Dc) -> None:
 
     assert dc.record()["state"] == "undo_failed"
     assert dc.fake.get_attribute(fake_samba_write.ALICE_DN, "userAccountControl") == "512"
+
+
+# ---- the exit status of the timers and an unlistable store
+
+
+def _run_main(dc: Dc, monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> tuple[int, dict[str, Any]]:
+    """Run the helper's entry point the way a systemd unit runs it."""
+    import io
+
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    monkeypatch.setattr(sys, "argv", ["newton-ad-samba-write", *argv])
+    out = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"")))
+    status = dc.helper.main()
+    return status, json.loads(out.getvalue())
+
+
+def _unlistable_store(dc: Dc, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The transaction store cannot be listed; every other path still can."""
+    real = os.listdir
+
+    def listdir(path: Any = ".") -> list[str]:
+        if os.fspath(path) == str(dc.tx):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path)
+
+    monkeypatch.setattr(os, "listdir", listdir)
+
+
+def test_a_clean_sweep_exits_zero(dc: Dc, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sweep timer records success when the sweep did its work."""
+    status, answer = _run_main(dc, monkeypatch, ["--sweep"])
+
+    assert answer["code"] == "ok"
+    assert status == 0
+
+
+def test_a_refused_sweep_exits_non_zero(dc: Dc, monkeypatch: pytest.MonkeyPatch) -> None:
+    """systemd marks the sweep unit failed when the sweep is refused, so the
+    timer never looks healthy while expired changes are not undone."""
+    dc.tx.chmod(0o777)
+
+    status, answer = _run_main(dc, monkeypatch, ["--sweep"])
+
+    assert answer["code"] == "unavailable"
+    assert status != 0
+
+
+def test_a_sweep_that_crashes_exits_non_zero(dc: Dc, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A crash of the sweep answers error and the unit fails."""
+
+    def boom(now: int, skip: str | None = None) -> bool:
+        raise RuntimeError("crash")
+
+    monkeypatch.setattr(dc.helper, "sweep", boom)
+
+    status, answer = _run_main(dc, monkeypatch, ["--sweep"])
+
+    assert answer["code"] == "error"
+    assert status != 0
+
+
+def test_a_refused_undo_exits_non_zero(dc: Dc, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one-shot undo unit fails too when its undo is refused."""
+    status, answer = _run_main(dc, monkeypatch, ["--undo", "a" * 32])
+
+    assert answer["code"] == "not_found"
+    assert status != 0
+
+
+def test_a_good_undo_exits_zero(dc: Dc, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one-shot undo that put the value back records success."""
+    dc.run(dc.request())
+
+    status, answer = _run_main(dc, monkeypatch, ["--undo", TXID])
+
+    assert answer["code"] == "ok"
+    assert status == 0
+
+
+def test_the_sweep_refuses_a_store_it_cannot_list(dc: Dc, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A store that cannot be listed is never taken for an empty one: the
+    sweep timer answers error, and the expired change stays visible."""
+    dc.run(dc.request())
+    dc.helper.current_time = lambda: float(NBF + 601)
+    _unlistable_store(dc, monkeypatch)
+
+    status, answer = _run_main(dc, monkeypatch, ["--sweep"])
+
+    assert answer["code"] == "error"
+    assert status != 0
+    assert dc.record()["state"] == "armed"
+
+
+def test_a_request_logs_a_store_the_sweep_cannot_list(
+    dc: Dc, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The sweep that runs before a request never stops the request, but an
+    unlistable store leaves a line in the log instead of passing in silence."""
+    dc.run(dc.request())
+    capsys.readouterr()
+    _unlistable_store(dc, monkeypatch)
+
+    answer = dc.run({"v": 1, "mode": "status", "device": DEVICE, "txid": TXID})
+
+    assert answer["code"] == "ok"
+    assert "cannot be listed" in capsys.readouterr().err
+

@@ -63,8 +63,15 @@ Send = Callable[[Any, Mapping[str, Any]], dict[str, Any]]
 #: How often a DC is read again while it has not caught up.
 POLL_S = 10.0
 
-#: How long a DC may take to show the after-image.
+#: How long one DC may take to show the after-image.  Each DC has its own
+#: budget, and the read-back as a whole stops at READBACK_RESERVE_S before
+#: the end of the undo window.
 TIMEOUT_S = 120.0
+
+#: What the read-back leaves of the undo window: the confirm or abort
+#: session (one transport session) and a margin, so it reaches the DC
+#: before the DC runs its own undo.
+READBACK_RESERVE_S = float(transport.TIMEOUT_S) + 30.0
 
 #: The state of a receipt.
 STATE_CONFIRMED = "confirmed"
@@ -405,7 +412,11 @@ DC_REFUSED_NEXT_STEPS: dict[str, str] = {
         "The DC did not accept the approval token: its approval key does not "
         "match the one the approval was made with. Check that the passphrase "
         "typed on the DC and at newton-approve is the same, then approve the "
-        "plan again and apply it."
+        "plan again and apply it. When every approval is refused this way, "
+        "the DC holds a key made from another passphrase, so run the DC's write setup "
+        "again with the domain's passphrase (on every DC of the domain), and "
+        "check that its printed fingerprint is the one newton-ad-setup "
+        "approval-key printed on the Newton host."
     ),
     "risk_mismatch": (
         "The DC derived another risk level for this change than the plan "
@@ -443,6 +454,16 @@ STALE_TARGET_MESSAGE = (
     "plan (its live value, in live, is not the plan's before-image), so "
     "nothing was written. Read the target with the admin tools and plan the "
     "change again from its value now."
+)
+#: A move's conflict whose live parent is empty: the DC could not read the
+#: object's current parent (Windows answers "", Samba null), so the target
+#: may not have changed at all.
+UNREADABLE_PARENT_MESSAGE = (
+    "The domain controller refused the move: it could not read the object's "
+    "current parent (the parent was deleted, or the write account cannot read "
+    "it), so nothing was written and the target may not have changed. Check "
+    "the object's parent with the admin tools, and that the write account can "
+    "read it, then plan the change again."
 )
 #: The same conflict, but the live value is the plan's after-image:
 #: somebody else made the planned change, so there is nothing to apply.
@@ -963,6 +984,7 @@ def _apply_change(
     lost: BaseException | None = None
     secret_error: str | None = None
     answer: dict[str, Any] | None = None
+    apply_started = clock()
     try:
         preflight(pdc, payload)
     except LINK_ERRORS as exc:
@@ -978,6 +1000,9 @@ def _apply_change(
                 "dcs": {},
                 "receipt_error": PENDING_ERROR_MESSAGE,
             }
+        # The DC's undo_at is its clock at the apply plus the window: read
+        # before the apply is sent, this moment is never later than that.
+        apply_started = clock()
         try:
             answer = sender(pdc, payload)
         except LINK_ERRORS as exc:
@@ -1058,6 +1083,13 @@ def _apply_change(
                 message = ARMED_CONFLICT_MESSAGE
             elif isinstance(live, dict) and live and live == plan.get("after"):
                 message = ALREADY_HELD_MESSAGE
+            elif (
+                plan.get("verb") == "move"
+                and isinstance(live, dict)
+                and "parent" in live
+                and live["parent"] in ("", None)
+            ):
+                message = UNREADABLE_PARENT_MESSAGE
             else:
                 message = STALE_TARGET_MESSAGE
         elif code == "replay":
@@ -1164,7 +1196,16 @@ def _apply_change(
             result["live"] = live
         return _with_receipt_error(result, receipt_error, secret_error)
 
-    states = _verify(sender, dcs, plan, poll_s, timeout_s, sleep, clock)
+    readback_deadline = apply_started + max(
+        TIMEOUT_S, float(plan["window"]) - READBACK_RESERVE_S
+    )
+    if send is None:
+        def reader(device: Any, body: Mapping[str, Any], session_s: float) -> dict[str, Any]:
+            return transport.send(device, body, timeout_s=session_s)
+    else:
+        def reader(device: Any, body: Mapping[str, Any], session_s: float) -> dict[str, Any]:
+            return sender(device, body)
+    states = _verify(reader, dcs, plan, poll_s, timeout_s, sleep, clock, readback_deadline)
     every = all(
         isinstance(one, dict) and one.get("state") == "matched"
         for one in states.values()
@@ -1347,13 +1388,14 @@ def _status_of(sender: Send, pdc: Any, plan: Mapping[str, Any]) -> dict[str, Any
 
 
 def _verify(
-    sender: Send,
+    reader: Callable[[Any, Mapping[str, Any], float], dict[str, Any]],
     dcs: list[Any],
     plan: Mapping[str, Any],
     poll_s: float,
     timeout_s: float,
     sleep: Callable[[float], None],
     clock: Callable[[], float],
+    readback_deadline: float,
 ) -> dict[str, dict[str, Any]]:
     """Read the target back from every DC until every one shows the after-image.
 
@@ -1362,19 +1404,29 @@ def _verify(
     read is an empty outcome there (a missing quota or lockoutTime reads 0
     in ``live``).  An answer with no outcome never matches.
 
-    The deadline is read from the clock, so a test that injects one
+    Each DC has its own ``timeout_s``, counted from its first read.  The
+    read-back as a whole ends at ``readback_deadline``: no read starts
+    after it, each read session is given only the time left before it
+    (``reader``'s third argument), and a DC not read by then is
+    not_tested, so the confirm or abort still reaches the PDC before its
+    undo runs.
+
+    The deadlines are read from the clock, so a test that injects one
     waits exactly as long as the timeout and no longer.
     """
-    deadline = clock() + timeout_s
     states: dict[str, dict[str, Any]] = {}
     read_request = _read_request(plan)
     after = plan["after"]
     for device in dcs:
         state = "not_tested"
         live: Any = None
+        deadline = min(clock() + timeout_s, readback_deadline)
         while True:
+            left = readback_deadline - clock()
+            if left <= 0:
+                break
             try:
-                answer = sender(device, read_request)
+                answer = reader(device, read_request, left)
             except Exception:
                 answer = {}
             if answer.get("code") == "ok":

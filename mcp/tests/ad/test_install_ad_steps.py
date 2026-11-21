@@ -53,12 +53,12 @@ def _commands() -> list[list[str]]:
     """Every sh command of section 10, split the way a shell splits words."""
     commands: list[list[str]] = []
     for block in _blocks("sh"):
-        # a line ending in a backslash goes on; `a && b || c` is three commands
+        # a line ending in a backslash goes on; `a && b || c | d` is four commands
         for line in block.replace("\\\n", " ").splitlines():
             if line.strip():
                 argv: list[str] = []
                 for word in shlex.split(line):
-                    if word in ("&&", "||"):
+                    if word in ("&&", "||", "|"):
                         commands.append(argv)
                         argv = []
                     else:

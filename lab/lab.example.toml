@@ -173,7 +173,7 @@ cmd = "echo 7702"
 # The agent host: the workstation that runs the runner.  agent_ip is its address on the router's LAN and
 # agent_nonlocal_ip one of its own addresses outside every subnet the router has (a DNS query sourced from
 # it proves the dnsmasq local-service behaviour).  The live values go in the operator's own
-# lab/lab.toml, which is not part of this repository; lab/pulsar.example.toml carries the same two vars with
+# lab/lab.toml, which is kept out of every published copy of Newton; lab/pulsar.example.toml carries the same two vars with
 # documentation-range placeholders, so the example ships without a house address and the operator's copy carries the live ones.
 [vars.agent_ip]
 device = "local"

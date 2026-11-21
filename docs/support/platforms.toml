@@ -3,7 +3,7 @@
 
 [platforms.openwrt]
 label = "OpenWrt"
-untested = ["Hardware other than the Asus RT-AX57M and the GL.iNet Beryl AX", "Dual WAN on the GL.iNet Beryl and a satellite-WAN uplink (planned for the first 1.x release with the hardware)", "Firmware upgrade (planned for 1.4)", "Other OpenWrt releases than the one in each row", "The no-install mode: b and c are refused when the change is planned, not rolled back (a change that cuts off Newton's own access to the router could never be confirmed), so nothing is applied"]
+untested = ["Hardware other than the Asus RT-AX57M and the GL.iNet Beryl AX", "Dual WAN on the GL.iNet Beryl and a satellite-WAN uplink (planned for the first 1.x release with the hardware)", "Firmware upgrade (planned for later)", "Other OpenWrt releases than the one in each row", "The no-install mode: b and c are refused when the change is planned, not rolled back (a change that cuts off Newton's own access to the router could never be confirmed), so nothing is applied"]
 
 # The two access modes of an OpenWrt router (ADR-021 point 1).  A run
 # names the mode it was made in.
@@ -185,9 +185,9 @@ scenarios = ["07-uplink-down"]
 
 [platforms.linux]
 label = "Linux hosts"
-release = "1.3"
+release = "1.6"
 undo = "timer"
-untested = ["Every shape: planned for 1.3, tested per network stack"]
+untested = ["Every shape: planned for 1.6, tested per network stack"]
 
 [[platforms.linux.shape]]
 id = "a"

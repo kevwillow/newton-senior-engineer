@@ -536,6 +536,9 @@ def _owner_finish(args: argparse.Namespace) -> int:
     outcome = {
         owner_verify.CONFIRMED: "confirmed",
         owner_verify.ROLLED_BACK: "rolled_back",
+        # the change is on the router and stayed: a final state, and
+        # the receipt says the change is live, not that it is uncertain
+        owner_verify.KEPT: "kept",
     }.get(verdict.state, "unknown")
     if verdict.state != owner_verify.NOT_APPLIED:
         # A change the router never took leaves no receipt: nothing is

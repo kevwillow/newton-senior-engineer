@@ -244,6 +244,21 @@ def test_fail_password_auth_false_pulsar(pulsar_env):
 	assert "FAIL password-only login failed" in r.out.splitlines()
 
 
+def test_password_refused_on_plain_key_names_the_way_out(pulsar_env):
+	"""The FAIL stays (the password is the way back in), and a
+	NOTE names the option every later setup command needs on a router
+	that refuses passwords."""
+	env = pulsar_env
+	seed_known_hosts(env)
+	env.router.update_state(password_auth=False)
+	r = env.run("--plain-key", env.plain_key, "pulsar", "check", typed=(GOOD_PW,))
+	assert_stopped(r, "pulsar")
+	lines = r.out.splitlines()
+	i = lines.index("FAIL password-only login failed")
+	assert lines[i + 1].startswith("NOTE the router refused the root password login"), r.out
+	assert "--admin plain-key --plain-key <your admin key> to every setup command for pulsar" in lines[i + 1]
+
+
 def test_fail_dropbear_passwordauth_off(setup_env):
 	"""uci dropbear PasswordAuth = off is a FAIL (3.1)."""
 	env = setup_env

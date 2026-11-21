@@ -2036,3 +2036,71 @@ def test_un05_a_replaced_list_has_no_claim_that_the_option_is_absent(env, monkey
     draft = draft_undo(env.state, DEVICE, HOST, SID, current, AGENT)
     assert "delete network.lan.dns" in draft.batch and "add_list network.lan.dns" in draft.batch
     assert not any(c.get("probe", [""])[0] == "uci-unset" for c in draft.explanation["expect"])
+
+
+# ------------------------------------------- no trusted after-hash
+
+
+def test_a_reconciled_confirm_is_refused_even_with_an_after_hash(env, monkeypatch):
+    """the router confirmed the change after the link dropped; the
+    config read when this host learned it may already hold a later change or
+    an edit made outside Newton, so its after-hash cannot be trusted."""
+    _record_out, current = _change(
+        env, monkeypatch, diff="network.lan.ipaddr='10.0.0.2'",
+        before={"network": NET_BEFORE}, after={"network": NET_AFTER},
+    )
+    _audit(env.root, f"CONFIRMED session={SID} (reconciled: the router's status says confirmed)")
+    with pytest.raises(UndoRefused) as excinfo:
+        draft_undo(env.state, DEVICE, HOST, SID, current, AGENT)
+    assert str(excinfo.value) == undo_plan.NO_AFTER_HASH_RECONCILED
+    assert "restore its backup by hand" in str(excinfo.value)
+
+
+def test_a_reconciled_confirm_without_an_after_hash_says_why(env, monkeypatch):
+    _record_out, current = _change(
+        env, monkeypatch, diff="network.lan.ipaddr='10.0.0.2'",
+        before={"network": NET_BEFORE}, after={"network": NET_AFTER},
+        after_hash=None,
+    )
+    _audit(env.root, f"CONFIRMED session={SID} (reconciled: the router refused the abort: it says confirmed)")
+    with pytest.raises(UndoRefused) as excinfo:
+        draft_undo(env.state, DEVICE, HOST, SID, current, AGENT)
+    assert str(excinfo.value) == undo_plan.NO_AFTER_HASH_RECONCILED
+
+
+def test_another_sessions_reconcile_does_not_refuse_this_one(env, monkeypatch):
+    _record_out, current = _change(
+        env, monkeypatch, diff="network.lan.ipaddr='10.0.0.2'",
+        before={"network": NET_BEFORE}, after={"network": NET_AFTER},
+    )
+    _audit(env.root, f"CONFIRMED session={OTHER_SID} (reconciled: the router's status says confirmed)")
+    draft = draft_undo(env.state, DEVICE, HOST, SID, current, AGENT)
+    assert draft.batch
+
+
+def test_a_change_whose_config_was_not_read_after_the_confirm_says_so(env, monkeypatch):
+    """the config read right after the confirm failed; the refusal
+    says that, not that the change predates undo records."""
+    _record_out, current = _change(
+        env, monkeypatch, diff="network.lan.ipaddr='10.0.0.2'",
+        before={"network": NET_BEFORE}, after={"network": NET_AFTER},
+        after_hash=None,
+    )
+    _audit(env.root, f"NO UNDO RECORD session={SID}: the router's config could not be read right after "
+                     "the confirm, so newton_plan_undo cannot undo this change; restore its backup by "
+                     "hand if it must be undone")
+    with pytest.raises(UndoRefused) as excinfo:
+        draft_undo(env.state, DEVICE, HOST, SID, current, AGENT)
+    assert str(excinfo.value) == undo_plan.NO_AFTER_HASH_UNREAD
+    assert "before undo records were kept" not in str(excinfo.value)
+
+
+def test_a_change_with_no_after_hash_and_no_reason_keeps_the_old_reason(env, monkeypatch):
+    _record_out, current = _change(
+        env, monkeypatch, diff="network.lan.ipaddr='10.0.0.2'",
+        before={"network": NET_BEFORE}, after={"network": NET_AFTER},
+        after_hash=None,
+    )
+    with pytest.raises(UndoRefused) as excinfo:
+        draft_undo(env.state, DEVICE, HOST, SID, current, AGENT)
+    assert str(excinfo.value) == undo_plan.NO_AFTER_HASH

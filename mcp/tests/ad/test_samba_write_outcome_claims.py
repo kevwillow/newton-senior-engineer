@@ -3097,8 +3097,8 @@ def _verify_on(dc: Dc, fields: dict[str, Any], after: dict[str, Any]) -> dict[st
     plan = {"device": DEVICE, "after": after, **fields}
     replica = type("Device", (), {"name": "sdc2"})()
     return core_apply._verify(
-        lambda device, payload: dc.run(payload), [replica], plan, 0, 0,
-        lambda seconds: None, lambda: 0.0,
+        lambda device, payload, session_s: dc.run(payload), [replica], plan, 0, 0,
+        lambda seconds: None, lambda: 0.0, 600.0,
     )["sdc2"]
 
 

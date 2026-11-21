@@ -102,6 +102,22 @@ NO_CLAIM_RISK = (
 NO_AFTER_HASH = (
     "this change was confirmed before undo records were kept; restore its backup by hand"
 )
+# The router confirmed the change but its answer was lost; this host learned
+# it later (a status, abort or confirm reconciled it).  The config then may
+# already hold a later change or an edit made outside Newton, so no record of
+# the config right after the change is trusted, even one stored by an older
+# wrapper, and the change's receipt is newer than changes made after it.
+NO_AFTER_HASH_RECONCILED = (
+    "the router confirmed this change after the link to it dropped, so the config right "
+    "after the change was never recorded (an undo now would also revert anything changed "
+    "since); restore its backup by hand"
+)
+# The wrapper could not read the router's config right after the confirm and
+# logged a NO UNDO RECORD line for the session.
+NO_AFTER_HASH_UNREAD = (
+    "the router's config could not be read right after this change was confirmed, so the "
+    "config right after the change was never recorded; restore its backup by hand"
+)
 
 _SID_RE = re.compile(r"^[0-9a-f]{32}$")
 _DEVICE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -349,10 +365,21 @@ def _require_planned_base(record: dict[str, Any], backup_copy: Path) -> None:
         )
 
 
-def _require_after_hash(record: dict[str, Any]) -> dict[str, str]:
-    """The md5 of every config file right after the change."""
+def _require_after_hash(record: dict[str, Any], change_id: str) -> dict[str, str]:
+    """The md5 of every config file right after the change.
+
+    A change confirmed by reconcile is refused even with a stored hash, and
+    a missing hash names the reason the audit log gives for it.
+    """
+    lines = _receipts.audit_lines(change_id)
+    reconciled = f"CONFIRMED session={change_id} (reconciled: "
+    if any(line.startswith(reconciled) for line in lines):
+        raise UndoRefused(NO_AFTER_HASH_RECONCILED)
     raw = record.get("after_hash")
     if not isinstance(raw, dict) or not raw:
+        unread = f"NO UNDO RECORD session={change_id}: "
+        if any(line.startswith(unread) for line in lines):
+            raise UndoRefused(NO_AFTER_HASH_UNREAD)
         raise UndoRefused(NO_AFTER_HASH)
     out: dict[str, str] = {}
     for name, value in raw.items():
@@ -857,7 +884,7 @@ def draft_undo(
     receipt = _require_receipt(state, device, change_id)
     backup_copy = _require_backup_copy(state, change_id, receipt)
     _require_planned_base(record, backup_copy)
-    after_hash = _require_after_hash(record)
+    after_hash = _require_after_hash(record, change_id)
     _require_not_undone(state, change_id)
     packages = _touched_packages(record)
 

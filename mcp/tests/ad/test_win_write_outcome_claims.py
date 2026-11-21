@@ -2197,8 +2197,8 @@ def _verified(response: dict[str, Any], fields: dict[str, Any],
     plan = {"device": DEVICE, "after": after, **fields}
     replica = type("Device", (), {"name": "windc2"})()
     return core_apply._verify(
-        lambda device, payload: response, [replica], plan, 0, 0,
-        lambda seconds: None, lambda: 0.0,
+        lambda device, payload, session_s: response, [replica], plan, 0, 0,
+        lambda seconds: None, lambda: 0.0, 600.0,
     )["windc2"]
 
 

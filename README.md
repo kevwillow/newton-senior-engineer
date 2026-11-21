@@ -25,9 +25,9 @@ approve and run. On Active Directory, on the main branch ahead of its release, i
 set of account changes. Rollback timers and approvals are not new. Newton puts them together around each change, and each
 part below holds only in the modes it names:
 
-- **The undo is armed on the device before it writes.** On an OpenWrt router a timer on the router puts the settings back when a check fails or the change is not confirmed in time, so it still fires if the agent, its session or your PC goes away. In the **installed** mode the undo also survives a reboot: Newton's guard on the router's flash puts the last good settings back at boot. In the **no-install** mode it is OpenWrt's own rpcd timer, which lives in the router's RAM, so a router that reboots, or whose web service restarts, in the middle of a change keeps the change. On Active Directory the domain controller arms its own undo before it writes, for every change but an unlock, which has nothing to put back. One undo can fail: a new user whose ID the domain controller did not record stays written, recorded as `undo_failed` (the details are under [Active Directory](#active-directory)).
+- **The undo is armed on the device before it writes.** On an OpenWrt router a timer on the router puts the settings back when a check fails or the change is not confirmed in time, so it still fires if the agent, its session or your PC goes away. In the **installed** mode the undo also survives a reboot: Newton's guard on the router's flash puts the last good settings back at boot. When the guard, not rpcd, puts a change back while the router keeps running, the files go back but running firewall, network and rpcd settings can stay changed until a reboot, so check the router or reboot it. In the **no-install** mode it is OpenWrt's own rpcd timer, which lives in the router's RAM, so a router that reboots, or whose web service restarts, in the middle of a change keeps the change. On Active Directory the domain controller arms its own undo before it writes, for every change but an unlock, which has nothing to put back. One undo can fail: a new user whose ID the domain controller did not record stays written, recorded as `undo_failed` (the details are under [Active Directory](#active-directory)).
 - **A check from a client can roll a change back.** A router change is kept only after fresh connections prove the network still works. In the **installed** mode a plan can also claim what a client in a zone sees (DNS, DHCP, the internet, an address that must stay blocked), checked from a client machine you register as a vantage; a check that fails, or cannot run, stops the confirm and the router rolls the change back. Client checks have run in the virtual lab only, and Newton notices only the breaks its checks test for.
-- **Your approval is bound to the exact change and the state it was planned against.** In the **installed** mode the router itself checks the approval against the plan's digest, which covers the router's settings at plan time, the change and its checks, and refuses the apply if any of them changed. In the **no-install** mode Newton reads the settings the change touches again just before the write and stops if they changed. On Active Directory the domain controller checks the approval itself.
+- **Your approval is bound to the exact change and the state it was planned against.** In the **installed** mode the router itself checks the approval against the plan's digest, which covers the router's settings at plan time, the change and its checks, and refuses the apply if any of them changed; it does so on a router set to the prod profile (the default) or for a change Newton always asks about, while a router set to lab skips that check by design and only the Newton host checks the approval. In the **no-install** mode Newton reads the settings the change touches again just before the write and stops if they changed. On Active Directory the domain controller checks the approval itself.
 - **An honest unknown instead of an invented success.** When Newton cannot tell what happened, because the connection dropped in the middle of an apply for example, it says the outcome is unknown and how to read the status, on a router in either mode and on Active Directory.
 
 Newton is an operational skill for an AI agent plus an MCP server (`newton-mcp`). Both speak the same change protocol, so
@@ -56,7 +56,7 @@ modes are shown side by side, in plain words, before the router is touched.
 
 **no-install:** Newton puts nothing on the router except one web-interface user. Every change uses OpenWrt's own undo timer. Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays. Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval. Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run.
 
-**installed:** Newton puts a program on the router: a small set of shell scripts (6 files, about 217 KB), no packages and no compiled code. Newton's key can run that program and nothing else, so the agent never gets a root shell. If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck. More checks can run, and fewer changes need a script. uninstall removes Newton's program and key; it keeps the guard's saved settings and the rest of /etc/newton (its lock and log), the program directory, the WAN-health settings in /etc/config/newton_wanhealth, the keys from before swap-key and the sysupgrade file: the saved settings and the copy of your keys are what you restore by hand.
+**installed:** Newton puts a program on the router: a small set of shell scripts (6 files, about 218 KB), no packages and no compiled code. Newton's key can run that program and nothing else, so the agent never gets a root shell. If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck. More checks can run, and fewer changes need a script. uninstall removes Newton's program and key; it keeps the guard's saved settings and the rest of /etc/newton (its lock and log), the program directory, the WAN-health settings in /etc/config/newton_wanhealth, the keys from before swap-key and the sysupgrade file: the saved settings and the copy of your keys are what you restore by hand.
 
 The uninstall takes out every Newton key line on the router, for every host and label, including the key the Newton
 server itself uses; the next section lists what it removes and keeps, and how to put each key back.
@@ -74,13 +74,13 @@ prints the same text on your terminal before it asks you to agree:
 What Newton puts on your router
 
 Newton's executable code is a small set of POSIX shell scripts; it also writes the configuration and service entries listed below.
-No package is installed and nothing is compiled: about 217 KB of shell in 6 files.
+No package is installed and nothing is compiled: about 218 KB of shell in 6 files.
 
   /usr/libexec/newton/newton-router     148 KB  the program Newton talks to
   /usr/libexec/newton/newton-safe-apply   25 KB  the change helper
   /usr/libexec/newton-guard              32 KB  the rollback guard
   /etc/init.d/newton-guard               525 B  starts the guard at boot
-  /usr/libexec/newton/newton-wan-health   11 KB  the dual-WAN health check
+  /usr/libexec/newton/newton-wan-health   12 KB  the dual-WAN health check
   /etc/init.d/newton-wan-health          641 B  starts the health check
 
 It also writes the device name, the profile and the zones under /etc/newton
@@ -141,7 +141,9 @@ lines are left in it.
 The run-time files in /tmp/newton and /tmp/owrt-safe-apply.lock are in memory and go at
 the next reboot. The uninstall stops the WAN-health check first, and its
 restore removes the WAN-health run-time state in /var/run/newton-wan-health
-(every *.state file and all_down.flag); the directory itself stays, empty.
+(every *.state file and all_down.flag); the directory itself stays, holding
+only a <wan>.wasdown mark for each WAN that was down at the stop, so a
+restart demotes that WAN again in its first round.
 ```
 
 ## Get started
@@ -228,7 +230,7 @@ A ✓ line says so when the feature works in one mode only, was run only in the 
 with no recorded run on a real router.
 
 **Changes that undo themselves**
-- ✓ Plan → your approval (or your scoped grant; a lab router skips it) → apply → verify → keep, for every change. Nothing is written outside this flow. Before Newton contacts the router, you must have said yes in the chat and the agent must give an explanation whose steps match the change.
+- ✓ Plan → your approval (or your scoped grant; a lab router skips it) → apply → verify → keep, for every change. Nothing is written outside this flow. Outside a scoped grant, before Newton contacts the router, you must have said yes in the chat; in every case the agent must give an explanation whose steps match the change.
 - ✓ Apply-with-automatic-rollback over rpcd, with the timer on the router. In the **installed** mode the change is confirmed only after three consecutive passing rounds; in the **no-install** mode it is confirmed only when every mandatory check passes and the router's values read back as the staged ones, and the undo is OpenWrt's own rpcd timer (in the router's RAM).
 - ✓ The undo timer is armed **on the router** before anything changes. Installed mode: 60–600 s, 90 s by default. No-install mode: 120–600 s, 180 s by default. 120 s or more is advised for Wi-Fi.
 - ✓ The undo puts back `/etc/config` only. Packages, passwords and files outside `/etc/config` are never rolled back.
@@ -254,13 +256,13 @@ with no recorded run on a real router.
 - ✓ An approval dialog in Claude Code, asking for your passphrase, or for an authenticator code (TOTP) on an installed-mode router.
 - ✓ `newton-approve` in a terminal, as the fallback for any client without dialogs: you type `approve` and the first 8 characters of the plan id, then your passphrase.
 - ✓ HIGH changes (management access, internet exposure, options that run commands) need a second typed confirmation, `<device> HIGH`, in the dialog every time. OpenWrt changes are either HIGH or not; there is no LOW/MEDIUM scale. The `newton-approve` terminal fallback does not ask the second question for router changes.
-- ✓ A first-approval warning per device, shown in the dialog until your first approval on that device succeeds.
+- ✓ A first-approval warning per device, shown in the approval dialog or in the terminal until your first approval on that device succeeds.
 - ✓ Scoped grants: "allow these kinds of change on this router for the next 1, 4 or 8 hours". A grant covers four kinds of change only: DHCP reservations, DNS settings, the router's name, and the Wi-Fi name and password. It never covers a HIGH change, a change the leash always asks about, or an owner script. It ends early on any result other than CONFIRMED, or when you end it (`newton_grant_off` or `newton-enrol grant-off`); a result made inside a grant says so. Covered by tests.
 - ✓ A loud result after every change: `NEWTON RESULT: CONFIRMED / ROLLED BACK / UNKNOWN / NOT APPLIED`.
 - ✓ The dialog stops waiting after about three minutes (180 s) and tells you how to approve from a terminal.
 - ✓ Three wrong approval answers in the approval dialog lock approvals on that device for 5 minutes, doubling up to 24 hours; the terminal `newton-approve <session_id>` fallback for a router change counts no wrong answers and does not check the lock. An answer given in the dialog in under 1.5 s is rejected; the terminal fallback has no minimum time.
 - ✓ A reminder to clear your screen after typing a passphrase.
-- ✓ Approval tokens expire and are single-use; the Newton host enforces the single use. Each one is bound to the exact change and the router's current config, and an approval lasts at most 30 minutes. On an installed OpenWrt router the router program checks it again (its expiry and the length of its window); in the no-install mode and on VyOS, RouterOS and Junos only the Newton host checks it.
+- ✓ Approval tokens expire and are single-use; the Newton host enforces the single use. Each one is bound to the exact change and the router's current config, and an approval lasts at most 30 minutes. On an installed OpenWrt router set to the prod profile (the default), or for a change Newton always asks about, the router program checks it again (its expiry and the length of its window); on a router set to lab, in the no-install mode and on VyOS, RouterOS and Junos only the Newton host checks it.
 - ✓ The leash: changes to Newton's own access, the management network, internet exposure, or options that run commands always need approval. On an installed router it runs in the router program (22 rules); in the no-install mode it is the Newton host's policy only.
 - ✓ A lab mode for test routers: a router applies changes without approval only when its inventory entry says `lab = true` and its profile is lab, and the server runs from a source checkout with `NEWTON_LAB_APPROVAL_CARVEOUT=1`; leash changes still ask. An installed Newton never uses this lab exception.
 

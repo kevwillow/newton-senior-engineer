@@ -77,6 +77,9 @@ VERDICT_RESULTS = {
     "UNKNOWN": UNKNOWN,
 }
 
+#: The first note of the status of an owner-script run that ended KEPT.
+KEPT_NOTE = "the change is on the router and stayed; Newton did not confirm it"
+
 #: The receipt word of every state that has one.  A change that was
 #: never applied leaves no receipt, exactly as on an installed device.
 RECEIPT_OUTCOMES = {
@@ -1344,9 +1347,14 @@ def status(svc: Any, device_name: str, session_id: str) -> dict[str, Any]:
         # run that confirmed is a confirmed change.
         state = VERDICT_RESULTS.get(str(verdict.get("state")))
         if state is not None:
+            verdict_notes = _texts(verdict.get("notes"))
+            if verdict.get("state") == owner_verify.KEPT:
+                # KEPT is answered as unknown (Newton did not confirm
+                # it), but the router's state is known: it is said first
+                verdict_notes.insert(0, KEPT_NOTE)
             return {
                 "result": state,
-                "notes": _texts(verdict.get("notes")),
+                "notes": verdict_notes,
                 "not_verified": _texts(verdict.get("not_verified")),
             }
     if outcome in (CONFIRMED, ROLLED_BACK, NOT_APPLIED, UNKNOWN):
@@ -1371,6 +1379,22 @@ def status(svc: Any, device_name: str, session_id: str) -> dict[str, Any]:
         return {
             "result": IN_PROGRESS,
             "notes": [IN_PROGRESS_NOTE],
+            "not_verified": [
+                str(item)
+                for item in record.get("not_verified", [])
+                if isinstance(item, str)
+            ],
+        }
+    undone = _live_apply_of(Path(svc.state), record)
+    if undone is not None:
+        # the restore has not run, but the change it undoes did: saying
+        # "the change has not been applied" would deny a live change
+        return {
+            "result": NOT_APPLIED,
+            "notes": [
+                f"this restore has not been run; the change it undoes "
+                f"({undone}) ran and may be on the router"
+            ],
             "not_verified": [
                 str(item)
                 for item in record.get("not_verified", [])
@@ -1420,25 +1444,7 @@ def abort(svc: Any, device_name: str, session_id: str) -> dict[str, Any]:
             ),
         }
     run = owner_records.read_run(state, session_id)
-    outcome = run.get("outcome")
-    verdict = run.get("verdict")
-    verdict_state = (
-        str(verdict.get("state")) if isinstance(verdict, Mapping) else ""
-    )
-    never_applied = (
-        outcome == NOT_APPLIED
-        or verdict_state == owner_verify.NOT_APPLIED
-    )
-    started_at = run.get("started_at")
-    ran = (
-        bool(run.get("outcome"))
-        or bool(run.get("verdict"))
-        or (
-            isinstance(started_at, (int, float))
-            and not isinstance(started_at, bool)
-        )
-    )
-    if ran and not never_applied:
+    if _may_be_live(run):
         # The plan ran: the change may be on the router, and a plan
         # that says "nothing was applied" would be a lie.  A run that
         # PROVED the change was never applied is the one exception:
@@ -1450,6 +1456,18 @@ def abort(svc: Any, device_name: str, session_id: str) -> dict[str, Any]:
                 if claim == "stale"
                 else "the plan already ran: there is nothing to abort; the "
                 "change is on the router unless the router put it back"
+            ),
+        }
+    undone = _live_apply_of(state, record)
+    if undone is not None:
+        # This is the restore plan of a change that ran: its script and
+        # the backup it is checked against are the way back, and the
+        # receipt of that change points the owner at them.
+        return {
+            "result": "not_aborted",
+            "message": (
+                f"this plan is the undo of change {undone}, which ran: the "
+                "change may be on the router, so its restore plan is kept"
             ),
         }
     # The plan is dropped whole: the record, the approval that could
@@ -1468,6 +1486,48 @@ def abort(svc: Any, device_name: str, session_id: str) -> dict[str, Any]:
         "result": "aborted",
         "message": "the plan was dropped; nothing was applied",
     }
+
+
+def _may_be_live(run: Mapping[str, Any]) -> bool:
+    """True when a run started and did not PROVE nothing was applied."""
+    outcome = run.get("outcome")
+    verdict = run.get("verdict")
+    verdict_state = (
+        str(verdict.get("state")) if isinstance(verdict, Mapping) else ""
+    )
+    never_applied = (
+        outcome == NOT_APPLIED
+        or verdict_state == owner_verify.NOT_APPLIED
+    )
+    started_at = run.get("started_at")
+    ran = (
+        bool(run.get("outcome"))
+        or bool(run.get("verdict"))
+        or (
+            isinstance(started_at, (int, float))
+            and not isinstance(started_at, bool)
+        )
+    )
+    return ran and not never_applied
+
+
+def _live_apply_of(state: Path, record: Mapping[str, Any]) -> str | None:
+    """The apply plan a restore plan undoes, when that change may be live.
+
+    None for a plan that is no restore plan, and for the restore of an
+    apply that never ran or proved it never reached the router.  An
+    apply whose approval is claimed may be running: it counts as live.
+    """
+    restore_of = record.get("restore_of")
+    if not isinstance(restore_of, str) or not owner_script.PLAN_ID_RE.fullmatch(
+        restore_of
+    ):
+        return None
+    if (state / "approvals" / f"{restore_of}.claimed").exists():
+        return restore_of
+    if _may_be_live(owner_records.read_run(state, restore_of)):
+        return restore_of
+    return None
 
 
 def _unlink(path: Path) -> None:

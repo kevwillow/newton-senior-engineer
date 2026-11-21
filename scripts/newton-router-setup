@@ -164,6 +164,8 @@ newton-router-setup [--password-file FILE] [--admin plain-key|password] [--plain
 ACTION: check | install | no-install | offer-installed | approval-key [--passphrase-file FILE] | swap-key [--new-key] [--remove-plain-key] [LABEL] | add-key [--new-key] LABEL ROLE | revoke LABEL
         | profile lab|prod | upgrade | rollback | uninstall | lab-snapshot [--new-key] [--labels L1,L2] [--gates-cmd CMD | --skip-gates]
         | owner-run SID [--print] | owner-finish SID
+rollback puts the router program from before the last upgrade back; Newton
+calls then fail until this host runs the same version.
 EOF
 }
 
@@ -1019,7 +1021,8 @@ refuse_no_install_action() {
 
 # Contract: validate_action_args -- no arguments; called by main right
 # after choose_admin_path and before require_known_hosts and the password
-# prefetch: approval-key with --passphrase-file dies (exit 2) unless the
+# prefetch: profile stops (exit 1, router unchanged) when PROFILE_VALUE
+# differs from the inventory profile; approval-key with --passphrase-file dies (exit 2) unless the
 # inventory profile is lab and the file is readable; lab-snapshot runs
 # its config preflight; every other action: nothing.  The no-install
 # refusal is not here: it runs before the admin path is chosen (see
@@ -1036,6 +1039,14 @@ validate_action_args() {
 			;;
 	esac
 	case "$ACTION" in
+		profile)
+			# the controller refuses a router whose profile differs
+			# from the inventory's, so the inventory changes first
+			if [[ "$PROFILE_VALUE" != "$DEV_PROFILE" ]]; then
+				STATE_NOTE='router unchanged'
+				stopped "the inventory says ${DEV_PROFILE} for ${DEVICE}; set profile = \"${PROFILE_VALUE}\" in devices.toml first, then run profile ${PROFILE_VALUE} again"
+			fi
+			;;
 		approval-key)
 			if [[ -n "$PASSPHRASE_FILE" ]]; then
 				[[ "$DEV_PROFILE" == "lab" ]] \
@@ -1066,6 +1077,27 @@ password_only_proof() {
 		rc=1
 	fi
 	return "$rc"
+}
+
+# Contract: way_in_proof -- the proof that the owner keeps a way back in
+# to the router, which uninstall runs before and after its removal: on
+# the password admin path it is password_only_proof; on the plain-key
+# admin path it is the admin key itself (`rsh_admin true </dev/null`),
+# because a router the owner reaches with an admin key may refuse root
+# passwords, and uninstall never removes a key that is not Newton's.
+# The plain-key branch prints exactly "PASS admin key login works" or
+# "FAIL admin key login failed"; returns 0 or 1.
+way_in_proof() {
+	if [[ "$ADMIN_MODE" != "plain-key" ]]; then
+		password_only_proof
+		return
+	fi
+	if rsh_admin true </dev/null >/dev/null 2>&1; then
+		pass "admin key login works"
+		return 0
+	fi
+	fail "admin key login failed"
+	return 1
 }
 
 # Contract: restricted_key_check -- the two restricted-key proofs the
@@ -1164,6 +1196,11 @@ action_check() {
 	fi
 	if ! password_only_proof; then
 		rc=1
+		if [[ "$ADMIN_MODE" == "plain-key" ]]; then
+			note "the router refused the root password login. check counts that as a problem: the password is the way back in if a key stops working. If password logins are off on purpose, your admin key is the way in: keep it on the router and pass --admin plain-key --plain-key <your admin key> to every setup command for ${DEVICE}"
+		else
+			note "if the router refuses root password logins, rerun with --admin plain-key --plain-key <your admin key>"
+		fi
 	fi
 	if ! restricted_key_check; then
 		rc=1
@@ -1293,7 +1330,9 @@ lines are left in it.
 The run-time files in /tmp/newton and ${R_LOCK} are in memory and go at
 the next reboot. The uninstall stops the WAN-health check first, and its
 restore removes the WAN-health run-time state in /var/run/newton-wan-health
-(every *.state file and all_down.flag); the directory itself stays, empty.
+(every *.state file and all_down.flag); the directory itself stays, holding
+only a <wan>.wasdown mark for each WAN that was down at the stop, so a
+restart demotes that WAN again in its first round.
 EOF
 }
 
@@ -1756,7 +1795,9 @@ approval_key_run() {
 		# recorded it, and die prints that FAIL line first.  No "nothing
 		# was changed": lab-snapshot runs this after its install.
 		if [[ -n "$ADMIN_FAIL_FILE" && -s "$ADMIN_FAIL_FILE" ]]; then
-			die "the admin login failed (see the FAIL line above)"
+			[[ "$ADMIN_MODE" == "plain-key" ]] \
+				&& die "the admin login failed (see the FAIL line above)"
+			die "the admin login failed (see the FAIL line above); if the router refuses root passwords, rerun with --admin plain-key --plain-key <your admin key>"
 		fi
 		die "run install first"
 	fi
@@ -2472,15 +2513,13 @@ action_revoke() {
 # 8.1): requires known_hosts, then puts the profile file
 # (${R_NEWTON_DIR}/profile, mode 600) with PROFILE_VALUE and a final LF
 # through put_text; when PUT_CHANGED=1 prints `PASS profile set to
-# PROFILE_VALUE`, else `PASS profile already PROFILE_VALUE`; when
-# PROFILE_VALUE differs from DEV_PROFILE prints the NOTE; a failed
+# PROFILE_VALUE`, else `PASS profile already PROFILE_VALUE` (a value that
+# differs from DEV_PROFILE never gets here: validate_action_args stops
+# it before any router contact); a failed
 # put_text sets STATE_NOTE='router unchanged' and stopped "cannot
 # write the profile file"; ends with done_line.
 action_profile() {
 	require_known_hosts
-	if [[ "$PROFILE_VALUE" != "$DEV_PROFILE" ]]; then
-		note "the inventory says ${DEV_PROFILE}; the controller refuses a router whose profile differs"
-	fi
 	# here-string, not a pipe: the pipe would run put_text in a
 	# subshell and PUT_CHANGED would never be visible in this shell
 	put_text "${R_NEWTON_DIR}/profile" 600 <<<"$PROFILE_VALUE" \
@@ -2505,7 +2544,9 @@ action_profile() {
 # daemon when this run changed one of its two files or a host-side marker
 # says an earlier restart is pending (a disabled daemon is never started),
 # then appends any SYSUPGRADE_LINES entry the router lacks
-# (`PASS upgrade extras 3: ...`), then ends with
+# (`PASS upgrade extras 3: ...`), then writes the disabled main section
+# into a missing or empty /etc/config/newton_wanhealth
+# (`PASS upgrade extras 4: ...`), then ends with
 # `pass "upgrade: prog=<first 12 hex>"` and done_line; a second run with
 # unchanged sources writes nothing
 # (put_file skips identical files) and exits 0.
@@ -2650,6 +2691,11 @@ action_upgrade() {
 		stopped "upgrade extras 3 failed"
 	fi
 	pass "upgrade extras 3: sysupgrade.conf lines present"
+	if ! upgrade_wan_health_config; then
+		STATE_NOTE='the code is upgraded; /etc/config/newton_wanhealth could not be given its settings section'
+		stopped "upgrade extras 4 failed"
+	fi
+	pass "upgrade extras 4: wan-health settings section present"
 	# the success line shows the first 12 hex chars of the program sha
 	row="${CODE_FILES[0]}"
 	rel="${row%%|*}"
@@ -2710,7 +2756,9 @@ rollback_restore_one() {
 }
 
 # Contract: action_rollback -- the rollback action (design
-# 8.6): require_known_hosts, ONE state-gathering rsh_admin call (the
+# 8.6): require_known_hosts, refuse_if_busy rollback (a pending guard or
+# a live helper lock stops with "rollback refused: the router is busy",
+# router unchanged), ONE state-gathering rsh_admin call (the
 # program, helper and two WAN-health files, basenames from their rows); when
 # the call fails or neither core file has a `.prev`: STATE_NOTE='router
 # unchanged (no .prev to roll back to)' and stopped "nothing to roll
@@ -2723,7 +2771,9 @@ rollback_restore_one() {
 # STATE_NOTE to the list of restored files and "hello after rollback:
 # failed" and stopped "hello failed after the rollback"; success prints
 # "PASS rollback: prog=<first 12 hex of prog sha256> helper=<first 12
-# hex of helper sha256>" from the hello fields and done_line. A second
+# hex of helper sha256>" from the hello fields, two NOTE rollback: lines
+# (a router-program rollback: the guard stays and this controller no
+# longer matches until both sides run one version) and done_line. A second
 # run when both files already equal `.prev` writes nothing and exits 0.
 # After the WAN-health restore/restart decision, the device's host-side
 # restart-pending marker is cleared; a clear failure only prints FAIL.
@@ -2734,6 +2784,12 @@ action_rollback() {
 	local helper_exists='' helper_live='' helper_prev=''
 	local wan_exists='' wan_live='' wan_prev=''
 	local wan_init_exists='' wan_init_live='' wan_init_prev=''
+	# a pending change or a live helper lock: swapping the program under
+	# it would leave its confirm or abort failing at the handshake
+	refuse_if_busy rollback || {
+		STATE_NOTE='router unchanged'
+		stopped "cannot read whether the router is busy"
+	}
 	out=$(rollback_state_call) || {
 		STATE_NOTE='router unchanged (no .prev to roll back to)'
 		stopped "nothing to roll back to"
@@ -2859,6 +2915,8 @@ action_rollback() {
 		stopped "hello failed after the rollback"
 	}
 	pass "rollback: prog=${prog_sha:0:12} helper=${helper_sha:0:12}"
+	note "rollback: this put the router program from before the last upgrade back; the guard is not rolled back. This controller still expects its own version, so every Newton call to ${DEVICE} fails at the handshake until they match."
+	note "rollback: to stay on the earlier version, install that earlier Newton version on this host and run upgrade from it; to undo the rollback, run: sudo -u newton /usr/local/bin/newton-router-setup ${DEVICE} upgrade"
 	done_line
 }
 
@@ -3019,12 +3077,14 @@ uninstall_config() {
 # rsh_admin call (the guard file missing or its status exactly `idle`
 # goes on; rc=1: STATE_NOTE='router unchanged' and stopped "uninstall
 # refused: the guard is not idle"; rc=2: STATE_NOTE='router unchanged'
-# and stopped "cannot read the guard status"); (2) password_only_proof
-# (on failure: STATE_NOTE='router unchanged' and stopped "the
-# password-only login failed; nothing was removed"); (3) the five
+# and stopped "cannot read the guard status"); (2) way_in_proof
+# (password_only_proof on the password admin path, the admin key login
+# on the plain-key path; on failure: STATE_NOTE='router unchanged' and
+# stopped "the password-only login failed; nothing was removed", or
+# "the admin key login failed; nothing was removed"); (3) the five
 # idempotent steps each ending in `PASS uninstall step N: ...` (a
 # failing router call sets STATE_NOTE='uninstall stopped half way; run
-# it again' and stops); (4) password_only_proof again (on failure:
+# it again' and stops); (4) way_in_proof again (on failure:
 # STATE_NOTE='everything was removed but the password-only login failed
 # afterwards' and stopped "the password-only login failed after the
 # removal"); (5) done_line. A second run on a router whose Newton files
@@ -3058,8 +3118,12 @@ action_uninstall() {
 			stopped "cannot read the guard status"
 			;;
 	esac
-	if ! password_only_proof; then
+	if ! way_in_proof; then
 		STATE_NOTE='router unchanged'
+		if [[ "$ADMIN_MODE" == "plain-key" ]]; then
+			stopped "the admin key login failed; nothing was removed"
+		fi
+		note "if the router refuses root password logins, rerun with --admin plain-key --plain-key <your admin key>"
 		stopped "the password-only login failed; nothing was removed"
 	fi
 	if ! uninstall_authorized_keys; then
@@ -3128,7 +3192,11 @@ action_uninstall() {
 		stopped "uninstall step 5 failed"
 	fi
 	pass "uninstall step 5: config files removed"
-	if ! password_only_proof; then
+	if ! way_in_proof; then
+		if [[ "$ADMIN_MODE" == "plain-key" ]]; then
+			STATE_NOTE='everything was removed but the admin key login failed afterwards'
+			stopped "the admin key login failed after the removal"
+		fi
 		STATE_NOTE='everything was removed but the password-only login failed afterwards'
 		stopped "the password-only login failed after the removal"
 	fi
@@ -4780,9 +4848,10 @@ wan_health_restart() {
 
 # Contract: install_wan_health_config -- ONE fixed-text rsh_admin call
 # (</dev/null, ${RR} on every location) that:
-# (a) creates /etc/config/newton_wanhealth if it does not exist, holding
+# (a) creates /etc/config/newton_wanhealth if it does not exist or is
+#     empty (wan_health_config_text), holding
 #     only the main section (type settings) with enabled '0' (never
-#     overwrites an existing one). When created here the file is chmod 600
+#     overwrites a non-empty one). When written here the file is chmod 600
 #     and `set newton_wanhealth.main.enabled=1` has a section to set: uci
 #     refuses an option of a section that does not exist; an
 #     existing file keeps its content AND its mode (user data); and
@@ -4799,7 +4868,26 @@ wan_health_restart() {
 #     and the call's non-zero exit makes install fail at extras 2
 #     (install_restore + STOPPED). The exit status is the call's.
 install_wan_health_config() {
-	rsh_admin "f=\"${RR}/etc/config/newton_wanhealth\"; if [ ! -e \"\$f\" ]; then umask 077 && printf \"config settings 'main'\\n\\toption enabled '0'\\n\" > \"\$f\" && chmod 600 \"\$f\"; fi; \"${RR}${R_WANHEALTH_INIT}\" enable && \"${RR}${R_WANHEALTH_INIT}\" start" </dev/null 2>/dev/null
+	rsh_admin "$(wan_health_config_text) && \"${RR}${R_WANHEALTH_INIT}\" enable && \"${RR}${R_WANHEALTH_INIT}\" start" </dev/null 2>/dev/null
+}
+
+# Contract: wan_health_config_text -- prints the fixed router-side text
+# (${RR} on the location) that writes the disabled main section into
+# /etc/config/newton_wanhealth when the file is missing OR empty, mode
+# 600; a non-empty file keeps its content and its mode (user data).  An
+# empty file is what install wrote up to v1.1.3: it has no section, so
+# `set newton_wanhealth.main.enabled=1` fails at staging.  The text
+# exits 0 when nothing needed writing.
+wan_health_config_text() {
+	printf '%s' "f=\"${RR}/etc/config/newton_wanhealth\"; if [ ! -s \"\$f\" ]; then umask 077 && printf \"config settings 'main'\\n\\toption enabled '0'\\n\" > \"\$f\" && chmod 600 \"\$f\"; fi"
+}
+
+# Contract: upgrade_wan_health_config -- ONE rsh_admin call of the
+# wan_health_config_text alone (</dev/null): upgrade repairs the empty
+# settings file of a router installed by v1.1.3 or earlier and never
+# enables or starts the WAN-health init.  The exit status is the call's.
+upgrade_wan_health_config() {
+	rsh_admin "$(wan_health_config_text)" </dev/null 2>/dev/null
 }
 
 # Contract: install_wan_health_verify -- ONE fixed-text rsh_admin call
@@ -6792,7 +6880,7 @@ access_modes_notes() {
 	note "no-install: Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays."
 	note "no-install: Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval."
 	note "no-install: Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run."
-	note "installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 217 KB), no packages and no compiled code."
+	note "installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 218 KB), no packages and no compiled code."
 	note "installed: Newton's key can run that program and nothing else, so the agent never gets a root shell."
 	note "installed: If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck."
 	note "installed: More checks can run, and fewer changes need a script."

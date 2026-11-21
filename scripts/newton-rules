@@ -12,7 +12,11 @@ cannot be tested) will block the confirm and the router will roll back.
 Only the owner runs this tool (as the newton user, like newton-enrol):
 rules live in ``rules.toml`` next to the inventory ``devices.toml`` --
 same directory, same owner -- and no MCP tool can write them; the agent
-can only read them and run them.
+can only read them and run them.  On an installed Newton the owner runs
+``sudo -u newton /usr/local/bin/newton-rules ...``: the launcher names
+the installed inventory, /var/lib/newton/devices.toml.  ``list`` refuses
+when the inventory is missing, so it never answers "no rules" for the
+wrong place.
 
 Commands:
   add <device> <id> <zone> <kind> [<to>] [--label TEXT]
@@ -469,7 +473,12 @@ def cmd_remove(args: argparse.Namespace) -> int:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    rows = parse_rules(rules_path(inventory_path()))
+    inventory = inventory_path()
+    # rules.toml is found through the inventory: with no inventory at the
+    # path, "no rules" would answer for the wrong place
+    if not os.path.lexists(inventory):
+        refuse(f"inventory file not found: {inventory}")
+    rows = parse_rules(rules_path(inventory))
     if args.device is not None:
         if DEVICE_RE.fullmatch(args.device) is None:
             refuse("device must be 1-32 characters of [a-z][a-z0-9-]")

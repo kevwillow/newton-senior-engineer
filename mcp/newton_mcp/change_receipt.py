@@ -29,7 +29,9 @@ from . import redact as _redact
 from .client_checks import CLIENT_KINDS
 
 
-OUTCOME_WORDS = {"confirmed": "CONFIRMED", "rolled_back": "ROLLED BACK", "unknown": "UNKNOWN"}
+# "kept" is the owner-script run whose window closed with the change on
+# the router, unconfirmed by Newton: the change is live and final.
+OUTCOME_WORDS = {"confirmed": "CONFIRMED", "rolled_back": "ROLLED BACK", "kept": "KEPT", "unknown": "UNKNOWN"}
 RECEIPT_DIR = "receipts"
 BACKUP_DIR = "backups"
 _AUDIT_PREFIX = re.compile(r"^\S+ \S+ (?P<msg>.*)$")

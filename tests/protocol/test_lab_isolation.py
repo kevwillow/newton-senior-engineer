@@ -19,6 +19,16 @@ FILTER = (
 )
 
 
+# The check only listens.  A PASS says so on stdout, next to the
+# PASS line, so a reader of the result sees what it could not see.
+PASSIVE_NOTE = (
+    "NOTE passive check: it sends no DHCP discover and no router solicitation, "
+    "so a server that answers only a client that asks, or answers by unicast "
+    "to another port, is not seen; router adverts can be up to 600 s apart, "
+    "so a window shorter than that can miss them (use --seconds 600 or more)"
+)
+
+
 def run(*args, env=None):
     return subprocess.run(
         [str(SCRIPT), *args], text=True, capture_output=True, env=env, timeout=10
@@ -80,6 +90,7 @@ def test_from_file_only_allowed_sources_passes(tmp_path):
         f"INFO {ALLOWED_MAC} router-advert x1 (allowed)",
         "PASS no foreign DHCP server or router advert on eth0 in 120 s "
         "(3 packets from allowed sources)",
+        PASSIVE_NOTE,
     ]
 
 
@@ -126,6 +137,7 @@ def test_from_file_no_packets_passes_with_zero_count(tmp_path):
     assert result.stdout.splitlines() == [
         "PASS no foreign DHCP server or router advert on eth0 in 120 s "
         "(0 packets from allowed sources)",
+        PASSIVE_NOTE,
     ]
 
 
@@ -141,6 +153,7 @@ def test_from_file_uppercase_allow_mac_is_accepted(tmp_path):
         f"INFO {ALLOWED_MAC} dhcp-server x1 (allowed)",
         "PASS no foreign DHCP server or router advert on eth0 in 120 s "
         "(1 packet from allowed sources)",
+        PASSIVE_NOTE,
     ]
 
 
@@ -156,6 +169,7 @@ def test_from_file_seconds_leading_zeros_prints_without_them(tmp_path):
     assert result.stdout.splitlines() == [
         "PASS no foreign DHCP server or router advert on eth0 in 12 s "
         "(0 packets from allowed sources)",
+        PASSIVE_NOTE,
     ]
 
 
@@ -238,6 +252,7 @@ def test_capture_pins_tcpdump_invocation_and_passes(tmp_path):
         f"INFO {ALLOWED_MAC} router-advert x1 (allowed)",
         "PASS no foreign DHCP server or router advert on eth0 in 10 s "
         "(2 packets from allowed sources)",
+        PASSIVE_NOTE,
     ]
 
 
@@ -261,6 +276,7 @@ def test_capture_allowed_sources_pass_with_packet_count(tmp_path):
         f"INFO {ALLOWED_MAC} router-advert x1 (allowed)",
         "PASS no foreign DHCP server or router advert on eth0 in 10 s "
         "(3 packets from allowed sources)",
+        PASSIVE_NOTE,
     ]
 
 
@@ -336,6 +352,7 @@ def test_capture_timeout_kill_still_passes(tmp_path):
         f"INFO {ALLOWED_MAC} dhcp-server x1 (allowed)",
         "PASS no foreign DHCP server or router advert on eth0 in 10 s "
         "(1 packet from allowed sources)",
+        PASSIVE_NOTE,
     ]
 
 
@@ -483,6 +500,7 @@ def test_from_file_banner_and_summary_lines_are_ignored(tmp_path):
         f"INFO {ALLOWED_MAC} dhcp-server x1 (allowed)",
         "PASS no foreign DHCP server or router advert on eth0 in 120 s "
         "(1 packet from allowed sources)",
+        PASSIVE_NOTE,
     ]
 
 
@@ -577,6 +595,7 @@ def test_from_file_allowed_dhcpv6_offer_passes(tmp_path):
         f"INFO {allowed} dhcpv6-server x1 (allowed)",
         "PASS no foreign DHCP server or router advert on eth0 in 120 s "
         "(1 packet from allowed sources)",
+        PASSIVE_NOTE,
     ]
 
 
@@ -692,6 +711,7 @@ def test_from_file_zero_packets_prints_note_on_stderr(tmp_path):
     assert result.stdout.splitlines() == [
         "PASS no foreign DHCP server or router advert on eth0 in 120 s "
         "(0 packets from allowed sources)",
+        PASSIVE_NOTE,
     ]
     assert "NOTE: no DHCP or router advert packet was seen" in result.stderr
 
@@ -728,10 +748,11 @@ def test_from_file_plural_packet_counts(tmp_path):
     )
 
     assert allowed_result.returncode == 0, allowed_result.stdout
-    assert allowed_result.stdout.splitlines()[-1] == (
+    assert allowed_result.stdout.splitlines()[-2:] == [
         "PASS no foreign DHCP server or router advert on eth0 in 120 s "
-        "(2 packets from allowed sources)"
-    )
+        "(2 packets from allowed sources)",
+        PASSIVE_NOTE,
+    ]
     assert foreign_result.returncode == 1
     assert foreign_result.stdout.splitlines()[-1] == (
         "FAIL foreign DHCP server or router advert on eth0 in 120 s "
@@ -760,3 +781,43 @@ def test_from_file_vlan_tagged_offer_fails(tmp_path):
         result.stdout
     )
     assert "PASS" not in result.stdout
+
+
+def test_header_blind_spots_name_the_passive_capture():
+    """The Blind spots header says the check sends nothing."""
+    header = []
+    for line in SCRIPT.read_text().splitlines()[1:]:
+        if not line.startswith("#"):
+            break
+        header.append(line.lstrip("# "))
+    text = " ".join(header)
+    spots = text[text.index("Blind spots:"):]
+    assert "passive" in spots, spots
+    assert "no DHCP discover" in spots, spots
+    assert "router solicitation" in spots, spots
+    assert "unicast" in spots, spots
+    assert "600 s" in spots, spots
+    # docs/TESTING-METHOD.md cites the header by its lines: the cited
+    # range ends at the header's last line
+    method = (ROOT / "docs" / "TESTING-METHOD.md").read_text()
+    cited = re.search(r"`scripts/newton-lab-isolation:1-(\d+)`", method)
+    assert cited, "TESTING-METHOD.md no longer cites the header"
+    assert int(cited.group(1)) == len(header) + 1, (cited.group(0), len(header))
+
+
+def test_pass_is_followed_by_the_passive_note_on_stdout(tmp_path):
+    """A PASS with allowed traffic still carries the note, on
+    stdout right after the PASS line, and the exit stays 0."""
+    capture = write_capture(tmp_path, [dhcp_offer(ALLOWED_MAC)])
+    result = run("--iface", "eth0", "--allow-mac", ALLOWED_MAC, "--from-file", str(capture))
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[-2].startswith("PASS "), lines
+    assert lines[-1] == PASSIVE_NOTE, lines
+
+
+def test_no_passive_note_without_a_pass(tmp_path):
+    capture = write_capture(tmp_path, [dhcp_offer("aa:bb:cc:00:11:22")])
+    result = run("--iface", "eth0", "--allow-mac", ALLOWED_MAC, "--from-file", str(capture))
+    assert result.returncode == 1
+    assert PASSIVE_NOTE not in result.stdout

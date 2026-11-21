@@ -3,9 +3,10 @@
 When the link drops after the router confirmed a change but before its
 answer reached the host, the apply (or confirm) ends OUTCOME UNKNOWN.  A
 later status, abort or confirm that finds the router's status saying
-confirmed prints the config hashes and a ``CONFIRMED session=<sid>
-(reconciled: ...)`` line; the server then writes the confirmed receipt
-and the after-hash, so the change can be undone like any confirmed one.
+confirmed prints a ``CONFIRMED session=<sid> (reconciled: ...)`` line;
+the server then writes the confirmed receipt (and an after-hash when the
+wrapper printed config hashes; the current wrapper prints none, and the
+undo planner refuses a reconciled change).
 """
 
 from __future__ import annotations

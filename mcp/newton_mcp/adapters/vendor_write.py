@@ -752,6 +752,10 @@ class VyosOps:
         output = run(stage_script(stmts))
         return parse_stage(output.stdout)
 
+    def window_s(self, timeout_s: int) -> int:
+        """The revert window the apply arms: the commit-confirm minutes."""
+        return minutes_for(timeout_s) * 60
+
     def apply(self, run: Run, stmts: list[list[str]], timeout_s: int) -> str:
         """Apply the statements with the VyOS commit-confirm revert armed."""
         output = run(apply_script(stmts, minutes_for(timeout_s)))

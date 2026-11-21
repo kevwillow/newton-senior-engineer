@@ -11,13 +11,14 @@ Do the steps in order. Every command runs on the machine that will manage your r
 
 ## 1. Check the prerequisites
 
-You need Linux with `sudo`, `git`, an SSH client and Python 3.11 or newer as `/usr/bin/python3`, with its `venv`
-module (Ubuntu 22.04 and RHEL 9 ship an older one; the installer refuses it). Check what you have:
+You need Linux with `sudo`, `git`, an SSH client and Python 3.11 to 3.14 as `/usr/bin/python3`, with its `venv`
+module (Ubuntu 22.04 and RHEL 9 ship an older one, and the locked dependencies have no wheels for 3.15 yet; the
+installer refuses both). Check what you have:
 
 ```sh
 uname -s
 command -v sudo git ssh python3
-/usr/bin/python3 -c 'import sys, venv, ensurepip; sys.exit(0 if sys.version_info >= (3, 11) else "Python 3.11 or newer is needed, found " + sys.version.split()[0])'
+/usr/bin/python3 -c 'import sys, venv, ensurepip; v = sys.version_info[:2]; sys.exit(0 if (3, 11) <= v <= (3, 14) else "Python 3.11 to 3.14 is needed, found %d.%d" % v)'
 ```
 `uname -s` must print `Linux`. If a program is missing, install it and run the checks again.
 
@@ -110,7 +111,7 @@ skip it.
 An existing file is never overwritten; the installer prints the one line to add instead. The approval passphrase
 comes in step 7. The install creates the `newton` account and group (home `/var/lib/newton`, no login shell), which
 holds the router keys; the code under `/opt/newton`; the launchers `/usr/local/bin/newton-mcp`, `newton-approve`,
-`newton-router-setup`, `newton-vantage-setup`, `newton-enrol`, `newton-ad-setup` and `newton-doctor`; the sudoers rules in `/etc/sudoers.d/newton-mcp`; and
+`newton-router-setup`, `newton-vantage-setup`, `newton-enrol`, `newton-ad-setup`, `newton-rules` and `newton-doctor`; the sudoers rules in `/etc/sudoers.d/newton-mcp`; and
 the bootstrap `/usr/local/sbin/newton-bootstrap`.
 
 Near its end the install prints these lines. The two access modes are for the router, and step 7e picks one:
@@ -124,7 +125,7 @@ no-install: Every change uses OpenWrt's own undo timer.
 no-install: Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays.
 no-install: Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval.
 no-install: Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run.
-installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 217 KB), no packages and no compiled code.
+installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 218 KB), no packages and no compiled code.
 installed: Newton's key can run that program and nothing else, so the agent never gets a root shell.
 installed: If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck.
 installed: More checks can run, and fewer changes need a script.
@@ -307,13 +308,13 @@ install with "nothing was changed", and the router is not touched:
 What Newton puts on your router
 
 Newton's executable code is a small set of POSIX shell scripts; it also writes the configuration and service entries listed below.
-No package is installed and nothing is compiled: about 217 KB of shell in 6 files.
+No package is installed and nothing is compiled: about 218 KB of shell in 6 files.
 
   /usr/libexec/newton/newton-router     148 KB  the program Newton talks to
   /usr/libexec/newton/newton-safe-apply   25 KB  the change helper
   /usr/libexec/newton-guard              32 KB  the rollback guard
   /etc/init.d/newton-guard               525 B  starts the guard at boot
-  /usr/libexec/newton/newton-wan-health   11 KB  the dual-WAN health check
+  /usr/libexec/newton/newton-wan-health   12 KB  the dual-WAN health check
   /etc/init.d/newton-wan-health          641 B  starts the health check
 
 It also writes the device name, the profile and the zones under /etc/newton
@@ -374,12 +375,20 @@ lines are left in it.
 The run-time files in /tmp/newton and /tmp/owrt-safe-apply.lock are in memory and go at
 the next reboot. The uninstall stops the WAN-health check first, and its
 restore removes the WAN-health run-time state in /var/run/newton-wan-health
-(every *.state file and all_down.flag); the directory itself stays, empty.
+(every *.state file and all_down.flag); the directory itself stays, holding
+only a <wan>.wasdown mark for each WAN that was down at the stop, so a
+restart demotes that WAN again in its first round.
 ```
 
 If the router refuses root password logins, add `--admin plain-key --plain-key <path to a setup key>` before the
 device name. `swap-key` removes that plain key from the router, so use a separate setup key (step 7c), not your own
 admin key, or keep another way in (LuCI or the console).
+
+After `swap-key` the inventory names Newton's key, and the tool then logs in with the root password by default. On a
+router that refuses root passwords, every later setup command (`approval-key`, `check`, `upgrade`, `rollback`,
+`uninstall`, `add-key`, `revoke`, `profile`) needs `--admin plain-key --plain-key <your admin key>` before the device
+name, with an admin key that stays on the router (your own, not the setup key `swap-key` removed). check still reports
+the refused password login as a FAIL: the password is the way back in if a key stops working.
 
 **7f.** Choose the approval passphrase. On a no-install router, step 7e already asked for it, and the authenticator
 app belongs to the installed mode, so it is not offered there; run this only to change the passphrase. On an
@@ -521,13 +530,15 @@ Then append both to the inventory, which the `newton` account owns, as in 7b. Us
 
 ```sh
 sudo -u newton grep -qxF '[devices.dc1]' /var/lib/newton/devices.toml && echo 'already in the inventory: dc1' \
-  || sudo -u newton tee -a /var/lib/newton/devices.toml < dc1.toml >/dev/null
+  || { echo; cat dc1.toml; echo; } | sudo -u newton tee -a /var/lib/newton/devices.toml >/dev/null
 sudo -u newton grep -qxF '[devices.dc1-ops]' /var/lib/newton/devices.toml && echo 'already in the inventory: dc1-ops' \
-  || sudo -u newton tee -a /var/lib/newton/devices.toml < dc1-ops.toml >/dev/null
+  || { echo; cat dc1-ops.toml; echo; } | sudo -u newton tee -a /var/lib/newton/devices.toml >/dev/null
 sudo -u newton chmod 600 /var/lib/newton/devices.toml
 ```
 Each append checks for its entry first, so running this twice never adds a second table (a duplicate table makes the
-whole inventory unreadable, and every device stops working).
+whole inventory unreadable, and every device stops working). The `echo` before and after each file puts its table on
+a line of its own even when the file, or the inventory, ends without a newline; two tables on one line would make the
+inventory unreadable too.
 
 **10f.** For changes only, once per domain: record the approval key of the entry that stands for the domain (the PDC
 emulator's write entry). Type the passphrase you typed on every DC of the domain, twice:
@@ -606,7 +617,7 @@ iface = "eth0"
 
 ```sh
 sudo -u newton grep -qxF '[vantages.pc1]' /var/lib/newton/devices.toml && echo 'already in the inventory: pc1' \
-  || sudo -u newton tee -a /var/lib/newton/devices.toml < pc1.toml >/dev/null
+  || { echo; cat pc1.toml; echo; } | sudo -u newton tee -a /var/lib/newton/devices.toml >/dev/null
 sudo -u newton chmod 600 /var/lib/newton/devices.toml
 ```
 

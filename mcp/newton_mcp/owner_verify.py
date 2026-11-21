@@ -1089,6 +1089,9 @@ def settle(
     # this poll for ever: the polls are bounded by the window too.
     polls_left = int((timeout_s + SETTLE_GRACE_S) / poll_s) + 1
     pending = True
+    # whether the last poll read the window: an unread window is
+    # treated as pending, but it is never SAID to be open
+    read = False
     while True:
         polls_left -= 1
         try:
@@ -1096,6 +1099,7 @@ def settle(
         except Exception:
             # The router cannot be reached: the state of the window is
             # unknown, and unknown is never "not pending".
+            read = False
             if now() >= limit or polls_left <= 0:
                 break
             sleep(poll_s)
@@ -1104,8 +1108,10 @@ def settle(
             transaction = rpcd_txn.RpcdTransaction(client)
             try:
                 pending = transaction.pending(session)
+                read = True
             except rpcd.RpcdError:
                 pending = True
+                read = False
         finally:
             try:
                 session.mark_spent()
@@ -1117,9 +1123,17 @@ def settle(
             break
         sleep(poll_s)
     if pending:
-        # the window is still open: the router has not decided yet, and
-        # it may still undo the change.  Nothing is said about it.
-        notes.append("the change is still waiting for confirmation on the router")
+        if read:
+            # the window is still open: the router has not decided yet,
+            # and it may still undo the change.
+            notes.append(
+                "the change is still waiting for confirmation on the router"
+            )
+        else:
+            notes.append(
+                "Newton could not read the router's confirmation window: it "
+                "may still be open, or the router may have put the change back"
+            )
         return Verdict(
             state=UNKNOWN,
             checks=(),

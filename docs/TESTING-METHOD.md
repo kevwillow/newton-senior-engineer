@@ -15,8 +15,8 @@ kinds of failure. Together they are the gate.
 | On-router programs | `device/openwrt/newton-router/tests/` (the `newton-router` grammar, txn, probes, seal, confirm, abort), `device/openwrt/newton-guard/tests/` (the guard) | `mcp/.venv/bin/python -m pytest device/openwrt/newton-router/tests -q`; same for the guard |
 | Live lab | `lab/newton-lab-test.py` reads `lab/lab.toml` and every `lab/scenarios/*.toml` and `lab/scenarios/openwrt/*.toml` | `python3 lab/newton-lab-test.py --list` (no lab); `python3 lab/newton-lab-test.py --only <name>` (touches the real virtual lab) |
 
-`lab/lab.toml` is your own lab file and is not in this repository: it names your
-hypervisor, the lab VMs and the key and token files.
+`lab/lab.toml` is the lab's own file with the live values, kept out of every published copy of
+Newton: it names the hypervisor, the lab VMs and the key and token files.
 `lab/lab.example.toml` is the template: the same tables and the same keys with
 synthetic values (made-up hosts, documentation-range addresses, synthetic VM ids and
 placeholder paths under `/home/user/`). Copy it, fill in your own values and point
@@ -228,7 +228,7 @@ Checklist for a new platform:
    the lab bridges carry no uplink to the operator LAN, only the test runner
    reaches the device, and `scripts/newton-lab-isolation --iface <iface>
    --allow-mac <mac of the upstream router> --seconds N` passes
-   (`scripts/newton-lab-isolation:1-9`).
+   (`scripts/newton-lab-isolation:1-12`).
 9. **"Verified" and "Not verified".** Every scenario description carries the
    measured proof and its limits. Each vendor keeps its own "Not verified" list in the same shape.
 

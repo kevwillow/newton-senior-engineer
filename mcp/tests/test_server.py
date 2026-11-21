@@ -1181,3 +1181,167 @@ def test_two_concurrent_consume_approval_calls_exactly_one_wins(configured, monk
     approvals = configured / "state" / "approvals"
     assert (approvals / f"{SID}.claimed").is_file()
     assert not (approvals / f"{SID}.json").exists()
+
+
+# ---- a real timeout carries bytes, and the partial log is kept ----
+
+
+def test_a_real_apply_timeout_keeps_the_partial_log(configured, monkeypatch):
+    """A real subprocess.run(text=True) that times out raises with BYTES in
+    stdout/stderr; the apply result keeps the lines it printed and says what
+    to do next."""
+    import sys
+
+    record = _record(approval=True)
+    _write_plan(configured, record)
+    _write_approval(configured, record)
+
+    def real_run(self, device, *args, **kwargs):
+        return subprocess.run(
+            [sys.executable, "-c",
+             "import sys, time; print('APPLYING session=" + SID + "'); "
+             "print('VERIFY pass 1'); sys.stdout.flush(); time.sleep(10)"],
+            text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=2,
+            check=False,
+        )
+
+    monkeypatch.setattr(server.NewtonService, "run_script", real_run)
+    result = server.newton_apply_change("quasar", SID)
+    assert result["result"] == "unknown", result
+    assert "APPLYING session=" + SID in result["log"]["text"]
+    assert "VERIFY pass 1" in result["log"]["text"]
+    assert "newton_change_status" in result["next_step"]
+
+
+def test_timeout_text_decodes_bytes_and_keeps_str():
+    assert server._timeout_text(b"a\xffb") == "a�b"
+    assert server._timeout_text("kept") == "kept"
+    assert server._timeout_text(None) == ""
+
+
+# ---- router calls have a time limit and run off the event loop ----
+
+
+def test_run_script_has_a_finite_default_timeout(configured, monkeypatch):
+    """A call that names no timeout still gets one: a router that holds the
+    connection open and never answers cannot hold the call forever."""
+    seen: dict = {}
+
+    def fake_run(args, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    service = server.NewtonService()
+    service.run_script(service.devices["quasar"], "status", "root@192.0.2.1", SID)
+    assert isinstance(seen["timeout"], int)
+    assert 0 < seen["timeout"] <= 600
+    service.run_script(service.devices["quasar"], "confirm", "x", SID, timeout=180)
+    assert seen["timeout"] == 180
+
+
+def _timed_out(*a, **k):
+    raise subprocess.TimeoutExpired(
+        cmd="owrt-change.sh", timeout=180, output=b"partial line\n", stderr=b""
+    )
+
+
+def test_a_status_that_times_out_is_not_known(configured, monkeypatch):
+    monkeypatch.setattr(server.NewtonService, "run_script", _timed_out)
+    result = server.newton_change_status("quasar", SID)
+    assert result.get("error") != "internal server error", result
+    assert result["exit_code"] == 124
+    assert "partial line" in result["log"]["text"]
+    assert "did not answer in time" in result["next_step"]
+
+
+def test_an_abort_that_times_out_is_not_known(configured, monkeypatch):
+    monkeypatch.setattr(server.NewtonService, "run_script", _timed_out)
+    result = server.newton_abort_change("quasar", SID)
+    assert result.get("error") != "internal server error", result
+    assert result["exit_code"] == 124
+    assert result["result"] == "unknown"
+    assert "partial line" in result["log"]["text"]
+    assert "newton_change_status" in result["next_step"]
+
+
+def test_a_backup_that_times_out_says_so(configured, monkeypatch):
+    monkeypatch.setattr(server.NewtonService, "run_script", _timed_out)
+    result = server.newton_backup("quasar")
+    assert "did not finish in time" in result["error"], result
+
+
+def test_a_plan_undo_whose_backup_times_out_says_so(configured_lab, monkeypatch):
+    monkeypatch.setattr(server.NewtonService, "run_script", _timed_out)
+    result = server.newton_plan_undo("quasar", "a" * 32, owner_confirmed_in_chat=True)
+    assert "did not finish in time" in result["error"], result
+
+
+def test_a_plan_that_times_out_says_staging_is_not_known(configured, monkeypatch):
+    monkeypatch.setattr(server.NewtonService, "run_script", _timed_out)
+    monkeypatch.setattr(server.NewtonService, "read", lambda self, d, c: {"exit_code": 1})
+    result = server.newton_plan_change(
+        "quasar", "set dhcp.skilltest=host", **explained("set dhcp.skilltest=host")
+    )
+    error = result["error"]
+    assert "did not finish in time" in error, result
+    assert "not known" in error
+    assert "abort that session" in error
+
+
+@pytest.mark.parametrize(("tool", "method", "arguments"), [
+    ("newton_change_status", "status", {"device": "quasar", "session_id": SID}),
+    ("newton_abort_change", "abort", {"device": "quasar", "session_id": SID}),
+    ("newton_confirm_change", "confirm", {"device": "quasar", "session_id": SID}),
+    ("newton_backup", "backup", {"device": "quasar"}),
+    ("newton_plan_undo", "plan_undo", {"device": "quasar", "change_id": SID}),
+    ("newton_plan_change", "plan", {"device": "quasar", "uci_batch": "set dhcp.x=host"}),
+    ("newton_read", "read", {"device": "quasar", "command": "uptime"}),
+    ("newton_guided_audit", "guided_audit", {"device": "quasar"}),
+])
+def test_router_tools_leave_the_event_loop_free(
+    configured, monkeypatch, tool, method, arguments
+):
+    """While one of these tools waits on the router, the server's event loop
+    still runs: the call waits for a coroutine on the loop, which can run
+    only when the tool is off the loop (a confirm or abort of a held change
+    is never stuck behind it)."""
+    import threading
+
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    loop_ran = threading.Event()
+
+    def waits_for_the_loop(self, *a, **k):
+        if not loop_ran.wait(5):
+            return {"result": "the event loop was blocked"}
+        return {"result": "ok"}
+
+    monkeypatch.setattr(server.NewtonService, method, waits_for_the_loop)
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(
+            server.mcp._mcp_server
+        ) as client:
+            call = asyncio.create_task(client.call_tool(tool, arguments))
+            await asyncio.sleep(0.05)
+            loop_ran.set()
+            result = await call
+            return json.loads(result.content[0].text)
+
+    result = asyncio.run(run())
+    assert result.get("result") == "ok", result
+
+
+def test_the_plan_description_names_every_carve_out_condition():
+    """The lab carve-out needs a source checkout and the switch as well as the
+    two inventory flags; the plan_change description says so, and tells the
+    agent to go by the plan's requires_approval field."""
+    from newton_mcp import approval_gate
+
+    tool = server.mcp._tool_manager.get_tool("newton_plan_change")
+    flat = " ".join((tool.description or "").split())
+    assert "source checkout" in flat
+    assert f"{approval_gate.LAB_SWITCH_ENV}=1" in flat
+    assert "an installed Newton never applies it" in flat
+    assert "rely on the plan's ``requires_approval`` field" in flat

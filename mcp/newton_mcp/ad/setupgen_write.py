@@ -125,6 +125,10 @@ NO_POLICY_BACKUP = (
 # terminal.
 _getpass = getpass.getpass
 
+#: The question approval-key asks before it replaces a fingerprint; a test
+#: replaces it.
+_ask = input
+
 
 #: The value of a distinguished name component.  It keeps a quote, a
 #: dollar sign, a backslash and a newline out of the generated script,
@@ -410,6 +414,56 @@ def write_fingerprint(device: str, fingerprint: str) -> Path:
     return path
 
 
+def _check_domain_entry(device: str) -> None:
+    """The device must be the AD write entry that stands for a domain.
+
+    Routers and AD domains share the fingerprint directory, so a name that
+    is not an AD write entry of the inventory (a router, a typo) is
+    refused before anything is asked or written.  A second DC's entry is
+    refused too, naming the entry whose fingerprint newton-approve reads.
+    """
+    from ..server import NewtonError, load_inventory
+    from .write import inventory
+
+    try:
+        devices = load_inventory()
+    except NewtonError as exc:
+        raise SetupError(
+            f"the inventory cannot be read ({exc}); approval-key records the "
+            "key of an AD write entry of the inventory, so add that entry first"
+        ) from None
+    entry = devices.get(device)
+    if entry is None or not inventory.is_write_device(entry):
+        raise SetupError(
+            f"{device} is not an AD write entry of the inventory, so nothing "
+            "was asked or written. approval-key records the key of the write "
+            "entry that stands for an AD domain; for a router, run "
+            f"newton-router-setup {device} approval-key instead"
+        )
+    domain = getattr(entry, "ad_domain", None)
+    if domain != device:
+        raise SetupError(
+            f"{device} is a write entry of the domain {domain}: run "
+            f"approval-key {domain}, the entry that stands for the domain, "
+            "whose fingerprint newton-approve reads"
+        )
+
+
+def _recorded_fingerprint(device: str) -> str | None:
+    """The fingerprint already recorded for the device, "" when a file is
+    there but does not read as one, or None when there is none."""
+    try:
+        text = fingerprint_path(device).read_text(encoding="ascii")
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return ""
+    parts = text.split()
+    if len(parts) == 2 and parts[0] == "v1":
+        return parts[1]
+    return ""
+
+
 def approval_key(device: str) -> int:
     """Ask for the passphrase of a device twice and store its fingerprint.
 
@@ -417,9 +471,15 @@ def approval_key(device: str) -> int:
     fingerprint of K is written where ``newton-approve`` looks for it,
     and K itself is dropped.  An empty passphrase and two different
     passphrases are refusals, and nothing is written.
+
+    The device must be the AD write entry of the inventory that stands
+    for a domain.  The same passphrase again changes nothing; a different
+    one replaces the recorded fingerprint only when the owner types
+    ``replace``.
     """
     if DEVICE_RE.fullmatch(device) is None:
         raise SetupError("the device name must be [a-z][a-z0-9-]{0,31}")
+    _check_domain_entry(device)
     if not sys.stdin.isatty():
         raise SetupError("the approval passphrase must be read from a terminal")
     try:
@@ -439,6 +499,27 @@ def approval_key(device: str) -> int:
         del passphrase
     fingerprint = approval_fingerprint(k_hex)
     del k_hex
+    recorded = _recorded_fingerprint(device)
+    if recorded == fingerprint:
+        print(fingerprint)
+        return 0
+    if recorded is not None:
+        print(
+            f"a different approval fingerprint is already recorded for {device}. "
+            "Replacing it means every DC of the domain must hold the key of this "
+            "passphrase, or every apply is refused with bad_token.",
+            file=sys.stderr,
+        )
+        try:
+            answer = _ask("type replace to replace it: ")
+        except (EOFError, KeyboardInterrupt, OSError):
+            answer = ""
+        if answer.strip() != "replace":
+            raise SetupError(
+                "nothing was changed: the recorded fingerprint stays. If you "
+                "mistyped, run approval-key again with the passphrase you "
+                "typed on the domain controllers"
+            )
     write_fingerprint(device, fingerprint)
     print(fingerprint)
     return 0
@@ -1481,9 +1562,24 @@ $passphraseAgain = $null
 
 # The key is written with the access control list of SPEC-1.4 section
 # 8: SYSTEM and Administrators have full control and the write account
-# may read it.  The key itself is never printed.
+# may read it.  The key itself is never printed.  A key already installed
+# is compared, never written over: the same passphrase changes nothing,
+# and another one stops the setup with the key kept, since a DC whose key
+# changed refuses every approval.
 New-Item -ItemType Directory -Path $AdDir -Force | Out-Null
-[System.IO.File]::WriteAllText($ApprovalKeyPath, $keyHex + "`n", (New-Object System.Text.UTF8Encoding($false)))
+$installedKey = $null
+if (Test-Path -LiteralPath $ApprovalKeyPath) {
+    $installedKey = ([System.IO.File]::ReadAllText($ApprovalKeyPath)).Trim()
+    if ($installedKey -ne $keyHex) {
+        $keyHex = $null
+        $installedKey = $null
+        throw ('this DC already holds a different approval key: the passphrase typed now is not the one it was set up with. Nothing was changed. Run the setup again with the domain''s approval passphrase. To change the passphrase on purpose, remove ' + $ApprovalKeyPath + ' on every DC of the domain, run the setup again on each, then run newton-ad-setup approval-key for the domain on the Newton host.')
+    }
+}
+if ($null -eq $installedKey) {
+    [System.IO.File]::WriteAllText($ApprovalKeyPath, $keyHex + "`n", (New-Object System.Text.UTF8Encoding($false)))
+}
+$installedKey = $null
 $keyHex = $null
 $administrators = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
 $system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
@@ -2049,6 +2145,27 @@ def main(argv):
         return 1
     key = derive(first, device)
     del first, second
+    # A key already installed is compared, never written over: the same
+    # passphrase changes nothing, and another one stops the setup with the
+    # key kept, since a DC whose key changed refuses every approval.
+    try:
+        with open(path, "r", encoding="ascii") as stream:
+            installed = stream.read().strip()
+    except FileNotFoundError:
+        installed = None
+    if installed is not None:
+        if hmac.compare_digest(installed, key.hex()):
+            print(fingerprint(key))
+            return 0
+        sys.stderr.write(
+            "this DC already holds a different approval key: the passphrase "
+            "typed now is not the one it was set up with. Nothing was changed. "
+            "Run the setup again with the domain's approval passphrase. To "
+            "change the passphrase on purpose, remove %s on every DC of the "
+            "domain, run the setup again on each, then run newton-ad-setup "
+            "approval-key for the domain on the Newton host.\\n" % path
+        )
+        return 1
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="ascii") as stream:
         stream.write(key.hex() + "\\n")
@@ -2694,6 +2811,8 @@ install -m 0644 -o root -g root "${WORK_DIR}/device.txt" "${DEVICE_FILE}"
 # armed change whose undo_at has passed is put back then.  The sweep runs
 # as root, like the one-shot timer, and it acts only on the armed records
 # of the root-only transaction store; it adds no right to the login.
+# A sweep that is refused or cannot list the store exits non-zero, so
+# `systemctl status newton-ad-sweep.service` shows it failed.
 cat > "${WORK_DIR}/newton-ad-sweep.service" <<'NEWTON_AD_UNIT_EOF'
 [Unit]
 Description=Newton AD write helper: undo the armed changes whose undo_at has passed

@@ -1041,3 +1041,24 @@ def test_scan_approval_ignores_spaces_around_the_confirmation(tmp_path, monkeypa
     # past the confirmation: the empty passphrase is what refuses it
     assert "confirmation" not in err, err
     assert "passphrase" in err, err
+
+
+def test_a_timed_out_scan_keeps_its_partial_bytes_output(tmp_path, monkeypatch):
+    """A real subprocess.run(text=True) timeout carries BYTES: the hosts the
+    scan printed before the timeout are still parsed and reported."""
+    _write_inventory(tmp_path, monkeypatch, vantages=(("outside-a", "outside"),))
+    record = _request()
+    _write_request(tmp_path, record)
+    _write_consent(tmp_path, record)
+
+    raw = b"Host: 198.51.100.9 (router)\tPorts: 22/open/tcp//ssh///\n"
+
+    def fake_runner(vantage, command):
+        raise subprocess.TimeoutExpired(cmd=command, timeout=300, output=raw, stderr=b"")
+
+    monkeypatch.setattr(scans, "run_vantage", fake_runner)
+    result = server.newton_run_scan("router", REQUEST_ID)
+
+    assert result["result"] == "incomplete"
+    assert result["host_count"] == 1
+    assert result["port_count"] == 1

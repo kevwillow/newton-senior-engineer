@@ -9,9 +9,9 @@ install of the MCP server.
 
 ## Before you start
 
-Prerequisites: `sudo`, `git`, an ssh client and the system Python (`/usr/bin/python3`) 3.11 or newer with its `venv`
+Prerequisites: `sudo`, `git`, an ssh client and the system Python (`/usr/bin/python3`) 3.11 to 3.14 with its `venv`
 module (Debian and Ubuntu: `sudo apt install python3-venv`; a fresh Ubuntu 26.04 cloud image lacks it). The
-installer refuses an older Python before it changes anything.
+installer refuses an older or a newer Python before it changes anything.
 
 The repo documents the install in `SKILL.md` (the MCP server section, "First install" and "Every later install"). Follow that procedure
 exactly. The first install opens a new terminal and starts a root shell with
@@ -69,6 +69,7 @@ functions that name them:
 | Enrol launcher | `/usr/local/bin/newton-enrol` (`root:root` `0755`; clean env; newton user only; passes args through) | `perform_install` (constant `ENROL_LAUNCHER` in `main`) |
 | Vantage setup launcher | `/usr/local/bin/newton-vantage-setup` (`root:root` `0755`; clean env; newton user only; passes args through) | `perform_install` (constant `VANTAGE_SETUP_LAUNCHER` in `main`) |
 | AD setup launcher | `/usr/local/bin/newton-ad-setup` (`root:root` `0755`; clean env; newton user only; `approval-key` and one device name) | `perform_install` (constant `AD_SETUP_LAUNCHER` in `main`) |
+| Rules launcher | `/usr/local/bin/newton-rules` (`root:root` `0755`; clean env; newton user only; passes args through; names the inventory `/var/lib/newton/devices.toml`) | `perform_install` (constant `RULES_LAUNCHER` in `main`) |
 | Doctor launcher | `/usr/local/bin/newton-doctor` (`root:root` `0755`; test seams disabled) | `perform_install`, `render_installed_doctor` (constant `DOCTOR_LAUNCHER`) |
 | Sudoers file | `/etc/sudoers.d/newton-mcp` (`root:root` `0440`) | `perform_install` (constant `SUDOERS`) |
 | Sudoers MCP rule (NOPASSWD) | `<invoking_user> ALL=(newton) NOPASSWD: /usr/local/bin/newton-mcp ""` | `SUDOERS_MCP_LINE` in `main` (this is what makes `sudo -n` non-interactive) |
@@ -76,6 +77,7 @@ functions that name them:
 | Sudoers setup rule | `<invoking_user> ALL=(newton) /usr/local/bin/newton-router-setup` + `Defaults!/usr/local/bin/newton-router-setup timestamp_timeout=0` | `SUDOERS_SETUP_LINE`, `SUDOERS_SETUP_DEFAULTS_LINE` in `main` |
 | Sudoers enrol rule | `<invoking_user> ALL=(newton) /usr/local/bin/newton-enrol` + `Defaults!/usr/local/bin/newton-enrol timestamp_timeout=0` | `SUDOERS_ENROL_LINE`, `SUDOERS_ENROL_DEFAULTS_LINE` in `main` |
 | Sudoers vantage setup rule | `<invoking_user> ALL=(newton) /usr/local/bin/newton-vantage-setup` + `Defaults!/usr/local/bin/newton-vantage-setup timestamp_timeout=0` | `SUDOERS_VANTAGE_SETUP_LINE`, `SUDOERS_VANTAGE_SETUP_DEFAULTS_LINE` in `main` |
+| Sudoers rules rule | `<invoking_user> ALL=(newton) /usr/local/bin/newton-rules` + `Defaults!/usr/local/bin/newton-rules timestamp_timeout=0` | `SUDOERS_RULES_LINE`, `SUDOERS_RULES_DEFAULTS_LINE` in `main` |
 | Sudoers AD setup rule | `<invoking_user> ALL=(newton) /usr/local/bin/newton-ad-setup` + `Defaults!/usr/local/bin/newton-ad-setup timestamp_timeout=0` | `SUDOERS_AD_SETUP_LINE`, `SUDOERS_AD_SETUP_DEFAULTS_LINE` in `main` |
 | Claude Code managed settings | `/etc/claude-code/managed-settings.json` = `{"allowManagedHooksOnly": true}` (`root:root` `0644`; optional: written only when the owner answers `lock` to the install question and the file is absent; default: no; never overwritten) | `ask_managed_settings`, `install_managed_settings` |
 | Bootstrap | `/usr/local/sbin/newton-bootstrap` + `/usr/local/sbin/newton-bootstrap.source` | `install_bootstrap` (plain mode only) |
@@ -130,15 +132,18 @@ lists stdio servers under `mcpServers`:
 {"mcpServers": {"newton": {"command": "sudo", "args": ["-n", "-u", "newton", "/usr/local/bin/newton-mcp"]}}}
 ```
 
-Claude Desktop has no Linux build and `newton-install` installs on Linux, so
-the server must run on the same machine as the client for this entry to
-work. This format comes from the client's own documentation, not from the
-repo, and was not tested here.
+This entry cannot start the server, so Claude Desktop is not supported.
+Claude Desktop has no Linux build, and `newton-install` installs only on
+Linux: on macOS or Windows there is no `newton` account, no sudoers rule and
+no `/usr/local/bin/newton-mcp` for the command to run. A way to reach a
+Newton host from another machine is not documented or tested yet. The
+format above comes from the client's own documentation, not from the repo.
 
 ### OpenCode
 
-Same situation as Claude Desktop. Use the generic JSON form
-(`README.md` Quickstart, `SKILL.md` MCP server section):
+The repo shows only the generic JSON form for OpenCode too
+(`README.md` Quickstart, `SKILL.md` MCP server section). OpenCode runs on
+Linux, so it can start the server on the Newton host itself:
 
 ```json
 {"command": "sudo", "args": ["-n", "-u", "newton", "/usr/local/bin/newton-mcp"]}

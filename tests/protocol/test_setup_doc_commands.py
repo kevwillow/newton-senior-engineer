@@ -225,8 +225,8 @@ def _section_of(doc: Path, heading: str) -> str:
     (CLIENTS, "## Before you start"),
 ], ids=["SETUP", "INSTALL", "CLIENTS"])
 def test_prerequisites_name_python_3_11(doc, heading):
-    """The installer's venv needs Python 3.11 or newer (the lock file has
-    only cp311+ wheels); the prerequisites say so."""
+    """The installer's venv needs Python 3.11 to 3.14 (the lock file has
+    only cp311 to cp314 wheels); the prerequisites say so."""
     assert "3.11" in _section_of(doc, heading)
 
 
@@ -236,7 +236,7 @@ def test_prerequisite_check_tests_the_python_version(doc):
     one (the suite runs on 3.11 or newer)."""
     block = _first_block(_section_of(doc, "## 1. Check the prerequisites"))
     line = next(line for line in block.splitlines() if "python3 -c" in line)
-    assert "sys.version_info >= (3, 11)" in line, line
+    assert "(3, 11) <= v <= (3, 14)" in line, line
     res = subprocess.run(["bash", "-c", line.split("  #")[0]], text=True,
                          capture_output=True, timeout=30)
     assert res.returncode == 0, res.stdout + res.stderr
@@ -267,7 +267,7 @@ def test_installer_check_refuses_python_older_than_3_11(tmp_path):
     """--check stops on an old python3 and names the version it found."""
     res = _main_with_python(tmp_path, _fake_python(tmp_path, "3.10"), "--check")
     assert res.returncode != 0
-    assert "Python 3.11 or newer" in res.stderr, res.stdout + res.stderr
+    assert "Python 3.11 to 3.14" in res.stderr, res.stdout + res.stderr
     assert "found 3.10" in res.stderr, res.stderr
     assert "CHECK ONLY" not in res.stdout
     assert not (tmp_path / "root").exists()
@@ -298,7 +298,7 @@ def test_installer_checks_python_before_it_writes(func, first_write):
 def test_installer_check_names_the_python_it_will_use(tmp_path):
     res = _main_with_python(tmp_path, _fake_python(tmp_path, "3.12"), "--check")
     assert res.returncode == 0, res.stderr
-    assert "Python 3.12 (3.11 or newer needed)" in res.stdout, res.stdout
+    assert "Python 3.12 (3.11 to 3.14 needed)" in res.stdout, res.stdout
 
 
 def test_failed_first_install_does_not_claim_nothing_was_installed(tmp_path):
@@ -411,3 +411,166 @@ def test_install_update_step_says_finish_held_changes_and_reconnect():
     assert "confirm or abort every held change" in part, part
     assert "`/mcp`" in part and "reconnect" in part, part
     assert "newton-router-setup <device> upgrade" in part, part
+
+
+# ---- a no-install setup already asked for the passphrase ----
+
+def test_setup_approval_key_step_says_no_install_already_asked():
+    text = SETUP.read_text(encoding="utf-8")
+    step = " ".join(text[text.index("f. `sudo -u newton"):text.index("g. Read-only checkup")].split())
+    assert "no-install setup in step e already asked for the passphrase" in step, step
+    assert "only to change the passphrase" in step, step
+    four = " ".join(_section(text, "## 4. Give the user").split())
+    assert "step 7e (no-install) or step 7f (installed)" in four, four
+
+
+# ---- a router that refuses root passwords after swap-key ----
+
+@pytest.mark.parametrize("doc,start,end", [
+    (INSTALL, "**7e.**", "**7g.**"),
+    (SETUP, "e. Choose the access mode", "g. Read-only checkup"),
+], ids=["INSTALL", "SETUP"])
+def test_refused_password_router_needs_the_admin_key_on_every_later_action(doc, start, end):
+    text = doc.read_text(encoding="utf-8")
+    part = " ".join(text[text.index(start):text.index(end)].split())
+    assert "every later setup command" in part, part
+    assert "--admin plain-key --plain-key <your admin key>" in part, part
+    assert "check still reports the refused password login as a FAIL" in part, part
+
+
+# ---- the Python check has an upper bound ----
+# The lock file's pydantic-core has wheels for cp311 to cp314 only, and
+# the venv is built with --only-binary=:all: --require-hashes, so a newer
+# Python fails in build_venv after the newton user was created.
+
+def test_lock_file_has_no_wheel_newer_than_cp314():
+    """The upper bound below is the lock file's: pydantic-core has no
+    cp315 or abi3 wheel.  When it gains one, raise the bound and this."""
+    lock = (REPO / "mcp" / "uv.lock").read_text(encoding="utf-8")
+    tags = set(re.findall(r"pydantic_core-[0-9.]+-cp3(\d+)-", lock))
+    assert tags and max(int(t) for t in tags) == 14, tags
+    assert not re.search(r"pydantic_core-[0-9.]+-cp3\d+-abi3", lock)
+
+
+@pytest.mark.parametrize("version", ["3.15", "3.16", "4.0"])
+def test_installer_check_refuses_python_newer_than_3_14(tmp_path, version):
+    res = _main_with_python(tmp_path, _fake_python(tmp_path, version), "--check")
+    assert res.returncode != 0, res.stdout + res.stderr
+    assert "Python 3.11 to 3.14" in res.stderr, res.stderr
+    assert f"found {version}" in res.stderr, res.stderr
+    assert "CHECK ONLY" not in res.stdout
+    assert not (tmp_path / "root").exists()
+
+
+@pytest.mark.parametrize("version", ["3.11", "3.14"])
+def test_installer_check_accepts_the_supported_pythons(tmp_path, version):
+    res = _main_with_python(tmp_path, _fake_python(tmp_path, version), "--check")
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert f"Python {version} (3.11 to 3.14 needed)" in res.stdout, res.stdout
+
+
+def _doc_python_line(doc: Path) -> str:
+    block = _first_block(_section_of(doc, "## 1. Check the prerequisites"))
+    return next(line for line in block.splitlines() if "python3 -c" in line).split("  #")[0]
+
+
+def _doc_fake_python(tmp_path: Path, version: str) -> Path:
+    """A python3 for the documented `/usr/bin/python3 -c CODE` line,
+    reporting *version*."""
+    major, minor = (int(part) for part in version.split("."))
+    fake = tmp_path / f"doc-python-{version}"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'exec "{sys.executable}" -I -c "import sys; '
+        f"sys.version_info = ({major}, {minor}, 0, 'final', 0); "
+        'exec(sys.argv[1])" "$2"\n')
+    fake.chmod(0o755)
+    return fake
+
+
+@pytest.mark.parametrize("doc", [SETUP, INSTALL], ids=["SETUP", "INSTALL"])
+@pytest.mark.parametrize("version,ok", [
+    ("3.10", False), ("3.11", True), ("3.14", True), ("3.15", False),
+])
+def test_prerequisite_check_bounds_the_python_version(tmp_path, doc, version, ok):
+    line = _doc_python_line(doc)
+    assert line.startswith("/usr/bin/python3 -c "), line
+    line = line.replace("/usr/bin/python3", str(_doc_fake_python(tmp_path, version)), 1)
+    res = subprocess.run(["bash", "-c", line], text=True, capture_output=True, timeout=30)
+    assert (res.returncode == 0) is ok, (version, res.stdout + res.stderr)
+    if not ok:
+        assert "Python 3.11 to 3.14 is needed" in res.stderr, res.stderr
+
+
+@pytest.mark.parametrize("doc,heading", [
+    (SETUP, "## 1. Check the prerequisites"),
+    (INSTALL, "## 1. Check the prerequisites"),
+    (CLIENTS, "## Before you start"),
+], ids=["SETUP", "INSTALL", "CLIENTS"])
+def test_prerequisites_name_the_upper_bound(doc, heading):
+    section = " ".join(_section_of(doc, heading).split())
+    assert "3.11 or newer" not in section, section
+    assert "3.11 to 3.14" in section, section
+
+
+# ---- an inventory append survives a missing final newline ----
+
+def _run_append(block: str, inv: Path, cwd: Path) -> None:
+    assert "sudo -u newton " in block
+    block = block.replace("sudo -u newton ", "").replace("/var/lib/newton/devices.toml", str(inv))
+    res = subprocess.run(["bash", "-c", block], text=True, capture_output=True,
+                         timeout=30, cwd=cwd)
+    assert res.returncode == 0, res.stdout + res.stderr
+
+
+def test_dc_inventory_append_survives_entries_without_a_final_newline(tmp_path):
+    """INSTALL.md 10e: the owner pastes each entry and stops before its
+    final newline (Ctrl-D twice after `cat > dc1.toml`), and the
+    inventory itself ends without one: every table still lands on a line
+    of its own, and a second run adds nothing."""
+    text = INSTALL.read_text(encoding="utf-8")
+    block = _block_after(text[text.index("**10e.**"):], "Then append both")
+    inv = tmp_path / "devices.toml"
+    inv.write_text('[devices.router1]\nplatform = "openwrt"\nhost = "192.0.2.1"\nuser = "root"')
+    (tmp_path / "dc1.toml").write_text(
+        '[devices.dc1]\nplatform = "ad-samba"\nhost = "192.0.2.21"\nuser = "newton-audit"')
+    (tmp_path / "dc1-ops.toml").write_text(
+        '[devices.dc1-ops]\nplatform = "ad-samba"\nhost = "192.0.2.21"\nuser = "newton-ops"')
+    for _ in range(2):
+        _run_append(block, inv, tmp_path)
+    data = tomllib.loads(inv.read_text())
+    assert set(data["devices"]) == {"router1", "dc1", "dc1-ops"}
+    assert inv.read_text().count("[devices.dc1]") == 1
+    assert inv.read_text().count("[devices.dc1-ops]") == 1
+    # a second router added later with 7b, whose printf starts with the
+    # table line: the last entry's missing newline must not glue onto it
+    router = _block_after(text, "**7b.**").replace("router1", "router2")
+    _run_append(router, inv, tmp_path)
+    assert set(tomllib.loads(inv.read_text())["devices"]) == {"router1", "router2", "dc1", "dc1-ops"}
+
+
+def test_vantage_inventory_append_survives_an_entry_without_a_final_newline(tmp_path):
+    """INSTALL.md 11d, with the same pasted entry and inventory."""
+    text = INSTALL.read_text(encoding="utf-8")
+    block = _block_after(text, "**11d.**")
+    inv = tmp_path / "devices.toml"
+    inv.write_text('[devices.router1]\nplatform = "openwrt"\nhost = "192.0.2.1"\nuser = "root"')
+    (tmp_path / "pc1.toml").write_text('[vantages.pc1]\nhost = "192.0.2.50"\nuser = "newton-check"')
+    for _ in range(2):
+        _run_append(block, inv, tmp_path)
+    data = tomllib.loads(inv.read_text())
+    assert set(data["devices"]) == {"router1"}
+    assert set(data["vantages"]) == {"pc1"}
+    assert inv.read_text().count("[vantages.pc1]") == 1
+
+
+# ---- Claude Desktop cannot reach a Linux-only install ----
+
+def test_setup_clients_desktop_entry_says_it_is_unsupported():
+    """Claude Desktop has no Linux build and newton-install installs on
+    Linux only, so the local sudo entry can never start the server: the
+    doc says so, and never that a same-machine setup works."""
+    section = " ".join(_section_of(CLIENTS, "### Claude Desktop").split("\n### OpenCode")[0].split())
+    assert "same machine" not in section, section
+    assert "cannot start the server" in section, section
+    assert "not supported" in section, section

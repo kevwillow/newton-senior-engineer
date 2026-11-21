@@ -142,6 +142,8 @@ VANTAGE_SETUP_FILE=$ROOT/usr/local/bin/newton-vantage-setup
 ENROL_FILE=$ROOT/usr/local/bin/newton-enrol
 # The AD setup launcher reads the AD approval passphrase.
 AD_SETUP_FILE=$ROOT/usr/local/bin/newton-ad-setup
+# The network rules launcher writes the owner's rules.toml as newton.
+RULES_FILE=$ROOT/usr/local/bin/newton-rules
 SUDOERS_FILE=$ROOT/etc/sudoers.d/newton-mcp
 # The Claude Code managed-settings file: the guard that stops an agent
 # hook from answering Newton's approval dialog for the owner.
@@ -571,14 +573,35 @@ check_agent_no_root_path() {
 	return 0
 }
 
+# sudo_refused TEXT: 0 when TEXT (a probe's stderr, in the C locale) is
+# sudo refusing to run the command without a password; any other
+# failure (an unknown user, a sudoers parse error, the command itself
+# failing after sudo ran it) consulted no refusal.
+sudo_refused() {
+	[[ $1 == *' is not allowed to execute '* || $1 == *'a password is required'* || $1 == *' may not run sudo on '* ]]
+}
+
+# sudo-only-mcp: both probes must be refused by sudo itself.  A probe
+# that fails some other way is INCONCLUSIVE, never a PASS.
 check_sudo_only() {
-	local bad=''
-	if "$SUDO" -n -u newton /usr/bin/id >/dev/null 2>&1; then
-		bad='/usr/bin/id was allowed'
-	elif "$SUDO" -n -u newton "$LAUNCHER" --x >/dev/null 2>&1; then
-		bad='newton-mcp with arguments was allowed'
+	local err
+	if err=$(LC_ALL=C "$SUDO" -n -u newton /usr/bin/id 2>&1 >/dev/null); then
+		fail sudo-only-mcp '/usr/bin/id was allowed'
+		return 0
 	fi
-	if [[ -n $bad ]]; then fail sudo-only-mcp "$bad"; else pass sudo-only-mcp; fi
+	if ! sudo_refused "$err"; then
+		inconclusive sudo-only-mcp "sudo did not refuse /usr/bin/id, it failed: $(escape_text "${err%%$'\n'*}")"
+		return 0
+	fi
+	if err=$(LC_ALL=C "$SUDO" -n -u newton "$LAUNCHER" --x 2>&1 >/dev/null); then
+		fail sudo-only-mcp 'newton-mcp with arguments was allowed'
+		return 0
+	fi
+	if ! sudo_refused "$err"; then
+		inconclusive sudo-only-mcp "sudo did not refuse newton-mcp with arguments, it failed: $(escape_text "${err%%$'\n'*}")"
+		return 0
+	fi
+	pass sudo-only-mcp
 }
 
 initialize_payload() {
@@ -873,6 +896,7 @@ check_code_not_writable() {
 		"$VANTAGE_SETUP_FILE"
 		"$ENROL_FILE"
 		"$AD_SETUP_FILE"
+		"$RULES_FILE"
 	)
 	local -a hits=()
 	for item in "${required[@]}"; do
@@ -886,6 +910,7 @@ check_code_not_writable() {
 	cw_walk "$VANTAGE_SETUP_FILE"
 	cw_walk "$ENROL_FILE"
 	cw_walk "$AD_SETUP_FILE"
+	cw_walk "$RULES_FILE"
 	# The sudoers file is special: the agent normally cannot even traverse
 	# /etc/sudoers.d, so an unreadable or absent file is not a failure here;
 	# only a writable one (or chain) is.

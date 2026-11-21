@@ -276,3 +276,92 @@ def test_no_secrets_leaked(setup_env, tmp_path):
     assert env.leaks() == []
     _run(env, "uninstall")
     assert env.leaks() == []
+
+
+# -- 8. plain-key uninstall on a router that refuses passwords ------
+# The owner's router refuses root password logins, so the setup tool logs
+# in with an admin key (--admin plain-key).  uninstall proves the way back
+# in before and after the removal: on the plain-key path that way is the
+# admin key, not a password the router refuses.
+
+def test_uninstall_plain_key_router_refusing_passwords(pulsar_env):
+    env = pulsar_env
+    seed_known_hosts(env)
+    pk_line = (env.plain_key.with_name(env.plain_key.name + ".pub")
+               .read_text().strip())
+    r_install = env.run("--admin", "plain-key", "--plain-key", env.plain_key,
+                        "pulsar", "install", typed=("yes",))
+    assert r_install.rc == 0, r_install.out + r_install.err
+    env.router.update_state(password_auth=False)
+
+    r = env.run("--admin", "plain-key", "--plain-key", env.plain_key,
+                "pulsar", "uninstall")
+    assert r.rc == 0, r.out + r.err
+    lines = r.out.splitlines()
+    assert lines[-1] == "DONE uninstall pulsar"
+    assert not any(l.startswith("FAIL ") for l in lines), r.out
+    assert len([l for l in lines
+                if l == "PASS admin key login works"]) == 2
+    assert PROG not in env.router.snapshot()
+    assert pk_line in env.router.authorized_keys()
+
+
+def test_uninstall_plain_key_login_proof_failure_removes_nothing(pulsar_env):
+    """The admin-key proof is a real gate: when it fails, nothing is
+    removed."""
+    env = pulsar_env
+    seed_known_hosts(env)
+    r_install = env.run("--plain-key", env.plain_key, "pulsar", "install",
+                        typed=("yes",))
+    assert r_install.rc == 0, r_install.out + r_install.err
+    env.router.update_state(password_auth=False,
+                            drop_commands=["NEWTON-ADMIN-SESSION >&2; true"])
+    before = env.router.snapshot()
+    r = env.run("--plain-key", env.plain_key, "pulsar", "uninstall")
+    assert r.rc == 1, r.out + r.err
+    assert "FAIL admin key login failed" in r.out.splitlines()
+    assert r.out.splitlines()[-1] == (
+        "STOPPED uninstall pulsar: the admin key login failed; "
+        "nothing was removed")
+    assert env.router.snapshot() == before
+
+
+# -- 9. rollback refuses a busy router and says what it did ---------
+
+def test_rollback_refused_pending_guard(setup_env, tmp_path):
+    env = setup_env
+    _upgraded(env, tmp_path)
+    env.router.write("etc/newton/guard-state", "pending t\n")
+    before = env.router.snapshot()
+    r = _run(env, "rollback")
+    assert r.rc == 1, r.out + r.err
+    assert r.out.splitlines()[-1] == \
+        "STOPPED rollback r1: rollback refused: the router is busy"
+    assert any("router unchanged" in l for l in _state_notes(r))
+    assert env.router.snapshot() == before
+
+
+def test_rollback_refused_live_helper_lock(setup_env, tmp_path):
+    env = setup_env
+    _upgraded(env, tmp_path)
+    env.router.write("tmp/owrt-safe-apply.lock/sid", "0xdead\n")
+    env.router.update_state(ubus_sessions='"sid": "0xdead"')
+    before = env.router.snapshot()
+    r = _run(env, "rollback")
+    assert r.rc == 1, r.out + r.err
+    assert r.out.splitlines()[-1] == \
+        "STOPPED rollback r1: rollback refused: the router is busy"
+    assert env.router.snapshot() == before
+
+
+def test_rollback_says_the_controller_no_longer_matches(setup_env, tmp_path):
+    env = setup_env
+    _upgraded(env, tmp_path)
+    r = _run(env, "rollback")
+    assert r.rc == 0, r.out + r.err
+    notes = [l for l in r.out.splitlines() if l.startswith("NOTE rollback:")]
+    assert notes, r.out
+    text = " ".join(notes)
+    assert "router program" in text
+    assert "upgrade" in text
+    assert "earlier Newton version" in text

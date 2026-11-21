@@ -121,6 +121,7 @@ def test_install_check_uses_fake_root_without_writing(tmp_path):
         "/usr/local/bin/newton-vantage-setup",
         "/usr/local/bin/newton-enrol",
         "/usr/local/bin/newton-ad-setup",
+        "/usr/local/bin/newton-rules",
         "/etc/sudoers.d/newton-mcp",
     ):
         assert path in result.stdout
@@ -144,6 +145,8 @@ EXPECTED_SUDOERS_LINES = [
     "Defaults!/usr/local/bin/newton-enrol timestamp_timeout=0",
     "agent ALL=(newton) /usr/local/bin/newton-ad-setup",
     "Defaults!/usr/local/bin/newton-ad-setup timestamp_timeout=0",
+    "agent ALL=(newton) /usr/local/bin/newton-rules",
+    "Defaults!/usr/local/bin/newton-rules timestamp_timeout=0",
 ]
 
 
@@ -169,6 +172,7 @@ def test_install_sudoers_user_lines_keep_nopasswd_only_for_mcp(tmp_path):
         EXPECTED_SUDOERS_LINES[5],
         EXPECTED_SUDOERS_LINES[7],
         EXPECTED_SUDOERS_LINES[9],
+        EXPECTED_SUDOERS_LINES[11],
     ]
     assert not any(
         "NOPASSWD" in line and "newton-approve" in line for line in lines
@@ -1843,6 +1847,7 @@ def doctor_env(tmp_path):
     vantage_setup = fake_root / "usr/local/bin/newton-vantage-setup"
     enrol = fake_root / "usr/local/bin/newton-enrol"
     ad_setup = fake_root / "usr/local/bin/newton-ad-setup"
+    rules = fake_root / "usr/local/bin/newton-rules"
     sudoers = fake_root / "etc/sudoers.d/newton-mcp"
     managed_settings = fake_root / "etc/claude-code/managed-settings.json"
     bindir = tmp_path / "bin"
@@ -1868,6 +1873,7 @@ def doctor_env(tmp_path):
         (vantage_setup, "#!/bin/sh\n"),
         (enrol, "#!/bin/sh\n"),
         (ad_setup, "#!/bin/sh\n"),
+        (rules, "#!/bin/sh\n"),
     ):
         path.write_text(text)
         path.chmod(0o555)
@@ -1916,10 +1922,29 @@ fi
 case "${DOCTOR_STUB_MODE:-ok}:$*" in
   allow-id:*'/usr/bin/id') exit 0 ;;
   allow-args:*'newton-mcp --x') exit 0 ;;
+  sudo-broken:*'/usr/bin/id'|sudo-broken:*'newton-mcp --x')
+    printf 'sudo: unknown user newton\n' >&2; exit 1 ;;
+  password:*'/usr/bin/id'|password:*'newton-mcp --x')
+    printf 'sudo: a password is required\n' >&2; exit 1 ;;
+  no-rules:*'/usr/bin/id'|no-rules:*'newton-mcp --x')
+    printf 'Sorry, user agent may not run sudo on host.\n' >&2; exit 1 ;;
+  args-tool-fails:*'newton-mcp --x')
+    printf 'newton-mcp: error: unrecognized arguments: --x\n' >&2; exit 2 ;;
+esac
+case "${LC_ALL:-}:$*" in
+  C:*) ;;
+  *'/usr/bin/id'|*'newton-mcp --x')
+    # a real sudo translates its refusal unless the C locale is asked for
+    printf 'Der Benutzer agent darf diesen Befehl nicht ausfuehren.\n' >&2
+    exit 1 ;;
 esac
 case "$*" in
-  *'/usr/bin/id') exit 1 ;;
-  *'newton-mcp --x') exit 1 ;;
+  *'/usr/bin/id')
+    printf "Sorry, user agent is not allowed to execute '/usr/bin/id' as newton on host.\n" >&2
+    exit 1 ;;
+  *'newton-mcp --x')
+    printf "Sorry, user agent is not allowed to execute '/usr/local/bin/newton-mcp --x' as newton on host.\n" >&2
+    exit 1 ;;
 esac
 case "$*" in
   *'/usr/local/bin/newton-router-setup'*)
@@ -2001,6 +2026,7 @@ esac
         "vantage_setup": vantage_setup,
         "enrol": enrol,
         "ad_setup": ad_setup,
+        "rules": rules,
         "sudoers": sudoers,
         "managed_settings": managed_settings,
         "venv": venv,

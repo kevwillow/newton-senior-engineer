@@ -213,7 +213,13 @@ def test_render_plan_text_is_the_same_bytes_main_prints(
     monkeypatch.setattr(approve.sys, "stdin", TerminalInput("no\n"))
     assert approve.main([SID]) == 1
     printed = capsys.readouterr().out
-    shown = printed.split("Type 'approve")[0]
+    # the first approval of the device shows its warning after the plan,
+    # in the terminal as in the dialog; the plan is the text before it
+    head, warning, _rest = printed.split("Type 'approve")[0].partition(
+        "\n" + approve.FIRST_APPROVAL_WARNING
+    )
+    assert warning, printed
+    shown = head
 
     explanation, digest = approve.validate_plan_for_approval(record)
     rendered = approve.render_plan_text(SID, record, explanation, digest, now=frozen_now)
@@ -251,7 +257,13 @@ def test_render_plan_text_escapes_control_characters_in_a_diff_line(
     monkeypatch.setattr(approve.sys, "stdin", TerminalInput("no\n"))
     assert approve.main([SID]) == 1
     printed = capsys.readouterr().out
-    shown = printed.split("Type 'approve")[0]
+    # the first approval of the device shows its warning after the plan,
+    # in the terminal as in the dialog; the plan is the text before it
+    head, warning, _rest = printed.split("Type 'approve")[0].partition(
+        "\n" + approve.FIRST_APPROVAL_WARNING
+    )
+    assert warning, printed
+    shown = head
 
     explanation, digest = approve.validate_plan_for_approval(record)
     rendered = approve.render_plan_text(SID, record, explanation, digest, now=frozen_now)

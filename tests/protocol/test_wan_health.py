@@ -222,7 +222,9 @@ if name == "ip":
                 parts.append("scope " + route["scope"])
             if route.get("src"):
                 parts.append("src " + route["src"])
-            parts.append("metric " + str(route["metric"]))
+            # the kernel prints no metric token for a metric-0 route
+            if route["metric"] != 0:
+                parts.append("metric " + str(route["metric"]))
             print("  ".join(parts) + " ")
         raise SystemExit(0)
     if action in ("add", "del"):
@@ -625,6 +627,164 @@ def test_sigterm_restores_demoted_routes_and_exits_zero(lab):
     assert process.returncode == 0, stdout + stderr
     assert route_entries(lab, "10.100.0.1", "eth1", 10)
     assert not route_entries(lab, "10.100.0.1", "eth1", 1010)
+
+
+def _metric_zero_primary(lab):
+    interfaces = lab.read("interfaces.json")
+    interfaces["wan"]["metric"] = 0
+    lab.write("interfaces.json", interfaces)
+    routes = [dict(item) for item in DEFAULT_ROUTES]
+    for item in routes:
+        if item["device"] == "eth1":
+            item["metric"] = 0
+    lab.write("routes.json", routes)
+
+
+def test_stub_prints_no_metric_token_for_a_metric_zero_route(lab):
+    """iproute2 and BusyBox print a metric-0 route with no metric token."""
+    _metric_zero_primary(lab)
+    result = subprocess.run([str(lab.bin / "ip"), "route", "list"], env=lab.env(),
+                            text=True, capture_output=True)
+    line = next(l for l in result.stdout.splitlines() if l.split()[:3] == ["default", "via", "10.100.0.1"])
+    assert "metric" not in line, line
+
+
+def test_metric_zero_primary_is_demoted_then_restored(lab):
+    """A WAN with no UCI metric (netifd metric 0) is demoted when it
+    dies and restored when it recovers, although `ip route list` prints its
+    route without a metric token."""
+    _metric_zero_primary(lab)
+    lab.configure(down_after="1", up_after="1")
+    lab.set_probes(eth1=False, eth2=True)
+    run_ok(lab)
+    assert not route_entries(lab, "10.100.0.1", "eth1", 0)
+    assert route_entries(lab, "10.100.0.1", "eth1", 1000)
+    assert min(item["metric"] for item in lab.routes() if "gateway" in item) == 20
+
+    lab.set_probes(eth1=True, eth2=True)
+    run_ok(lab)
+    assert len(route_entries(lab, "10.100.0.1", "eth1", 0)) == 1
+    assert not route_entries(lab, "10.100.0.1", "eth1", 1000)
+
+
+def test_metric_word_without_a_number_is_not_read_as_metric_zero(lab):
+    """A route line that does carry a metric token for another metric is
+    never taken for the metric-0 route."""
+    _metric_zero_primary(lab)
+    routes = [item for item in lab.routes() if not (item.get("device") == "eth1" and "gateway" in item)]
+    routes.append({"gateway": "10.100.0.1", "device": "eth1", "metric": 5})
+    lab.write("routes.json", routes)
+    lab.configure(down_after="1")
+    lab.set_probes(eth1=False, eth2=True)
+    run_ok(lab)
+    # the metric-5 route is not the one the daemon owns: it is left alone
+    assert route_entries(lab, "10.100.0.1", "eth1", 5)
+
+
+@pytest.mark.parametrize("field,value,message", [
+    ("route", [], "invalid ubus gateway; skipping interface"),
+    ("l3_device", "bad name", "invalid ubus device; skipping interface"),
+    ("metric", "010", "invalid ubus metric; skipping interface"),
+])
+def test_invalid_ubus_value_is_logged_once_not_every_round(lab, field, value, message):
+    """An up WAN with no IPv4 default route (or a bad device or
+    metric) logs its skip line once, not every round, and again only after
+    it validated or went down in between."""
+    interfaces = lab.read("interfaces.json")
+    good = interfaces["wan2"][field]
+    interfaces["wan2"][field] = value
+    lab.write("interfaces.json", interfaces)
+    for _ in range(5):
+        run_ok(lab)
+    assert lab.messages().count(message) == 1
+
+    interfaces["wan2"][field] = good
+    lab.write("interfaces.json", interfaces)
+    run_ok(lab)
+    interfaces["wan2"][field] = value
+    lab.write("interfaces.json", interfaces)
+    run_ok(lab)
+    run_ok(lab)
+    assert lab.messages().count(message) == 2
+
+    interfaces["wan2"]["up"] = False
+    lab.write("interfaces.json", interfaces)
+    run_ok(lab)
+    interfaces["wan2"]["up"] = True
+    lab.write("interfaces.json", interfaces)
+    run_ok(lab)
+    assert lab.messages().count(message) == 3
+
+
+def test_a_restart_logs_an_invalid_value_again_and_stop_leaves_no_flag(lab):
+    interfaces = lab.read("interfaces.json")
+    interfaces["wan2"]["route"] = []
+    lab.write("interfaces.json", interfaces)
+    run_ok(lab)
+    assert lab.run("restore").returncode == 0
+    assert not list(lab.state.glob("*.invalid"))
+    run_ok(lab)
+    assert lab.messages().count("invalid ubus gateway; skipping interface") == 2
+
+
+def test_a_different_invalid_value_is_logged_again(lab):
+    interfaces = lab.read("interfaces.json")
+    interfaces["wan2"]["route"] = []
+    lab.write("interfaces.json", interfaces)
+    run_ok(lab)
+    run_ok(lab)
+    interfaces["wan2"]["l3_device"] = "bad name"
+    lab.write("interfaces.json", interfaces)
+    run_ok(lab)
+    run_ok(lab)
+    assert lab.messages().count("invalid ubus gateway; skipping interface") == 1
+    assert lab.messages().count("invalid ubus device; skipping interface") == 1
+
+
+def test_restart_during_an_outage_demotes_the_dead_wan_in_the_first_round(lab):
+    """The stop restores the dead WAN's route, but a restart carries its
+    down mark over, so the first round demotes it again instead of after
+    down_after more failed rounds, and it is restored only after up_after
+    good rounds."""
+    lab.configure(down_after="1")
+    lab.set_probes(eth1=False, eth2=True)
+    run_ok(lab)
+    assert route_entries(lab, "10.100.0.1", "eth1", 1010)
+    assert lab.run("restore").returncode == 0
+    assert route_entries(lab, "10.100.0.1", "eth1", 10)
+
+    lab.configure(down_after="3", up_after="2")
+    run_ok(lab)
+    assert not route_entries(lab, "10.100.0.1", "eth1", 10)
+    assert route_entries(lab, "10.100.0.1", "eth1", 1010)
+
+    lab.set_probes(eth1=True, eth2=True)
+    run_ok(lab)
+    assert route_entries(lab, "10.100.0.1", "eth1", 1010)
+    run_ok(lab)
+    assert route_entries(lab, "10.100.0.1", "eth1", 10)
+    assert not route_entries(lab, "10.100.0.1", "eth1", 1010)
+
+
+def test_restart_carries_the_down_mark_once_and_only_for_down_wans(lab):
+    lab.configure(down_after="1")
+    lab.set_probes(eth1=False, eth2=True)
+    run_ok(lab)
+    assert lab.run("restore").returncode == 0
+
+    # the healthy WAN was up at the stop: one failed round does not demote it
+    lab.configure(down_after="3", up_after="1")
+    lab.set_probes(eth1=True, eth2=False)
+    run_ok(lab)
+    assert route_entries(lab, "10.101.0.1", "eth2", 20)
+    run_ok(lab)
+    assert route_entries(lab, "10.100.0.1", "eth1", 10)
+
+    # the carried mark is used once: a second stop with wan up leaves none
+    assert lab.run("restore").returncode == 0
+    lab.set_probes(eth1=False, eth2=True)
+    run_ok(lab)
+    assert route_entries(lab, "10.100.0.1", "eth1", 10)
 
 
 def test_stub_route_save_replaces_the_target_atomically(lab):

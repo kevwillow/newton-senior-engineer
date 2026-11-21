@@ -1143,6 +1143,28 @@ def _ask_proof(
     return None, f"wrong approval passphrase for {safe_device}; approval not created"
 
 
+#: The warning the first approval of a device shows, in the dialog and
+#: in the terminal alike (ADR-019 item 4).
+FIRST_APPROVAL_WARNING = (
+    "FIRST APPROVAL ON THIS DEVICE\n"
+    "Newton will change this live router.\n"
+    "Every change auto-undoes unless confirmed.\n"
+    "Only you can approve.\n"
+    "The agent can be wrong."
+)
+
+
+def _first_approval(device: str) -> bool:
+    """True when *device* has no acknowledgement of the warning yet."""
+    from . import approval_proof
+
+    try:
+        return not approval_proof.has_ack(device)
+    except Exception:
+        # a device whose acknowledgement cannot be checked is warned
+        return True
+
+
 def approve_plan(
     plan_id: str,
     plan: dict[str, Any],
@@ -1183,6 +1205,12 @@ def approve_plan(
         _print_plan_tail(plan, explanation, router_digest, _masked)
     except ApprovalRefused as exc:
         return False, str(exc)
+
+    first_time = _first_approval(device)
+    if first_time:
+        print()
+        print(FIRST_APPROVAL_WARNING)
+        print()
 
     expected = f"approve {plan_id[:8]}"
     refusal = _confirm_typed(expected)
@@ -1226,6 +1254,19 @@ def approve_plan(
     del approval
     window_minutes = max(1, int(window_seconds // 60))
     print(f"Approved plan {plan_id} for {window_minutes} minutes.")
+    if first_time:
+        # The acknowledgement is stored only after a successful
+        # approval, as the dialog does: a failed answer must not
+        # silence the warning (ADR-019 item 4).
+        from . import approval_proof
+
+        try:
+            approval_proof.write_ack(device)
+        except Exception:
+            print(
+                "The first-approval acknowledgement could not be saved; "
+                "the warning is shown again next time."
+            )
     return True, ""
 
 
@@ -1497,7 +1538,21 @@ def main(argv: list[str] | None = None) -> int:
         print("newton-approve: stdin must be an interactive terminal", file=sys.stderr)
         return 1
     if not (state_dir() / "plans" / f"{plan_id}.json").exists():
-        return _approve_scan(plan_id)
+        if _scans.request_path(state_dir(), plan_id).exists():
+            return _approve_scan(plan_id)
+        if (state_dir() / "ad-plans" / f"{plan_id}.json").exists():
+            print(
+                "newton-approve: this is an Active Directory plan; approve it "
+                f"with the ad-change word: newton-approve ad-change {plan_id}",
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            "newton-approve: no plan or scan request with this id; it was "
+            "mistyped, or the plan was dropped: plan the change again",
+            file=sys.stderr,
+        )
+        return 1
     try:
         plan = _load_plan(plan_id)
     except ValueError as exc:

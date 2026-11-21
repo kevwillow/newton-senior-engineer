@@ -281,11 +281,20 @@ def protocol(tmp_path):
                 print("digest", digest)
                 sys.exit(0)
             if cmd == PROG + " diff " + SID:
-                fail = read_state().get("diff_fail")
+                state = read_state()
+                fail = state.get("diff_fail")
                 if fail:
                     sys.stderr.write(fail["stderr"] + "\\n")
                     sys.exit(fail["rc"])
-                sys.stdout.write(read_state()["diff"])
+                # diff_seq: the answers of the next diff reads, one per read
+                # (a read cut short still exits 0), then the diff itself
+                seq = state.get("diff_seq") or []
+                if seq:
+                    state["diff_seq"] = seq[1:]
+                    write_state(state)
+                    sys.stdout.write(seq[0])
+                    sys.exit(0)
+                sys.stdout.write(state["diff"])
                 sys.exit(0)
             if cmd == PROG + " named " + SID:
                 fail = read_state().get("named_fail")
@@ -1049,6 +1058,18 @@ def test_health_check_fails_when_fw4_check_fails(tmp_path):
     _, check = run_health_helper(
         tmp_path, service_state(True), service_state(True),
         fw_after=(1, "Error: invalid rule\n")
+    )
+    assert check.returncode == 1
+    assert check.stderr == "health: fw4 check failed: Error: invalid rule\n"
+
+
+def test_health_check_names_the_real_fw4_error_not_a_leading_notice(tmp_path):
+    """a failing fw4 check whose output starts with a disabled-section
+    notice names the real error, as the health snapshot does."""
+    notice = "[!] Section @rule[1] (Allow-Ping) is disabled, ignoring section"
+    _, check = run_health_helper(
+        tmp_path, service_state(True), service_state(True),
+        fw_after=(1, f"{notice}\nError: invalid rule\n"),
     )
     assert check.returncode == 1
     assert check.stderr == "health: fw4 check failed: Error: invalid rule\n"
@@ -2000,6 +2021,8 @@ def test_firewall_state_is_read_before_apply_only_for_named_changes(protocol):
 
     protocol["calls"].write_text("")
     protocol["events"].write_text("")
+    # a second apply of the same session id: this host never confirmed it
+    protocol["audit"].write_text("")
     set_router_state(protocol, named="")
     unnamed_result = protocol["run"]()
 
@@ -3610,11 +3633,14 @@ def test_handshake_refuses_device_mismatch(protocol):
 
 def test_handshake_refuses_profile_mismatch(protocol):
     set_router_state(protocol, hello_overrides={"profile": "lab"})
-    result = run_status(protocol, extra_env={"OWRT_EXPECT_PROFILE": "prod"})
+    result = run_status(protocol, extra_env={"OWRT_EXPECT_PROFILE": "prod",
+                                             "OWRT_EXPECT_DEVICE": "lab-r1"})
     assert_hello_only(
         protocol,
         result,
-        "router profile=lab is not the expected prod; check OWRT_EXPECT_PROFILE",
+        "router profile=lab is not the expected prod, the inventory profile; "
+        "change profile in devices.toml or run: "
+        "sudo -u newton newton-router-setup lab-r1 profile prod",
     )
 
 
@@ -3982,7 +4008,8 @@ def test_changed_staged_diff_dies_before_apply(protocol, tmp_path):
     result = apply_direct(protocol)
 
     assert result.returncode == 1
-    assert "staged diff changed since plan — re-plan and re-approve" in result.stdout
+    assert ("the staged diff does not match the plan, or the read of it was cut short; "
+            "nothing applied") in result.stdout
     assert not any(
         call.startswith(f"{PROG} apply {SID}") for call in remote_calls(protocol)
     )
@@ -4167,7 +4194,7 @@ def test_status_retried_every_5s_up_to_90s_then_unreachable_alert(protocol):
     assert result.returncode == 1
     assert (
         f"ALERT session={SID} status=unreachable after rollback window — "
-        "check the router now; latest backup in" in result.stdout
+        "check the router now; compare it with the backup this plan took" in result.stdout
     )
     calls = [call for call in remote_calls(protocol) if call == f"{PROG} status {SID}"]
     # first try plus one retry every 5 s while waited < 90 s
@@ -4289,7 +4316,8 @@ def test_confirmed_status_alerts_with_design_text_and_never_aborts(protocol):
     assert (
         f"ALERT session={SID} status=confirmed after the rollback window — "
         "the change was confirmed outside this run; check the router now; "
-        f"latest backup in {protocol['root'] / 'backups'}"
+        "compare it with the backup this plan took (this host has no record of it; "
+        f"{protocol['root'] / 'backups'} holds the backups of every router"
     ) in result.stdout
     assert f"{PROG} abort {SID}" not in remote_calls(protocol)
     assert "ABORTED" not in result.stdout
@@ -4305,7 +4333,7 @@ def test_staged_and_inconsistent_alert_without_abort(protocol, st):
     assert result.returncode == 1
     assert (
         f"ALERT session={SID} status={st} after rollback window — "
-        "check the router now; latest backup in" in result.stdout
+        "check the router now; compare it with the backup this plan took" in result.stdout
     )
     assert f"{PROG} abort {SID}" not in remote_calls(protocol)
 
@@ -4938,6 +4966,8 @@ def test_confirmed_apply_prints_the_config_hashes_before_the_confirmed_line(prot
     # before the CONFIRMED one
     many = "".join(f"{index:032x} pkg{index}\n" for index in range(250))
     set_router_state(protocol, confighash=[CONFIGHASH_BEFORE, many])
+    # a second apply of the same session id: this host never confirmed it
+    protocol["audit"].write_text("")
 
     result = protocol["run"]()
 
@@ -5000,7 +5030,11 @@ def test_a_malformed_confighash_output_prints_no_config_hashes(protocol):
     assert result.returncode == 0, result.stdout
     assert config_hash_lines(result) == []
     assert result.stdout.splitlines()[-1].startswith(f"CONFIRMED session={SID}")
+    # no hash was kept, and the line before the CONFIRMED one says so
+    assert result.stdout.splitlines()[-2].startswith(f"NO UNDO RECORD session={SID}: ")
 
+    # a second apply of the same session id: this host never confirmed it
+    protocol["audit"].write_text("")
     set_router_state(
         protocol,
         confighash=[

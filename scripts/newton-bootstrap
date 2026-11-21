@@ -214,6 +214,9 @@ case $sub in
 		COMMIT_ID=$id
 		make_snapshot "$repo" "$id"
 		print_identity
+		printf 'If this updates an installed Newton, confirm or abort every held change first: ' >&2
+		printf 'a held change cannot be confirmed by a server that was updated under it, so it rolls back. ' >&2
+		printf 'To stop now, type anything else.\n' >&2
 		printf 'Compare the commit id with what you saw on GitHub, then type "install " followed by the first 12 hex characters of the commit id to continue: ' >&2
 		conf=; IFS= read -r conf || conf=
 		[[ $conf == "install ${id:0:12}" ]] || { printf 'ERROR: confirmation did not match; nothing installed\n' >&2; exit 1; }
@@ -285,7 +288,8 @@ case $sub in
 			if [[ -f $SOURCE_FILE.new ]]; then
 				staged=$(awk '$1=="sha256"{print $2; exit}' "$SOURCE_FILE.new")
 				if [[ -n $staged && $staged == "$sha" ]]; then
-					printf 'WARNING: provenance does not match this file (recorded %s, actual %s)\n' "${staged:0:12}" "${sha:0:12}"
+					printf 'WARNING: the provenance file %s is missing; %s matches this file: ' "$SOURCE_FILE" "$SOURCE_FILE.new"
+					printf 'rename it to %s to finish the update\n' "$SOURCE_FILE"
 				fi
 			fi
 		fi

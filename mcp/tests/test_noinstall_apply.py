@@ -1568,11 +1568,47 @@ def test_a_busy_router_gives_the_approval_back(
     assert not (state / "approvals" / f"{sid}.used").exists()
 
 
+@pytest.mark.parametrize("code", [2, 8, 9])
+def test_a_router_that_refuses_the_apply_gives_the_approval_back(
+    tmp_path: Path, monkeypatch, code: int
+) -> None:
+    """rpcd answered the apply with a refusal and the change is not on
+    the router.
+
+    The read-back proves nothing was applied: the result is not_applied,
+    the approval goes back to the owner, no receipt is written and the
+    plan can still be dropped.
+    """
+    router, clock = _setup(tmp_path, monkeypatch)
+    before = dict(router.sections)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    _approve(state, sid, _record(state, sid))
+    router.apply_code = code
+
+    result = _apply(tmp_path, monkeypatch, router, clock, sid)
+
+    assert result["result"] == "not_applied", result
+    assert router.sections == before
+    assert router.count("uci", "confirm") == 0
+    assert (state / "approvals" / f"{sid}.json").exists()
+    assert not (state / "approvals" / f"{sid}.used").exists()
+    assert not list((state / "receipts").glob(f"*-{sid}.md"))
+    aborted = _server.newton_abort_change("lab-r1", sid)
+    assert aborted["result"] == "aborted", aborted
+
+
 def test_a_link_lost_after_the_apply_was_sent_stays_unknown(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The other side of the test above: an apply that may have been sent and
-    whose answer is an error the router gave is never 'not applied'."""
+    """The other side of the test above: an apply that was sent, whose
+    answer is an error the router gave and whose values Newton cannot
+    read back afterwards, is never 'not applied'.
+
+    The read-back is what may turn an error answer into a refusal:
+    without it nothing proves the router took nothing.
+    """
     from newton_mcp.adapters import openwrt_rpcd as rpcd
 
     router, clock = _setup(tmp_path, monkeypatch)
@@ -1583,6 +1619,10 @@ def test_a_link_lost_after_the_apply_was_sent_stays_unknown(
 
     def hook(obj: str, fn: str, _args: dict[str, Any]) -> None:
         if (obj, fn) == ("uci", "apply"):
+            # the router may have done part of the apply; from here on
+            # it refuses every login, so nothing can be read back
+            router._applied = True
+            router.login_fails_after_apply = True
             raise rpcd.RpcdCallFailed(2)
 
     router.on_call = hook
@@ -1860,3 +1900,153 @@ def test_a_copy_of_a_used_approval_put_back_does_not_apply_again(
     assert "changed since the plan" in message
     assert router.count("uci", "apply") == 1, router.calls
     assert router.count("uci", "confirm") == 1, router.calls
+
+
+# ---- the restore plan of a change that ran ------------------------
+
+
+def _owner_plan(tmp_path: Path, monkeypatch) -> tuple[str, str, Path]:
+    """An owner-script plan and its restore plan, as the plan made them."""
+    router, _clock = _setup(tmp_path, monkeypatch)
+    router.sections[("wireless", "default_radio0")] = (
+        "wifi-iface",
+        {"device": "radio0", "ssid": "labnet"},
+    )
+    plan = _plan(tmp_path, monkeypatch, WIFI_NAME)
+    assert plan["mode"] == "owner-script", plan
+    return plan["session_id"], plan["restore_session_id"], _state(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        {"verdict": {"state": "CONFIRMED"}},
+        {"verdict": {"state": "ROLLED BACK"}},
+        {"verdict": {"state": "KEPT"}},
+        {"verdict": {"state": "UNKNOWN"}},
+        {},
+    ],
+)
+def test_the_abort_of_the_restore_of_a_change_that_ran_refuses(
+    tmp_path: Path, monkeypatch, run: dict[str, Any]
+) -> None:
+    """The restore plan of a change that ran is the way back: it stays.
+
+    Dropping it would delete the restore script and the backup it is
+    checked against while the receipt still points the owner at it.
+    Only an apply that PROVED it never reached the router lets the
+    restore plan go.
+    """
+    sid, rsid, state = _owner_plan(tmp_path, monkeypatch)
+    owner_records.write_run(state, sid, {"started_at": time.time(), **run})
+
+    result = _server.newton_abort_change("lab-r1", rsid)
+
+    assert "error" not in result, result
+    assert result["result"] == "not_aborted", result
+    assert sid in result["message"], result
+    assert "undo" in result["message"], result
+    assert (state / "plans" / f"{rsid}.json").exists()
+    assert (state / owner_records.OWNER_DIR / rsid).is_dir()
+    owner_records.load_record(state, rsid)
+
+
+def test_the_abort_of_the_restore_of_a_change_never_run_drops_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The restore plan of an apply that never ran may still be dropped."""
+    sid, rsid, state = _owner_plan(tmp_path, monkeypatch)
+
+    result = _server.newton_abort_change("lab-r1", rsid)
+
+    assert result["result"] == "aborted", result
+    assert not (state / "plans" / f"{rsid}.json").exists()
+
+
+def test_the_abort_of_the_restore_of_a_change_that_was_never_applied_drops_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An apply whose run proved NOT APPLIED left nothing to undo."""
+    sid, rsid, state = _owner_plan(tmp_path, monkeypatch)
+    owner_records.write_run(
+        state,
+        sid,
+        {"started_at": time.time(), "verdict": {"state": "NOT APPLIED"}},
+    )
+
+    result = _server.newton_abort_change("lab-r1", rsid)
+
+    assert result["result"] == "aborted", result
+    assert not (state / "plans" / f"{rsid}.json").exists()
+
+
+def test_the_abort_of_the_restore_of_a_change_in_flight_refuses(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An apply that holds its approval claimed may be on the router."""
+    sid, rsid, state = _owner_plan(tmp_path, monkeypatch)
+    approvals = state / "approvals"
+    approvals.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (approvals / f"{sid}.claimed").write_text("{}", encoding="utf-8")
+
+    result = _server.newton_abort_change("lab-r1", rsid)
+
+    assert result["result"] == "not_aborted", result
+    assert (state / "plans" / f"{rsid}.json").exists()
+
+
+def test_the_status_of_the_restore_of_a_change_that_ran_says_the_change_is_live(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The restore is not run yet, but the change it undoes ran: the
+    status no longer says "the change has not been applied"."""
+    sid, rsid, state = _owner_plan(tmp_path, monkeypatch)
+    owner_records.write_run(
+        state,
+        sid,
+        {"started_at": time.time(), "verdict": {"state": "CONFIRMED"}},
+    )
+
+    status = _server.newton_change_status("lab-r1", rsid)
+
+    assert "error" not in status, status
+    assert status["result"] == "not_applied", status
+    assert "the change has not been applied" not in status["notes"], status
+    assert any(sid in note for note in status["notes"]), status
+
+
+def test_the_status_of_the_restore_of_a_change_never_run_is_unchanged(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sid, rsid, state = _owner_plan(tmp_path, monkeypatch)
+
+    status = _server.newton_change_status("lab-r1", rsid)
+
+    assert status["result"] == "not_applied", status
+    assert status["notes"] == ["the change has not been applied"], status
+
+
+def test_the_status_of_a_kept_owner_script_change_says_it_is_on_the_router(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """KEPT stays the unknown state of the five (Newton did not confirm
+    it), but the status says the change is on the router."""
+    sid, _rsid, state = _owner_plan(tmp_path, monkeypatch)
+    owner_records.write_run(
+        state,
+        sid,
+        {
+            "started_at": time.time(),
+            "verdict": {
+                "state": "KEPT",
+                "notes": ["the router restarted or someone else confirmed"],
+                "not_verified": [],
+            },
+        },
+    )
+
+    status = _server.newton_change_status("lab-r1", sid)
+
+    assert status["result"] == "unknown", status
+    assert "the change is on the router and stayed" in status["notes"][0], status
+    assert "the router restarted or someone else confirmed" in status["notes"]

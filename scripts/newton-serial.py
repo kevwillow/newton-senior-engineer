@@ -40,7 +40,18 @@ DEFAULT_PROMPT = r"[#$>]\s*$"
 HARD_RULES = (
     # mtd with erase or write anywhere after it: options may come first (mtd -r erase rootfs_data)
     r"firstboot", r"jffs2reset", r"(?s)\bmtd\b.*\b(write|erase)\b",
-    r"dd\s+.*of=/dev/(mtd|ubi|mmcblk|sd)", r"ubiformat", r"ubirmvol",
+    r"dd\s+.*of=['\"]?/dev/(mtd|ubi|mmcblk|sd|nvme)", r"ubiformat", r"ubirmvol",
+    # flash writers and discard tools; mtd_debug only for write or erase
+    r"\b(flashcp|flash_erase|flash_eraseall|nandwrite|wipefs|blkdiscard|sgdisk)\b",
+    r"\bmtd_debug\s+(write|erase)\b",
+    # partition tools, except a -l listing
+    r"\b(parted|fdisk|sfdisk)\b(?!\s+-l\b)",
+    # a copy or move whose last word is a flash or block device node
+    r"\b(cp|mv|install)\b[^|;&\n]*\s['\"]?/dev/(mtd|ubi|mmcblk|sd|nvme)\S*\s*($|[|;&\n])",
+    # any other write to a flash or block device node: a redirect, tee, a UBI
+    # volume tool or a filesystem build
+    r"(>\s*['\"]?|\btee\b[^|;&\n]*)/dev/(mtd|ubi|mmcblk|sd|nvme)",
+    r"\bubi(updatevol|mkvol|rsvol)\b", r"\bmkfs\b", r"\bmke2fs\b",
     r"fw_setenv", r"sysupgrade\s+(-n|.*--force|-F)",
     r"rm\s+-[a-z]*r[a-z]*\s+/(overlay|rom)", r"nft\s+flush\s+ruleset",
     r"iptables\s+-F", r"write\s+erase", r"erase\s+startup-config",
@@ -738,12 +749,13 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 session.write("\x03")
                 session.settle()
-                session.write(f"cat > {args.remote} <<'{delim}'\r")
-                # once the heredoc starts the target is overwritten: every failure from here says so
+                # once the heredoc line is sent the target is overwritten, and a write can fail after its
+                # bytes reached the device (the flush): every failure from here on says so
                 if exists_rc == 0:
                     overwritten = f"{args.remote} was already overwritten; the old file is in {backup}"
                 else:
                     overwritten = f"{args.remote} was already written; there was no earlier file"
+                session.write(f"cat > {args.remote} <<'{delim}'\r")
                 cut_short = ", possibly cut short"
                 for line in push_text.splitlines():
                     session.write(line + "\r")

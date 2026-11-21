@@ -432,7 +432,7 @@ health-check)
 	if command -v fw4 >/dev/null 2>&1; then
 		fw4 check > "$health/fw4.now" 2>&1; rc=$?
 		if [ "$rc" -ne 0 ]; then
-			first=$(head -n 1 "$health/fw4.now")
+			first=$(fw4_first_line "$health/fw4.now")
 			rm -f "$health/fw4.now"
 			echo "health: fw4 check failed: $first" >&2
 			exit 1

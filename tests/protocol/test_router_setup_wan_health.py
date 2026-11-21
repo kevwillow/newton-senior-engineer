@@ -147,6 +147,63 @@ def test_install_creates_empty_wan_health_config_when_missing(setup_env):
 	assert env.router.snapshot()[WANHEALTH_CONFIG]["mode"] == "0o600"
 
 
+# -- 3b. an empty config from v1.1.3 or earlier gets its section ----
+# v1.1.3 and earlier created /etc/config/newton_wanhealth EMPTY; uci has no
+# section main to set enabled=1 in, so the documented enable step fails at
+# staging.  An empty file holds no user data: install and upgrade both
+# write the disabled main section into it; a non-empty file stays as it is.
+
+def test_install_writes_main_section_into_an_empty_config(setup_env):
+	env = setup_env
+	seed_known_hosts(env)
+	env.router.write(WANHEALTH_CONFIG, "", 0o644)
+	r = run(env, "install")
+	assert r.rc == 0, r.out + r.err
+	assert env.router.read(WANHEALTH_CONFIG) == WANHEALTH_CONFIG_NEW
+	assert env.router.snapshot()[WANHEALTH_CONFIG]["mode"] == "0o600"
+
+
+def test_upgrade_writes_main_section_into_an_empty_config(setup_env, tmp_path):
+	"""A router installed by v1.1.3 or earlier: upgrade repairs the empty
+	file, and does not enable a WAN-health init the operator disabled."""
+	env = setup_env
+	install_ok(env)
+	env.router.write(WANHEALTH_CONFIG, "", 0o644)
+	env.router.path("etc/rc.d/S95newton-wan-health").unlink()
+	src2 = build_src(tmp_path / "src2", version="2.0.0")
+	r = run(env, "upgrade", src=src2)
+	assert r.rc == 0, r.out + r.err
+	assert env.router.read(WANHEALTH_CONFIG) == WANHEALTH_CONFIG_NEW
+	assert env.router.snapshot()[WANHEALTH_CONFIG]["mode"] == "0o600"
+	assert "PASS upgrade extras 4: wan-health settings section present" \
+		in r.out.splitlines()
+	assert not os.path.lexists(env.router.path("etc/rc.d/S95newton-wan-health"))
+	assert _calls_with(r, "init.d/newton-wan-health\" enable") == []
+	assert _calls_with(r, "init.d/newton-wan-health\" start") == []
+
+
+def test_upgrade_keeps_a_non_empty_config(setup_env, tmp_path):
+	env = setup_env
+	install_ok(env)
+	user = "config mysection 'user'\n\toption foo 'bar'\n"
+	env.router.write(WANHEALTH_CONFIG, user, 0o644)
+	r = run(env, "upgrade", src=build_src(tmp_path / "src2", version="2.0.0"))
+	assert r.rc == 0, r.out + r.err
+	assert env.router.read(WANHEALTH_CONFIG) == user
+	assert env.router.snapshot()[WANHEALTH_CONFIG]["mode"] == "0o644"
+
+
+def test_upgrade_config_write_failure_stops(setup_env, tmp_path):
+	env = setup_env
+	install_ok(env)
+	env.router.write(WANHEALTH_CONFIG, "", 0o644)
+	env.router.update_state(fail_commands=["/etc/config/newton_wanhealth"])
+	r = run(env, "upgrade", src=build_src(tmp_path / "src2", version="2.0.0"))
+	assert r.rc == 1, r.out + r.err
+	assert r.out.splitlines()[-1] == \
+		"STOPPED upgrade r1: upgrade extras 4 failed"
+
+
 # -- 4. install: sha mismatch on verify fails and removes the extras --------
 
 def test_install_sha_mismatch_removes_wan_health_extras(setup_env):

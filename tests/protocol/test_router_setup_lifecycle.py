@@ -1,6 +1,6 @@
 """Tests of the profile and upgrade actions of scripts/newton-router-setup:
-the profile action (with the mismatch NOTE,
-the set/already wording, lab round-trip and the dev rejection) and the
+the profile action (the refusal of a profile that differs from the
+inventory, the set/already wording, lab round-trip and the dev rejection) and the
 upgrade action happy path (the .prev rotation, the four step PASS lines,
 the INFO skip and the PASS upgrade: prog line), idempotence, refusal
 paths (pending guard, live helper lock, the failed and restored guards
@@ -59,20 +59,48 @@ def file_mode(path):
 
 # -- 1. profile action ---------------------------------------------------
 
-def test_profile_action_lab_round_trip_and_dev_rejected(setup_env):
-	"""profile prod on a lab device prints the mismatch NOTE, PASS
-	profile set to prod and DONE; a second profile prod is PASS profile
-	already prod and the router snapshot is unchanged (no .new/.prev);
-	profile lab reverts with no NOTE; profile dev exits 2."""
+def _set_inventory_profile(env, value):
+	"""Edit the inventory's profile, as the owner does in devices.toml."""
+	text = env.inventory.read_text()
+	old = 'profile = "%s"' % env.profile
+	assert old in text
+	env.inventory.write_text(text.replace(old, 'profile = "%s"' % value))
+	env.inventory.chmod(0o644)
+	env.profile = value
+
+
+def test_profile_differing_from_the_inventory_is_refused(setup_env):
+	"""Profile prod on a lab inventory is refused before any
+	router contact (the controller refuses a router whose profile
+	differs from the inventory), and the refusal names the inventory
+	field to change first; the router keeps its profile."""
 	env = setup_env
 	install_ok(env)
+	before = env.router.snapshot()
 	r = run(env, "profile", "prod")
-	assert r.rc == 0
+	assert r.rc == 1, r.out + r.err
+	assert r.out.splitlines()[-1] == (
+		"STOPPED profile r1: the inventory says lab for r1; set "
+		'profile = "prod" in devices.toml first, then run profile prod again')
+	assert r.calls == []
+	assert env.router.snapshot() == before
+	assert env.router.read("etc/newton/profile") == "lab\n"
+
+
+def test_profile_action_lab_round_trip_and_dev_rejected(setup_env):
+	"""With the inventory changed first, profile prod prints PASS
+	profile set to prod and DONE; a second profile prod is PASS profile
+	already prod and the router snapshot is unchanged (no .new/.prev);
+	back to lab with no NOTE; profile dev exits 2."""
+	env = setup_env
+	install_ok(env)
+	_set_inventory_profile(env, "prod")
+	r = run(env, "profile", "prod")
+	assert r.rc == 0, r.out + r.err
 	assert env.router.read("etc/newton/profile") == "prod\n"
 	assert env.router.snapshot()["etc/newton/profile"]["mode"] == "0o600"
 	lines = r.out.splitlines()
-	assert any("the inventory says lab; the controller refuses" in l
-	           for l in lines)
+	assert [l for l in lines if l.startswith("NOTE ")] == []
 	assert "PASS profile set to prod" in lines
 	assert lines[-1] == "DONE profile r1"
 	snap1 = env.router.snapshot()
@@ -84,6 +112,7 @@ def test_profile_action_lab_round_trip_and_dev_rejected(setup_env):
 	assert lines2[-1] == "DONE profile r1"
 	assert env.router.snapshot() == snap1
 	assert no_dot_files(env.router.snapshot()) == []
+	_set_inventory_profile(env, "lab")
 	r3 = run(env, "profile", "lab")
 	assert r3.rc == 0
 	assert env.router.read("etc/newton/profile") == "lab\n"

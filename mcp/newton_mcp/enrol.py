@@ -36,6 +36,8 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
+from pathlib import Path
 
 from . import approval_proof as _proof
 from . import approve
@@ -265,13 +267,32 @@ def _rotate(device: str) -> int:
     return 0
 
 
-def _grant_off(device: str) -> int:
-    """End the easy grant on *device* and say whether one was there."""
-    if grants.revoke_grant(device):
-        print(f"Easy grant for {device} ended.")
-    else:
-        print(f"No easy grant for {device}.")
-    return 0
+def _known_devices() -> tuple[frozenset[str] | None, str]:
+    """The device names of the inventory, or None and why it cannot be read.
+
+    Only the names are read: a typo in the device name must not end in
+    "No easy grant" while the real grant stays open.
+    """
+    path = Path(
+        os.environ.get("NEWTON_INVENTORY", "~/.config/newton/devices.toml")
+    ).expanduser()
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None, f"the inventory {path} cannot be read"
+    devices = data.get("devices", {})
+    if not isinstance(devices, dict):
+        return None, f"the inventory {path} has no [devices] table"
+    return frozenset(name for name in devices if isinstance(name, str)), ""
+
+
+def _unknown(device: str, known: frozenset[str]) -> int:
+    names = ", ".join(sorted(known)) or "none"
+    print(
+        f"newton-enrol: unknown device {device}: the inventory names {names}",
+        file=sys.stderr,
+    )
+    return 2
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -304,9 +325,33 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    known, problem = _known_devices()
+    if command == "grant-off":
+        # Ending a grant is always safe, so a grant is ended even when
+        # its device is no longer in the inventory; only "there was
+        # none" needs the name checked.
+        if grants.revoke_grant(device):
+            print(f"Easy grant for {device} ended.")
+            return 0
+        if known is None:
+            print(
+                f"newton-enrol: no easy grant for {device}, and {problem} "
+                "to check the name",
+                file=sys.stderr,
+            )
+            return 1
+        if device not in known:
+            return _unknown(device, known)
+        print(f"No easy grant for {device}.")
+        return 0
+    if known is None:
+        print(f"newton-enrol: {problem}", file=sys.stderr)
+        return 1
+    if device not in known:
+        return _unknown(device, known)
     # The owner types the passphrase and reads the seed, so those commands
     # only run in a terminal; grant-off asks for and shows no secret.
-    if command != "grant-off" and not sys.stdin.isatty():
+    if not sys.stdin.isatty():
         print(
             "newton-enrol: stdin must be an interactive terminal",
             file=sys.stderr,
@@ -316,8 +361,6 @@ def main(argv: list[str] | None = None) -> int:
         return _enrol_totp(device)
     if command == "rotate":
         return _rotate(device)
-    if command == "grant-off":
-        return _grant_off(device)
     return _set_level(device, args[2])
 
 
