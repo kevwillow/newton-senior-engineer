@@ -4212,7 +4212,10 @@ if ($MyInvocation.InvocationName -ne '.') {
     try {
         $install = Test-NewtonInstall
         if ($install -ne '') {
+            # The install check refused before anything was read: nothing
+            # was written and no record was created, and the answer says so.
             $response = New-NewtonResponse $install
+            $response['stage'] = 'install'
         } elseif ($args.Count -gt 0) {
             $response = New-NewtonResponse 'schema'
         } elseif (-not [string]::IsNullOrEmpty($Undo)) {

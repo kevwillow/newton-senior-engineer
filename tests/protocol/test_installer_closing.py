@@ -197,12 +197,44 @@ def test_the_skip_line_gives_the_whole_object_when_the_file_is_missing(tmp_path)
     assert "add the line" not in line, line
 
 
-def test_the_skip_line_gives_the_whole_object_when_the_file_is_not_json(tmp_path):
+def test_the_skip_line_keeps_the_other_settings_when_the_file_is_not_json(tmp_path):
+    """a typo in a real policy file is fixed, not thrown away: the
+    advice copies the file aside first and replaces the whole content
+    only when its other settings are not needed."""
     path = tmp_path / "managed-settings.json"
     path.write_text("not json\n")
     line = run_ask(path)
     assert (
-        f"as root, replace the content of {path}, which is not valid JSON, with: {GUARD_OBJECT}"
+        f"as root, copy {path} aside first (cp -p {path} {path}.bak), then fix its JSON "
+        f"(it is not valid JSON now) and add {GUARD_LINE} to its top-level object; replace "
+        f"its whole content with {GUARD_OBJECT} only if you need none of its other settings"
+    ) in line, line
+    assert "add the line" not in line, line
+    assert "replace the content of" not in line, line
+
+
+@pytest.mark.parametrize("content", ["[]\n", "null\n", "3\n", '"x"\n'])
+def test_the_skip_line_gives_the_whole_object_for_json_that_is_not_an_object(tmp_path, content):
+    """one line added to [] or null is not a settings object."""
+    path = tmp_path / "managed-settings.json"
+    path.write_text(content)
+    line = run_ask(path)
+    assert (
+        f"as root, copy {path} aside first (cp -p {path} {path}.bak), then replace its "
+        f"content, whose top level is not a JSON object, with: {GUARD_OBJECT} (move into "
+        "that object any settings you need)"
+    ) in line, line
+    assert "add the line" not in line, line
+
+
+@pytest.mark.parametrize("value", ["false", "null", '"true"', "1"])
+def test_the_skip_line_changes_a_key_that_is_not_true(tmp_path, value):
+    """a second "allowManagedHooksOnly" key is a duplicate key."""
+    path = tmp_path / "managed-settings.json"
+    path.write_text('{"allowManagedHooksOnly": %s}\n' % value)
+    line = run_ask(path)
+    assert (
+        f'as root, change the value of "allowManagedHooksOnly" in {path} to true.'
     ) in line, line
     assert "add the line" not in line, line
 
@@ -214,20 +246,48 @@ def test_the_skip_line_keeps_the_one_line_for_a_json_object(tmp_path):
     assert f'as root, add the line {GUARD_LINE} to {path}.' in line, line
 
 
-def test_install_managed_settings_gives_the_whole_object_for_a_file_that_is_not_json(tmp_path):
+def _install_managed_settings(tmp_path, content):
     from test_newton_managed_settings import (
         run_install_managed_settings,
         write_managed_settings,
     )
 
-    path = write_managed_settings(tmp_path, "this is not json\n")
+    path = write_managed_settings(tmp_path, content)
     result = run_install_managed_settings(path)
     assert "RC=0" in result.stdout
-    assert path.read_text() == "this is not json\n"
-    assert "Add this line" not in result.stderr, result.stderr
+    assert path.read_text() == content
+    return path, result.stderr
+
+
+def test_install_managed_settings_keeps_the_other_settings_of_a_file_that_is_not_json(tmp_path):
+    path, err = _install_managed_settings(tmp_path, "this is not json\n")
+    assert "Add this line" not in err, err
+    assert "Replace its content with this" not in err, err
     assert (
-        f"Replace its content with this, as root:\n  {GUARD_OBJECT}\n"
-    ) in result.stderr, result.stderr
+        f"As root, copy it aside first (cp -p {path} {path}.bak), then fix its JSON and add "
+        f"this line to its top-level object:\n  {GUARD_LINE}\n"
+        f"Replace its whole content with {GUARD_OBJECT} only if you need none of its other settings.\n"
+    ) in err, err
+
+
+@pytest.mark.parametrize("content", ["[]\n", "null\n"])
+def test_install_managed_settings_gives_the_whole_object_for_json_that_is_not_an_object(tmp_path, content):
+    path, err = _install_managed_settings(tmp_path, content)
+    assert "Add this line" not in err, err
+    assert (
+        f"WARNING: {path} is valid JSON but not a JSON object; it was left untouched "
+        "(Newton never overwrites it).\n"
+        f"As root, copy it aside first (cp -p {path} {path}.bak), then replace its content with "
+        f"this (move into that object any settings you need):\n  {GUARD_OBJECT}\n"
+    ) in err, err
+
+
+def test_install_managed_settings_changes_a_key_that_is_not_true(tmp_path):
+    path, err = _install_managed_settings(tmp_path, '{"allowManagedHooksOnly": false}\n')
+    assert "Add this line" not in err, err
+    assert (
+        f'Change the value of "allowManagedHooksOnly" in {path} to true yourself.\n'
+    ) in err, err
 
 
 def managed_settings_path(doctor_env):
@@ -251,14 +311,45 @@ def test_doctor_gives_the_whole_object_when_the_file_is_missing(doctor_env):
     assert "Add this line" not in line, line
 
 
-def test_doctor_gives_the_whole_object_when_the_file_is_not_json(doctor_env):
+def _doctor_line_for(doctor_env, content):
     path = managed_settings_path(doctor_env)
     path.parent.chmod(0o755)
-    path.write_text("this is not json\n")
+    path.write_text(content)
     path.chmod(0o644)
-    line = doctor_guard_line(doctor_env)
+    return path, doctor_guard_line(doctor_env)
+
+
+def test_doctor_keeps_the_other_settings_when_the_file_is_not_json(doctor_env):
+    path, line = _doctor_line_for(doctor_env, "this is not json\n")
     assert (
-        f"As root, replace the content of {path} with: {GUARD_OBJECT}."
+        f"As root, copy {path} aside first (cp -p {path} {path}.bak), then fix its JSON and "
+        f"add {GUARD_LINE} to its top-level object; replace its whole content with "
+        f"{GUARD_OBJECT} only if you need none of its other settings."
+    ) in line, line
+    assert "Add this line" not in line, line
+    assert "replace the content of" not in line, line
+
+
+@pytest.mark.parametrize("content", ["[]\n", "null\n"])
+def test_doctor_gives_the_whole_object_for_json_that_is_not_an_object(doctor_env, content):
+    path, line = _doctor_line_for(doctor_env, content)
+    assert f"the Claude Code managed settings file {path} is valid JSON but not a JSON object" in line, line
+    assert (
+        f"As root, copy {path} aside first (cp -p {path} {path}.bak), then replace its content "
+        f"with: {GUARD_OBJECT} (move into that object any settings you need)."
+    ) in line, line
+    assert "Add this line" not in line, line
+
+
+def test_doctor_changes_a_key_that_is_not_true(doctor_env):
+    path, line = _doctor_line_for(doctor_env, '{"allowManagedHooksOnly": false}\n')
+    assert (
+        f'the Claude Code managed settings file {path} sets "allowManagedHooksOnly" to a value '
+        "other than true"
+    ) in line, line
+    assert (
+        f'As root, change the value of "allowManagedHooksOnly" in {path} to true, so the '
+        f"line reads {GUARD_LINE}."
     ) in line, line
     assert "Add this line" not in line, line
 
@@ -318,3 +409,137 @@ def test_ci_runs_every_python_the_installer_accepts():
     assert matrix, "python matrix not found in ci.yml"
     ran = [v.strip().strip('"') for v in matrix.group(1).split(",")]
     assert ran == accepted
+
+
+# ---- a rerun of a failed first install is still a first install ----
+
+
+@needs_ns
+def test_a_plain_rerun_over_a_left_code_root_prints_the_first_install_steps(tmp_path):
+    """a first install whose bootstrap step failed leaves the code
+    root behind; the rerun the error asks for still prints the
+    first-install text (the credential moves and the client command),
+    not "Newton updated successfully."."""
+    code_root = tmp_path / "opt"
+    code_root.mkdir()
+    (code_root / "from-the-failed-run").write_text("old\n")
+    r = run_plain_tail(tmp_path, bootstrap_ok=True)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "Newton installed successfully." in r.stdout, r.stdout
+    assert "Newton updated successfully." not in r.stdout, r.stdout
+    assert "move its router credentials to the newton account" in r.stdout, r.stdout
+    assert "MCP client command" in r.stdout, r.stdout
+    # the code root it replaced may be the one a running server loaded
+    assert "Restart Claude Code, or run /mcp and reconnect newton" in r.stdout, r.stdout
+
+
+# ---- the leftover .old advice cannot nest the tree ----
+
+
+def test_the_leftover_backup_advice_restores_with_mv_t_after_removing_the_partial_tree(tmp_path):
+    """a plain `mv /opt/newton.old /opt/newton` over a partial
+    /opt/newton nests the old tree inside it, and the next run deletes
+    it.  The refusal says to remove the partial tree first and to move
+    the backup back with mv -T."""
+    code_root = tmp_path / "opt"
+    code_root.mkdir()
+    old = tmp_path / "opt.old"
+    old.mkdir()
+    code = 'source "$1"\nCODE_ROOT="$2"\ninstall_code_root\n'
+    r = subprocess.run(
+        ["bash", "-c", code, "icr", str(INSTALL), str(code_root)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert r.returncode != 0
+    assert "move it back to" not in r.stderr, r.stderr
+    assert (
+        f"ERROR: {old} exists: an earlier install did not finish. Inspect it, then "
+        f"either remove it, or restore it: remove {code_root} if it is there (it is "
+        f"the unfinished new tree), then run: mv -T {old} {code_root}. "
+        "Then run the installer again"
+    ) in r.stderr, r.stderr
+    assert old.is_dir() and code_root.is_dir()
+
+
+# ---- the update steps say when the bootstrap is older ----
+
+
+def run_update_steps(tmp_path, installed, snapshot):
+    snap = tmp_path / "snap"
+    (snap / "scripts").mkdir(parents=True)
+    (snap / "scripts" / "newton-bootstrap").write_text(snapshot)
+    dest = tmp_path / "newton-bootstrap"
+    if installed is not None:
+        dest.write_text(installed)
+    code = (
+        'source "$1"\n'
+        'SNAP="$2"\n'
+        'BOOTSTRAP_DEST="$3"\n'
+        "SETUP_LAUNCHER=/usr/local/bin/newton-router-setup\n"
+        "CLIENT_COMMAND=x\n"
+        "print_update_steps\n"
+    )
+    return subprocess.run(
+        ["bash", "-c", code, "steps", str(INSTALL), str(snap), str(dest)],
+        capture_output=True, text=True, timeout=30, check=True,
+    ).stdout
+
+
+BOOTSTRAP_SELF_UPDATE = (
+    "The installed newton-bootstrap differs from this release's: update it from the "
+    "same root shell with: newton-bootstrap self-update <repo> <commit id> with the "
+    "same repository and commit id. A bootstrap installed by an earlier release asks "
+    "for update and a 12-hex prefix of the id instead of all 40: type what its prompt "
+    "asks for."
+)
+
+
+def test_the_update_steps_say_to_self_update_an_older_bootstrap(tmp_path):
+    """--from-snapshot never replaces the bootstrap, so after an
+    update with an older one the steps name its self-update and its
+    12-hex prompt."""
+    out = run_update_steps(tmp_path, "#!/bin/bash\n# old\n", "#!/bin/bash\n# new\n")
+    assert BOOTSTRAP_SELF_UPDATE in " ".join(out.split()), out
+
+
+def test_the_update_steps_leave_a_current_bootstrap_alone(tmp_path):
+    out = run_update_steps(tmp_path, "#!/bin/bash\n# same\n", "#!/bin/bash\n# same\n")
+    assert "self-update" not in out, out
+
+
+# ---- the launchers name the root shell ----
+
+LAUNCHER_TMPS = {
+    "newton-approve": ("approve_launcher_tmp", ["0123456789abcdef0123456789abcdef"]),
+    "newton-router-setup": ("setup_launcher_tmp", ["r1", "check"]),
+    "newton-vantage-setup": ("vantage_setup_launcher_tmp", ["v1", "check"]),
+    "newton-enrol": ("enrol_launcher_tmp", ["totp"]),
+    "newton-rules": ("rules_launcher_tmp", ["list"]),
+    "newton-ad-setup": ("ad_setup_launcher_tmp", ["approval-key", "dc1"]),
+}
+
+
+@pytest.mark.parametrize("name", sorted(LAUNCHER_TMPS))
+def test_a_launcher_run_from_a_root_shell_says_to_leave_it(tmp_path, name):
+    """from the step-4 root shell sudo sets SUDO_USER=root; the
+    refusal says to run the command from the owner's own account."""
+    from test_newton_isolation import launcher_text, make_executable
+
+    tmp, args = LAUNCHER_TMPS[name]
+    fake_id = tmp_path / "id"
+    make_executable(fake_id, "#!/bin/sh\necho 4242\n")
+    fake_env = tmp_path / "env"
+    make_executable(fake_env, "#!/bin/sh\necho RAN\n")
+    launcher = tmp_path / name
+    make_executable(
+        launcher,
+        launcher_text(tmp).replace("/usr/bin/id", str(fake_id)).replace("/usr/bin/env", str(fake_env)),
+    )
+    env = {"PATH": "/usr/bin:/bin", "SUDO_USER": "root"}
+    r = subprocess.run([str(launcher), *args], capture_output=True, text=True, env=env, timeout=10)
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert "RAN" not in r.stdout
+    assert (
+        f"{name}: run this from your own account, not from a root shell (type exit to "
+        "leave it); sudo must provide a valid non-root SUDO_USER"
+    ) in r.stderr, r.stderr

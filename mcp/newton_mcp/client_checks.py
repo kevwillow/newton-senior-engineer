@@ -160,7 +160,13 @@ def old_forced_command_message(vantage_name: str) -> str:
     """
     if not isinstance(vantage_name, str) or NAME_RE.fullmatch(vantage_name) is None:
         raise ClientCheckError("the vantage name has an unusable shape")
-    return f"re-run newton-vantage-setup {vantage_name} install-client-checks"
+    # imported here, not at the top: approve imports this module
+    from . import approve
+
+    return (
+        f"re-run {approve._launcher('newton-vantage-setup')} {vantage_name} "
+        "install-client-checks"
+    )
 
 
 def derive_router_targets(dump: dict[str, Any]) -> list[str]:

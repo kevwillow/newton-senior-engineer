@@ -296,7 +296,13 @@ def test_mv1_3_04_device_for_preserves_lookup_and_unknown_platform_errors(
     service = server.NewtonService()
     with pytest.raises(NewtonError) as unknown:
         service.device_for("newton_read", "nope")
-    assert str(unknown.value) == "unknown device: nope"
+    # The refusal names the inventory, the devices it does name
+    # and the table the owner adds
+    inventory = server.inventory_file_path()
+    assert str(unknown.value) == (
+        f"unknown device: nope: not in the inventory {inventory} (known: "
+        "quasar, vy1); the owner adds a [devices.nope] table to it"
+    )
 
     capability_lab.devices["acme"] = server.Device(
         name="acme",

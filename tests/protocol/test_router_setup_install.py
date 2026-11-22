@@ -264,6 +264,16 @@ def test_install_refused_when_busy(setup_env):
 	assert state_notes(run_install(env)) == []
 
 
+def test_install_accepts_an_idle_guard_with_a_skipped_line(setup_env):
+	"""A /etc/config entry the guard cannot name makes its status
+	two lines (`idle`, then `skipped <name>`).  Only the first line is the
+	status: step 4 accepts the idle guard and the install is DONE."""
+	env = setup_env
+	env.router.write("etc/newton/guard-skipped", "bad\\x20name\n")
+	r = install_ok(env)
+	assert not [l for l in r.out.splitlines() if l.startswith("FAIL ")], r.out
+
+
 def test_install_refused_helper_lock(setup_env):
 	"""Design 8.2 step 1: a helper lock whose sid the fake ubus lists
 	refuses with the router unchanged."""

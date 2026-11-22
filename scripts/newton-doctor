@@ -767,13 +767,17 @@ try:
 except Exception:
     print("invalid")
     sys.exit(0)
-if isinstance(data, dict) and data.get("allowManagedHooksOnly") is True:
+if not isinstance(data, dict):
+    print("notobject")
+elif data.get("allowManagedHooksOnly") is True:
     print("true")
+elif "allowManagedHooksOnly" in data:
+    print("wrong")
 else:
     print("absent")
 ' "$file" 2>/dev/null) || state=invalid
 	case $state in
-		true|absent|invalid) printf '%s\n' "$state" ;;
+		true|absent|wrong|notobject|invalid) printf '%s\n' "$state" ;;
 		*) printf 'invalid\n' ;;
 	esac
 }
@@ -806,6 +810,10 @@ check_managed_settings_guard() {
 			state=$(managed_settings_state "$file")
 			if [[ $state == invalid ]]; then
 				reason="the Claude Code managed settings file $(escape_text "$file") is not valid JSON"
+			elif [[ $state == notobject ]]; then
+				reason="the Claude Code managed settings file $(escape_text "$file") is valid JSON but not a JSON object"
+			elif [[ $state == wrong ]]; then
+				reason="the Claude Code managed settings file $(escape_text "$file") sets \"allowManagedHooksOnly\" to a value other than true"
 			elif [[ $state != true ]]; then
 				reason="the Claude Code managed settings file $(escape_text "$file") does not set \"allowManagedHooksOnly\": true"
 			fi
@@ -813,11 +821,18 @@ check_managed_settings_guard() {
 	fi
 	if [[ -n $reason ]]; then
 		# The advice must leave valid JSON behind: one line added to a
-		# missing file or to one that is not JSON is not a settings object.
+		# missing file, to one that is not JSON or to one that is not an
+		# object is not a settings object, and a second key is a duplicate.
+		# The file may hold other policies the owner needs, so a copy comes
+		# first and the whole object replaces only what is not wanted.
 		if [[ $missing == 1 ]]; then
 			how="As root, create $(escape_text "$file") with this content: {\"allowManagedHooksOnly\": true}."
 		elif [[ $state == invalid ]]; then
-			how="As root, replace the content of $(escape_text "$file") with: {\"allowManagedHooksOnly\": true}."
+			how="As root, copy $(escape_text "$file") aside first (cp -p $(escape_text "$file") $(escape_text "$file").bak), then fix its JSON and add \"allowManagedHooksOnly\": true to its top-level object; replace its whole content with {\"allowManagedHooksOnly\": true} only if you need none of its other settings."
+		elif [[ $state == notobject ]]; then
+			how="As root, copy $(escape_text "$file") aside first (cp -p $(escape_text "$file") $(escape_text "$file").bak), then replace its content with: {\"allowManagedHooksOnly\": true} (move into that object any settings you need)."
+		elif [[ $state == wrong ]]; then
+			how="As root, change the value of \"allowManagedHooksOnly\" in $(escape_text "$file") to true, so the line reads \"allowManagedHooksOnly\": true."
 		else
 			how="Add this line to $(escape_text "$file"): \"allowManagedHooksOnly\": true."
 		fi
@@ -1018,9 +1033,12 @@ check_router() {
 #     `PASS proof unknown-and-empty: rejected`; that is what the setup
 #     tool's proofs print -- the router's literal `error unknown-subcommand`
 #     is consumed inside the tool and never reaches the report);
-# (d) otherwise INCONCLUSIVE: the setup tool's check action does not print
-#     the proofs (they live in its restricted-key action), and absence of a
-#     proof is not evidence of a violation -- never a PASS, never a FAIL.
+# (d) otherwise INCONCLUSIVE: the setup check prints both proofs only when
+#     the inventory's key_file names an installed restricted key, and skips
+#     them with a `WARN restricted-key proofs skipped: ...` line otherwise
+#     (no key_file, the key not installed); the doctor quotes that line and
+#     names the key step.  Absence of a proof is not evidence of a
+#     violation -- never a PASS, never a FAIL.
 check_router_line() {
 	local device=$1 name="router-line-restricted[$1]" output rc line
 	# stdout only: the report lines are on stdout, and the tool's prompts
@@ -1044,7 +1062,12 @@ check_router_line() {
 		pass "$name"
 		return
 	fi
-	inconclusive "$name" 'the setup report carries no restricted-line proof (the setup tool'"'"'s check action does not print the proofs; run its restricted-key proofs another way or upgrade the tool)'
+	line=$(grep -m1 '^WARN restricted-key proofs skipped: ' <<<"$output" || true)
+	if [[ -n $line ]]; then
+		inconclusive "$name" "the setup check skipped the restricted-line proofs ($(escape_text "${line#WARN }")): give the router Newton's restricted key with sudo -u newton /usr/local/bin/newton-router-setup $(escape_text "$device") swap-key --new-key newton-agent (or add-key), so the inventory names an installed key_file; a no-install router has no restricted key to prove"
+		return
+	fi
+	inconclusive "$name" "the setup report carries no restricted-line proof (the setup check prints both proofs only when the inventory's key_file names an installed restricted key; give the router one with newton-router-setup $(escape_text "$device") swap-key or add-key)"
 }
 
 if (( EUID == 0 )); then

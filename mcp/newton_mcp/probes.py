@@ -1,6 +1,6 @@
 """Structured verification probes (design 3.6, 4.1-4.3) and manifest checks (4.8).
 
-grammar.tsv holds only the 24 subcommand rows (the `probe` row is one line),
+grammar.tsv holds only the subcommand rows (the `probe` row is one line),
 so the per-probe field rules of design 4.3 live here as an explicit TABLE,
 pinned to the real router program by the SHARED VECTORS in
 device/openwrt/newton-router/tests/probe_cases.json: the router test

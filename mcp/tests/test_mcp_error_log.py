@@ -8,6 +8,7 @@ traceback to diagnose what went wrong.  These tests pin the on-disk shape.
 
 from __future__ import annotations
 
+import re
 import stat
 from pathlib import Path
 
@@ -58,7 +59,7 @@ def test_unexpected_exception_writes_traceback_and_returns_generic_error(configu
     assert audit.exists()
     audit_lines = audit.read_text(encoding="utf-8").splitlines()
     assert any(
-        line.endswith("tool=newton_read device=quasar result=error")
+        re.search(r"tool=newton_read device=quasar result=error dur_ms=\d+ bytes=\d+$", line)
         for line in audit_lines
     ), audit_lines
 

@@ -680,7 +680,13 @@ def test_push_reports_a_dropped_line_instead_of_a_traceback(tmp_path):
     assert result.returncode == 7, (result.returncode, result.stderr)
     assert "Traceback" not in result.stderr
     assert "serial line failed" in result.stderr
-    assert "already overwritten" in result.stderr and "possibly cut short" in result.stderr
+    # the shell runs the redirect only once it reads the end line, which was
+    # never sent: the target is untouched, and a Ctrl-D at the router's
+    # heredoc prompt would write the part sent, so the owner is told to
+    # press Ctrl-C there
+    assert "already overwritten" not in result.stderr and "cut short" not in result.stderr
+    assert "/etc/config/x was not written" in result.stderr
+    assert "end line" in result.stderr and "Ctrl-C" in result.stderr
     assert "/etc/config/x.newton-bak" in result.stderr
 
 
@@ -1120,10 +1126,11 @@ def test_log_dir_under_sticky_parent_is_accepted(console, tmp_path):
     assert next(log_dir.glob("*.log")).is_file()
 
 
-def test_push_whose_heredoc_line_fails_after_sending_says_the_file_was_overwritten(tmp_path, capsys):
+def test_push_whose_heredoc_line_fails_after_sending_says_the_file_was_not_written(tmp_path, capsys):
     """A write can fail after its bytes reached the device (the flush after
-    os.write). If that happens on the `cat >` line, the router may already have
-    truncated the target, so the message must not say it was not written."""
+    os.write). If that happens on the `cat >` line, the router shell is
+    still reading the heredoc and runs the redirect only at its end line,
+    which was never sent: the target is untouched."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("ns_push", SCRIPT)
     ns = importlib.util.module_from_spec(spec); spec.loader.exec_module(ns)
@@ -1145,8 +1152,9 @@ def test_push_whose_heredoc_line_fails_after_sending_says_the_file_was_overwritt
         console.close()
     err = capsys.readouterr().err
     assert rc == 7, err
-    assert "already overwritten" in err, err
-    assert "was not written" not in err, err
+    assert "already overwritten" not in err, err
+    assert "/etc/config/x was not written" in err, err
+    assert "/etc/config/x.newton-bak" in err, err
 
 
 class _StallAtHeredocConsole(_UnplugConsole):
@@ -1181,11 +1189,11 @@ class _StallAtHeredocConsole(_UnplugConsole):
 
 
 @pytest.mark.parametrize("sig", ["SIGINT", "SIGHUP"])
-def test_push_interrupted_mid_heredoc_says_the_target_was_overwritten(tmp_path, sig):
+def test_push_interrupted_mid_heredoc_says_the_target_was_not_written(tmp_path, sig):
     """Ctrl-C (or the terminal hanging up) in the middle of a push must not
     end in a traceback: the router shell is taken out of the heredoc with a
-    Ctrl-C, and the owner is told the target may be overwritten and where
-    the old copy is."""
+    Ctrl-C, which abandons it before its redirect runs, and the owner is
+    told the target was not written and where the copy is."""
     import signal
     f = tmp_path / "x.txt"; f.write_text("".join(f"line {i} " + "x" * 100 + "\n" for i in range(400)))
     console = _StallAtHeredocConsole("shell", answers={"test -e /etc/config/x": ("", 0),
@@ -1208,7 +1216,8 @@ def test_push_interrupted_mid_heredoc_says_the_target_was_overwritten(tmp_path, 
     assert proc.returncode == 130, (proc.returncode, err)
     assert "Traceback" not in err, err
     assert "interrupted" in err, err
-    assert "already overwritten" in err and "possibly cut short" in err, err
+    assert "already overwritten" not in err and "cut short" not in err, err
+    assert "/etc/config/x was not written" in err, err
     assert "/etc/config/x.newton-bak" in err, err
     heredoc_at = console.received.find(b"cat > /etc/config/x")
     assert b"\x03" in console.received[heredoc_at:], "the router shell was left inside the heredoc"
@@ -1264,3 +1273,178 @@ def test_a_retry_after_a_failed_push_names_the_first_backup_too(tmp_path):
     first = "the file as it was before Newton's first push is still in /etc/config/x.newton-bak"
     assert first in result.stdout, result.stdout
     assert "already overwritten" in result.stderr and first in result.stderr, result.stderr
+
+
+# -----------------------------
+# a dropped line outside the heredoc, the heredoc wording, unreadable
+# local files, and the capture cap
+# -----------------------------
+
+class _UnplugAtConsole(_UnplugConsole):
+    """Drops the line (closes its end of the pty) when the push sends a
+    marked command that starts with ``trigger``, without answering it."""
+
+    def __init__(self, *args, trigger, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.trigger = trigger
+
+    def _run(self):
+        while not self.stop.is_set():
+            line = self._readline()
+            if line is None:
+                return
+            line = line.split("\x03")[-1]
+            if line == "":
+                self._write("root@OpenWrt:~# ")
+                continue
+            marked = self.MARKED.match(line)
+            if marked and marked.group(2).startswith(self.trigger):
+                os.close(self.master)
+                self.master = None
+                return
+            if marked:
+                token, body = marked.group(1), marked.group(2)
+                self.commands.append(body)
+                code = self.answers.get(body, ("", 0))[1]
+                self._write(f"{line}\r\n__NWS{token}__\r\n\r\n__NWE{token}__{code}\r\nroot@OpenWrt:~# ")
+                continue
+            self.commands.append(line)
+
+
+_EXISTING = {"test -e /etc/config/x": ("", 0), "test -e /etc/config/x.newton-bak": ("", 1)}
+
+
+def test_push_dropped_during_the_backup_says_nothing_was_written(tmp_path):
+    """A USB-serial adapter pulled out while the backup copy runs is a
+    one-line refusal (exit 7) saying the target was not written, not a raw
+    OSError traceback from pyserial's in_waiting."""
+    f = tmp_path / "x.txt"; f.write_text("new\n")
+    console = _UnplugAtConsole("shell", answers=_EXISTING, trigger="cp -p ").start()
+    try:
+        result = invoke(console, tmp_path, "push", str(f), "/etc/config/x")
+    finally:
+        console.close()
+    assert "Traceback" not in result.stderr, result.stderr
+    assert result.returncode == 7, (result.returncode, result.stderr)
+    assert "serial line failed" in result.stderr, result.stderr
+    assert "/etc/config/x was not written" in result.stderr, result.stderr
+    assert "already overwritten" not in result.stderr, result.stderr
+
+
+def test_push_dropped_during_the_verify_says_the_file_was_overwritten(tmp_path):
+    """A drop at the byte-count check, after the whole file was sent, says
+    the target was already overwritten and names the backup."""
+    f = tmp_path / "x.txt"; f.write_text("new\n")
+    console = _UnplugAtConsole("shell", answers=_EXISTING, trigger="wc -c ").start()
+    try:
+        result = invoke(console, tmp_path, "push", str(f), "/etc/config/x")
+    finally:
+        console.close()
+    assert "Traceback" not in result.stderr, result.stderr
+    assert result.returncode == 7, (result.returncode, result.stderr)
+    assert "serial line failed" in result.stderr, result.stderr
+    assert "already overwritten" in result.stderr, result.stderr
+    assert "/etc/config/x.newton-bak" in result.stderr, result.stderr
+
+
+def test_run_dropped_line_is_a_one_line_error(tmp_path):
+    """The same drop during `run` ends in one line and exit 3, not a
+    traceback."""
+    console = _UnplugAtConsole("shell", trigger="uname").start()
+    try:
+        result = invoke(console, tmp_path, "run", "uname -a")
+    finally:
+        console.close()
+    assert "Traceback" not in result.stderr, result.stderr
+    assert result.returncode == 3, (result.returncode, result.stderr)
+    assert "serial line failed" in result.stderr, result.stderr
+
+
+def _load(name):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, SCRIPT)
+    ns = importlib.util.module_from_spec(spec); spec.loader.exec_module(ns)
+    return ns
+
+
+def test_push_whose_end_line_fails_after_sending_says_the_file_was_overwritten(tmp_path, capsys):
+    """The router shell runs the `cat >` redirect once it reads the end line.
+    A write of that line can fail after its bytes reached the device, so from
+    then on the message says the target was already overwritten."""
+    ns = _load("ns_push_end")
+    real_write = ns.Session.write
+
+    def write_then_fail_on_end_line(self, data, *rest):
+        real_write(self, data, *rest)
+        if data.startswith("__NEWTON_EOF_"):
+            raise ns.serial.SerialException("write failed: (5, 'Input/output error')")
+
+    ns.Session.write = write_then_fail_on_end_line
+    f = tmp_path / "x.txt"; f.write_text("line\n")
+    console = FakeConsole("shell", answers=dict(_EXISTING)).start()
+    try:
+        rc = ns.main(["--port", console.path, "--timeout", "0.35", "--log-dir", str(tmp_path / "logs"),
+                      "push", str(f), "/etc/config/x"])
+    finally:
+        console.close()
+    err = capsys.readouterr().err
+    assert rc == 7, err
+    assert "already overwritten" in err, err
+    assert "/etc/config/x.newton-bak" in err, err
+    assert "was not written" not in err, err
+
+
+def test_push_of_a_file_that_is_not_utf8_is_refused(console, tmp_path):
+    f = tmp_path / "x.bin"; f.write_bytes(b"caf\xe9\n")
+    result = invoke(console, tmp_path, "push", str(f), "/tmp/x.txt")
+    assert "Traceback" not in result.stderr, result.stderr
+    assert result.returncode == 2, (result.returncode, result.stderr)
+    assert f"cannot read {f}" in result.stderr and "UTF-8" in result.stderr, result.stderr
+    time.sleep(0.03)
+    assert not console.received
+
+
+@pytest.mark.parametrize("flag", ["--password-file", "--secret-file"])
+def test_a_secret_file_that_is_not_utf8_is_refused(console, tmp_path, flag):
+    pw_file = tmp_path / "pw"; pw_file.write_bytes(b"\xff\xfe\n"); pw_file.chmod(0o600)
+    args = ["login"] if flag == "--password-file" else ["send"]
+    if flag == "--password-file":
+        result = invoke(console, tmp_path, "--user", "root", flag, str(pw_file), *args)
+    else:
+        result = invoke(console, tmp_path, *args, flag, str(pw_file))
+    assert "Traceback" not in result.stderr, result.stderr
+    assert result.returncode == 2, (result.returncode, result.stderr)
+    assert "cannot read" in result.stderr and "UTF-8" in result.stderr, result.stderr
+    time.sleep(0.03)
+    assert not console.received
+
+
+def test_capture_prints_at_most_the_last_64_kb_and_names_the_log(capsys, tmp_path):
+    """A console flood is not printed whole: the block holds the last
+    64 KB, and stderr says how much was left out and where the full text
+    is."""
+    ns = _load("ns_cap")
+    text = "a" * 50_000 + "b" * 100_000 + "TAIL\n"
+    log = tmp_path / "serial-x.log"
+    ns.print_capture(text, log)
+    captured = capsys.readouterr()
+    m = CONSOLE_BLOCK_RE.match(captured.out)
+    assert m, captured.out[:200]
+    body = m.group(2)
+    assert len(body) <= ns.CAPTURE_LIMIT, len(body)
+    assert body.endswith("TAIL"), body[-20:]
+    assert "a" not in body
+    assert f"console text truncated: the first {len(text) - ns.CAPTURE_LIMIT} characters are not shown" in captured.err
+    assert str(log) in captured.err
+    ns.print_capture("short\n", log)
+    assert "truncated" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("args", [["read", "--seconds", "601"], ["send", "x", "--wait", "601"],
+                                  ["send", "x", "--wait", "-1"]])
+def test_capture_durations_are_bounded(console, tmp_path, args):
+    result = invoke(console, tmp_path, *args)
+    assert result.returncode == 2, (result.returncode, result.stderr)
+    assert "600" in result.stderr, result.stderr
+    time.sleep(0.03)
+    assert not console.received

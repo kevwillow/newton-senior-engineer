@@ -31,8 +31,10 @@ Refusals at add time, all before anything is written:
   device entry that is not a table; a check_targets entry that is not
   an IPv4 CIDR.
 
-The file is regenerated on every write: comments in it are not kept
-(the tool says so when it drops one); a rule's --label holds a note.
+The file is regenerated on every write: comments in it are not kept.
+Before a write that drops one, the old file is copied to rules.toml.bak
+(mode 0600; rules.toml.bak-<time> when that exists) and the tool names
+the copy; a rule's --label holds a note that is kept.
 
 The write is atomic (a fresh mkstemp file, mode 0600, an fsync, then a
 rename into place -- the way the plan records are written) and the file
@@ -52,6 +54,7 @@ import re
 import stat
 import sys
 import tempfile
+import time
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -299,6 +302,44 @@ def _has_hand_comments(path: Path) -> bool:
     return any("#" in line for line in text.splitlines() if line not in header)
 
 
+def _keep_a_copy(path: Path) -> Path:
+    """Copy rules.toml, comments included, to a new file beside it.
+
+    rules.toml.bak, or rules.toml.bak-<time>[-n] when that exists, so an
+    earlier copy is never overwritten. The file is created with O_EXCL and
+    O_NOFOLLOW (a planted name or symlink is skipped, never followed), mode
+    0600, and fsynced. Raises Refused when no copy can be made, so the
+    rewrite does not run.
+    """
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        refuse(f"cannot copy {path} before dropping its comments: {exc.strerror}; nothing was written")
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    names = [f"{path.name}.bak"] + [f"{path.name}.bak-{stamp}" + (f"-{n}" if n else "") for n in range(100)]
+    for name in names:
+        target = path.parent / name
+        try:
+            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            refuse(f"cannot copy {path} to {target} before dropping its comments: {exc.strerror}; "
+                   "nothing was written")
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError as exc:
+            refuse(f"cannot copy {path} to {target} before dropping its comments: {exc.strerror}; "
+                   "nothing was written")
+        return target
+    refuse(f"cannot copy {path} before dropping its comments: every backup name is taken; nothing was written")
+    raise AssertionError("unreachable")
+
+
 def write_rules(path: Path, rows: list[dict[str, Any]]) -> None:
     """Write rules.toml the way the plan records are written.
 
@@ -308,8 +349,10 @@ def write_rules(path: Path, rows: list[dict[str, Any]]) -> None:
     always plain quoted values.
     """
     if _has_hand_comments(path):
+        copy = _keep_a_copy(path)
         print(f"{PROGRAM}: note: the comments in {path} are not kept "
-              "(newton-rules rewrites the file; put a note in a rule's --label)", file=sys.stderr)
+              "(newton-rules rewrites the file; put a note in a rule's --label); "
+              f"a copy of the old file is in {copy}", file=sys.stderr)
     lines = [FILE_HEADER, ""]
     for row in rows:
         lines.append("[[rule]]")

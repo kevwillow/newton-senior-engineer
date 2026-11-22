@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -434,20 +435,6 @@ def test_rotate_needs_the_confirmation(monkeypatch, tmp_path, calls):
     assert calls == []
 
 
-def test_rotate_prints_the_command_when_the_setup_tool_is_missing(monkeypatch, tmp_path, capsys):
-    home = tmp_path / "newton-home"
-    home.mkdir()
-    monkeypatch.setenv("NEWTON_HOME", str(home))
-    _seed_rotatable_state()
-    monkeypatch.setattr(sys, "stdin", FakeStdin([f"rotate {DEVICE}"]))
-
-    assert enrol.main(["rotate", DEVICE]) == 1
-
-    out = capsys.readouterr()
-    expected = f"{home}/scripts/newton-router-setup {DEVICE} approval-key"
-    assert expected in out.out + out.err
-
-
 def test_rotate_propagates_the_setup_exit_code(monkeypatch, tmp_path):
     home = tmp_path / "newton-home"
     (home / "scripts").mkdir(parents=True)
@@ -584,3 +571,197 @@ def test_an_unreadable_inventory_is_said_and_sets_no_level(
 
     assert "inventory" in capsys.readouterr().err
     assert not proof._level_path(DEVICE).exists()
+
+
+# ---- the next steps enrol prints on AD entries and failed rotations ------
+
+
+AD_DOMAIN = "dc1-ops"
+
+
+def _ad_inventory(inventory, platform: str = "ad-windows-write") -> None:
+    """The inventory names the router DEVICE and an AD write entry."""
+    inventory.write_text(
+        f'[devices.{DEVICE}]\nplatform = "openwrt"\n'
+        f'[devices.{AD_DOMAIN}]\nplatform = "{platform}"\n'
+        f'ad_domain = "{AD_DOMAIN}"\n',
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    "platform", ["ad-windows-write", "ad-samba-write", "ad-windows", "ad-samba"]
+)
+def test_rotate_of_an_ad_entry_never_runs_the_router_setup(
+    monkeypatch, tmp_path, capsys, calls, inventory, platform
+):
+    """rotate changes a router's key.  On an AD entry it ran
+    newton-router-setup against the DC, which failed and named no AD
+    route.  It is refused, nothing is run or deleted, and the message
+    names newton-ad-setup approval-key."""
+    _ad_inventory(inventory, platform)
+    home = tmp_path / "newton-home"
+    (home / "scripts").mkdir(parents=True)
+    (home / "scripts" / "newton-router-setup").write_text("#!/bin/sh\n")
+    monkeypatch.setenv("NEWTON_HOME", str(home))
+    _seed_rotatable_state(AD_DOMAIN)
+    monkeypatch.setattr(sys, "stdin", FakeStdin([f"rotate {AD_DOMAIN}"]))
+
+    assert enrol.main(["rotate", AD_DOMAIN]) == 2
+
+    err = capsys.readouterr().err
+    assert calls == []
+    assert "Active Directory" in err
+    assert (
+        f"sudo -u newton /usr/local/bin/newton-ad-setup approval-key {AD_DOMAIN}"
+        in err
+    )
+    for path in _rotated_files(AD_DOMAIN):
+        assert path.exists(), path
+
+
+@pytest.mark.parametrize("argv", [["totp", AD_DOMAIN], ["level", AD_DOMAIN, "totp"]])
+def test_an_authenticator_is_refused_for_an_ad_entry(
+    monkeypatch, capsys, inventory, no_qrencode, argv
+):
+    """AD approvals ask for the passphrase only, so enrolling an
+    authenticator for an AD entry (or switching its level to totp) would
+    tell the owner something false.  Both are refused and nothing is
+    stored."""
+    _ad_inventory(inventory)
+    _write_fingerprint(AD_DOMAIN)
+    if argv[0] == "level":
+        # a record left over (say, from before the entry was an AD one):
+        # without the refusal the level would switch to totp
+        proof.store_totp(AD_DOMAIN, SEED, _k(AD_DOMAIN))
+    had_record = proof.load_totp(AD_DOMAIN) is not None
+    monkeypatch.setattr(proof, "generate_seed", lambda: SEED)
+    _type_passphrase(monkeypatch)
+    monkeypatch.setattr(sys, "stdin", FakeStdin([lambda: _current_code()]))
+
+    assert enrol.main(argv) == 2
+
+    out = capsys.readouterr()
+    assert "passphrase only" in out.err
+    assert "otpauth" not in out.out
+    assert (proof.load_totp(AD_DOMAIN) is not None) == had_record
+    assert proof.get_level(AD_DOMAIN) == proof.LEVEL_PASSPHRASE
+
+
+def test_level_passphrase_still_works_for_an_ad_entry(monkeypatch, inventory):
+    """Going back to the passphrase is always allowed: it is what AD uses."""
+    _ad_inventory(inventory)
+    monkeypatch.setattr(sys, "stdin", FakeStdin())
+
+    assert enrol.main(["level", AD_DOMAIN, "passphrase"]) == 0
+
+
+def test_rotate_with_a_missing_setup_tool_never_repeats_the_missing_path(
+    monkeypatch, tmp_path, capsys
+):
+    """the "run this yourself" line repeated the path it had just
+    called missing.  It now tells the owner how to point newton-enrol at
+    the tool instead."""
+    home = tmp_path / "newton-home"
+    home.mkdir()
+    monkeypatch.setenv("NEWTON_HOME", str(home))
+    _seed_rotatable_state()
+    monkeypatch.setattr(sys, "stdin", FakeStdin([f"rotate {DEVICE}"]))
+
+    assert enrol.main(["rotate", DEVICE]) == 1
+
+    out = capsys.readouterr()
+    text = out.out + out.err
+    missing = f"{home}/scripts/newton-router-setup"
+    assert f"{missing} {DEVICE} approval-key" not in text
+    assert "NEWTON_HOME" in text
+    for path in _rotated_files():
+        assert path.exists(), path
+
+
+def test_rotate_in_a_source_checkout_runs_the_source_tree_setup(
+    monkeypatch, tmp_path, calls
+):
+    """with no NEWTON_HOME and nothing at /opt/newton, the setup
+    tool of the source tree this module runs from is the one to run."""
+    monkeypatch.delenv("NEWTON_HOME", raising=False)
+    monkeypatch.setattr(enrol, "DEFAULT_NEWTON_HOME", str(tmp_path / "no-such-home"))
+    _seed_rotatable_state()
+    monkeypatch.setattr(sys, "stdin", FakeStdin([f"rotate {DEVICE}"]))
+
+    assert enrol.main(["rotate", DEVICE]) == 0
+
+    source = Path(enrol.__file__).resolve().parents[2] / "scripts" / "newton-router-setup"
+    assert source.is_file()
+    assert calls == [[str(source), DEVICE, "approval-key"]]
+
+
+def test_a_failed_rotate_names_the_router_and_never_says_nothing_changed(
+    monkeypatch, tmp_path, capsys
+):
+    """the setup tool writes the router's new approve.key before
+    its selftest, so a failure can leave the router on the new key.  The
+    message must not say nothing changed; it names the router and says
+    to run rotate again."""
+    home = tmp_path / "newton-home"
+    (home / "scripts").mkdir(parents=True)
+    (home / "scripts" / "newton-router-setup").write_text("#!/bin/sh\n")
+    monkeypatch.setenv("NEWTON_HOME", str(home))
+    _seed_rotatable_state()
+    monkeypatch.setattr(sys, "stdin", FakeStdin([f"rotate {DEVICE}"]))
+    monkeypatch.setattr(
+        subprocess, "run", lambda argv, *a, **k: subprocess.CompletedProcess(list(argv), 2)
+    )
+
+    assert enrol.main(["rotate", DEVICE]) == 2
+
+    err = capsys.readouterr().err
+    assert "nothing on this host was changed" not in err
+    assert f"the router {DEVICE} may already hold the new key" in err
+    assert f"newton-enrol rotate {DEVICE} again" in err
+
+
+# ---- the installed launcher form ------------------------------------------
+
+
+def test_an_installed_enrol_names_the_sudo_form_without_a_fingerprint(
+    monkeypatch, tmp_path, capsys, no_qrencode
+):
+    monkeypatch.setenv("NEWTON_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(proof, "generate_seed", lambda: SEED)
+    _type_passphrase(monkeypatch)
+    monkeypatch.setattr(sys, "stdin", FakeStdin([lambda: _current_code()]))
+
+    assert enrol.main(["totp", DEVICE]) == 1
+
+    err = capsys.readouterr().err
+    assert (
+        f"run sudo -u newton /usr/local/bin/newton-router-setup {DEVICE} approval-key first"
+        in err
+    )
+
+
+def test_an_installed_level_totp_names_the_sudo_form(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("NEWTON_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys, "stdin", FakeStdin())
+
+    assert enrol.main(["level", DEVICE, "totp"]) == 1
+
+    err = capsys.readouterr().err
+    assert f"sudo -u newton /usr/local/bin/newton-enrol totp {DEVICE}" in err
+
+
+def test_an_installed_rotate_names_the_sudo_form_of_enrol_totp(
+    monkeypatch, tmp_path, capsys, calls
+):
+    home = tmp_path / "newton-home"
+    (home / "scripts").mkdir(parents=True)
+    (home / "scripts" / "newton-router-setup").write_text("#!/bin/sh\n")
+    monkeypatch.setenv("NEWTON_HOME", str(home))
+    _seed_rotatable_state()
+    monkeypatch.setattr(sys, "stdin", FakeStdin([f"rotate {DEVICE}"]))
+
+    assert enrol.main(["rotate", DEVICE]) == 0
+
+    out = capsys.readouterr().out
+    assert f"sudo -u newton /usr/local/bin/newton-enrol totp {DEVICE}" in out

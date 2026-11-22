@@ -24,7 +24,9 @@ One run of the helper is one request and one answer:
 The answer is one JSON object on stdout, `{"v":1,"code":<code>, ...}`. The exit code is 0 whatever
 the outcome; a non-zero exit means the helper itself crashed. The codes are `ok`, `schema`,
 `bad_token`, `expired`, `replay`, `not_found`, `conflict`, `privileged`, `denied`, `unavailable`,
-`not_pdc`, `risk_mismatch` and `error`.
+`not_pdc`, `risk_mismatch` and `error`. A refusal of the checks made before the request is acted on (the
+login is not the write login, the install is not safe, the device file cannot be used) carries
+`"stage":"install"` beside its code: the helper wrote nothing and created no record.
 
 Every write is one atomic LDAP modify: the message holds the exact old value with `FLAG_MOD_DELETE`
 and the new value with `FLAG_MOD_ADD`, and it holds the name of the object, because that is the
@@ -71,7 +73,9 @@ The undo is armed with `systemd-run` and cancelled with `systemctl stop`. Both c
 argv list, never through a shell. The one-shot timer lives under `/run`, so a reboot drops it, and an
 undo whose run fails (a bind or an LDAP error) is not tried again by it. The setup therefore installs
 a persistent timer, `newton-ad-sweep.timer`, which runs `newton-ad-samba-write --sweep` once after boot
-and about once a minute: an armed change whose deadline has passed is put back then. A DC set up
+and about once a minute: an armed change whose deadline has passed is put back then. A bind that fails
+ends the pass (one bind per pass, never one per record), and a pass that leaves an expired change
+armed because its bind or undo failed answers `error`, so the unit is recorded failed. A DC set up
 before the sweep timer existed retries only at the next Newton request; run the write setup again to
 install it.
 

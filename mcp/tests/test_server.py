@@ -1287,6 +1287,20 @@ def test_a_plan_that_times_out_says_staging_is_not_known(configured, monkeypatch
     assert "did not finish in time" in error, result
     assert "not known" in error
     assert "abort that session" in error
+    # a router that takes the connection and never answers times out every
+    # plan: the message says so before it says plan again
+    assert "may not be answering" in error
+    assert "newton_read uptime" in error
+    assert error.index("newton_read uptime") < error.index("plan again")
+
+
+def test_a_status_that_times_out_names_a_router_that_does_not_answer(
+    configured, monkeypatch
+):
+    monkeypatch.setattr(server.NewtonService, "run_script", _timed_out)
+    result = server.newton_change_status("quasar", SID)
+    assert "may not be answering" in result["next_step"], result
+    assert "newton_read uptime" in result["next_step"]
 
 
 @pytest.mark.parametrize(("tool", "method", "arguments"), [

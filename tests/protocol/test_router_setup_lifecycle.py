@@ -239,9 +239,13 @@ def test_upgrade_live_helper_lock_refuses(setup_env, tmp_path):
 	assert env.router.snapshot() == before
 
 
-def test_upgrade_failed_guard_does_not_block(setup_env, tmp_path):
-	"""A `failed x y` guard does NOT refuse; only program and helper get
-	upgraded, guard and init stay as before."""
+def test_upgrade_failed_guard_with_a_new_guard_stops_without_done(setup_env, tmp_path):
+	"""A `failed x y` guard is not refused at step 2 and its
+	files are not replaced (a failed guard needs the owner's recover
+	first), but when this Newton ships a different guard the run must
+	not end in DONE: every later change would die demanding an upgrade
+	that skips the guard again.  The run stops naming the guard status
+	and the recover step; program and helper are upgraded."""
 	env = setup_env
 	install_ok(env)
 	guard_before = env.router.read(GUARD)
@@ -251,10 +255,22 @@ def test_upgrade_failed_guard_does_not_block(setup_env, tmp_path):
 	src2_helper = (src2_path / HELPER_REL).read_text()
 	env.router.write("etc/newton/guard-state", "failed x y\n")
 	r = run(env, "upgrade", src=src2_path)
-	assert r.rc == 0
+	assert r.rc == 1, r.out + r.err
 	lines = r.out.splitlines()
 	assert not any(l.startswith("WARN upgrade refused") for l in lines)
-	assert lines[-1] == "DONE upgrade r1"
+	assert not any(l.startswith("DONE ") for l in lines), r.out
+	assert lines[-1] == "STOPPED upgrade r1: the guard was not upgraded"
+	warns = [l for l in lines if l.startswith("WARN upgrade guard:")]
+	assert warns == [
+		"WARN upgrade guard: the guard and its init were not replaced "
+		"because the guard status is 'failed x y'; to clear it, as root on "
+		"the router run /usr/libexec/newton-guard recover (keeps the live "
+		"settings) or /usr/libexec/newton-guard recover restore <txn> "
+		"(puts a saved copy back), then run: sudo -u newton "
+		"/usr/local/bin/newton-router-setup r1 upgrade"], r.out
+	notes = [l for l in lines if l.startswith("NOTE state: ")]
+	assert notes == ["NOTE state: program and helper are upgraded; the "
+	                 "guard and its init are the old ones"], r.out
 	assert env.router.read(PROG) == src2_prog
 	assert env.router.read(HELPER) == src2_helper
 	assert env.router.read(GUARD) == guard_before
@@ -263,24 +279,82 @@ def test_upgrade_failed_guard_does_not_block(setup_env, tmp_path):
 	assert not env.router.path(INIT + ".new").exists()
 
 
-def test_upgrade_restored_guard_does_not_block(setup_env, tmp_path):
-	"""A `restored t boot` guard does NOT refuse; program and helper
-	get upgraded, guard and init stay as before."""
+@pytest.mark.parametrize("state", ["cannot-run", "failed"])
+def test_upgrade_with_a_guard_it_cannot_replace_names_the_way_back(setup_env, tmp_path, state):
+	"""A guard the upgrade cannot replace stops the run: every later
+	change would die demanding an upgrade that skips the guard again.
+
+	A guard that reports no status cannot run, so its warning
+	says so and names the owner's way back: the full install run for
+	that device.  Every other status
+	keeps today's message, with the recover step."""
 	env = setup_env
 	install_ok(env)
-	guard_before = env.router.read(GUARD)
-	init_before = env.router.read(INIT)
 	src2_path = src2(tmp_path)
-	src2_prog = (src2_path / PROG_REL).read_text()
-	src2_helper = (src2_path / HELPER_REL).read_text()
+	if state == "cannot-run":
+		env.router.path(GUARD).chmod(0o644)
+	else:
+		env.router.write("etc/newton/guard-state", "failed x y\n")
+	r = run(env, "upgrade", src=src2_path)
+	assert r.rc == 1, r.out + r.err
+	lines = r.out.splitlines()
+	assert lines[-1] == "STOPPED upgrade r1: the guard was not upgraded"
+	warns = [l for l in lines if l.startswith("WARN upgrade guard:")]
+	assert len(warns) == 1, r.out
+	if state != "failed":
+		assert "reports no status (it looks broken)" in warns[0], warns[0]
+		assert "newton-guard recover" not in warns[0], warns[0]
+		assert ("sudo -u newton /usr/local/bin/newton-router-setup r1 install"
+		        in warns[0]), warns[0]
+	else:
+		assert "the guard status is 'failed x y'" in warns[0], warns[0]
+		assert "/usr/libexec/newton-guard recover" in warns[0], warns[0]
+		assert ("sudo -u newton /usr/local/bin/newton-router-setup r1 upgrade"
+		        in warns[0]), warns[0]
+
+
+def test_upgrade_failed_guard_with_the_same_guard_is_done(setup_env, tmp_path):
+	"""A failed guard whose files already match this Newton's
+	does not stop the upgrade: only the program changed."""
+	env = setup_env
+	install_ok(env)
+	src_p = build_src(tmp_path / "srcp", version="2.0.0")
+	env.router.write("etc/newton/guard-state", "failed x y\n")
+	r = run(env, "upgrade", src=src_p)
+	assert r.rc == 0, r.out + r.err
+	assert r.out.splitlines()[-1] == "DONE upgrade r1"
+	assert env.router.read(PROG) == (src_p / PROG_REL).read_text()
+
+
+def test_upgrade_restored_guard_upgrades_the_guard(setup_env, tmp_path):
+	"""A `restored t boot` guard has no change in flight (the
+	state stays until the next arm), so it is as safe as idle: guard
+	and init are uploaded and checked too, and the run ends in DONE."""
+	env = setup_env
+	install_ok(env)
+	src2_path = src2(tmp_path)
 	env.router.write("etc/newton/guard-state", "restored t boot\n")
 	r = run(env, "upgrade", src=src2_path)
-	assert r.rc == 0
+	assert r.rc == 0, r.out + r.err
 	assert r.out.splitlines()[-1] == "DONE upgrade r1"
-	assert env.router.read(PROG) == src2_prog
-	assert env.router.read(HELPER) == src2_helper
-	assert env.router.read(GUARD) == guard_before
-	assert env.router.read(INIT) == init_before
+	for rel, remote in ((PROG_REL, PROG), (HELPER_REL, HELPER),
+	                    (GUARD_REL, GUARD), (INIT_REL, INIT)):
+		assert env.router.read(remote) == (src2_path / rel).read_text(), remote
+
+
+def test_upgrade_idle_guard_with_a_skipped_line_upgrades_the_guard(setup_env, tmp_path):
+	"""A /etc/config entry the guard cannot name adds a second
+	`skipped <name>` line to its status; only the first line is the
+	status, so the guard is still idle and gets upgraded."""
+	env = setup_env
+	install_ok(env)
+	src2_path = src2(tmp_path)
+	env.router.write("etc/newton/guard-skipped", "bad\\x20name\n")
+	r = run(env, "upgrade", src=src2_path)
+	assert r.rc == 0, r.out + r.err
+	assert r.out.splitlines()[-1] == "DONE upgrade r1"
+	assert env.router.read(GUARD) == (src2_path / GUARD_REL).read_text()
+	assert env.router.read(INIT) == (src2_path / INIT_REL).read_text()
 
 
 # -- 5. broken new program -----------------------------------------------

@@ -2220,3 +2220,26 @@ def test_a_batch_that_also_sets_something_still_asks(tmp_path: Path) -> None:
     assert asked, "the owner is still asked to keep it"
     assert verdict.state == owner_verify.UNKNOWN
     assert router.confirms == 0
+
+
+def test_unknown_advice_names_the_installed_launcher(monkeypatch, tmp_path):
+    """the installed newton-router-setup refuses any user but
+    newton, so on an installed Newton the advice is the sudo form."""
+    sid = "0123456789abcdef0123456789abcdef"
+    monkeypatch.setenv("NEWTON_HOME", str(tmp_path / "home"))
+
+    advice = owner_verify.unknown_advice("lab-r1", sid, time.time() + 60)
+
+    assert (
+        f"`sudo -u newton /usr/local/bin/newton-router-setup lab-r1 owner-finish {sid}`"
+        in advice
+    )
+
+
+def test_unknown_advice_in_a_source_tree_keeps_the_bare_name(monkeypatch):
+    sid = "0123456789abcdef0123456789abcdef"
+    monkeypatch.delenv("NEWTON_HOME", raising=False)
+
+    advice = owner_verify.unknown_advice("lab-r1", sid, time.time() + 60)
+
+    assert f"`newton-router-setup lab-r1 owner-finish {sid}`" in advice

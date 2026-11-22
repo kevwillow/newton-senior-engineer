@@ -195,8 +195,11 @@ def _write_record(path: Path, record: dict[str, Any]) -> None:
     handle = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     with os.fdopen(handle, "w", encoding="utf-8") as stream:
         stream.write(json.dumps(record, sort_keys=True))
+        stream.flush()
+        os.fsync(stream.fileno())
     os.chmod(tmp, 0o600)
     tmp.replace(path)
+    _receipts.fsync_dir(path.parent)
 
 
 # -------------------------------------------------------------- the receipts

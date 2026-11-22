@@ -82,6 +82,19 @@ def _names(target_names: Any) -> list[str]:
     return names
 
 
+#: The refusal of a name outside the sam pattern names the pattern: the
+#: agent can then write a mixed-case name in lowercase (both helpers compare
+#: names without their case) and knows that some names cannot be named.
+SAM_PATTERN_REFUSAL = (
+    "a name of the target is outside the sam pattern: a name is 1 to 20 "
+    "characters of lowercase letters, digits, '.', '_' and '-', starting "
+    "with a letter or a digit (a computer's name ends in $). Write a "
+    "mixed-case name in lowercase (JSmith as jsmith): the directory compares "
+    "names without their case. A name with a space or any other character "
+    "cannot be named: change that object with the admin tools."
+)
+
+
 def _check_names(verb: str, names: list[str]) -> None:
     """The names of the target: the right count, and every one a sam."""
     if verb in TWO_NAMES:
@@ -99,7 +112,7 @@ def _check_names(verb: str, names: list[str]) -> None:
             request.SAM_RE.fullmatch(name) is None
             and request.COMPUTER_SAM_RE.fullmatch(name) is None
         ):
-            raise WriteError("a name of the target is outside the sam pattern")
+            raise WriteError(SAM_PATTERN_REFUSAL)
 
 
 #: TRUSTED_FOR_DELEGATION: the directory lets only a holder of

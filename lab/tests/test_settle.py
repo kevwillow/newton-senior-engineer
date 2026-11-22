@@ -852,3 +852,41 @@ def test_an_unknown_access_mode_is_refused(monkeypatch, tmp_path, capsys):
     assert rc == 2
     err = capsys.readouterr().err
     assert "access" in err, err
+
+
+# ---------- [settle] values are checked when the lab file is read ----------
+
+def _lab_file_with_settle(tmp_path: Path, settle: str) -> Path:
+    import re
+    text = Path(LAB_TOML).read_text(encoding="utf-8")
+    text, n = re.subn(r"(?ms)^\[settle\]\n.*?(?=^\[|\Z)", "[settle]\n" + settle + "\n\n", text)
+    assert n == 1, "the lab file has no [settle] table"
+    path = tmp_path / "lab.toml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("settle,key", [
+    ("quiet_s = 10\ntimeout_s = inf\npoll_s = 1", "settle.timeout_s"),
+    ("quiet_s = 10\ntimeout_s = nan\npoll_s = 1", "settle.timeout_s"),
+    ("quiet_s = 10\ntimeout_s = 0\npoll_s = 1", "settle.timeout_s"),
+    ("quiet_s = 10\ntimeout_s = 120\npoll_s = 0", "settle.poll_s"),
+    ("quiet_s = 10\ntimeout_s = 120\npoll_s = -1", "settle.poll_s"),
+    ("quiet_s = 10\ntimeout_s = 120\npoll_s = inf", "settle.poll_s"),
+    ("quiet_s = -1\ntimeout_s = 120\npoll_s = 1", "settle.quiet_s"),
+    ("quiet_s = inf\ntimeout_s = 120\npoll_s = 1", "settle.quiet_s"),
+    ('quiet_s = 10\ntimeout_s = "soon"\npoll_s = 1', "settle.timeout_s"),
+])
+def test_settle_values_must_be_finite_and_in_range(tmp_path, settle, key):
+    """timeout_s = inf would ssh-poll forever and poll_s = 0 would busy-loop:
+    the lab file is refused when it is read, naming the key."""
+    with pytest.raises(nl.LabConfigError) as e:
+        nl.load_lab(_lab_file_with_settle(tmp_path, settle))
+    assert key in str(e.value)
+
+
+def test_settle_quiet_zero_and_defaults_are_accepted(tmp_path):
+    lab = nl.load_lab(_lab_file_with_settle(tmp_path, "quiet_s = 0\ntimeout_s = 0.5\npoll_s = 0.1"))
+    assert (lab.settle_quiet_s, lab.settle_timeout_s, lab.settle_poll_s) == (0, 0.5, 0.1)
+    lab = nl.load_lab(_lab_file_with_settle(tmp_path, ""))
+    assert (lab.settle_quiet_s, lab.settle_timeout_s, lab.settle_poll_s) == (10, 120, 1)

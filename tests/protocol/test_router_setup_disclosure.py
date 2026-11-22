@@ -322,6 +322,26 @@ def test_the_block_gives_the_whole_wan_health_enable_step():
 	        "(iface) and the probe targets (target) it watches.") in block
 
 
+def test_the_block_says_what_the_wan_health_check_costs_in_data():
+	"""The check pings from every listed WAN every round, forever,
+	so the block that says how to turn it on also says what it costs on
+	a metered WAN and how to avoid that."""
+	block = flat(render_block(REPO))
+	assert ("Once on, it pings a target from every listed WAN every interval "
+	        "seconds (5 by default), about 85 MB a month per WAN: leave a "
+	        "metered WAN out of iface or raise interval.") in block
+
+
+def test_the_block_says_a_firmware_upgrade_after_uninstall_drops_the_kept_copies():
+	"""Uninstall takes the lkg and quarantine lines out of
+	/etc/sysupgrade.conf with the other Newton lines, so the copies it
+	keeps go at the next firmware upgrade; the block has to say so."""
+	block = flat(render_block(REPO))
+	assert ("The kept copies of your settings are no longer in "
+	        "/etc/sysupgrade.conf, so the next firmware upgrade drops them: "
+	        "copy them off the router first if you still want them.") in block
+
+
 def test_the_leash_count_in_the_block_is_the_router_programs():
 	"""The "N rules in all" of the block is the number of distinct leash
 	codes the router program can fire, so a new rule cannot leave the

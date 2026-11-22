@@ -225,3 +225,23 @@ def test_abort_of_a_gone_session_says_the_outcome_is_not_known(lab, was_applied)
     assert not any("uci rollback" in c for c in lab.ubus_calls())
     if was_applied:
         assert "an apply of this session was recorded" in out
+
+
+def test_apply_whose_deadline_record_cannot_be_written_rolls_back_and_fails(lab):
+    """The deadline file is the helper's only record of the apply: when it
+    cannot be written, status would say staged and abort would not roll back
+    an applied change, so the helper rolls the change back at once and fails
+    instead of printing APPLIED."""
+    lab.lock.chmod(0o500)
+    try:
+        res = lab.run("apply", SID, "90")
+    finally:
+        lab.lock.chmod(0o700)
+
+    assert res.returncode == 1, res.stdout
+    assert "APPLIED" not in res.stdout
+    assert "cannot record the apply deadline" in res.stderr
+    assert "rolled the change back" in res.stderr
+    calls = lab.ubus_calls()
+    apply_at = next(i for i, c in enumerate(calls) if "uci apply" in c)
+    assert any("uci rollback" in c for c in calls[apply_at:]), calls

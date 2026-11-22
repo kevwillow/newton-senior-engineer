@@ -150,6 +150,7 @@ import fcntl
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import posixpath
 import re
@@ -835,6 +836,20 @@ def _load_device_with_kind(name: str, dev: dict) -> Device:
                   router_key=router_key, lab=True, board_name=board_name)
 
 
+def _settle_seconds(settle: dict[str, Any], key: str, default: float, *, zero_ok: bool) -> float:
+    """A [settle] value in seconds: a finite number, above zero (or at
+    least zero when ``zero_ok``). timeout_s = inf would ssh-poll forever
+    and poll_s = 0 would busy-loop."""
+    raw = settle.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise LabConfigError(f"settle.{key}: must be a number of seconds, got {raw!r}")
+    value = float(raw)
+    if not math.isfinite(value) or value < 0 or (value == 0 and not zero_ok):
+        bound = "zero or more" if zero_ok else "more than zero"
+        raise LabConfigError(f"settle.{key}: must be a finite number of seconds, {bound}; got {raw!r}")
+    return value
+
+
 def load_lab(path: Path) -> Lab:
     data = tomllib.loads(path.read_text())
     pve = data["pve"]
@@ -911,9 +926,9 @@ def load_lab(path: Path) -> Lab:
         known_hosts=_expand(str(ssh.get("known_hosts", ""))),
         devices=devs,
         var_defs=var_defs,
-        settle_quiet_s=float(settle.get("quiet_s", 10)),
-        settle_timeout_s=float(settle.get("timeout_s", 120)),
-        settle_poll_s=float(settle.get("poll_s", 1)),
+        settle_quiet_s=_settle_seconds(settle, "quiet_s", 10, zero_ok=True),
+        settle_timeout_s=_settle_seconds(settle, "timeout_s", 120, zero_ok=False),
+        settle_poll_s=_settle_seconds(settle, "poll_s", 1, zero_ok=False),
         checks=checks,
         steps=steps,
         regression_default=reg_default,

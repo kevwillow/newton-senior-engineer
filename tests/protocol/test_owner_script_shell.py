@@ -946,6 +946,16 @@ def test_the_apply_stops_on_a_leftover_undo_file_and_says_the_way_out(
         in run.out
     ), run.out
     assert "rm -rf /var/run/rpcd/snapshot-files" in run.out
+    # The folder is the only copy of the settings from before the
+    # change; the way to put them back comes before the way to clear it
+    assert (
+        "The live settings may still hold that change: "
+        "/var/run/rpcd/snapshot-files holds the settings from before it"
+    ) in run.out
+    assert (
+        "To undo the change, as root run: cp /var/run/rpcd/snapshot-files/* "
+        "/etc/config/ && reload_config && rm -rf /var/run/rpcd/snapshot-files."
+    ) in run.out
     _no_apply(run)
 
 

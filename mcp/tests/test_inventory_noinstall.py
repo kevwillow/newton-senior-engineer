@@ -35,7 +35,7 @@ def no_install_message(tool: str = "this tool") -> str:
     return (
         f"{tool} is not available for device lab-r1: it uses no-install access, "
         "where Newton reads, plans, applies, shows the status of and aborts a "
-        "change. If this tool is needed, the owner can switch the router to the "
+        "change, and ends an easy grant. If this tool is needed, the owner can switch the router to the "
         "installed mode: newton-router-setup lab-r1 uninstall, then install"
     )
 
@@ -331,6 +331,23 @@ def test_every_other_device_tool_refuses_a_no_install_device(
         assert result.get("error") == no_install_message(tool), tool
         assert "cannot manage" not in result["error"], tool
     assert ran == [], "no tool may reach ssh for a no-install device"
+
+
+def test_an_installed_no_install_refusal_names_the_sudo_form(
+    tmp_path, monkeypatch
+) -> None:
+    """the installed launcher refuses the bare name, so the way
+    to the installed mode is its sudo form."""
+    _write_inventory(tmp_path, monkeypatch, _no_install_body(tmp_path))
+    monkeypatch.setenv("NEWTON_HOME", str(tmp_path / "home"))
+
+    result = server.newton_backup("lab-r1")
+
+    assert result["error"].endswith(
+        "the owner can switch the router to the installed mode: "
+        "sudo -u newton /usr/local/bin/newton-router-setup lab-r1 uninstall, "
+        "then install"
+    ), result
 
 
 def _refuse_ssh(monkeypatch) -> None:
@@ -629,7 +646,6 @@ def test_the_no_install_device_advertises_no_installed_only_tool(
         "newton_guided_audit",
         "newton_plan_scan",
         "newton_run_scan",
-        "newton_grant_off",
     ):
         assert tool not in tools, tool
     # the getter catalog is the vendor mechanism: the getter loader
@@ -680,3 +696,22 @@ def test_a_bad_https_host_refusal_states_the_host_rule(tmp_path, monkeypatch) ->
     assert str(caught.value) == (
         "device lab-r1: https_host fails the hostname grammar: " + server.HOST_RULE
     )
+
+
+def test_grant_off_ends_a_grant_on_a_no_install_device(
+    tmp_path, monkeypatch
+) -> None:
+    """A grant covers no-install plans, so the owner can ask the agent to
+    end it there too: newton_grant_off answers for the device, the grant
+    is gone, and the device listing advertises the tool."""
+    from newton_mcp import grants
+
+    _write_inventory(tmp_path, monkeypatch, _no_install_body(tmp_path))
+    grants.open_grant("lab-r1", ["dhcp-reservations"], 1, "ab" * 32, "0" * 32)
+    assert grants.load_live_grant("lab-r1") is not None
+
+    result = server.newton_grant_off("lab-r1")
+
+    assert result == {"result": "ok", "revoked": True}, result
+    assert grants.load_live_grant("lab-r1") is None
+    assert "newton_grant_off" in _device_row("lab-r1")["capabilities"]["tools"]

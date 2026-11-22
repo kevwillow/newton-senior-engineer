@@ -802,29 +802,60 @@ def quarantined_restore(router, txn, extra=b"extra\n"):
     assert (result.returncode, result.stdout) == (0, f"restored {txn} manual\n")
 
 
-def test_g6_five_quarantine_dirs_kept(router):
+def rq(seq):
+    """A recover-<timestamp> name (the only kind of directory prune removes)."""
+    return f"recover-20260101T0000{seq:02d}"
+
+
+def test_g6_restore_quarantine_dirs_never_pruned(router):
+    """A restore's quarantine holds the owner's files (entries that were not
+    in the LKG, such as a config a package added during the window): they
+    are never pruned, by count or by size, whatever follows."""
     for i in range(1, 8):
         flatten_mtimes(router)
-        quarantined_restore(router, f"txn-{i:04d}")
-        assert len(qnames(router)) <= 5
-    assert qnames(router) == {f"txn-{i:04d}" for i in range(3, 8)}
+        quarantined_restore(router, f"txn-{i:04d}", extra=b"x" * (100 * 1024))
+    assert qnames(router) == {f"txn-{i:04d}" for i in range(1, 8)}
+    assert (router / QROOT / "txn-0001/extra").read_bytes() == b"x" * (100 * 1024)
+    log = guard_log_text(router)
+    assert "pruned quarantine" not in log
+    assert "quarantined txn=txn-0001 entries=1 dir=/etc/newton/quarantine/txn-0001" in log
+
+
+def test_g6_confirm_keeps_restore_quarantine_dirs(router):
+    for i in range(1, 8):
+        make_qdir(router, f"txn-{i:04d}", i)
+    arm(router, "txn-0009")
+    result = run_guard(router, "confirm", "txn-0009")
+    assert (result.returncode, result.stdout) == (0, "confirmed txn-0009\n")
+    assert qnames(router) == {f"txn-{i:04d}" for i in range(1, 8)}
+
+
+def test_g6_five_recover_dirs_kept(router):
+    for seq in range(1, 8):
+        make_qdir(router, rq(seq), seq)
+    quarantined_restore(router, "txn-0001")
+    assert qnames(router) == {"txn-0001"} | {rq(s) for s in range(3, 8)}
 
 
 def test_g6_prune_orders_by_seq_not_mtime(router):
     old = time.mktime((2001, 1, 1, 0, 0, 0, 0, 0, 0))
-    for seq in range(1, 6):
+    for seq in range(1, 7):
         # The oldest (.seq 1) directory gets the NEWEST mtime.
-        make_qdir(router, f"pre-{seq}", seq, mtime=old if seq > 1 else time.time())
+        make_qdir(router, rq(seq), seq, mtime=old if seq > 1 else time.time())
     quarantined_restore(router, "txn-0001")
-    assert qnames(router) == {"txn-0001", "pre-2", "pre-3", "pre-4", "pre-5"}
+    assert qnames(router) == {"txn-0001"} | {rq(s) for s in range(2, 7)}
 
 
 def test_g6_size_cap_256kib(router):
-    for i in range(1, 4):
-        quarantined_restore(router, f"txn-{i:04d}", extra=b"x" * (100 * 1024))
-    assert qnames(router) == {"txn-0002", "txn-0003"}
+    for seq in range(1, 4):
+        d = make_qdir(router, rq(seq), seq)
+        (d / "junk").write_bytes(b"x" * (100 * 1024))
+    quarantined_restore(router, "txn-0001", extra=b"x" * (100 * 1024))
+    assert qnames(router) == {"txn-0001", rq(2), rq(3)}
     total = 0
     for d in (router / QROOT).iterdir():
+        if not d.name.startswith("recover-"):
+            continue
         out = subprocess.run(
             ["du", "-sk", str(d)], capture_output=True, text=True, check=True
         ).stdout
@@ -832,52 +863,52 @@ def test_g6_size_cap_256kib(router):
     assert total <= 256
 
 
-def test_g6_active_dir_protected_from_size_rule(router):
+def test_g6_active_dir_kept_over_the_size_cap(router):
     make_qdir(router, "old-txn-0000", 1)
     arm(router)
     (router / "etc/config/extra").write_bytes(b"x" * (300 * 1024))
     result = run_guard(router, "restore", "manual")
     assert (result.returncode, result.stdout) == (0, "restored txn-0001 manual\n")
-    assert qnames(router) == {"txn-0001"}
+    assert qnames(router) == {"old-txn-0000", "txn-0001"}
     assert (router / QROOT / "txn-0001/extra").stat().st_size == 300 * 1024
 
 
 def test_g6_active_protected_with_lowest_seq(router):
     for seq in range(10, 16):
-        make_qdir(router, f"pre-{seq}", seq)
+        make_qdir(router, rq(seq), seq)
     make_qdir(router, "txn-0001", 1)
     quarantined_restore(router, "txn-0001")
-    assert qnames(router) == {"txn-0001"} | {f"pre-{s}" for s in range(11, 16)}
+    assert qnames(router) == {"txn-0001"} | {rq(s) for s in range(11, 16)}
 
 
 def test_g6_confirm_prunes_quarantine(router):
     for seq in range(1, 9):
-        make_qdir(router, f"q-{seq}", seq)
+        make_qdir(router, rq(seq), seq)
     make_qdir(router, "txn-0001", 2)
     arm(router)
     result = run_guard(router, "confirm", "txn-0001")
     assert (result.returncode, result.stdout) == (0, "confirmed txn-0001\n")
-    assert qnames(router) == {"txn-0001"} | {f"q-{s}" for s in range(4, 9)}
+    assert qnames(router) == {"txn-0001"} | {rq(s) for s in range(4, 9)}
 
 
 def test_g6_dir_without_seq_is_oldest(router):
-    noseq = router / QROOT / "noseq"
+    noseq = router / QROOT / "recover-20250101T000000"
     noseq.mkdir(parents=True)
     (noseq / "junk").write_bytes(b"x\n")
-    for seq in range(1, 5):
-        make_qdir(router, f"q-{seq}", seq)
+    for seq in range(1, 6):
+        make_qdir(router, rq(seq), seq)
     quarantined_restore(router, "txn-0001")
-    assert qnames(router) == {"txn-0001", "q-1", "q-2", "q-3", "q-4"}
+    assert qnames(router) == {"txn-0001"} | {rq(s) for s in range(1, 6)}
 
 
 def test_g6_fifo_in_quarantine_does_not_hang_pruning(router):
-    for seq in range(1, 7):
-        make_qdir(router, f"q-{seq}", seq)
-    # q-6 survives the count rule, so its size is measured: reading a FIFO would block forever.
-    os.mkfifo(router / QROOT / "q-6/fifo")
+    for seq in range(1, 8):
+        make_qdir(router, rq(seq), seq)
+    # rq(7) survives the count rule, so its size is measured: reading a FIFO would block forever.
+    os.mkfifo(router / QROOT / rq(7) / "fifo")
     quarantined_restore(router, "txn-0001")
-    assert "q-1" not in qnames(router)
-    assert "q-6" in qnames(router)
+    assert rq(1) not in qnames(router)
+    assert rq(7) in qnames(router)
 
 
 # the operator recover command.
@@ -1052,19 +1083,22 @@ def test_g2_recover_crash_safety(router, tmp_path):
 
 
 def test_g2_recover_dir_protected_from_prune(router):
-    for seq in range(100, 106):
-        make_qdir(router, f"pre-{seq}", seq)
+    for seq in range(0, 6):
+        make_qdir(router, f"recover-20250101T00000{seq}", 100 + seq)
     arm(router)
     change_config(router)
     (router / "etc/newton/pending").write_text("garbage\n")
     result = run_guard(router, "recover", "restore", "txn-0001")
     assert (result.returncode, result.stdout) == (0, "restored txn-0001 recover\n")
     names = qnames(router)
-    rec = [n for n in names if n.startswith("recover-")]
+    rec = [n for n in names if n.startswith("recover-") and not n.startswith("recover-2025")]
     assert len(rec) == 1
-    # The 5-rule ran (oldest of the six pre-made dirs were removed) yet the
-    # fresh recover directory and the restored transaction's directory remain.
-    assert names == {rec[0], "txn-0001", "pre-103", "pre-104", "pre-105"}
+    # The 5-rule ran over the recover directories (the oldest of the six
+    # pre-made ones were removed) yet the fresh recover directory and the
+    # restored transaction's directory remain.
+    assert names == {rec[0], "txn-0001"} | {
+        f"recover-20250101T00000{seq}" for seq in range(2, 6)
+    }
 
 
 def test_g2_recover_dir_survives_size_pressure(router):
@@ -1501,31 +1535,37 @@ def test_r8_resume_starts_a_fresh_retry_budget(router):
 def test_r8_resume_protects_the_newest_recover_directory(router):
     arm(router)
     (router / "etc/config/extra").write_bytes(b"x" * (300 * 1024))
-    make_qdir(router, "recover-20200101T000000", 1)
+    old = make_qdir(router, "recover-20200101T000000", 1)
+    (old / "junk").write_bytes(b"x" * (300 * 1024))
     make_qdir(router, "recover-20200102T000000", 2)
     (router / "etc/newton/pending").write_text("txn-0001 0 boot-one\n")
     result = run_guard(router, "recover", "restore", "txn-0001")
     assert (result.returncode, result.stdout) == (0, "restored txn-0001 recover\n")
     names = qnames(router)
-    # Over the 256 KiB cap: the oldest unprotected directory goes, the newest recover directory stays.
+    # The recover directories are over the 256 KiB cap: the oldest unprotected
+    # one goes, the newest recover directory stays, and the restore's own
+    # directory (the owner's files) is never pruned.
     assert "recover-20200101T000000" not in names
     assert "recover-20200102T000000" in names
     assert "txn-0001" in names
 
 
 def test_r6_count_rule_skips_the_protected_recover_directory(router):
-    # Review R6: a resumed `recover restore` protects its recover directory from the count rule too,
-    # even when that directory is the oldest of more than five.
+    # Review R6: a resumed `recover restore` protects its recover directory
+    # (the one with the highest .seq) from the count rule too. Only recover
+    # directories are pruned now, so the protected one is the newest
+    # of them, and the restore's own txn directory is never pruned.
     arm(router)
     change_config(router)
-    make_qdir(router, "recover-20200101T000000", 1)
-    for seq in range(2, 7):
-        make_qdir(router, f"q-{seq}", seq)
+    for seq in range(1, 8):
+        make_qdir(router, f"recover-2020010{seq}T000000", seq)
     (router / "etc/newton/pending").write_text("txn-0001 0 boot-one\n")
     result = run_guard(router, "recover", "restore", "txn-0001")
     assert (result.returncode, result.stdout) == (0, "restored txn-0001 recover\n")
-    # Newest five by sequence: txn-0001, q-6, q-5, q-4, q-3. q-2 is sixth and goes; the seventh is protected.
-    assert qnames(router) == {"txn-0001", "q-6", "q-5", "q-4", "q-3", "recover-20200101T000000"}
+    assert qnames(router) == {"txn-0001"} | {
+        f"recover-2020010{seq}T000000" for seq in range(3, 8)
+    }
+    assert (router / QROOT / "txn-0001/extra").read_bytes() == b"preserve me\n"
 
 
 # Review fix R3.

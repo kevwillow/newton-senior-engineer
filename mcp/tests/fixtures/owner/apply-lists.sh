@@ -14,7 +14,6 @@ PLAN='00112233445566778899aabbccddeeff'
 WINDOW=300
 die() { echo "NEWTON-STOP: $*"; exit 1; }
 [ "$(id -u </dev/null)" = 0 ] || die "this must run as root"
-echo "NEWTON-APPLYING plan=$PLAN"
 W=$(mktemp -d /tmp/newton-owner.XXXXXX </dev/null) || die "no private directory"
 trap 'rm -rf "$W"' EXIT
 trap 'rm -rf "$W"; exit 1' HUP INT TERM
@@ -44,7 +43,7 @@ if [ -n "$(ls -A /var/run/rpcd/snapshot-files 2>/dev/null </dev/null)" ]; then
       else
         if [ "$undo_mins" -eq 1 ]; then undo_text="1 minute"; else undo_text="$undo_mins minutes"; fi
       fi
-      die "the router has a leftover undo file from $undo_text ago (its web service restarted during a change). If nobody is changing the router right now, reboot it, or as root run: rm -rf /var/run/rpcd/snapshot-files"
+      die "the router has a leftover undo file from $undo_text ago (its web service restarted during a change, so that change was never confirmed or rolled back). The live settings may still hold that change: /var/run/rpcd/snapshot-files holds the settings from before it, and a reboot or deleting that folder loses them. To undo the change, as root run: cp /var/run/rpcd/snapshot-files/* /etc/config/ && reload_config && rm -rf /var/run/rpcd/snapshot-files. To keep it, if nobody is changing the router right now, reboot it, or as root run: rm -rf /var/run/rpcd/snapshot-files"
     fi
   fi
   die "another change is waiting for confirmation (LuCI or Newton)"
@@ -54,6 +53,7 @@ want() { got=$(uci -q get "$1" </dev/null) && [ "$got" = "$2" ] || die "the rout
 absent() { if uci -q get "$1" >/dev/null </dev/null; then die "the router changed since the plan: $1"; fi; }
 want 'firewall.cfg03dc81.network' 'wan wan6 wan2'
 absent 'firewall.labz.ntp'
+echo "NEWTON-APPLYING plan=$PLAN"
 echo "NEWTON-CHECKED plan=$PLAN"
 SID=$(ubus call session create "{\"timeout\":$((WINDOW + 120))}" </dev/null | jsonfilter -e '@.ubus_rpc_session')
 drop_session() { printf '%s' "$SID" | grep -Eq '^[0-9a-f]{32}$' || return 0; ubus call session destroy "{\"ubus_rpc_session\":\"$SID\"}" </dev/null >/dev/null 2>&1; }

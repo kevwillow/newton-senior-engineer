@@ -150,13 +150,18 @@ Persistent state is below `/etc/newton`:
   `quarantine/recover-<timestamp>/` from `recover`), each with a `.seq`
   counter (one plus the highest existing counter at creation, so ordering
   never depends on the wall clock or mtimes; a directory without a valid
-  `.seq` counts as the oldest). After every `confirm` and restore the
-  quarantine is pruned, best effort: the newest 5 directories are kept (the
-  active transaction's and the directory a `recover` just wrote are never
-  removed but still count toward the 5), and then, oldest first and skipping
-  those protected directories, entries are removed until the total is at
-  most 256 KiB (`du -sk`, never file reads). Pruning can never make a
-  `confirm` or restore fail, and logs each removal to `guard.log`.
+  `.seq` counts as the oldest). A restore's directory, `quarantine/<txn>/`,
+  holds the owner's files (config entries that were not in the LKG, such as
+  a file a package or LuCI added during the window): it is never pruned and
+  stays until the owner removes it; the restore logs a warning naming it,
+  and the router program's `status <txn>` line ends `quarantined=<n>`
+  while it holds entries. After every `confirm` and restore the
+  `recover-*` directories are pruned, best effort: the newest 5 of them are
+  kept (the directory a `recover` just wrote is never removed but still
+  counts toward the 5), and then, oldest first and skipping that protected
+  directory, they are removed until their total is at most 256 KiB
+  (`du -sk`, never file reads). Pruning can never make a `confirm` or
+  restore fail, and logs each removal to `guard.log`.
 - `guard.lock` — the state lock. Every state-changing command opens it with
   `exec 9>>` and takes `flock 9`; it is never written (so no flash wear). It
   lives here, not in `tmp`, because `/etc/newton` is mode 700 and root-owned:
@@ -242,7 +247,7 @@ failure controls. Every wrapper logs its calls to
   before RD10.
 - Edits made during the armed window are reverted; no copy of reverted
   versions of tracked files is kept, though untracked new validly named
-  files are retained in quarantine.
+  files are retained in quarantine until the owner removes them.
 - A uci or LuCI commit that lands while restore is running is overwritten,
   and no copy of it is kept.
 - A guard-only restore puts the files back; running firewall, network and

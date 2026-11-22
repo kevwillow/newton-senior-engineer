@@ -150,6 +150,10 @@ BOOTSTRAP_PENDING=0
 # 1 when perform_install leaves the closing text to its caller: the
 # plain mode prints it only after the bootstrap is installed too.
 INSTALL_CLOSING_DEFERRED=0
+# 1 in the plain mode, which runs only while no bootstrap is installed:
+# that is a first install even when a failed earlier attempt left a code
+# root behind, so the closing text prints the first-install steps.
+FIRST_INSTALL=0
 
 # The Claude Code managed-settings guard.
 #
@@ -625,7 +629,7 @@ confirm_install() {
 # machine.  Only the exact word "lock" sets the guard; anything else,
 # or the end of the input, skips it and says how to set it later.
 ask_managed_settings() {
-	local answer='' how='' file=${MANAGED_SETTINGS:-/etc/claude-code/managed-settings.json}
+	local answer='' how='' state='' file=${MANAGED_SETTINGS:-/etc/claude-code/managed-settings.json}
 	printf '%s\n' 'Optional: lock Claude Code on this machine to system hooks only (allowManagedHooksOnly).'
 	printf '%s\n' "Yes: no tool can add a hook that answers Newton's approval dialog. Your own Claude Code hooks stop running."
 	printf '%s\n' "No: your hooks keep working. Each approval still needs your passphrase or authenticator code."
@@ -641,10 +645,18 @@ ask_managed_settings() {
 	# file or to one that is not JSON is not a settings object.
 	if [[ ! -e $file && ! -L $file ]]; then
 		how="as root, create $file with this content: $MANAGED_SETTINGS_CONTENT"
-	elif [[ -f $file && -r $file && $(managed_settings_state "$file") == invalid ]]; then
-		how="as root, replace the content of $file, which is not valid JSON, with: $MANAGED_SETTINGS_CONTENT"
 	else
-		how="as root, add the line \"allowManagedHooksOnly\": true to $file."
+		# The file may hold other policies the owner needs: a copy comes
+		# first, and the whole object replaces it only when nothing else in
+		# it is wanted.
+		state=
+		[[ -f $file && -r $file ]] && state=$(managed_settings_state "$file")
+		case $state in
+			invalid) how="as root, copy $file aside first (cp -p $file $file.bak), then fix its JSON (it is not valid JSON now) and add \"allowManagedHooksOnly\": true to its top-level object; replace its whole content with $MANAGED_SETTINGS_CONTENT only if you need none of its other settings" ;;
+			notobject) how="as root, copy $file aside first (cp -p $file $file.bak), then replace its content, whose top level is not a JSON object, with: $MANAGED_SETTINGS_CONTENT (move into that object any settings you need)" ;;
+			wrong) how="as root, change the value of \"allowManagedHooksOnly\" in $file to true." ;;
+			*) how="as root, add the line \"allowManagedHooksOnly\": true to $file." ;;
+		esac
 	fi
 	printf 'The Claude Code managed settings guard was not set. newton-doctor will report managed-settings-guard as INCONCLUSIVE; to set it later, %s\n' "$how"
 	return 0
@@ -931,7 +943,9 @@ install_code_root() {
 	local old
 	old=$CODE_ROOT.old
 	if [[ -e $old || -L $old ]]; then
-		printf 'ERROR: %s exists: an earlier install did not finish. Inspect it, then move it back to %s or remove it, and run the installer again\n' "$old" "$CODE_ROOT" >&2
+		# A plain mv onto an existing directory would move the backup
+		# INTO it, and the next run would then delete it with the rest.
+		printf 'ERROR: %s exists: an earlier install did not finish. Inspect it, then either remove it, or restore it: remove %s if it is there (it is the unfinished new tree), then run: mv -T %s %s. Then run the installer again\n' "$old" "$CODE_ROOT" "$old" "$CODE_ROOT" >&2
 		return 1
 	fi
 	if [[ -e $CODE_ROOT || -L $CODE_ROOT ]]; then
@@ -1095,6 +1109,10 @@ if [ "$(/usr/bin/id -u)" != "$expected_uid" ]; then
 fi
 sudo_user=${SUDO_USER:-}
 case $sudo_user in
+	root)
+		echo "newton-approve: run this from your own account, not from a root shell (type exit to leave it); sudo must provide a valid non-root SUDO_USER" >&2
+		exit 1
+		;;
 	''|root|[!A-Za-z_]*|*[!A-Za-z0-9_.-]*)
 		echo "newton-approve: sudo must provide a valid non-root SUDO_USER" >&2
 		exit 1
@@ -1124,6 +1142,10 @@ if [ "$(/usr/bin/id -u)" != "$expected_uid" ]; then
 fi
 sudo_user=${SUDO_USER:-}
 case $sudo_user in
+	root)
+		echo "newton-router-setup: run this from your own account, not from a root shell (type exit to leave it); sudo must provide a valid non-root SUDO_USER" >&2
+		exit 1
+		;;
 	''|root|[!A-Za-z_]*|*[!A-Za-z0-9_.-]*)
 		echo "newton-router-setup: sudo must provide a valid non-root SUDO_USER" >&2
 		exit 1
@@ -1154,6 +1176,10 @@ if [ "$(/usr/bin/id -u)" != "$expected_uid" ]; then
 fi
 sudo_user=${SUDO_USER:-}
 case $sudo_user in
+	root)
+		echo "newton-vantage-setup: run this from your own account, not from a root shell (type exit to leave it); sudo must provide a valid non-root SUDO_USER" >&2
+		exit 1
+		;;
 	''|root|[!A-Za-z_]*|*[!A-Za-z0-9_.-]*)
 		echo "newton-vantage-setup: sudo must provide a valid non-root SUDO_USER" >&2
 		exit 1
@@ -1183,6 +1209,10 @@ if [ "$(/usr/bin/id -u)" != "$expected_uid" ]; then
 fi
 sudo_user=${SUDO_USER:-}
 case $sudo_user in
+	root)
+		echo "newton-enrol: run this from your own account, not from a root shell (type exit to leave it); sudo must provide a valid non-root SUDO_USER" >&2
+		exit 1
+		;;
 	''|root|[!A-Za-z_]*|*[!A-Za-z0-9_.-]*)
 		echo "newton-enrol: sudo must provide a valid non-root SUDO_USER" >&2
 		exit 1
@@ -1217,6 +1247,10 @@ if [ "$(/usr/bin/id -u)" != "$expected_uid" ]; then
 fi
 sudo_user=${SUDO_USER:-}
 case $sudo_user in
+	root)
+		echo "newton-rules: run this from your own account, not from a root shell (type exit to leave it); sudo must provide a valid non-root SUDO_USER" >&2
+		exit 1
+		;;
 	''|root|[!A-Za-z_]*|*[!A-Za-z0-9_.-]*)
 		echo "newton-rules: sudo must provide a valid non-root SUDO_USER" >&2
 		exit 1
@@ -1258,6 +1292,10 @@ if [ "$(/usr/bin/id -u)" != "$expected_uid" ]; then
 fi
 sudo_user=${SUDO_USER:-}
 case $sudo_user in
+	root)
+		echo "newton-ad-setup: run this from your own account, not from a root shell (type exit to leave it); sudo must provide a valid non-root SUDO_USER" >&2
+		exit 1
+		;;
 	''|root|[!A-Za-z_]*|*[!A-Za-z0-9_.-]*)
 		echo "newton-ad-setup: sudo must provide a valid non-root SUDO_USER" >&2
 		exit 1
@@ -1305,13 +1343,16 @@ EOF
 # steps that follow it.  perform_install prints it, except in the plain
 # mode, which prints it after the bootstrap is installed as well.
 print_install_closing() {
-	if (( INSTALL_IS_UPDATE )); then printf 'Newton updated successfully.\n'; fi
-	(( INSTALL_IS_UPDATE )) || printf 'Newton installed successfully.\n'
+	if (( INSTALL_IS_UPDATE && ! FIRST_INSTALL )); then printf 'Newton updated successfully.\n'; fi
+	(( INSTALL_IS_UPDATE && ! FIRST_INSTALL )) || printf 'Newton installed successfully.\n'
 	printf 'Run the isolation check yourself, in your own terminal as the agent user: %s --router root@<router-ip>\n' "$DOCTOR_LAUNCHER"
 	access_modes_closing
-	if (( INSTALL_IS_UPDATE )); then
+	if (( INSTALL_IS_UPDATE && ! FIRST_INSTALL )); then
 		print_update_steps
 	else
+		if (( INSTALL_IS_UPDATE )); then
+			printf '\nThis run replaced the Newton code an earlier attempt left in %s. Restart Claude Code, or run /mcp and reconnect newton, before you use Newton, if it was connected.\n' "$CODE_ROOT"
+		fi
 		print_manual_steps
 	fi
 }
@@ -1328,9 +1369,29 @@ To finish the update:
   2. For each router in the installed mode, run: sudo -u newton $SETUP_LAUNCHER <device> upgrade
      (a no-install router needs nothing).
 A change that was held during the update cannot be confirmed by the new server; it rolls back when its timer ends.
+EOF
+	print_bootstrap_self_update_step
+	cat <<EOF
 
 MCP client command (all harnesses):
   $CLIENT_COMMAND
+EOF
+}
+
+# --from-snapshot never replaces the bootstrap (it manages itself through
+# its self-update), so an update run by an older bootstrap leaves that
+# older copy, with its older prompts, in place.  Say so when the
+# installed one differs from the snapshot's.
+print_bootstrap_self_update_step() {
+	local installed='' snapshot=''
+	[[ -f $BOOTSTRAP_DEST && -f ${SNAP:-}/scripts/newton-bootstrap ]] || return 0
+	installed=$(<"$BOOTSTRAP_DEST") || return 0
+	snapshot=$(<"$SNAP/scripts/newton-bootstrap") || return 0
+	[[ $installed == "$snapshot" ]] && return 0
+	cat <<'EOF'
+The installed newton-bootstrap differs from this release's: update it from the same root shell with:
+  newton-bootstrap self-update <repo> <commit id>
+with the same repository and commit id. A bootstrap installed by an earlier release asks for update and a 12-hex prefix of the id instead of all 40: type what its prompt asks for.
 EOF
 }
 
@@ -1347,7 +1408,7 @@ no-install: Every change uses OpenWrt's own undo timer.
 no-install: Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays.
 no-install: Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval.
 no-install: Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run.
-installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 218 KB), no packages and no compiled code.
+installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 220 KB), no packages and no compiled code.
 installed: Newton's key can run that program and nothing else, so the agent never gets a root shell.
 installed: If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck.
 installed: More checks can run, and fewer changes need a script.
@@ -1356,8 +1417,9 @@ EOF
 }
 
 # The state of a managed-settings file.  true means the
-# guard is set, absent means valid JSON without the key and invalid
-# means the file is not JSON at all.  The file is parsed with python3
+# guard is set, absent means a JSON object without the key, wrong a JSON
+# object whose key is not true, notobject valid JSON that is not an
+# object ([] or null), and invalid means the file is not JSON at all.  The file is parsed with python3
 # -I (isolated: no user site, no PYTHON* from the environment) and is
 # never executed.
 managed_settings_state() {
@@ -1372,13 +1434,17 @@ try:
 except Exception:
     print("invalid")
     sys.exit(0)
-if isinstance(data, dict) and data.get("allowManagedHooksOnly") is True:
+if not isinstance(data, dict):
+    print("notobject")
+elif data.get("allowManagedHooksOnly") is True:
     print("true")
+elif "allowManagedHooksOnly" in data:
+    print("wrong")
 else:
     print("absent")
 ' "$file" 2>/dev/null) || state=invalid
 	case $state in
-		true|absent|invalid) printf '%s\n' "$state" ;;
+		true|absent|wrong|notobject|invalid) printf '%s\n' "$state" ;;
 		*) printf 'invalid\n' ;;
 	esac
 }
@@ -1443,8 +1509,16 @@ install_managed_settings() {
 		fi
 		if [[ $state == invalid ]]; then
 			printf 'WARNING: %s is not valid JSON; it was left untouched (Newton never overwrites it).\n' "$file" >&2
-			printf 'Replace its content with this, as root:\n' >&2
+			printf 'As root, copy it aside first (cp -p %s %s.bak), then fix its JSON and add this line to its top-level object:\n' "$file" "$file" >&2
+			printf '  "allowManagedHooksOnly": true\n' >&2
+			printf 'Replace its whole content with %s only if you need none of its other settings.\n' "$MANAGED_SETTINGS_CONTENT" >&2
+		elif [[ $state == notobject ]]; then
+			printf 'WARNING: %s is valid JSON but not a JSON object; it was left untouched (Newton never overwrites it).\n' "$file" >&2
+			printf 'As root, copy it aside first (cp -p %s %s.bak), then replace its content with this (move into that object any settings you need):\n' "$file" "$file" >&2
 			printf '  %s\n' "$MANAGED_SETTINGS_CONTENT" >&2
+		elif [[ $state == wrong ]]; then
+			printf 'WARNING: %s does not set "allowManagedHooksOnly": true; it was left untouched (Newton never overwrites it).\n' "$file" >&2
+			printf 'Change the value of "allowManagedHooksOnly" in %s to true yourself.\n' "$file" >&2
 		else
 			printf 'WARNING: %s does not set "allowManagedHooksOnly": true; it was left untouched (Newton never overwrites it).\n' "$file" >&2
 			printf 'Add this line to %s yourself:\n' "$file" >&2
@@ -1762,6 +1836,7 @@ EOF
 		exit 1
 	fi
 	INSTALL_CLOSING_DEFERRED=1
+	FIRST_INSTALL=1
 	perform_install
 	BOOTSTRAP_PENDING=1
 	install_bootstrap

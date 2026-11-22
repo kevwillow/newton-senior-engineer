@@ -514,3 +514,42 @@ def test_plan_tier_with_a_tier_having_no_placeholders_works_without_values(confi
     )
     assert result["session_id"] == SID
     assert result["tier"] == "standard"
+
+
+# ---- the tier plan names the controls it sealed no probe for -------
+
+
+def _tier_plan(configured, monkeypatch, tier, batch_index, values):
+    monkeypatch.setattr(
+        server.NewtonService,
+        "run_script",
+        _fake_script([], output=_plan_output(), uci_text_holder={}, probes_holder={}),
+    )
+    monkeypatch.setattr(server.NewtonService, "read", lambda self, d, c: {"exit_code": 1, "stdout": "", "stderr": "", "truncated": False})
+    return server.newton_plan_tier(
+        "quasar", tier, batch_index=batch_index, values=values,
+        **tier_explained(tier, batch_index, values),
+    )
+
+
+def test_plan_tier_names_controls_without_a_sealed_probe(configured, monkeypatch):
+    """OW-FW-01 and OW-FW-04 (placeholders, no probes key) seal no control
+    probe; the result says so and why, and a control whose probe WAS sealed
+    (OW-MGMT-01) is not listed."""
+    values = {"fw_wan_zone": "@zone[1]", "fw_allow_ping": "@rule[1]"}
+    result = _tier_plan(configured, monkeypatch, "hardened", 0, values)
+    assert "session_id" in result, result
+    missing = result["controls_without_probe"]
+    assert "OW-FW-01" in missing and "OW-FW-04" in missing, missing
+    assert "OW-MGMT-01" not in missing, missing
+    assert set(missing) <= set(result["control_ids"])
+    record = json.loads((configured / "state/plans" / f"{SID}.json").read_text())
+    sealed = set(record.get("manifest_checks", [])) | set(record.get("manifest_checks_auto", []))
+    assert set(missing) == set(result["control_ids"]) - sealed
+    note = result["controls_without_probe_note"]
+    assert "OW-FW-01" in note and "built-in" in note
+
+
+def test_plan_tier_second_hardened_batch_names_fw_09(configured, monkeypatch):
+    result = _tier_plan(configured, monkeypatch, "hardened", 1, {"fw_wan_zone": "@zone[1]"})
+    assert "OW-FW-09" in result["controls_without_probe"], result

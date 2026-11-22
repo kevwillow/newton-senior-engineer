@@ -8,14 +8,16 @@
   report line starting with `FAIL proof ` is a FAIL naming it; both
   proof lines as whole lines is a PASS; anything else (including a
   report with no proof lines at all, which is what today's check action
-  prints) is INCONCLUSIVE -- absence of a proof is not evidence of a
-  violation.
+  prints when it skipped the proofs) is INCONCLUSIVE -- absence of a
+  proof is not evidence of a violation.
 
 Uses the NEWTON_DOCTOR_* seams only (the shared doctor_env fixture fakes
 sudo/ssh and the filesystem root); nothing touches the real system.
 """
 
 import sys
+
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -219,9 +221,10 @@ def test_doctor_router_line_pass_substring_inside_another_line_does_not_count(
     assert result.returncode == 3, result.stdout + result.stderr
     assert (
         "INCONCLUSIVE router-line-restricted[r1]: the setup report carries "
-        "no restricted-line proof (the setup tool's check action does not "
-        "print the proofs; run its restricted-key proofs another way or "
-        "upgrade the tool)" in result.stdout
+        "no restricted-line proof (the setup check prints both proofs only "
+        "when the inventory's key_file names an installed restricted key; "
+        "give the router one with newton-router-setup r1 swap-key or "
+        "add-key)" in result.stdout
     )
     assert "PASS router-line-restricted" not in result.stdout
     assert "FAIL router-line-restricted" not in result.stdout
@@ -241,9 +244,10 @@ def test_doctor_router_line_inconclusive_without_any_proof(doctor_env, tmp_path)
     assert result.returncode == 3, result.stdout + result.stderr
     assert (
         "INCONCLUSIVE router-line-restricted[r1]: the setup report carries "
-        "no restricted-line proof (the setup tool's check action does not "
-        "print the proofs; run its restricted-key proofs another way or "
-        "upgrade the tool)" in result.stdout
+        "no restricted-line proof (the setup check prints both proofs only "
+        "when the inventory's key_file names an installed restricted key; "
+        "give the router one with newton-router-setup r1 swap-key or "
+        "add-key)" in result.stdout
     )
     assert "PASS router-line-restricted" not in result.stdout
     assert "FAIL router-line-restricted" not in result.stdout
@@ -443,3 +447,56 @@ def test_doctor_router_line_fail_on_real_check_output_fail_proof(
     assert result.returncode == 1, result.stdout + result.stderr
     assert ("FAIL router-line-restricted[r1]: FAIL proof hello:"
             in result.stdout), result.stdout
+
+
+# ---- a skipped proof names why, not the tool version ----
+
+
+SKIP_WARNS = [
+    "WARN restricted-key proofs skipped: no key_file in the inventory",
+    "WARN restricted-key proofs skipped: key file not installed: /var/lib/newton/keys/r1-newton-agent",
+]
+
+
+@pytest.mark.parametrize("warn", SKIP_WARNS)
+def test_doctor_router_line_names_the_skipped_proofs_and_the_key_step(doctor_env, tmp_path, warn):
+    """the setup check prints both proofs; when they are missing it
+    is because it skipped them with a WARN (no key_file, or the key is not
+    installed).  The doctor quotes that line and points at swap-key or
+    add-key, not at a tool upgrade."""
+    env = doctor_env["env"].copy()
+    env["DOCTOR_STUB_SETUP_REPORT"] = write_setup_report(
+        tmp_path, ["INFO release 24.10", warn, "DONE check r1"],
+    )
+    result = run(DOCTOR, "--router", "root@192.0.2.1", "--device", "r1", env=env)
+    assert result.returncode == 3, result.stdout + result.stderr
+    line = next(
+        line for line in result.stdout.splitlines()
+        if line.startswith("INCONCLUSIVE router-line-restricted[r1]")
+    )
+    assert "upgrade the tool" not in line, line
+    assert "does not print the proofs" not in line, line
+    assert (
+        "INCONCLUSIVE router-line-restricted[r1]: the setup check skipped the "
+        f"restricted-line proofs ({warn[len('WARN '):]}): give the router Newton's "
+        "restricted key with sudo -u newton /usr/local/bin/newton-router-setup r1 "
+        "swap-key --new-key newton-agent (or add-key), so the inventory names an "
+        "installed key_file; a no-install router has no restricted key to prove"
+    ) == line, line
+
+
+def test_doctor_router_line_without_a_skip_line_does_not_blame_the_tool(doctor_env, tmp_path):
+    """no proof and no skip line is still INCONCLUSIVE, and the
+    text no longer says the check action cannot print the proofs."""
+    env = doctor_env["env"].copy()
+    env["DOCTOR_STUB_SETUP_REPORT"] = write_setup_report(
+        tmp_path, ["INFO release 24.10", "DONE check r1"],
+    )
+    result = run(DOCTOR, "--router", "root@192.0.2.1", "--device", "r1", env=env)
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert (
+        "INCONCLUSIVE router-line-restricted[r1]: the setup report carries no "
+        "restricted-line proof (the setup check prints both proofs only when the "
+        "inventory's key_file names an installed restricted key; give the router one "
+        "with newton-router-setup r1 swap-key or add-key)"
+    ) in result.stdout.splitlines(), result.stdout

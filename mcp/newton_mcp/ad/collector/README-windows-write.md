@@ -18,6 +18,11 @@ The other way in is the undo argv, `-Undo <txid>`, used by the undo task and nev
 SSH. It is refused when `SSH_CONNECTION` or `SSH_CLIENT` is set, and the transaction id is
 checked against `^[0-9a-f]{32}$` before it is used in a path.
 
+A refusal of the install check, made before the request is read (the install root, the
+approval key file or the device file is missing, or its ACL lets others change it), carries
+`"stage":"install"` beside its code (`unavailable` or `denied`): nothing was written and no
+record was created.
+
 The helper:
 
 - scans the raw text of the request itself before `ConvertFrom-Json` sees it, and refuses a

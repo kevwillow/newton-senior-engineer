@@ -1,6 +1,8 @@
 #!/bin/sh
 # Fixture guard (addendum R3 4.5): `status` prints the first line of the
-# state file (default idle); `restore` and `confirm` echo.
+# state file (default idle), then, as the real guard does for /etc/config
+# entries it cannot name, a `skipped ...` line when the guard-skipped file
+# holds one; `restore` and `confirm` echo.
 
 FS=${FAKE_ROUTER_FS:-/nonexistent}
 
@@ -11,6 +13,10 @@ case "${1:-}" in
       IFS= read -r line < "$FS/etc/newton/guard-state" || line=idle
     fi
     echo "$line"
+    if [ -f "$FS/etc/newton/guard-skipped" ]; then
+      IFS= read -r skipped < "$FS/etc/newton/guard-skipped" || skipped=
+      [ -z "$skipped" ] || echo "skipped $skipped"
+    fi
     ;;
   restore|confirm)
     echo "$1"

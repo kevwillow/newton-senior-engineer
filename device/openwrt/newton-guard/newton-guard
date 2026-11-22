@@ -488,8 +488,12 @@ quarantine_dir_new() {
 }
 
 prune_quarantine() {
-	# Best effort: keeps the newest 5 directories and at most 256 KiB in
-	# total (oldest first); ACTIVE and PROTECTED2 are never removed.
+	# Best effort, over the recover-* directories only (the guard's own old
+	# state files): keeps the newest 5 and at most 256 KiB in total (oldest
+	# first); ACTIVE and PROTECTED2 are never removed. A restore's directory
+	# holds the owner's config entries that were not in the LKG, so it is
+	# never pruned: the owner deletes it once the files are moved back or
+	# not wanted.
 	local active="$1" protected2="$2" dir name seq kb count total
 	local unsorted sorted sizes
 	[ -d "$NG/quarantine" ] || return 0
@@ -498,7 +502,7 @@ prune_quarantine() {
 	sorted=$SCRATCH/qprune.sorted
 	sizes=$SCRATCH/qprune.sizes
 	: > "$unsorted" 2>/dev/null || return 0
-	for dir in "$NG"/quarantine/*; do
+	for dir in "$NG"/quarantine/recover-*; do
 		[ -d "$dir" ] || continue
 		name=${dir##*/}
 		quarantine_seq_read "$dir"
@@ -696,6 +700,9 @@ restore_core() {
 	prune_lkg
 	prune_quarantine "$txn" "$RECOVER_QDIR"
 	log_event info "restore done txn=$txn reason=$reason changed=$changed quarantined=$quarantined"
+	if [ "$quarantined" -gt 0 ]; then
+		log_event warning "quarantined txn=$txn entries=$quarantined dir=/etc/newton/quarantine/$txn (kept until the owner removes it)"
+	fi
 	echo "restored $txn $reason"
 	return 0
 }

@@ -158,6 +158,27 @@ oneline() {
 		LC_ALL=C sed 's/\xe2\x80\xa8/ /g; s/\xe2\x80\xa9/ /g; s/\xc2\x85/ /g' |
 		mask | cut -c1-120
 }
+# setup_launcher: the command an owner types for newton-router-setup. An
+# installed Newton (its launchers set NEWTON_HOME) refuses the bare name,
+# so the hint is the installed launcher (the rule of _launcher in
+# mcp/newton_mcp/approve.py).
+setup_launcher() {
+	if [[ -n ${NEWTON_HOME:-} ]]; then
+		printf '%s' "sudo -u newton /usr/local/bin/newton-router-setup"
+	else
+		printf '%s' "sudo -u newton newton-router-setup"
+	fi
+}
+# quarantine_note LINE: QNOTE = the owner's note when the router's status
+# LINE ends with the whole field quarantined=<n> (the guard's restore moved
+# config entries that were not in the saved copy, such as a file a package
+# added during the window, to /etc/newton/quarantine/<SID>/ and keeps them
+# there); empty otherwise.
+quarantine_note() {
+	QNOTE=
+	[[ $1 =~ \ quarantined=([1-9][0-9]{0,3})$ ]] || return 0
+	QNOTE="the guard moved ${BASH_REMATCH[1]} config file(s) that were not in the saved copy to /etc/newton/quarantine/$SID/ on the router; they stay there until you remove them: copy back into /etc/config any you want to keep"
+}
 # refusal_next_step FIRST: the true next step for a router's exit-3 apply
 # refusal (its first stderr line, "error <code> [detail]"). Only the codes
 # that leave an applicable staged session say "still staged"; an unknown
@@ -192,7 +213,7 @@ refusal_next_step() {
 		bad-approval)
 			printf '%s' "the approval does not match this plan; approve the plan again; session $SID is still staged; then apply again: $0 apply $ROUTER $SID" ;;
 		approval-key-missing)
-			printf '%s' "the router has no approval key (run: sudo -u newton newton-router-setup ${OWRT_EXPECT_DEVICE:-<device>} approval-key); session $SID is still staged; then $again" ;;
+			printf '%s' "the router has no approval key (run: $(setup_launcher) ${OWRT_EXPECT_DEVICE:-<device>} approval-key); session $SID is still staged; then $again" ;;
 		*)
 			printf '%s' "this refusal code is not one Newton knows, so whether session $SID can still be applied is not known from here; run: $0 status $ROUTER $SID" ;;
 	esac
@@ -312,7 +333,7 @@ reconcile_confirmed() {
 	confirmed_here "$SID" && return 1
 	[[ -e $PLANS/$SID.sha256 || -e $PLANS/$SID.held ]] || return 1
 	log "CONFIRMED session=$SID (reconciled: $1)"
-	rm -f "$PLANS/$SID.sha256" "$PLANS/$SID.held"
+	rm -f "$PLANS/$SID.sha256" "$PLANS/$SID.held" "$PLANS/$SID.named"
 }
 # held_closed_rolled_back STATUS: a held apply whose window ended
 # unconfirmed is recorded as rolled back only when the router's own status
@@ -365,7 +386,7 @@ handshake() {
 		[[ -z ${H[$key]+x} ]] || die "malformed hello reply"
 		H[$key]=$val
 	done
-	setup="sudo -u newton newton-router-setup ${OWRT_EXPECT_DEVICE:-$ROUTER} upgrade"
+	setup="$(setup_launcher) ${OWRT_EXPECT_DEVICE:-$ROUTER} upgrade"
 	[[ ${H[api]-} == 1 ]] || die "router program speaks api=$(oneline "${H[api]:-?}"), this controller speaks api=1; run: $setup"
 	[[ ${H[mode]-} == prod ]] || die "router program runs in mode=$(oneline "${H[mode]:-?}"); this controller only talks to mode=prod routers; fix the router's newton install"
 	for comp in prog helper guard init; do
@@ -386,7 +407,7 @@ handshake() {
 		log "unchecked device"
 	fi
 	if [[ -n ${OWRT_EXPECT_PROFILE:-} ]]; then
-		[[ ${H[profile]-} == "$OWRT_EXPECT_PROFILE" ]] || die "router profile=$(oneline "${H[profile]:-?}") is not the expected $OWRT_EXPECT_PROFILE, the inventory profile; change profile in ${NEWTON_INVENTORY:-/var/lib/newton/devices.toml} (owned by the newton account; edit it with sudo -u newton) or run: sudo -u newton newton-router-setup ${OWRT_EXPECT_DEVICE:-$ROUTER} profile $OWRT_EXPECT_PROFILE"
+		[[ ${H[profile]-} == "$OWRT_EXPECT_PROFILE" ]] || die "router profile=$(oneline "${H[profile]:-?}") is not the expected $OWRT_EXPECT_PROFILE, the inventory profile; change profile in ${NEWTON_INVENTORY:-/var/lib/newton/devices.toml} (owned by the newton account; edit it with sudo -u newton) or run: $(setup_launcher) ${OWRT_EXPECT_DEVICE:-$ROUTER} profile $OWRT_EXPECT_PROFILE"
 	else
 		log "unchecked profile"
 	fi
@@ -504,7 +525,11 @@ on_interrupt() {
 		if (( CONFIRM_SENT == 1 )); then
 			log "INTERRUPTED session=$SID: this run stopped; the confirm was sent; whether it took is not known from here; run: $0 status $ROUTER $SID"
 		elif (( APPLY_SENT == 1 )); then
-			log "INTERRUPTED session=$SID: this run stopped after it sent the apply and confirmed nothing; if the change was applied, the router rolls it back by itself when its window ends; run: $0 status $ROUTER $SID"
+			if fw_restart_owed; then
+				log "INTERRUPTED session=$SID: this run stopped after it sent the apply and confirmed nothing; if the change was applied, the router rolls it back by itself when its window ends, but $(owed_fw_next)"
+			else
+				log "INTERRUPTED session=$SID: this run stopped after it sent the apply and confirmed nothing; if the change was applied, the router rolls it back by itself when its window ends; run: $0 status $ROUTER $SID"
+			fi
 		else
 			log "INTERRUPTED session=$SID: this run stopped; run: $0 status $ROUTER $SID"
 		fi
@@ -538,6 +563,62 @@ backup_now() {
 	BK_PARTIAL=
 	PLAN_BACKUP=$bk
 	log "BACKUP $(printf '%s' "$bk" | LC_ALL=C tr '\000-\037\177' ' ') ($(tar -tzf "$bk" | grep -c '^etc/config/[^/][^/]*$') config files)"
+}
+
+# fw_restart WHEN: restart the firewall so the live named nft objects match
+# the config ($FW_LOADED: whether table inet fw4 was loaded before the apply).
+fw_restart() {
+	local when=$1 rc first attempt
+	for (( attempt=1; attempt <= 3; attempt++ )); do
+		r "$PROG fwrestart $FW_LOADED" </dev/null >"$TMPD/fw.out" 2>&1
+		rc=$?
+		(( rc == 255 && attempt < 3 )) || break
+		sleep 2
+	done
+	FW_RESTART_RC=$rc
+	case $rc in
+	0)
+		log "FIREWALL RESTARTED session=$SID ($when): named nft objects re-created from the config"
+		return 0
+		;;
+	3)
+		log "FIREWALL NOT RESTARTED session=$SID ($when): the firewall is not loaded (no table inet fw4); left as it is"
+		return 0
+		;;
+	98)
+		IFS= read -r first < "$TMPD/fw.out" || true
+		first=$(oneline "$first")
+		log "FIREWALL RESTART FAILED session=$SID ($when): exit 98 (the fw4 table was loaded again): $first"
+		return 1
+		;;
+	esac
+	IFS= read -r first < "$TMPD/fw.out" || true
+	first=$(oneline "$first")
+	log "FIREWALL RESTART FAILED session=$SID ($when): exit $rc: $first"
+	return 1
+}
+# A change to named nft objects needs a firewall restart after its rollback
+# (a reload keeps the live objects). $PLANS/<sid>.named, written before the
+# apply with the FW_LOADED answer, says that restart is still owed; it goes
+# when the change is confirmed or the restart after the rollback is made.
+owed_fw_next() { printf '%s' "this change touched named nft objects, so the firewall must be restarted after the rollback (a reload keeps the live objects); run: $0 abort $ROUTER $SID (it restarts the firewall once the change is rolled back)"; }
+fw_restart_owed() { [[ $SID =~ ^[0-9a-f]{32}$ && -e $PLANS/$SID.named ]]; }
+# restart_owed_firewall WHEN: make the owed restart; 0 when none is owed or
+# it worked (the record goes), 1 when it failed (the record stays)
+restart_owed_firewall() {
+	local loaded=
+	fw_restart_owed || return 0
+	IFS= read -r loaded < "$PLANS/$SID.named" || true
+	[[ $loaded == [01] ]] || loaded=1
+	FW_LOADED=$loaded
+	fw_restart "$1" || return 1
+	rm -f "$PLANS/$SID.named"
+}
+# die_fw_restart_failed: the abort rolled the change back, the restart failed
+die_fw_restart_failed() {
+	local first=
+	IFS= read -r first < "$TMPD/fw.out" || true
+	die "session $SID was rolled back, but the firewall restart after it failed: $(oneline "${first:-exit $FW_RESTART_RC}"); the live named nft objects may still hold the change; run: $0 abort $ROUTER $SID to restart the firewall again"
 }
 
 case $cmd in
@@ -633,6 +714,13 @@ plan)
 		[[ ${seal_lines[k]} == section\ * || ${seal_lines[k]} == leash\ * ]] || discard_staged "$bad_seal"
 	done
 	staged_check "$SID"
+	# the staged diff is read before any plan record is written: a read that
+	# fails discards the session, so no record is left to point at it
+	DIFF_RAW=$(r "$PROG diff $SID" </dev/null 2>"$TMPD/diff.err"); rc=$?
+	if (( rc != 0 )); then
+		first=; IFS= read -r first < "$TMPD/diff.err" || true
+		discard_staged "cannot read the staged diff of session $SID: $(oneline "${first:-exit $rc}")"
+	fi
 	printf '%s\n' "$SEAL_DIFF" > "$PLANS/$SID.sha256"
 	printf '%s\n' "$SEAL_BASE" > "$PLANS/$SID.base"
 	# the backup this plan took: ALERT and die lines name it, never "the
@@ -656,7 +744,6 @@ plan)
 	log "STAGED CHECK session=$SID fw4=$SC_STATUS${SC_REASON:+ reason=$SC_REASON}" >/dev/null
 	operator=${OWRT_OPERATOR:-${SUDO_USER:-${USER:-unknown}}}
 	log "OPERATOR session=$SID: $(oneline "$operator")"
-	DIFF_RAW=$(r "$PROG diff $SID" </dev/null) || die "cannot read staged diff"
 	echo "----- diff -----"
 	while IFS= read -r line || [[ -n $line ]]; do mask_secrets "$line"; done <<< "$DIFF_RAW"
 	echo "----------------"
@@ -720,36 +807,6 @@ apply)
 			log "LOGD RESTARTED session=$SID ($when): logd pid $(oneline "$old") -> $(oneline "$now"); dnsmasq repair gave unexpected output: $first"
 		fi
 		return 0
-	}
-	fw_restart() {
-		local when=$1 rc first attempt
-		for (( attempt=1; attempt <= 3; attempt++ )); do
-			r "$PROG fwrestart $FW_LOADED" </dev/null >"$TMPD/fw.out" 2>&1
-			rc=$?
-			(( rc == 255 && attempt < 3 )) || break
-			sleep 2
-		done
-		FW_RESTART_RC=$rc
-		case $rc in
-		0)
-			log "FIREWALL RESTARTED session=$SID ($when): named nft objects re-created from the config"
-			return 0
-			;;
-		3)
-			log "FIREWALL NOT RESTARTED session=$SID ($when): the firewall is not loaded (no table inet fw4); left as it is"
-			return 0
-			;;
-		98)
-			IFS= read -r first < "$TMPD/fw.out" || true
-			first=$(oneline "$first")
-			log "FIREWALL RESTART FAILED session=$SID ($when): exit 98 (the fw4 table was loaded again): $first"
-			return 1
-			;;
-		esac
-		IFS= read -r first < "$TMPD/fw.out" || true
-		first=$(oneline "$first")
-		log "FIREWALL RESTART FAILED session=$SID ($when): exit $rc: $first"
-		return 1
 	}
 	add_rollback_reason() {
 		local reason=$1
@@ -840,6 +897,9 @@ apply)
 		health_detail=${health_err:+; helper said: $(oneline "$health_err")}
 		die "cannot record service and firewall health before the apply; nothing applied, session $SID is still staged$health_detail"
 	fi
+	if [[ -n $NAMED ]]; then
+		printf '%s\n' "$FW_LOADED" > "$PLANS/$SID.named" || die "cannot record that this change needs a firewall restart after a rollback; nothing applied, session $SID is still staged"
+	fi
 	log "APPLYING session=$SID"
 	APPLY_SENT=1
 	out=$(r "$PROG apply $SID $T $TOKEN $APPROVAL_NBF $APPROVAL_EXP" </dev/null 2>"$TMPD/apply.err"); arc=$?
@@ -849,6 +909,7 @@ apply)
 	elif (( arc == 3 )); then
 		first=; IFS= read -r first < "$TMPD/apply.err" || true
 		log "APPLY REFUSED session=$SID"
+		rm -f "$PLANS/$SID.named"
 		die "apply refused, nothing applied: $(oneline "$first"); $(refusal_next_step "$first")"
 	elif (( arc == 1 )) && IFS= read -r first < "$TMPD/apply.err" && [[ $first == "error already-applied" ]]; then
 		# the router refuses before it touches anything: an earlier run
@@ -926,7 +987,7 @@ apply)
 			# nothing else: the CONFIRMED line below stays the last line of stdout.
 			confighash_after_confirm
 			log "CONFIRMED session=$SID ($PASSES consecutive passes: fresh ssh + router-side ping, dns, health and $PROBE_N probes${OWRT_LOCAL_CHECK:+ + local check})$lost_note"
-			rm -f "$PLANS/$SID.sha256"
+			rm -f "$PLANS/$SID.sha256" "$PLANS/$SID.named"
 		elif (( crc == 3 )); then
 			confirm_refused=1
 			first=; IFS= read -r first < "$TMPD/confirm.err" || true
@@ -1036,7 +1097,7 @@ apply)
 				CONFIG_DIFF=$(awk 'NR==FNR { before[substr($0, 34)]=substr($0, 1, 32); next } { after[substr($0, 34)]=substr($0, 1, 32) } END { for (p in before) if (!(p in after) || before[p] != after[p]) print p; for (p in after) if (!(p in before)) print p }' "$TMPD/config.before" "$TMPD/config.after" | LC_ALL=C sort -u | paste -sd' ' -)
 			fi
 			DNSMASQ_RESTARTED=0
-			if [[ -n $NAMED ]] && ! fw_restart "after rollback"; then
+			if [[ -n $NAMED ]] && ! restart_owed_firewall "after rollback"; then
 				if (( FW_RESTART_RC != 98 )); then
 					IFS= read -r first < "$TMPD/fw.out" || true
 					first=$(oneline "$first")
@@ -1097,21 +1158,29 @@ apply)
 			fi
 			safe_st=$(oneline "$st")
 			safe_config_diff=$(oneline "$CONFIG_DIFF")
+			# the guard may have restored only now, in the abort: ask again
+			q_line=$st_full
+			if [[ $abort_how == rolled-back-by-guard ]]; then
+				q_line=$(r "$PROG status $SID" </dev/null 2>/dev/null) || q_line=
+				q_line=${q_line%%$'\n'*}
+			fi
+			quarantine_note "$q_line"
 			if [[ -n $CONFIG_DIFF ]]; then
-				log "ALERT session=$SID status=$safe_st after the rollback window, but the committed config differs from its state before the apply in: $safe_config_diff — the change may still be live (rpcd restarted during the window, or the change was confirmed outside Newton)${rollback_reason:+; also: $rollback_reason} — check the router now; compare it with $(plan_backup) (abort: $(oneline "$abort_how"))"
+				log "ALERT session=$SID status=$safe_st after the rollback window, but the committed config differs from its state before the apply in: $safe_config_diff — the change may still be live (rpcd restarted during the window, or the change was confirmed outside Newton)${rollback_reason:+; also: $rollback_reason} — check the router now; compare it with $(plan_backup) (abort: $(oneline "$abort_how"))${QNOTE:+; $QNOTE}"
 			elif [[ -z $rollback_reason ]]; then
-				log "ROLLBACK WINDOW PASSED session=$SID — router reachable; the committed config matches its state before the apply ($CONFIG_COUNT packages compared); rolled back by $rollback_cause"
+				log "ROLLBACK WINDOW PASSED session=$SID — router reachable; the committed config matches its state before the apply ($CONFIG_COUNT packages compared); rolled back by $rollback_cause${QNOTE:+; $QNOTE}"
 			else
-				log "ALERT session=$SID rolled back, but $rollback_reason — check the router now; compare it with $(plan_backup) (abort: $(oneline "$abort_how"))"
+				log "ALERT session=$SID rolled back, but $rollback_reason — check the router now; compare it with $(plan_backup) (abort: $(oneline "$abort_how"))${QNOTE:+; $QNOTE}"
 			fi
 			;;
 		confirmed)
+			rm -f "$PLANS/$SID.named"
 			log "ALERT session=$SID status=confirmed after the rollback window — the change was confirmed outside this run; check the router now; compare it with $(plan_backup)"
 			;;
 		staged|inconsistent|unreachable)
-			log "ALERT session=$SID status=$st after rollback window — check the router now; compare it with $(plan_backup)"
+			log "ALERT session=$SID status=$st after rollback window — check the router now; compare it with $(plan_backup)$(fw_restart_owed && printf '; %s' "$(owed_fw_next)")"
 			;;
-		*) log "ALERT session=$SID status=unexpected ($(oneline "$st")) after rollback window — check the router now; compare it with $(plan_backup)" ;;
+		*) log "ALERT session=$SID status=unexpected ($(oneline "$st")) after rollback window — check the router now; compare it with $(plan_backup)$(fw_restart_owed && printf '; %s' "$(owed_fw_next)")" ;;
 		esac
 		rm -f "$PLANS/$SID.sha256"
 		exit 1
@@ -1121,6 +1190,8 @@ status)
 	SID=${3:-}; need_sid "$SID"; handshake
 	out=$(r "$PROG status $SID" </dev/null) || die "status did not answer — run: $0 status $ROUTER $SID"
 	oneline "$out"
+	quarantine_note "${out%%$'\n'*}"
+	[[ -z $QNOTE ]] || echo "NOTE session=$SID: $QNOTE"
 	held_line=; [[ -r $PLANS/$SID.held ]] && { IFS= read -r held_line < "$PLANS/$SID.held" || true; }
 	if [[ $held_line =~ ^[0-2]\ [0-9]+\ ([0-9]+)$ ]] && (( $(date +%s) >= BASH_REMATCH[1] )); then
 		if router_says_confirmed "$out"; then
@@ -1132,6 +1203,12 @@ status)
 	fi
 	if router_says_confirmed "$out"; then
 		reconcile_confirmed "the router's status says confirmed" || true
+	elif fw_restart_owed && [[ $out =~ ^(rolled-back|gone)\ sid=$SID\  ]] && ! confirmed_here "$SID"; then
+		echo "NOTE session=$SID: $(owed_fw_next)"
+	elif [[ $out =~ ^gone\ sid=$SID\  ]] && confirmed_here "$SID"; then
+		# the router keeps its confirm record in memory: a reboot or a
+		# later confirm forgets it, this host's audit log does not
+		echo "NOTE session=$SID: this host's audit log records it confirmed, so the change stays live (the router no longer remembers the confirm after a reboot or a later change); to undo it, plan the reverse change (newton_plan_undo)"
 	fi
 	;;
 confirm)
@@ -1195,7 +1272,9 @@ confirm)
 		rm -f "$PLANS/$SID.sha256" "$HELD_FILE"
 	elif (( crc == 3 )) || [[ $crc == 1 && ( $first == 'error rpcd-confirm-failed'* || $first == 'error confirm-incomplete'* ) ]]; then
 		reason=$(oneline "$first"); reason=${reason:-exit $crc}
-		die "confirm refused: $reason; not confirmed: the router rolls the change back on its own; run: $0 status $ROUTER $SID"
+		# a confirm that overlapped this one may have taken first (then the
+		# router answers no-such-txn): its status decides
+		check_failed "the router refused this confirm: $reason" "confirm refused: $reason; not confirmed: the router rolls the change back on its own; run: $0 status $ROUTER $SID"
 	else
 		log "CONFIRM DID NOT REPORT SUCCESS session=$SID — OUTCOME UNKNOWN; run: $0 status $ROUTER $SID"; exit 1
 	fi
@@ -1215,6 +1294,7 @@ abort)
 	elif (( arc == 0 )) && [[ $out == "aborted $SID gone" ]] && aborted_here "$SID"; then
 		# an earlier abort from this host discarded or rolled it back
 		rm -f "$PLANS/$SID.sha256" "$PLANS/$SID.held"
+		restart_owed_firewall "after abort" || die_fw_restart_failed
 		echo "session $SID was already aborted on this host; nothing to do"
 		exit 0
 	elif (( arc == 0 )) && [[ $out == "aborted $SID gone" ]] && (( ! audit_readable )); then
@@ -1237,8 +1317,15 @@ abort)
 			# a held apply from it
 			[[ -e $PLANS/$SID.held ]] && log "HELD APPLY ROLLED BACK session=$SID (the abort found the session gone; the router's status says rolled-back)"
 			rm -f "$PLANS/$SID.sha256" "$PLANS/$SID.held"
+			restart_owed_firewall "after abort" || die_fw_restart_failed
 			log "the router no longer has session $SID and its status says rolled-back; this abort rolled nothing back"
 			exit 0
+		fi
+		if [[ $st =~ ^gone\ sid=$SID\  && ! -e $PLANS/$SID.held && ! -e $PLANS/$SID.sha256 ]] \
+			&& ! grep -qE -- "^[^ ]+ [^ ]+ (STAGED|APPLYING) session=$SID( |\$)" "$AUDIT"; then
+			# no plan record and no STAGED or APPLYING line: this host never
+			# planned this id (a mistyped or copied-wrong id)
+			die "the router has no session $SID, and this host has no plan of it (no plan record, no STAGED or APPLYING line in its audit log), so this abort rolled nothing back and the change you meant is untouched; check the session id (the plan's STAGED line names it), then abort that one"
 		fi
 		if [[ $st =~ ^gone\ sid=$SID\  && ! -e $PLANS/$SID.held ]] \
 			&& ! grep -qE -- "^[^ ]+ [^ ]+ APPLYING session=$SID\$" "$AUDIT"; then
@@ -1255,7 +1342,13 @@ abort)
 		# a line of its own (router text never starts a line): the server
 		# writes the rolled-back receipt of a held apply from it
 		[[ -e $PLANS/$SID.held ]] && log "HELD APPLY ABORTED session=$SID"
+		if [[ $out == "aborted $SID rolled-back-by-guard" ]]; then
+			st=$(r "$PROG status $SID" </dev/null 2>/dev/null) || st=
+			quarantine_note "${st%%$'\n'*}"
+			[[ -z $QNOTE ]] || log "NOTE session=$SID: $QNOTE"
+		fi
 		rm -f "$PLANS/$SID.sha256" "$PLANS/$SID.held"
+		restart_owed_firewall "after abort" || die_fw_restart_failed
 	elif [[ $out == "refused $SID confirmed" ]]; then
 		# a confirmed change has no rollback left; nothing was aborted
 		reconcile_confirmed "the router refused the abort: it says confirmed" || true

@@ -44,6 +44,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from . import approve
 from . import envelope
 from . import noinstall_checks
 from . import noinstall_read
@@ -608,7 +609,8 @@ def unknown_advice(device_name: str, session_id: str, deadline: float) -> str:
     return (
         "Do nothing. If the change was not confirmed, the router restores "
         f"itself at about {_host_time(deadline)} (host time). Run "
-        f"`newton-router-setup {device_name} owner-finish {session_id}` "
+        f"`{approve._launcher('newton-router-setup')} {device_name} "
+        f"owner-finish {session_id}` "
         "after that to check."
     )
 

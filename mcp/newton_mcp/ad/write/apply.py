@@ -448,7 +448,11 @@ DC_REFUSED_NEXT_STEPS: dict[str, str] = {
         "it is now (the change does not fit the live object, or the target "
         "is one Newton never writes, such as the write account, krbtgt or a "
         "trust account): read the target with the admin tools and plan the "
-        "change again if it still needs one."
+        "change again if it still needs one. The DC also answers denied when "
+        "the directory refused the write account (it lacks the delegation the "
+        "write setup grants on the OU): when a new plan is refused the same "
+        "way, run the DC's write setup again on that DC, then plan the change "
+        "again."
     ),
     "unavailable": (
         "The DC's write helper could not run the change: its install, its "
@@ -459,14 +463,58 @@ DC_REFUSED_NEXT_STEPS: dict[str, str] = {
 }
 #: For a user-create the password left the plan record with this apply, so
 #: an approval step cannot help: the same plan can never be applied again.
+#: The new plan of the user gets a new password, so the one shown for this
+#: plan, which no account holds, is said to be discarded.
+NEW_PASSWORD_NOTE = (
+    "The new plan has a new password, shown at its first approval: the "
+    "password shown for this plan was never set on any account, so discard it."
+)
 DC_REFUSED_USER_CREATE_STEP = (
     "The password of the new user left the plan record with this apply, so "
     "this plan cannot be applied again: fix the cause and plan the new user "
-    "again."
+    f"again. {NEW_PASSWORD_NOTE}"
 )
 #: The codes whose own next step applies the same plan again: for a
-#: user-create it is left out, and only DC_REFUSED_USER_CREATE_STEP is said.
-DC_REFUSED_USER_CREATE_CODES = frozenset({"expired", "bad_token", "unavailable"})
+#: user-create the step below is said instead, then
+#: DC_REFUSED_USER_CREATE_STEP.
+DC_REFUSED_USER_CREATE_STEPS: dict[str, str] = {
+    "expired": (
+        "The approval was outside its window when the DC checked it (an "
+        "approval lasts 30 minutes)."
+    ),
+    "bad_token": (
+        "The DC did not accept the approval token: its approval key does not "
+        "match the one the approval was made with. Check that the passphrase "
+        "typed on the DC and at newton-approve is the same; when every "
+        "approval is refused this way, run the DC's write setup again with "
+        "the domain's passphrase (on every DC of the domain)."
+    ),
+    "unavailable": (
+        "The DC's write helper could not run the change: its install, its "
+        "approval key or the timer of its undo is not usable. Run the DC's "
+        "write setup again."
+    ),
+}
+#: The next step of a refusal of the helper's own install check (the answer
+#: carries stage install): it refused before it read the request, so the DC
+#: holds no record of it and the same plan can go out again.
+INSTALL_REFUSED_STEP = (
+    "The DC's write helper refused the request before reading it: its "
+    "install check failed (the install, its approval key file or its device "
+    "file is missing or others may change them, or on Samba the login is not "
+    "the write login). Run the DC's write setup again on that DC, then apply "
+    "the same plan (approve it again first with newton-approve ad-change "
+    "when its 30-minute approval has passed): the DC holds no record of it."
+)
+INSTALL_REFUSED_USER_CREATE_STEP = (
+    "The DC's write helper refused the request before reading it: its "
+    "install check failed (the install, its approval key file or its device "
+    "file is missing or others may change them, or on Samba the login is not "
+    "the write login). Run the DC's write setup again on that DC."
+)
+#: The codes of the install check of both helpers: a refusal of that check
+#: carries stage install, and nothing of the request was read.
+INSTALL_CODES = frozenset({"unavailable", "denied"})
 #: A retry of a user-create whose earlier apply the DC refused before
 #: writing it: the password left the plan with that apply, so nothing is sent.
 SECRET_SPENT_MESSAGE = (
@@ -474,7 +522,15 @@ SECRET_SPENT_MESSAGE = (
     "writing it, so nothing was written, and the password of the new user "
     "left the plan record with that apply: this plan cannot be applied "
     "again, and Newton sent nothing. Fix the cause of the earlier refusal "
-    "(its receipt keeps its message) and plan the new user again."
+    "(its receipt keeps its message) and plan the new user again. "
+    f"{NEW_PASSWORD_NOTE}"
+)
+#: Added to a conflict a user-create's apply met: the DC wrote nothing, and
+#: the password left the plan record with the apply.
+USER_CREATE_CONFLICT_STEP = (
+    "The password of the new user left the plan record with this apply, so "
+    "this plan cannot be applied again: plan the new user again if it still "
+    f"needs one. {NEW_PASSWORD_NOTE}"
 )
 #: The DC refused with conflict and no other armed change: the target's
 #: live value is not the plan's before-image, so somebody changed it.
@@ -504,15 +560,22 @@ ALREADY_HELD_MESSAGE = (
 )
 
 
-def _dc_refused_message(code: object, verb: object) -> str:
-    """DC_REFUSED_MESSAGE with the next step of the code the DC named."""
+def _dc_refused_message(code: object, verb: object, install: bool = False) -> str:
+    """DC_REFUSED_MESSAGE with the next step of the code the DC named, or
+    of the helper's install check when ``install``."""
     step = DC_REFUSED_NEXT_STEPS.get(code) if isinstance(code, str) else None
     if verb == "user-create":
         # The password left the plan record with this apply, whatever the
         # code: the next step is always a new plan of the user.
-        if step is None or code in DC_REFUSED_USER_CREATE_CODES:
+        if install:
+            step = INSTALL_REFUSED_USER_CREATE_STEP
+        elif isinstance(code, str) and code in DC_REFUSED_USER_CREATE_STEPS:
+            step = DC_REFUSED_USER_CREATE_STEPS[code]
+        if step is None:
             return f"{DC_REFUSED_MESSAGE} {DC_REFUSED_USER_CREATE_STEP}"
         return f"{DC_REFUSED_MESSAGE} {step} {DC_REFUSED_USER_CREATE_STEP}"
+    if install:
+        step = INSTALL_REFUSED_STEP
     return DC_REFUSED_MESSAGE if step is None else f"{DC_REFUSED_MESSAGE} {step}"
 REPLAY_MESSAGE = (
     "The domain controller already holds this transaction: an earlier apply "
@@ -613,6 +676,52 @@ NOT_FOUND_MESSAGE = (
     "as far as the DC shows, no apply of this plan reached its write (the plan "
     "was never applied, or the DC refused it before writing anything). A plan "
     "that was never applied can be applied with newton_ad_apply_change."
+)
+#: A status the DC answers not_found when the receipt of an earlier apply
+#: is final and does not read refused (the apply's session failed, say):
+#: Newton refuses a second apply of the plan, so it is never offered.
+EARLIER_NOT_FOUND_MESSAGE = (
+    "The domain controller holds no record of this change that it can read, "
+    "but the receipt of an earlier apply on this host does not say the DC "
+    "refused it (the session of that apply failed, say): that apply may not "
+    "have reached the DC, or may still be on its way to it. Newton refuses "
+    "a second apply of this plan, so it cannot be applied again. Read the "
+    "status again before changing the target another way; when it still "
+    "reads not_found, read the target with the admin tools and plan the "
+    "change again if it still needs one."
+)
+#: A status the DC answers not_found for a user-create whose password left
+#: the plan record with an earlier apply the DC refused before its write.
+SPENT_NOT_FOUND_MESSAGE = (
+    "The domain controller holds no record of this change that it can read: "
+    "as far as the DC shows, no apply of this plan reached its write. The "
+    "password of the new user left the plan record with an earlier apply, so "
+    "this plan cannot be applied again: plan the new user again if it still "
+    f"needs one. {NEW_PASSWORD_NOTE}"
+)
+#: A status the DC answers refused when the receipt on this host does not
+#: hold the DC's refusal: the DC's record keeps the state only.
+REFUSED_STATUS_MESSAGE = (
+    f"{DC_REFUSED_MESSAGE} The DC's record keeps no reason, and the receipt "
+    "of the apply on this host, which keeps it, could not be read or does "
+    "not hold it: read the target with the admin tools and plan the change "
+    "again if it still needs one."
+)
+#: A status or an abort the helper answers unavailable or denied: its install
+#: check refused it, or (unavailable) its store was busy.
+HELPER_REFUSED_MESSAGE = (
+    "The domain controller's write helper refused this request or could not "
+    "run it (code unavailable or denied): its install check failed (the "
+    "install, its approval key file or its device file is missing or others "
+    "may change them, or on Samba the login is not the write login), or its "
+    "store was busy. Try again in a minute; when it answers the same, run "
+    "the DC's write setup again on that DC, then run newton_ad_change_status."
+)
+#: An abort the DC answers with an error: the undo may or may not have run.
+ABORT_ERROR_MESSAGE = (
+    "The domain controller answered the abort with an error, so Newton does "
+    "not know whether its undo ran. Run newton_ad_change_status to read the "
+    "change from the DC."
 )
 STATUS_LOST_MESSAGE = (
     "The connection to the domain controller failed, so the status could "
@@ -776,13 +885,18 @@ def _earlier_apply(plan_id: str, plan: Mapping[str, Any]) -> tuple[bool, str | N
 
 def _dc_refused_receipt(plan_id: str) -> bool:
     """Whether the plan's receipt is a refusal the DC answered before its
-    write (its message is the DC_REFUSED_MESSAGE one): that apply reached
-    the DC, so it sent the password of a user-create."""
+    write (its message is the DC_REFUSED_MESSAGE one), or a conflict (the
+    DC answered conflict, with no unmarked, before writing anything): that
+    apply reached the DC, so it sent the password of a user-create."""
     try:
         receipt = store.read_json(store.receipt_path(plan_id))
     except (OSError, ValueError):
         return False
-    if not isinstance(receipt, dict) or receipt.get("state") != STATE_REFUSED:
+    if not isinstance(receipt, dict) or receipt.get("pending") is True:
+        return False
+    if receipt.get("state") == STATE_CONFLICT:
+        return receipt.get("code") == "conflict"
+    if receipt.get("state") != STATE_REFUSED:
         return False
     message = receipt.get("message")
     return isinstance(message, str) and message.startswith(DC_REFUSED_MESSAGE)
@@ -1008,7 +1122,7 @@ def _apply_change(
     if (
         earlier
         and not pending
-        and earlier_state == STATE_REFUSED
+        and earlier_state in (STATE_REFUSED, STATE_CONFLICT)
         and plan.get("verb") == "user-create"
         and not isinstance(plan.get("secret"), str)
         and _dc_refused_receipt(plan_id)
@@ -1165,10 +1279,22 @@ def _apply_change(
                 message = UNREADABLE_PARENT_MESSAGE
             else:
                 message = STALE_TARGET_MESSAGE
+            if plan.get("verb") == "user-create":
+                message = f"{message} {USER_CREATE_CONFLICT_STEP}"
         elif code == "replay":
             state, message = STATE_REPLAY, REPLAY_MESSAGE
         else:
-            record = _try_send(
+            # A refusal of the helper's own install check (marked stage
+            # install): it refused before it read the request, so this apply
+            # wrote nothing and created no record, and a status read would
+            # meet the same check.
+            install = (
+                isinstance(code, str)
+                and code in INSTALL_CODES
+                and answer.get("stage") == "install"
+                and not unmarked
+            )
+            record = None if install else _try_send(
                 sender,
                 pdc,
                 {"v": 1, "mode": "status", "device": plan["device"], "txid": plan["txid"]},
@@ -1176,7 +1302,7 @@ def _apply_change(
             # A pre-write code with no record of the txid on the DC: no
             # apply of this txid ever reached its write (both helpers
             # create the record before they write anything).
-            never_held = (
+            never_held = install or (
                 code in PRE_WRITE_CODES
                 and not unmarked
                 and isinstance(record, dict)
@@ -1187,7 +1313,9 @@ def _apply_change(
                 and record.get("code") == "ok"
                 and record.get("state") == "refused"
             ):
-                state, message = STATE_REFUSED, _dc_refused_message(code, plan.get("verb"))
+                state, message = STATE_REFUSED, _dc_refused_message(
+                    code, plan.get("verb"), install
+                )
             elif unmarked:
                 # The DC answered the write itself, and its store took
                 # neither the mark nor the refused record: its undo may run
@@ -1515,14 +1643,45 @@ def _verify(
     return states
 
 
-def _receipt_pending(plan_id: str) -> bool:
-    """Whether the receipt of the plan is a pending one (False when it
-    cannot be read)."""
+def _not_found_message(plan_id: str, plan: Mapping[str, Any]) -> str:
+    """What a not_found from the DC means, given the receipt on this host:
+    it never offers an apply that ``_apply_change`` would refuse."""
+    path = store.receipt_path(plan_id)
+    try:
+        receipt: Any = store.read_json(path) if path.exists() else None
+    except (OSError, ValueError):
+        return EARLIER_NOT_FOUND_MESSAGE
+    if isinstance(receipt, dict) and receipt.get("pending") is True:
+        # With a pending receipt (an apply was about to be sent) only now is
+        # nothing changed known.
+        return PENDING_NOT_FOUND_MESSAGE
+    if receipt is not None and (
+        not isinstance(receipt, dict) or receipt.get("state") != STATE_REFUSED
+    ):
+        return EARLIER_NOT_FOUND_MESSAGE
+    if plan.get("verb") == "user-create" and not isinstance(plan.get("secret"), str):
+        return SPENT_NOT_FOUND_MESSAGE
+    return NOT_FOUND_MESSAGE
+
+
+def _refused_status_message(plan_id: str, plan: Mapping[str, Any]) -> str:
+    """The reason of a change the DC holds refused: the receipt of its apply
+    on this host keeps it (the DC's record keeps the state only)."""
     try:
         receipt = store.read_json(store.receipt_path(plan_id))
     except (OSError, ValueError):
-        return False
-    return isinstance(receipt, dict) and receipt.get("pending") is True
+        receipt = None
+    if (
+        isinstance(receipt, dict)
+        and receipt.get("state") == STATE_REFUSED
+        and receipt.get("txid") == plan.get("txid")
+        and isinstance(receipt.get("message"), str)
+        and str(receipt["message"]).startswith(DC_REFUSED_MESSAGE)
+    ):
+        return str(receipt["message"])
+    if plan.get("verb") == "user-create" and not isinstance(plan.get("secret"), str):
+        return f"{REFUSED_STATUS_MESSAGE} {DC_REFUSED_USER_CREATE_STEP}"
+    return REFUSED_STATUS_MESSAGE
 
 
 def change_status(
@@ -1571,11 +1730,12 @@ def change_status(
     if answer.get("code") == "error":
         result["message"] = STATUS_ERROR_MESSAGE
     if answer.get("code") == "not_found":
-        # The DC holds no record of the txid.  With a pending receipt (an
-        # apply was about to be sent) only now is nothing changed known.
-        result["message"] = (
-            PENDING_NOT_FOUND_MESSAGE if _receipt_pending(plan_id) else NOT_FOUND_MESSAGE
-        )
+        # The DC holds no record of the txid.
+        result["message"] = _not_found_message(plan_id, plan)
+    if answer.get("code") in INSTALL_CODES:
+        result["message"] = HELPER_REFUSED_MESSAGE
+    if answer.get("code") == "ok" and answer.get("state") == STATE_REFUSED:
+        result["message"] = _refused_status_message(plan_id, plan)
     if plan.get("verb") == "unlock" and answer.get("state") == "armed":
         # An unlock arms no undo: its armed record is one the DC could not
         # settle, and nothing runs at its undo_at.
@@ -1675,6 +1835,13 @@ def abort_change(
         }) or {}
         if status.get("code") == "ok" and status.get("state") == "confirmed":
             message = CONFIRMED_ABORT_MESSAGE
+    elif answer.get("code") == "not_found":
+        # No record of the txid: there was nothing on the DC to abort.
+        message = f"Nothing was aborted: {_not_found_message(plan_id, plan)}"
+    elif answer.get("code") == "error":
+        message = ABORT_ERROR_MESSAGE
+    elif answer.get("code") in INSTALL_CODES:
+        message = HELPER_REFUSED_MESSAGE
     restored = answer.get("restored")
     # The abort answer carries no state: for every verb but an unlock
     # (handled above), both helpers record ``undone`` exactly when the undo

@@ -133,20 +133,25 @@ def test_from_file_foreign_router_advert_fails(tmp_path):
     assert "PASS" not in result.stdout
 
 
-def test_from_file_no_packets_passes_with_zero_count(tmp_path):
-    capture = write_capture(tmp_path, [])
+NO_PACKETS = "INCONCLUSIVE capture file {} contains no packets, so it proves nothing"
+
+
+@pytest.mark.parametrize("lines", [[], ["reading from file x.pcap, link-type EN10MB (Ethernet), "
+                                        "snapshot length 262144", "", "0 packets captured"]])
+def test_from_file_with_no_packets_is_inconclusive(tmp_path, lines):
+    """An empty capture file (or one with only tcpdump's banner and summary
+    lines) proves nothing: INCONCLUSIVE and exit 3, never a PASS. A live
+    capture that sees nothing still passes (its window was observed)."""
+    capture = write_capture(tmp_path, lines)
 
     result = run(
         "--iface", "eth0", "--allow-mac", ALLOWED_MAC, "--from-file", str(capture)
     )
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.splitlines() == [
-        f"PASS no foreign DHCP server or router advert in capture file {capture} "
-        "(0 packets from allowed sources)",
-        PASSIVE_NOTE,
-        FILE_NOTE,
-    ]
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert result.stdout.splitlines() == [NO_PACKETS.format(capture)]
+    assert "PASS" not in result.stdout
+    assert "--iface" not in result.stdout + result.stderr
 
 
 def test_from_file_uppercase_allow_mac_is_accepted(tmp_path):
@@ -733,21 +738,39 @@ def test_unknown_option_exits_2():
     assert "PASS" not in result.stdout
 
 
-def test_from_file_zero_packets_prints_note_on_stderr(tmp_path):
-    capture = write_capture(tmp_path, [])
+def test_capture_zero_packets_prints_note_on_stderr(tmp_path):
+    bindir = install_fake(tmp_path, "id", "printf '0\\n'\n")
+    install_fake(tmp_path, "tcpdump", "exit 0\n")
+    install_expiring_timeout(tmp_path)
 
-    result = run(
-        "--iface", "eth0", "--allow-mac", ALLOWED_MAC, "--from-file", str(capture)
-    )
+    result = run("--iface", "eth0", "--allow-mac", ALLOWED_MAC, env=fake_root_env(bindir))
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.splitlines() == [
-        f"PASS no foreign DHCP server or router advert in capture file {capture} "
-        "(0 packets from allowed sources)",
-        PASSIVE_NOTE,
-        FILE_NOTE,
-    ]
     assert "NOTE: no DHCP or router advert packet was seen" in result.stderr
+    assert "check that --iface is the house-LAN interface" in result.stderr
+
+
+def test_from_file_needs_no_iface(tmp_path):
+    """--iface does not apply to a capture file, so --from-file runs
+    without it; a live capture still needs it."""
+    capture = write_capture(tmp_path, [dhcp_offer(ALLOWED_MAC)])
+
+    result = run("--allow-mac", ALLOWED_MAC, "--from-file", str(capture))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == FILE_NOTE
+    live = run("--allow-mac", ALLOWED_MAC)
+    assert live.returncode == 2 and "usage: newton-lab-isolation" in live.stderr
+
+
+def test_from_file_unreadable_line_does_not_name_iface(tmp_path):
+    capture = write_capture(tmp_path, ["17:13:20.000000 ip: 192.168.4.9.67 > 255.255.255.255.68: x"])
+
+    result = run("--allow-mac", ALLOWED_MAC, "--from-file", str(capture))
+
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "--iface" not in result.stdout + result.stderr
+    assert "was the capture taken on an Ethernet interface with -e?" in result.stdout
 
 
 def test_from_file_one_allowed_packet_prints_no_note(tmp_path):

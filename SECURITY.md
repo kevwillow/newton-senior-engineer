@@ -32,11 +32,14 @@ Remove addresses and keys from everything you send. Reports are handled by the m
 - The Active Directory write path: `mcp/newton_mcp/ad/write/` on the Newton host, the helpers it runs on a domain controller (`mcp/newton_mcp/ad/collector/write.ps1` on Windows, `mcp/newton_mcp/ad/collector/newton-ad-samba-write` on Samba), and the setup script `scripts/newton-ad-setup`.
 - The scan vantage scripts: `scripts/newton-vantage-setup`, `scripts/newton-vantage-run`, `scripts/newton-vantage-check`.
 - The serial console script: `scripts/newton-serial.py`.
+- The WAN-health service the setup tool installs on the router, where it runs as root and changes routes: `scripts/newton-wan-health.sh` and `scripts/newton-wan-health.init`.
+- The vantage scan command `scripts/newton-scan`, and the rules command `scripts/newton-rules` (an installed launcher runs it as the `newton` user).
+- Any other Newton code under `scripts/`, `device/` or `mcp/` that runs on the Newton host, a vantage or the router, unless it is listed below.
 
 ## Out of scope
 
 - Bugs in third-party dependencies. Report those upstream. Tell us if Newton makes them reachable.
-- The `lab/` test tooling.
+- The `lab/` test tooling, and the lab and build helpers `scripts/newton-lab-isolation` and `scripts/support-table.py`.
 - Attacks that need root on the machine that runs Newton.
 - A model that gives bad advice but cannot make Newton act. With no approval and no write, there is no change.
 

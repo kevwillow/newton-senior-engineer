@@ -107,6 +107,19 @@ class FakeClient:
         return session.call(obj, fn, args)
 
 
+#: The words of the leftover undo-file message after its age.
+LEFTOVER_TAIL = (
+    "(its web service restarted during a change, so that change was never "
+    "confirmed or rolled back). The live settings may still hold that change: "
+    "/var/run/rpcd/snapshot-files holds the settings from before it, and a "
+    "reboot or deleting that folder loses them. To undo the change, as root "
+    "run: cp /var/run/rpcd/snapshot-files/* /etc/config/ && reload_config && "
+    "rm -rf /var/run/rpcd/snapshot-files. To keep it, if nobody is changing "
+    "the router right now, reboot it, or as root run: rm -rf "
+    "/var/run/rpcd/snapshot-files"
+)
+
+
 def factory(client: FakeClient) -> Callable[[Any], FakeClient]:
     def build(_device: Any) -> FakeClient:
         return client
@@ -228,6 +241,11 @@ def test_a_leftover_undo_file_names_the_way_out() -> None:
     assert "leftover undo file" in message, message
     assert "1 hour ago" in message, message
     assert "rm -rf /var/run/rpcd/snapshot-files" in message, message
+    # The folder is the only copy of the settings from before the
+    # change: the message says so and how to put them back first
+    assert message == (
+        "the router has a leftover undo file from 1 hour ago " + LEFTOVER_TAIL
+    ), message
 
 
 def test_a_fresh_undo_file_keeps_the_short_message() -> None:

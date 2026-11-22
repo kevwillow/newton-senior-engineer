@@ -19,8 +19,11 @@ from newton_mcp.plan import compute_plan_hash
 from test_elicit_approval import (  # noqa: E402  (tests dir is on sys.path)
     DEVICE,
     FORM_CAPABILITY,
+    OTHER_SID,
     PASSPHRASE,
     SID,
+    TOTP_K,
+    TOTP_SEED,
     WRONG_PASSPHRASE,
     _approval_path,
     _audit_text,
@@ -611,6 +614,101 @@ def test_a_wrong_first_secret_never_reaches_the_second_dialog(clock):
         )
     )
     assert lockout["misses"] == 1
+
+
+#: The dialog's answer field (spelled once, as the schema names it).
+ANSWER_FIELD = "secret"
+
+
+def _totp_dialog_ready() -> str:
+    """A TOTP device whose dialog is ready; the code it shows now."""
+    proof = elicit_approval.approval_proof
+    proof.store_totp(DEVICE, TOTP_SEED, TOTP_K)
+    proof.set_level(DEVICE, proof.LEVEL_TOTP)
+    proof.write_ack(DEVICE)
+    return proof.totp_code(TOTP_SEED, proof.totp_counter())
+
+
+def _misses() -> int:
+    path = elicit_approval.approve.state_dir() / "lockout" / f"{DEVICE}.json"
+    if not path.exists():
+        return 0
+    return int(json.loads(path.read_text(encoding="utf-8")).get("misses", 0))
+
+
+def test_a_fumbled_high_confirmation_does_not_spend_the_totp_code(clock):
+    """the code was spent before the second confirmation, so the
+    natural retry with the same code was a replay, counted as a wrong
+    answer toward the doubling lock.  The code is now spent only once
+    the second confirmation was given."""
+    _write_plan(_plan(uci_batch=HIGH_BATCH))
+    code = _totp_dialog_ready()
+
+    first = _run(
+        _ResponseContext(clock, [{ANSWER_FIELD: code}, {"confirm": "wrong"}])
+    )
+    second = _run(_ResponseContext(clock, [{ANSWER_FIELD: code}, {}]))
+
+    assert first.status == "declined"
+    assert second.status == "approved", second.message
+    assert _misses() == 0
+    saved = json.loads(_approval_path().read_text(encoding="utf-8"))
+    assert saved["approved_by"] == "elicit:totp"
+
+
+def test_a_high_totp_code_is_still_spent_once_approved(clock):
+    """The code that approved one HIGH plan does not approve another."""
+    _write_plan(_plan(SID, uci_batch=HIGH_BATCH))
+    _write_plan(_plan(OTHER_SID, uci_batch=HIGH_BATCH))
+    code = _totp_dialog_ready()
+
+    first = _run(_ResponseContext(clock, [{ANSWER_FIELD: code}, {}]))
+    second = _run(
+        _ResponseContext(clock, [{ANSWER_FIELD: code}, {}]), session_id=OTHER_SID
+    )
+
+    assert first.status == "approved"
+    assert second.status == "wrong"
+    assert not _approval_path(OTHER_SID).exists()
+
+
+def test_a_code_spent_elsewhere_during_the_high_confirmation_is_no_miss(clock):
+    """The code matched when it was typed; if another approval spent it
+    while the second confirmation was open, nothing is approved and no
+    miss is counted (the owner's code was right)."""
+    _write_plan(_plan(uci_batch=HIGH_BATCH))
+    code = _totp_dialog_ready()
+    proof = elicit_approval.approval_proof
+
+    class _SpendDuringConfirm(_ResponseContext):
+        async def elicit(self, message, schema):
+            if "confirm" in schema.model_fields:
+                assert proof.verify_totp(DEVICE, code) is not None
+            return await super().elicit(message, schema)
+
+    outcome = _run(_SpendDuringConfirm(clock, [{ANSWER_FIELD: code}, {}]))
+
+    assert outcome.status == "fallback"
+    assert "used by another approval" in outcome.message
+    assert _misses() == 0
+    assert not _approval_path().exists()
+
+
+def test_a_wrong_totp_code_never_reaches_the_second_dialog(clock):
+    _write_plan(_plan(uci_batch=HIGH_BATCH))
+    _totp_dialog_ready()
+    proof = elicit_approval.approval_proof
+    current = proof.totp_counter()
+    live = {proof.totp_code(TOTP_SEED, current + offset) for offset in (-1, 0, 1, 2)}
+    wrong = next(c for c in ("000000", "111111", "222222", "333333", "444444") if c not in live)
+    ctx = _ResponseContext(clock, [{ANSWER_FIELD: wrong}, {}])
+
+    outcome = _run(ctx)
+
+    assert outcome.status == "wrong"
+    assert len(ctx.messages) == 1
+    assert _misses() == 1
+    assert not _approval_path().exists()
 
 
 def test_the_apply_result_carries_a_newton_result_and_grant_notice(

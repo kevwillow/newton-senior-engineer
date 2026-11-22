@@ -374,3 +374,16 @@ def test_lab_snapshot_prod_fails_before_password_prompt(tmp_path):
     assert "lab-snapshot works only on a device whose inventory profile is lab" \
         in r.err
     assert "root password:" not in r.err
+
+
+def test_an_unknown_device_names_the_inventory_and_how_to_add_it(setup_env):
+    """A device the inventory does not name is refused with the
+    inventory file, the devices it does name and the table to add."""
+    env = setup_env
+    r = env.run("r1x", "check", typed=())
+    assert r.rc == 2, (r.out, r.err)
+    assert (
+        "error: unknown device: r1x: not in %s (known: r1); add a "
+        "[devices.r1x] table to the inventory" % env.inventory
+    ) in r.err.splitlines(), r.err
+    assert r.calls == []

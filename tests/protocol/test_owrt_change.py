@@ -5082,3 +5082,69 @@ def test_a_rolled_back_apply_prints_no_config_hashes(protocol):
     assert "ROLLBACK WINDOW PASSED" in result.stdout
     assert config_hash_lines(result) == []
     assert f"CONFIRMED session={SID}" not in result.stdout
+
+
+# ---- config files the guard quarantined are named to the owner ----
+
+QNOTE = (
+    "the guard moved 2 config file(s) that were not in the saved copy to "
+    f"/etc/newton/quarantine/{SID}/ on the router; they stay there until you remove them: "
+    "copy back into /etc/config any you want to keep"
+)
+
+
+def test_rollback_window_names_quarantined_files(protocol):
+    set_router_state(
+        protocol,
+        status=f"rolled-back sid={SID} guard=restored:deadline rpcd=- config=base boot=same quarantined=2",
+    )
+    fail_verify_rounds(protocol)
+    result = protocol["run"]()
+    assert result.returncode == 1
+    final = [line for line in result.stdout.splitlines() if line.strip()][-1]
+    assert final.startswith(f"ROLLBACK WINDOW PASSED session={SID} "), final
+    assert final.endswith("; " + QNOTE), final
+
+
+def test_rollback_window_without_quarantine_has_no_note(protocol):
+    set_router_state(
+        protocol,
+        status=f"rolled-back sid={SID} guard=restored:deadline rpcd=- config=base boot=same",
+    )
+    fail_verify_rounds(protocol)
+    result = protocol["run"]()
+    assert result.returncode == 1
+    assert "quarantine" not in result.stdout
+
+
+def test_abort_by_the_guard_names_quarantined_files(protocol):
+    set_router_state(
+        protocol,
+        abort_how="rolled-back-by-guard",
+        status=f"gone sid={SID} guard=restored:abort rpcd=- config=- boot=- quarantined=2",
+    )
+    result = run_script(protocol, ["abort", "root@192.0.2.1", SID])
+    assert result.returncode == 0, result.stdout
+    assert f"ABORTED session={SID} (rolled-back-by-guard)" in result.stdout
+    assert f"NOTE session={SID}: {QNOTE}" in result.stdout.splitlines()
+
+
+def test_status_command_names_quarantined_files(protocol):
+    set_router_state(
+        protocol,
+        status=f"rolled-back sid={SID} guard=restored:abort rpcd=- config=- boot=- quarantined=2",
+    )
+    result = run_script(protocol, ["status", "root@192.0.2.1", SID])
+    assert result.returncode == 0, result.stdout
+    assert f"NOTE session={SID}: {QNOTE}" in result.stdout.splitlines()
+
+
+@pytest.mark.parametrize("field", ["quarantined=0", "quarantined=x", "quarantined=12345", "xquarantined=2"])
+def test_quarantine_note_only_for_a_whole_valid_field(protocol, field):
+    set_router_state(
+        protocol,
+        status=f"rolled-back sid={SID} guard=restored:abort rpcd=- config=- boot=- {field}",
+    )
+    result = run_script(protocol, ["status", "root@192.0.2.1", SID])
+    assert result.returncode == 0, result.stdout
+    assert "NOTE session" not in result.stdout

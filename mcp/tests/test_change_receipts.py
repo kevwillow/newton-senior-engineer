@@ -592,3 +592,45 @@ def test_cr22e_an_installed_receipt_keeps_the_full_backup_advice(configured):
     text = _render(configured, _record(configured), "confirmed")
     assert "sysupgrade -r" in text
     assert "including secrets" in text
+
+
+def _spy_fsync_and_replace(monkeypatch) -> list[tuple[str, ...]]:
+    """Record every fsync (by the path its fd names) and every rename."""
+    events: list[tuple[str, ...]] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd):
+        events.append(("fsync", os.path.realpath(os.readlink(f"/proc/self/fd/{fd}"))))
+        return real_fsync(fd)
+
+    def replace(src, dst, *a, **k):
+        events.append(("replace", os.path.realpath(src), os.path.realpath(dst)))
+        return real_replace(src, dst, *a, **k)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+    return events
+
+
+def _assert_synced_rename(events: list[tuple[str, ...]], dest: Path) -> None:
+    """The temp file was synced before its rename onto *dest*, and the
+    folder that holds *dest* after it: a crash then keeps the new file."""
+    target = os.path.realpath(dest)
+    renames = [i for i, e in enumerate(events) if e[0] == "replace" and e[2] == target]
+    assert renames, (target, events)
+    at = renames[-1]
+    tmp = events[at][1]
+    assert ("fsync", tmp) in events[:at], (tmp, events)
+    assert ("fsync", os.path.dirname(target)) in events[at + 1:], (target, events)
+
+
+# CR-23: the backup copy and the receipt survive a crash right after the
+# apply: each temp file is synced before its rename, its folder after.
+def test_cr23_backup_copy_and_receipt_are_synced_around_the_rename(configured, monkeypatch):
+    events = _spy_fsync_and_replace(monkeypatch)
+
+    _applied(configured, monkeypatch)
+
+    receipts = configured / "state" / "receipts"
+    _assert_synced_rename(events, receipts / "backups" / f"{SID}.tar.gz")
+    _assert_synced_rename(events, _receipts(configured)[0])

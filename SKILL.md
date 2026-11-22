@@ -1,7 +1,7 @@
 ---
 name: newton
-description: "Newton, the network engineer. Configure, troubleshoot and design small-to-large networks from an AI agent over SSH or a serial console, with safety rails that make lockouts and destructive commands less likely. Primary platform: OpenWrt 25.12+ routers (uci, ubus, fw4/nftables, DSA VLANs, dnsmasq/odhcpd, wifi, apk), driven through a tested apply-with-automatic-rollback protocol. Ships as a skill and as an MCP server (newton-mcp) so any MCP client can use the same protocol. Also covers Linux host networking (Proxmox bridges, NetworkManager) and network design (subnetting, VLANs, DHCP/DNS, dual-WAN). Use when the user says 'configure the router', 'add a port forward', 'set up a VLAN', 'change the wifi', 'reserve an IP', 'why is the network slow', 'how fast is my internet', 'run a speed test', 'test the wifi speed', 'open a port', 'set up dual WAN', 'segment the network', or any task touching uci, ubus, nft, fw4, dnsmasq, odhcpd, wifi, iwinfo, apk/opkg on an OpenWrt device, or network config on a Linux host. Primary use: the owner types /newton (or /network-engineer) to enter Network-engineer mode; every network request runs through that mode's flow."
-version: 1.4.0
+description: "Newton, the network engineer. Configure, troubleshoot and design small-to-large networks from an AI agent over SSH or a serial console, with safety rails that make lockouts and destructive commands less likely. Primary platform: OpenWrt 25.12+ routers (uci, ubus, fw4/nftables, DSA VLANs, dnsmasq/odhcpd, wifi, apk), driven through a tested apply-with-automatic-rollback protocol. Ships as a skill and as an MCP server (newton-mcp) so any MCP client can use the same protocol. Also covers Linux host networking (Proxmox bridges, NetworkManager) and network design (subnetting, VLANs, DHCP/DNS, dual-WAN). Use when the user says 'configure the router', 'add a port forward', 'set up a VLAN', 'change the wifi', 'reserve an IP', 'why is the network slow' or 'how fast is my internet' on a network Newton manages, 'run a speed test', 'test the wifi speed', 'open a port', 'set up dual WAN', 'segment the network', or any task touching uci, ubus, nft, fw4, dnsmasq, odhcpd, wifi, iwinfo, apk/opkg on an OpenWrt device, or bridge or NetworkManager config on a Linux host. Primary use: the owner types /newton (or /network-engineer) to enter Network-engineer mode; every network request runs through that mode's flow."
+version: 1.4.1
 author: Kev
 license: MIT (scripts, SKILL.md); see references/README.md for reference-doc licenses
 platforms: [linux]
@@ -104,7 +104,7 @@ no-install login.
 
 **no-install:** Newton puts nothing on the router except one web-interface user. Every change uses OpenWrt's own undo timer. Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays. Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval. Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run.
 
-**installed:** Newton puts a program on the router: a small set of shell scripts (6 files, about 218 KB), no packages and no compiled code. Newton's key can run that program and nothing else, so the agent never gets a root shell. If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck. More checks can run, and fewer changes need a script. uninstall removes Newton's program and key; it keeps the guard's saved settings and the rest of /etc/newton (its lock and log), the program directory, the WAN-health settings in /etc/config/newton_wanhealth, the keys from before swap-key and the sysupgrade file: the saved settings and the copy of your keys are what you restore by hand.
+**installed:** Newton puts a program on the router: a small set of shell scripts (6 files, about 220 KB), no packages and no compiled code. Newton's key can run that program and nothing else, so the agent never gets a root shell. If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck. More checks can run, and fewer changes need a script. uninstall removes Newton's program and key; it keeps the guard's saved settings and the rest of /etc/newton (its lock and log), the program directory, the WAN-health settings in /etc/config/newton_wanhealth, the keys from before swap-key and the sysupgrade file: the saved settings and the copy of your keys are what you restore by hand.
 
 The no-install mode is **not** as safe as the installed mode. Its rollback is OpenWrt's own, the
 same one LuCI uses, and Newton only applies the changes that are acceptable if they stay. Never
@@ -622,7 +622,7 @@ claude mcp add -s user newton -- sudo -n -u newton /usr/local/bin/newton-mcp
 ```
 Audit log: `~/.local/state/newton/mcp-audit.log`. Tests: `cd mcp && uv run --extra test pytest -q`.
 
-**What Newton puts on your router.** The OpenWrt install puts 6 files on the router: about 218 KB of small POSIX shell
+**What Newton puts on your router.** The OpenWrt install puts 6 files on the router: about 220 KB of small POSIX shell
 scripts. No packages are installed and nothing is compiled. It also writes the device name, the profile and the zones
 under `/etc/newton`, the WAN-health settings `/etc/config/newton_wanhealth`, the boot links `/etc/rc.d/S09newton-guard`,
 `/etc/rc.d/S95newton-wan-health` and `/etc/rc.d/K10newton-wan-health`, and 19 lines in `/etc/sysupgrade.conf`. It is there for the rollback that must
@@ -657,7 +657,7 @@ First install (once). The user opens the reviewed commit on the Git host's web p
 
 Every later install or update. Again a new terminal, `/usr/bin/sudo -i` (same caveat as above), then `newton-bootstrap install <repo> <full 40-hex commit id>`. The bootstrap is owned by root, refuses to run unless its own path is root-owned and not writable by others and the environment is clean, and makes its own verified snapshot of exactly that commit. It never runs the working tree's installer and never reads the repo's config or hooks. It shows commit id, tree id, author, date, subject and the sha256 of the snapshot's installer, asks the user to type `install ` and the full 40-hex id, then runs the snapshot's `scripts/newton-install --from-snapshot` from an empty directory with a scrubbed environment, and deletes the snapshot. Before an update, the owner confirms or aborts every held change; after it, they restart Claude Code (or run `/mcp` and reconnect `newton`) so the new server runs, and run `sudo -u newton /usr/local/bin/newton-router-setup <device> upgrade` for each router in the installed mode.
 
-To update the bootstrap itself: `newton-bootstrap self-update <repo> <full id>` shows the diff between the installed and the new bootstrap, asks for `update ` and the full 40-hex id, replaces itself atomically and keeps the old copy as `newton-bootstrap.prev`. `newton-bootstrap version` prints its own sha256 and the commit it was installed from.
+To update the bootstrap itself: `newton-bootstrap self-update <repo> <full id>` shows the diff between the installed and the new bootstrap, asks for `update ` and the full 40-hex id, replaces itself atomically and keeps the old copy as `newton-bootstrap.prev`. An update never replaces the bootstrap; it says when the installed one differs from the release's, and then the owner runs `newton-bootstrap self-update <repo> <full id>`. A bootstrap installed by an earlier release asks for a 12-hex prefix of the id instead of the full id, for `install ` and `update ` alike: the owner types what its prompt asks for. `newton-bootstrap version` prints its own sha256 and the commit it was installed from.
 
 This does not protect a shell the agent controls (see docs/design/04 section "Install bootstrap"). Doctor: run it from a fresh terminal that the agent has not configured; the installed copy re-executes itself with a clean environment (it keeps only `PATH`, `HOME`, `TERM`, `SSH_AUTH_SOCK` and `LANG`) and names the `LD_*`, `BASH_*` and `NEWTON_DOCTOR_*` variables it dropped, so this removes inherited variables only and cannot defend against a shell the agent controls. Router check: it ignores `~/.ssh/config` on purpose (a config can rewrite the host or run a `ProxyCommand` and fake the denial) and tries ssh's default key files and the ssh-agent, so a router that needs another port, a jump host or a differently named key file reports `INCONCLUSIVE`, never `PASS`. The router check includes the F2 isolation proofs: `hello` over the restricted key must show `door=ssh caller=<label>` and the matching `mode=prod` and sha256 fields; a request of `id` (or any non-subcommand) must come back as `error unknown-subcommand`; the restricted key file must be unreadable by the agent's user.
 
@@ -733,7 +733,9 @@ changes nothing. Explain each finding in plain words: what an attacker does with
 
 1. Explain the change and get the owner's yes in chat.
 2. `newton_ad_plan_change(device, verb, sam_names, value)`. `device` is the write entry that stands for the domain.
-   `sam_names` is a list of sAMAccountNames, never a DN or a filter. Verbs: `uac-clear` (one name; value: one bit of
+   `sam_names` is a list of sAMAccountNames, never a DN or a filter: each is 1 to 20 characters of lowercase letters,
+   digits, `.`, `_` and `-` (a computer's ends in `$`); write a mixed-case name in lowercase, and a name with a space
+   cannot be named. Verbs: `uac-clear` (one name; value: one bit of
    4194304, 32, 128, 65536), `disable` and `enable` (one user or computer, no value), `enc-types` (one name;
    value: the types as an integer bitmask), `unlock` (one name, no value), `member-add` and `member-remove` (two
    names, the group first, no value), `maq` (no names; value: an integer from 0 to 1000), `user-create` (the new
@@ -758,7 +760,7 @@ changes nothing. Explain each finding in plain words: what an attacker does with
    it), the result carries that undo's `dc_state` instead; when it says `confirmed`, the DC recorded the confirm
    before its error, and the result is `confirmed`; when it cannot be read, the result says Newton does not know whether the
    confirm was recorded, and the next step is `newton_ad_change_status`. `newton_ad_change_status(device, plan_id)` shows `armed`, `confirmed`, `undone`,
-   `undo_failed` or `refused`. An `unlock` that shows `armed` is one whose record the DC could not settle after its
+   `undo_failed`, `refused` or `not_found` (the DC holds no record; the message says what that means for the plan). An `unlock` that shows `armed` is one whose record the DC could not settle after its
    write: it has no undo, so nothing runs at its `undo_at`, and the result says so.
    If the connection to a domain controller fails mid-apply, the apply still writes its receipt (a final receipt that cannot be
    written is named in `receipt_error` and never changes the result; before it sends the apply, Newton writes a pending
@@ -779,13 +781,15 @@ changes nothing. Explain each finding in plain words: what an attacker does with
    read back counts as that DC not showing the change, so the change is aborted, except an unlock, which is not aborted and reaches the other DCs by replication. Do not apply the plan
    again. One exception: an apply request Newton refuses before it leaves the Newton host (the SSH runner's own check)
    is `refused` with code `not_sent`: nothing was sent, the plan keeps its password, and it can be applied again once
-   the cause is fixed. A domain controller's own `refused` means it changed nothing. A `replay` (an earlier apply of
+   the cause is fixed. A retry of a `user-create` whose earlier apply the DC refused before writing it is `refused` with
+   code `not_sent` too, but its password already left the plan: it can never be applied again, so plan the new user
+   again (the new plan has a new password). A domain controller's own `refused` means it changed nothing. A `replay` (an earlier apply of
    the plan reached the DC, or may have, and a pending receipt is an earlier apply that may have reached the DC until
    the DC's record of the transaction answers `not_found`; with code `not_sent` Newton caught it and sent nothing) changed nothing now, keeps the earlier apply's receipt and sends
    the owner to `newton_ad_change_status`. When a domain controller answers
    the apply with an error code that can follow a write it tried (`error`, `denied`, `not_found`) or any other error
    (the codes both helpers give only before they write anything, `schema`, `bad_token`, `expired`, `privileged`,
-   `not_pdc` and `risk_mismatch`, are `refused` only when the DC holds no record of the transaction and the answer carries no `unmarked`, or its record says `refused`), Newton reads the DC's record of the change and reports `refused` only when that record says `refused`; otherwise the
+   `not_pdc` and `risk_mismatch`, are `refused` only when the DC holds no record of the transaction and the answer carries no `unmarked`, or its record says `refused`), Newton reads the DC's record of the change and reports `refused` only when that record says `refused` (or when the answer is an `unavailable` or `denied` of the helper's own install check, which refuses before it reads the request: the next step is the DC's write setup again); otherwise the
    result is `apply_unknown` with the DC's error code, and the next step is `newton_ad_change_status`. When that
    result carries `live`, the DC read the target again and found neither the before-image nor the after-image:
    somebody else changed it, Newton does not know whether its own write landed first, and the DC does not write the

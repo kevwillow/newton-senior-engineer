@@ -304,15 +304,21 @@ def test_a_status_without_the_wrappers_line_writes_no_receipt(configured_lab, mo
 
 
 def test_the_held_next_step_says_how_long_the_window_is_and_how_to_lengthen_it():
-    """The hold window is the plan's timeout, part of it already spent on
-    the verify rounds: the agent is told so, and how to get a longer one."""
+    """The hold window is the plan's timeout minus 15 s (owrt-change.sh ends
+    the hold 15 s early), part of it already spent on the verify rounds:
+    the agent is told so, and how to get a longer one."""
     text = " ".join(server.HELD_NEXT_STEP.split())
-    assert "the plan's timeout_s (90 s by default, 60 to 600)" in text
+    assert "the plan's timeout_s minus 15 s (timeout_s is 90 s by default, 60 to 600)" in text
     assert "the verify rounds already used part of it" in text
     assert "plan the change again with a longer timeout_s" in text
     readme = (Path(__file__).resolve().parents[2] / "README.md").read_text(encoding="utf-8")
     flat = " ".join(readme.split())
-    assert "The hold window is the plan's timeout (90 s by default, 60 to 600 s)" in flat
+    assert (
+        "The hold window is the plan's timeout minus 15 s (the timeout is 90 s by default, "
+        "60 to 600 s)"
+    ) in flat
+    script = (Path(__file__).resolve().parents[2] / "scripts/owrt-change.sh").read_text(encoding="utf-8")
+    assert "deadline=$((SECONDS + T - 15))" in script
 
 
 def test_a_confirm_past_its_timeout_is_outcome_unknown_with_the_status_step(configured_lab, monkeypatch):

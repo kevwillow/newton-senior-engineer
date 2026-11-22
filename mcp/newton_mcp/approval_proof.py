@@ -320,25 +320,33 @@ def delete_totp(device: str) -> None:
         pass
 
 
-def verify_totp(device: str, code: str, now: float | None = None) -> str | None:
+def verify_totp(
+    device: str, code: str, now: float | None = None, *, consume: bool = True
+) -> str | None:
     """Check a TOTP *code* for *device* and return the approval key.
 
     The read of the last accepted counter and the write of the new one
     happen under an exclusive flock, so two server processes (or a
     relaunched one) cannot both accept the same code.  See
     ``_verify_totp_unlocked`` for the rules.
+
+    With ``consume=False`` the code is checked by the same rules but not
+    spent: the dialog of a HIGH plan checks it before the second
+    confirmation and spends it only once that was given.
     """
     _check_device(device)
     directory = _state_subdir("keys")
     fd = os.open(directory / f"{device}.lock", os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        return _verify_totp_unlocked(device, code, now)
+        return _verify_totp_unlocked(device, code, now, consume)
     finally:
         os.close(fd)
 
 
-def _verify_totp_unlocked(device: str, code: str, now: float | None) -> str | None:
+def _verify_totp_unlocked(
+    device: str, code: str, now: float | None, consume: bool = True
+) -> str | None:
     """Check a TOTP *code* for *device* and return the approval key.
 
     The counter of *now* and its two neighbours are accepted, so a
@@ -376,6 +384,8 @@ def _verify_totp_unlocked(device: str, code: str, now: float | None) -> str | No
         return None
     if matched <= record["last_counter"]:
         return None
+    if not consume:
+        return record["k"]
     record["last_counter"] = matched
     approve._atomic_write(_totp_path(device), record)
     return record["k"]

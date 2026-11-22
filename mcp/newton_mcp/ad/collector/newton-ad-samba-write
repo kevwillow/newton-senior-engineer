@@ -2664,13 +2664,15 @@ def _archive_if_old(record: Mapping[str, Any], name: str, now: int) -> None:
         _log("a final record could not be archived; it stays in the store")
 
 
-def sweep(now: int, skip: str | None = None) -> bool:
+def sweep(now: int, skip: str | None = None) -> str:
     """Run the undo of every armed record whose deadline has passed.
 
     Each record is undone on its own: a record that is malformed, or
-    whose bind or undo raises, is logged to stderr and left armed, so a later pass (the next request
+    whose undo raises, is logged to stderr and left armed, so a later pass (the next request
     or the sweep timer) tries it again, and it never stops the undo of
-    another record or the mode that runs the sweep.  An undo that ran
+    another record or the mode that runs the sweep.  A bind that raises
+    ends the undos of the pass: one failed bind (a refused keytab, LDAP
+    down) per pass, never one per stuck record.  An undo that ran
     records ``undone`` when it restored the value and ``undo_failed``
     when it did not; ``undo_failed`` is final and is never tried again.
     A final record (``FINAL_STATES``) whose undo_at is ``ARCHIVE_AFTER_S``
@@ -2682,16 +2684,20 @@ def sweep(now: int, skip: str | None = None) -> bool:
     undo_at; after that the sweep leaves it armed and does not bind for
     it again.
 
-    The answer is False when the store cannot be listed (logged: the pass
-    checked nothing, and an empty store is never assumed), and True
-    otherwise.  The sweep timer answers ``error`` on False, so its unit
-    fails; a request over stdin goes on.
+    The answer is the problem of the pass, or an empty string: the store
+    cannot be listed (logged: the pass checked nothing, and an empty store
+    is never assumed), or an expired record stays armed because its bind or
+    undo raised.  The sweep timer answers ``error`` on a problem, so its
+    unit fails and ``systemctl status`` shows it; a request over stdin
+    goes on.
     """
     try:
         names = record_files()
     except Refused:
         _log("the transaction store cannot be listed; the sweep checked nothing")
-        return False
+        return "the transaction store cannot be listed"
+    stuck = 0
+    bound = True
     for name in names:
         if skip is not None and name == f"{skip}.json":
             continue
@@ -2718,12 +2724,30 @@ def sweep(now: int, skip: str | None = None) -> bool:
             verb = (record.get("request") or {}).get("verb")
             if verb == "unlock" and undo_at + UNLOCK_SETTLE_S <= now:
                 continue
+        except Exception:
+            # A malformed record can never be undone: it is skipped, as it
+            # always was, and never fails the pass.
+            _log("the undo of an expired record failed; it stays armed")
+            continue
+        if not bound:
+            stuck += 1
+            continue
+        try:
             directory = bind()
+        except Exception:
+            _log("the bind of the sweep failed; every expired record stays armed")
+            bound = False
+            stuck += 1
+            continue
+        try:
             run_undo(directory, record, path)
         except Exception:
             _log("the undo of an expired record failed; it stays armed")
+            stuck += 1
             continue
-    return True
+    if stuck:
+        return "an expired record stays armed: its bind or its undo failed"
+    return ""
 
 
 # ---- the bind (section 9) ---------------------------------------------------
@@ -3821,17 +3845,31 @@ def do_undo(txid: str, now: int) -> dict[str, Any]:
 # ---- the entry point --------------------------------------------------------
 
 
+#: The answer of a refusal of the install check carries this beside its
+#: code: the helper refused before it acted on the request (it wrote
+#: nothing and created no record), so Newton names the write setup.
+INSTALL_STAGE = {"stage": "install"}
+
+
 def _stdin_path(stdin: bytes, env: Mapping[str, str]) -> dict[str, Any]:
     """The way in over stdin (section 1)."""
     if env.get("SUDO_USER") != LOGIN_NAME:
-        raise Refused("denied", "the login is not the write login")
+        raise Refused("denied", "the login is not the write login", INSTALL_STAGE)
     problem = install_problem()
     if problem:
-        raise Refused("unavailable", problem)
+        raise Refused("unavailable", problem, INSTALL_STAGE)
     if len(stdin) > MAX_REQUEST_BYTES:
         raise Refused("schema", "the request is bigger than 64 KiB")
     request = parse_request(stdin)
-    if request["device"] != read_device():
+    try:
+        device = read_device()
+    except Refused as exc:
+        # The device file is a file of the install: it is read before the
+        # lock, before anything of the request is acted on.
+        if exc.code == "unavailable":
+            exc.extra.update(INSTALL_STAGE)
+        raise
+    if request["device"] != device:
         raise Refused("schema", "the request names another device")
     mode = str(request["mode"])
 
@@ -3891,9 +3929,9 @@ def _sweep_path(argv: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
     if problem:
         raise Refused("unavailable", problem)
     with StoreLock(lock_path()):
-        listed = sweep(int(current_time()))
-    if not listed:
-        raise Refused("error", "the transaction store cannot be listed")
+        problem = sweep(int(current_time()))
+    if problem:
+        raise Refused("error", problem)
     return {"v": 1, "code": "ok"}
 
 

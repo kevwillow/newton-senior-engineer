@@ -129,10 +129,12 @@ NEW_BLOB=''
 NEW_LINE=''
 SWAP_APPENDED=0
 
-# set by refuse_if_busy: 1 when the guard status is exactly `idle` (0
-# also when the guard is not installed), so the upgrade step can choose
-# whether to also upload guard and init
+# set by refuse_if_busy: 1 when the first line of the guard status is
+# `idle` or starts with `restored ` (no change in flight; 0 also when the
+# guard is not installed), so the upgrade step can choose whether to also
+# upload guard and init; GUARD_STATUS holds that first line
 GUARD_IDLE=0
+GUARD_STATUS=''
 
 # set by approval_key_run: 1 when this run wrote a new approve.key (not
 # the `already set` path), so totp_offer can tell a stale TOTP record
@@ -749,7 +751,13 @@ except Exception as exc:
 
 devices = data.get("devices", {})
 if not isinstance(devices, dict) or dev not in devices:
-    err("unknown device: {}".format(dev))
+    # only plain names are listed: a key is the owner's text, but a
+    # control character must not reach the terminal
+    known = ", ".join(sorted(
+        n for n in (devices if isinstance(devices, dict) else {})
+        if isinstance(n, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", n)))
+    err("unknown device: {}: not in {} (known: {}); add a [devices.{}] table "
+        "to the inventory".format(dev, inv, known or "none", dev))
 entry = devices[dev]
 if not isinstance(entry, dict):
     err("device {} is not a table".format(dev))
@@ -1302,7 +1310,10 @@ settings in /etc/config/newton_wanhealth, the boot links
 ${#SYSUPGRADE_LINES[@]} lines in /etc/sysupgrade.conf, so a firmware upgrade
 keeps them. The guard service runs at boot; the WAN-health check stays idle
 until you set newton_wanhealth.main.enabled=1 and list the WAN interfaces
-(iface) and the probe targets (target) it watches. One more line goes into
+(iface) and the probe targets (target) it watches. Once on, it pings a target
+from every listed WAN every interval seconds (5 by default), about 85 MB a
+month per WAN: leave a metered WAN out of iface or raise interval. One more
+line goes into
 ${R_AUTH_KEYS}, but the install does not write it: swap-key
 or add-key does.
 
@@ -1343,7 +1354,10 @@ On purpose it keeps the guard's saved copies of your settings
 /etc/config/newton_wanhealth, the copy of your keys from before swap-key,
 ${R_AUTH_KEYS}.newton-prev, and the /etc/sysupgrade.conf file.
 The Newton lines go out of that file; the file itself stays, empty when the
-install created it. The copy of the keys holds the key line swap-key took
+install created it. The kept copies of your settings are no longer in
+/etc/sysupgrade.conf, so the next firmware upgrade drops them: copy them off
+the router first if you still want them. The copy of the keys holds the key
+line swap-key took
 out; if you still want that key to log in, copy the line back first. To
 remove those by hand:
   rm -rf ${R_NEWTON_DIR} /usr/libexec/newton /etc/config/newton_wanhealth ${R_AUTH_KEYS}.newton-prev
@@ -2595,7 +2609,12 @@ action_profile() {
 # then appends any SYSUPGRADE_LINES entry the router lacks
 # (`PASS upgrade extras 3: ...`), then writes the disabled main section
 # into a missing or empty /etc/config/newton_wanhealth
-# (`PASS upgrade extras 4: ...`), then ends with
+# (`PASS upgrade extras 4: ...`), then, when step 3 skipped guard and
+# init (GUARD_IDLE=0) and a fresh hello says they differ from this
+# Newton's (upgrade_guard_matches), WARN `upgrade guard: ...` naming the
+# status and the recover step (a guard that reports no status
+# cannot run: the warning names the install run instead) and stopped "the guard was not upgraded"
+# (no DONE), else ends with
 # `pass "upgrade: prog=<first 12 hex>"` and done_line; a second run with
 # unchanged sources writes nothing
 # (put_file skips identical files) and exits 0.
@@ -2612,7 +2631,8 @@ action_upgrade() {
 	pass "upgrade step 1: sources present"
 	refuse_if_busy upgrade || stopped "upgrade step 2 failed"
 	pass "upgrade step 2: router not busy"
-	# step 3: upload program + helper always, guard + init only when idle
+	# step 3: upload program + helper always, guard + init only when no
+	# change is in flight (idle or restored)
 	upgrade_rows=("${CODE_FILES[0]}" "${CODE_FILES[1]}")
 	if [[ $GUARD_IDLE -eq 1 ]]; then
 		upgrade_rows+=("${CODE_FILES[2]}" "${CODE_FILES[3]}")
@@ -2745,6 +2765,24 @@ action_upgrade() {
 		stopped "upgrade extras 4 failed"
 	fi
 	pass "upgrade extras 4: wan-health settings section present"
+	# A guard that was not replaced (its status was neither idle nor
+	# restored) must still match this Newton's guard: the change script
+	# refuses a router whose guard differs and names upgrade as the way
+	# out, and upgrade would skip the guard again.  So it stops here,
+	# naming the status and the owner's recover step; everything else is
+	# already upgraded and verified.
+	# A guard that reports no status cannot run, so the recover step
+	# cannot be the way back and the warning names the install run that
+	# puts a working guard there.
+	if [[ $GUARD_IDLE -ne 1 ]] && ! upgrade_guard_matches; then
+		if [[ -z $GUARD_STATUS ]]; then
+			warn "upgrade guard: the guard on the router reports no status (it looks broken), so it was not replaced and its recover step cannot be relied on; to install the guard and its init, run: sudo -u newton /usr/local/bin/newton-router-setup ${DEVICE} install"
+		else
+			warn "upgrade guard: the guard and its init were not replaced because the guard status is '$(escape_text "$GUARD_STATUS")'; to clear it, as root on the router run ${R_GUARD} recover (keeps the live settings) or ${R_GUARD} recover restore <txn> (puts a saved copy back), then run: sudo -u newton /usr/local/bin/newton-router-setup ${DEVICE} upgrade"
+		fi
+		STATE_NOTE='program and helper are upgraded; the guard and its init are the old ones'
+		stopped "the guard was not upgraded"
+	fi
 	# the success line shows the first 12 hex chars of the program sha
 	row="${CODE_FILES[0]}"
 	rel="${row%%|*}"
@@ -2971,8 +3009,10 @@ action_rollback() {
 
 # Contract: uninstall_check_guard -- ONE rsh_admin call (fixed text,
 # ${RR} on the location, </dev/null) that prints guard=<status> when the
-# guard file is present (its first line of `${RR}${R_GUARD} status 2>/dev/null`)
-# or guard=not-installed when it is missing; returns 0 when the value is
+# guard file is present (the output of `${RR}${R_GUARD} status 2>/dev/null`,
+# of which only the first line is the status: a `skipped ...` line may
+# follow) or guard=not-installed when it is missing; returns 0 when the
+# first line is
 # exactly `idle` or `not-installed`, 1 when the value is anything else, and
 # 2 when the ssh call itself failed (so the caller can tell a wrong root
 # password on the password lane apart from a guard that is not idle).
@@ -2982,6 +3022,9 @@ uninstall_check_guard() {
 	rc=$?
 	[[ $rc -ne 0 ]] && return 2
 	status="${out#guard=}"
+	# only the first line is the status: the guard adds a `skipped ...`
+	# line for /etc/config entries it cannot name
+	status="${status%%$'\n'*}"
 	if [[ "$status" == "not-installed" || "$status" == "idle" ]]; then
 		return 0
 	fi
@@ -3649,7 +3692,7 @@ rsh_admin() {
 # way: the owner script never exits 255, so an exit 255 is a connect or
 # authentication failure there too.
 rsh_admin_run() {
-	local cmd="$1" marker_on="$2" rc=0 tail='' msg='' marker=0
+	local cmd="$1" marker_on="$2" rc=0 tail='' msg='' marker=0 kh='' kh_host=''
 	SSH_ERR_FILE=''
 	if [[ -n "$TMP_DIR" ]]; then
 		SSH_ERR_FILE="${TMP_DIR}/admin-ssh-stderr"
@@ -3680,7 +3723,15 @@ rsh_admin_run() {
 		if [[ -n "$ROOT_PW" && "$tail" == *"$ROOT_PW"* ]]; then
 			tail=''
 		fi
-		if [[ "$ADMIN_MODE" == "plain-key" ]]; then
+		if [[ -n "$SSH_ERR_FILE" && -s "$SSH_ERR_FILE" ]] \
+			&& grep -Eq 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|Offending' -- "$SSH_ERR_FILE" 2>/dev/null; then
+			# the password or the key is not the cause: the router's
+			# host key is not the one pinned for it
+			kh=$(escape_text "$(known_hosts_file)")
+			kh_host="$DEV_HOST"
+			[[ "$DEV_PORT" == "22" ]] || kh_host="[${DEV_HOST}]:${DEV_PORT}"
+			msg="admin login to root@${DEV_HOST} failed: the router's SSH host key is not the one pinned in ${kh} (the router was reinstalled or replaced, or something else answers at that address). Check the router's new host key fingerprint at its console, then run: ssh-keygen -R ${kh_host} -f ${kh}, and run check again to pin the new key."
+		elif [[ "$ADMIN_MODE" == "plain-key" ]]; then
 			msg="admin login to root@${DEV_HOST} failed (key ${PLAIN_KEY}). Check that the key is in the router's authorized keys."
 		else
 			msg="admin login to root@${DEV_HOST} failed (password login). If the router refuses root passwords, rerun with --admin plain-key --plain-key <your admin key>."
@@ -4755,9 +4806,11 @@ install_check_sources() {
 # modes; a guard status starting with pending refuses in both modes; a
 # guard status starting with failed refuses only in install mode;
 # the guard status is reported as `guard_status=...`
-# in the same call so the caller can learn whether it is exactly
-# `idle`; GUARD_IDLE is set to 1 when the status is exactly idle, 0
-# otherwise (also 0 when the guard is not installed). A refusal prints
+# in the same call (only its first line: the guard adds a `skipped ...`
+# line for /etc/config entries it cannot name); GUARD_STATUS is set to
+# that line and GUARD_IDLE to 1 when it is `idle` or starts with
+# `restored ` (no change in flight), 0 otherwise (also 0 when the guard
+# is not installed). A refusal prints
 # WARN "<mode> refused: <reason>", STATE_NOTE 'router unchanged' and
 # stopped "<mode> refused: the router is busy" (exit 1); returns 0
 # when the router is not busy, else the call's exit status.
@@ -4795,11 +4848,11 @@ EOF
 			guard_status="${line#guard_status=}"
 		fi
 	done <<<"$out"
-	if [[ "$guard_status" == "idle" ]]; then
-		GUARD_IDLE=1
-	else
-		GUARD_IDLE=0
-	fi
+	GUARD_STATUS="$guard_status"
+	case "$guard_status" in
+		idle | restored\ *) GUARD_IDLE=1 ;;
+		*) GUARD_IDLE=0 ;;
+	esac
 	if [[ -n "$why" ]]; then
 		warn "${mode} refused: ${why#busy=}"
 		STATE_NOTE='router unchanged'
@@ -4990,12 +5043,15 @@ install_wan_health_verify() {
 
 # Contract: install_guard_enable -- step 4 of 3.2: runs `${RR}/etc/
 # init.d/newton-guard enable`, then reads `${RR}${R_GUARD} status` and
-# returns 0 only when it is `idle` or starts with `restored `; the exit
+# returns 0 only when its first line is `idle` or starts with
+# `restored `; the exit
 # status is the failing call's or 1 on a bad status.
 install_guard_enable() {
 	local status
 	rsh_admin "\"${RR}${R_INIT}\" enable" </dev/null 2>/dev/null || return 1
 	status=$(rsh_admin "\"${RR}${R_GUARD}\" status" </dev/null 2>/dev/null) || return 1
+	# only the first line is the status (a `skipped ...` line may follow)
+	status="${status%%$'\n'*}"
 	case "$status" in
 		idle|restored\ *) return 0 ;;
 		*) return 1 ;;
@@ -5073,6 +5129,24 @@ verify_hello() {
 	done
 	field=$(hello_field "$reply" mode) || return 1
 	[[ "$field" == "prod" ]] || return 1
+	return 0
+}
+
+# Contract: upgrade_guard_matches -- a fresh hello; returns 0 when its
+# guard and init fields are the sha256 of this Newton's guard and init
+# sources, 1 otherwise (also when the hello fails).
+upgrade_guard_matches() {
+	local nonce reply i row rel want field
+	local -a names=(guard init)
+	nonce=$(new_nonce)
+	reply=$(hello_direct "$nonce") || return 1
+	for i in 0 1; do
+		row="${CODE_FILES[i + 2]}"
+		rel="${row%%|*}"
+		want=$(sha256_file "${SRC}/${rel}")
+		field=$(hello_field "$reply" "${names[i]}") || return 1
+		[[ "$field" == "$want" ]] || return 1
+	done
 	return 0
 }
 
@@ -6219,7 +6293,7 @@ rpcd_pending_window_message() {
 	age=$((now - mtime))
 	[[ "$age" -ge 900 ]] || { printf '%s\n' "$fresh"; return 0; }
 	text=$(rpcd_age_text "$age")
-	printf 'the router has a leftover undo file from %s ago (its web service restarted during a change). If nobody is changing the router right now, reboot it, or as root run: rm -rf /var/run/rpcd/snapshot-files\n' "$text"
+	printf 'the router has a leftover undo file from %s ago (its web service restarted during a change, so that change was never confirmed or rolled back). The live settings may still hold that change: /var/run/rpcd/snapshot-files holds the settings from before it, and a reboot or deleting that folder loses them. To undo the change, as root run: cp /var/run/rpcd/snapshot-files/* /etc/config/ && reload_config && rm -rf /var/run/rpcd/snapshot-files. To keep it, if nobody is changing the router right now, reboot it, or as root run: rm -rf /var/run/rpcd/snapshot-files\n' "$text"
 }
 
 # Contract: rpcd_https_probe -- ONE rsh_admin call that prints the two
@@ -6961,7 +7035,7 @@ access_modes_notes() {
 	note "no-install: Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays."
 	note "no-install: Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval."
 	note "no-install: Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run."
-	note "installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 218 KB), no packages and no compiled code."
+	note "installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 220 KB), no packages and no compiled code."
 	note "installed: Newton's key can run that program and nothing else, so the agent never gets a root shell."
 	note "installed: If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck."
 	note "installed: More checks can run, and fewer changes need a script."

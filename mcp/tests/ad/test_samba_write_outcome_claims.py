@@ -623,7 +623,8 @@ def test_an_undo_whose_answer_was_lost_while_the_after_image_is_there_stays_arme
     _undo_lost(dc, monkeypatch, land=False)
     dc.helper.current_time = lambda: float(NBF + 601)
 
-    assert dc.helper.handle(["--sweep"], b"", {})["code"] == "ok"
+    # the expired change stays armed: the sweep unit is recorded failed
+    assert dc.helper.handle(["--sweep"], b"", {})["code"] == "error"
 
     assert dc.record()["state"] == "armed"
     assert dc.fake.get_attribute(fake_samba_write.ALICE_DN, "userAccountControl") == "512"
@@ -1194,7 +1195,8 @@ def test_an_answered_write_whose_refused_record_fails_is_never_a_conflict_and_ne
     assert record["state"] == "armed"
     assert record["answered"] == code
     dc.helper.current_time = lambda: float(NBF + 601)
-    assert dc.helper.handle(["--sweep"], b"", {})["code"] == "ok"
+    # the expired change stays armed: the sweep unit is recorded failed
+    assert dc.helper.handle(["--sweep"], b"", {})["code"] == "error"
     assert dc.fake.get_attribute(fake_samba_write.ALICE_DN, "userAccountControl") == value.decode()
 
 
@@ -1716,7 +1718,8 @@ def test_an_answered_mark_whose_flush_fails_and_refused_record_fails_is_marked_n
     assert record["state"] == "armed"
     assert record["answered"] == 53
     dc.helper.current_time = lambda: float(NBF + 601)
-    assert dc.helper.handle(["--sweep"], b"", {})["code"] == "ok"
+    # the expired change stays armed: the sweep unit is recorded failed
+    assert dc.helper.handle(["--sweep"], b"", {})["code"] == "error"
     assert dc.fake.get_attribute(fake_samba_write.ALICE_DN, "userAccountControl") == "512"
 
 

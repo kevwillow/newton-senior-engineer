@@ -105,8 +105,9 @@ TOOL_NAMES = {
 # asks the router's own web API, so it needs nothing installed.
 # the plan goes there too (it decides between an auto plan and an
 # owner script), and the apply, the status and the abort answer for a
-# plan of that device.  The listing of the devices answers too.  Every
-# other tool is refused at the choke point.
+# plan of that device.  The listing of the devices answers too, and the
+# end of an easy grant (a grant covers no-install plans).  Every other
+# tool is refused at the choke point.
 #
 # This is the ONE set: the refusal at the choke point and the tool list
 # a no-install device advertises are both taken from it, so the listing
@@ -119,6 +120,8 @@ NO_INSTALL_TOOLS = frozenset(
         "newton_apply_change",
         "newton_change_status",
         "newton_abort_change",
+        # a grant covers no-install plans too, so the owner can end it here
+        "newton_grant_off",
     }
 )
 
@@ -327,12 +330,24 @@ def oneline(value: str, limit: int = ONELINE_LIMIT) -> str:
     return cleaned[:limit]
 
 
-def write_audit(tool: str, device: str, result: str) -> None:
+def write_audit(
+    tool: str,
+    device: str,
+    result: str,
+    *,
+    dur_ms: int | None = None,
+    size: int | None = None,
+) -> None:
     """Best-effort audit that also works when inventory loading fails.
 
     The state directory (when this code creates it) and the audit log file
     are opened with mode 0o700 and 0o600 respectively so the audit log
     cannot leak across users on a shared host.
+
+    A tool call (call_tool) also records what it cost: ``dur_ms=`` the
+    time the call took and ``bytes=`` the size of its result as JSON,
+    the text the model reads.  They are the line's last two fields, after
+    the result, so the line still starts as it always did.
     """
     try:
         root = state_dir()
@@ -342,9 +357,13 @@ def write_audit(tool: str, device: str, result: str) -> None:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         if created:
             os.chmod(root, 0o700)
+        cost = ""
+        if dur_ms is not None and size is not None:
+            cost = f" dur_ms={int(dur_ms)} bytes={int(size)}"
         line = (
             f"{datetime.now(timezone.utc).isoformat()} "
-            f"tool={oneline(tool)} device={oneline(device)} result={oneline(result)}\n"
+            f"tool={oneline(tool)} device={oneline(device)} result={oneline(result)}"
+            f"{cost}\n"
         )
         fd = os.open(
             str(root / "mcp-audit.log"),
@@ -397,8 +416,13 @@ def script_path() -> Path:
     return path
 
 
+def inventory_file_path() -> Path:
+    """The inventory file the server reads (NEWTON_INVENTORY, else the default)."""
+    return Path(os.environ.get("NEWTON_INVENTORY", "~/.config/newton/devices.toml")).expanduser()
+
+
 def load_inventory() -> dict[str, Device]:
-    path = Path(os.environ.get("NEWTON_INVENTORY", "~/.config/newton/devices.toml")).expanduser()
+    path = inventory_file_path()
     try:
         path.lstat()
     except OSError:
@@ -822,7 +846,7 @@ def load_inventory() -> dict[str, Device]:
 
 
 # ---- the read grammar (design 3.8 and 3.3, mirrored table-driven) ----
-# grammar.tsv holds only the 24 subcommand rows, so the per-verb read forms
+# grammar.tsv holds only the subcommand rows, so the per-verb read forms
 # and the argument classes live here as data and are pinned to the router
 # program by the shared vectors in device/openwrt/newton-router/tests/read_cases.json.
 
@@ -1063,11 +1087,14 @@ BACKUP_TIMEOUT_ERROR = (
 )
 PLAN_TIMEOUT_ERROR = (
     "planning did not finish in time, so whether the change was staged on the router is "
-    "not known; plan again (if the router then says it is busy with a session of this "
-    "login, abort that session with newton_abort_change, then plan again)"
+    "not known. The router may not be answering: check it with newton_read uptime first, "
+    "and if that times out too, ask the owner to look at the router instead of planning "
+    "again. Once it answers, plan again (if the router then says it is busy with a "
+    "session of this login, abort that session with newton_abort_change, then plan again)"
 )
 STATUS_TIMEOUT_NEXT_STEP = (
-    "The router did not answer in time, so nothing new is known about this change. Call "
+    "The router did not answer in time, so nothing new is known about this change. The "
+    "router may not be answering: check it with newton_read uptime before you call "
     "newton_change_status again; unless the change was confirmed, the router rolls it back "
     "when its window ends."
 )
@@ -1158,14 +1185,20 @@ class NewtonService:
         web API instead of ssh.
         """
         if name not in self.devices:
-            raise NewtonError(f"unknown device: {name}")
+            known = ", ".join(sorted(self.devices)) or "none"
+            raise NewtonError(
+                f"unknown device: {oneline(name)}: not in the inventory "
+                f"{inventory_file_path()} (known: {known}); the owner adds a "
+                f"[devices.{oneline(name)}] table to it"
+            )
         device = self.devices[name]
         if device.access == "no-install" and not allow_noinstall:
             raise NewtonError(
                 f"{tool} is not available for device {oneline(name)}: it uses "
                 "no-install access, where Newton reads, plans, applies, shows the "
-                "status of and aborts a change. If this tool is needed, the owner "
-                "can switch the router to the installed mode: newton-router-setup "
+                "status of and aborts a change, and ends an easy grant. If this tool is needed, the owner "
+                "can switch the router to the installed mode: "
+                f"{elicit_approval.approve._launcher('newton-router-setup')} "
                 f"{oneline(name)} uninstall, then install"
             )
         return device
@@ -1979,19 +2012,46 @@ class NewtonService:
             raise NewtonError("scan vantage could not be started") from None
         stopped = datetime.now(timezone.utc)
         timed_out_addresses = _scans.parse_timed_out(stdout_text)
+        # a host whose open-port list is longer than the line cap cannot
+        # be parsed; it must not read as a host with nothing open
+        too_long = _scans.oversized_hosts(stdout_text)
         hosts = _scans.parse_grepable(stdout_text)
-        findings = _scans.findings_for(str(request["kind"]), hosts)
         port_count = sum(len(host["ports"]) for host in hosts)
+        # the result carries at most MAX_SCAN_PORTS ports; the counts
+        # above stay whole and the result says when it was cut
+        kept_hosts, truncated = _scans.cap_ports(hosts)
+        findings = _scans.findings_for(str(request["kind"]), kept_hosts)
+        bounds: dict[str, Any] = {
+            "truncated": truncated,
+            "returned_port_count": len(findings),
+        }
+        cut_note = (
+            f"the result keeps the first {_scans.MAX_SCAN_PORTS} of {port_count} "
+            "open ports, in address and port order; host_count and port_count are "
+            "the full counts"
+        )
         rc = completed.returncode if completed is not None else -1
-        incomplete = (
+        unfinished = (
             completed is None
             or rc != 0
             or timed_out_addresses
             or not _scans.scan_complete(stdout_text)
         )
+        incomplete = unfinished or too_long
         scan_name = f"nmap_{request['kind']}"
         if incomplete:
-            note = "scan did not finish; results are partial"
+            notes: list[str] = []
+            if unfinished:
+                notes.append("scan did not finish; results are partial")
+            if too_long:
+                notes.append(
+                    "the open-port lists of the hosts in too_long were too long to "
+                    "read, so those hosts are missing from the findings and the "
+                    "results are partial"
+                )
+            if truncated:
+                notes.append(cut_note)
+            note = "; ".join(notes)
             self._scan_audit(
                 request,
                 consent,
@@ -2010,9 +2070,11 @@ class NewtonService:
                 "request_id": request_id,
                 "note": note,
                 "timed_out": timed_out_addresses,
+                "too_long": too_long,
                 "findings": findings,
                 "host_count": len(hosts),
                 "port_count": port_count,
+                **bounds,
                 "report_update": {
                     "scans_run": skeleton["scans_run"],
                     "scans_not_run": skeleton["scans_not_run"],
@@ -2037,14 +2099,34 @@ class NewtonService:
             str(request["kind"]),
             findings,
         )
-        summary = json.dumps({"hosts": hosts}, ensure_ascii=False, sort_keys=True)
-        return {
+        # the per-port detail (service names) is in the findings; the
+        # envelope keeps the addresses and port numbers only
+        summary = json.dumps(
+            {
+                "hosts": [
+                    {
+                        "address": host["address"],
+                        "ports": [port["port"] for port in host["ports"]],
+                    }
+                    for host in kept_hosts
+                ]
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        result: dict[str, Any] = {
             "result": "ok",
             "request_id": request_id,
             "scan": _envelope.envelope(f"{device_name}:scan:{request_id}", summary),
             "findings": findings,
             "host_count": len(hosts),
             "port_count": port_count,
+            **bounds,
+        }
+        if truncated:
+            result["note"] = cut_note
+        return {
+            **result,
             "report_update": {
                 "scans_run": report_update["scans_run"],
                 "scans_not_run": report_update["scans_not_run"],
@@ -2756,7 +2838,7 @@ class NewtonService:
             device_name, text, timeout_s, _tool="newton_plan_tier",
             explanation=explanation, owner_confirmed_in_chat=owner_confirmed_in_chat,
         )
-        return {
+        result: dict[str, Any] = {
             **planned,
             "tier": tier,
             "batch_index": batch_index,
@@ -2764,6 +2846,27 @@ class NewtonService:
             "control_ids": batch["control_ids"],
             "skipped": info["skipped"],
         }
+        session_id = planned.get("session_id")
+        if isinstance(session_id, str):
+            # A control whose manifest entry has no probes, or whose
+            # batch has a {placeholder} (ADR-010 never matches those), seals
+            # no control probe; say which, from the stored plan record (an
+            # unreadable record lists every control: never a false "checked").
+            record = self._plan_record_for(device_name, session_id) or {}
+            sealed = set(record.get("manifest_checks") or []) | set(
+                record.get("manifest_checks_auto") or []
+            )
+            missing = [cid for cid in batch["control_ids"] if cid not in sealed]
+            result["controls_without_probe"] = missing
+            if missing:
+                result["controls_without_probe_note"] = (
+                    "No control probe is sealed for " + ", ".join(missing)
+                    + ": after the apply Newton checks them only with its built-in "
+                    "steps (router ping, DNS, DHCP test, health), not that the "
+                    "setting itself took effect. Read the settings back after the "
+                    "confirm (for example `uci get`) to see them applied."
+                )
+        return result
 
     def _refuse_failing_fw4(self, device_name: str) -> None:
         """Refuse plan() up front when `fw4 check` on the router already fails.
@@ -3768,7 +3871,8 @@ HELD_NEXT_STEP = (
     "ends (confirm_by, UNIX seconds). Ask the owner to test it now, from a client if the router "
     "cannot test it. Then call newton_confirm_change with this device and session_id to keep "
     "it, or newton_abort_change to roll it back, before the window ends. The window is the "
-    "plan's timeout_s (90 s by default, 60 to 600), and the verify rounds already used part of "
+    "plan's timeout_s minus 15 s (timeout_s is 90 s by default, 60 to 600), and the verify "
+    "rounds already used part of "
     "it; if that is too short for a client test, abort and plan the change again with a longer "
     "timeout_s. A rollback (the window ending unconfirmed, or newton_abort_change) puts back "
     "every /etc/config file as it was before the apply, so it also undoes any other setting "
@@ -4012,23 +4116,35 @@ def call_tool(tool: str, device: str, fn: Any) -> dict[str, Any]:
     if device != "-" and not (isinstance(device, str) and DEVICE_NAME_RE.fullmatch(device)):
         write_audit(tool, "-", "error invalid device name")
         return {"error": "invalid device name"}
+    started = time.monotonic()
+
+    def audited(word: str, returned: dict[str, Any]) -> dict[str, Any]:
+        # the audit line says what the call cost: its time and the size
+        # of what the model reads
+        try:
+            size = len(json.dumps(returned, ensure_ascii=False, default=str).encode("utf-8"))
+        except (TypeError, ValueError):
+            size = -1
+        dur_ms = int((time.monotonic() - started) * 1000)
+        write_audit(tool, device, word, dur_ms=dur_ms, size=size)
+        return returned
+
     try:
         service = NewtonService()
         result = fn(service)
-        write_audit(tool, device, str(result.get("result", "ok")))
-        return _unredactable() or _redact.redact_value(result)
+        word = str(result.get("result", "ok"))
+        return audited(word, _unredactable() or _redact.redact_value(result))
     except DeviceTextError as exc:
-        write_audit(tool, device, "error")
-        return _unredactable() or _redact.redact_value(
+        return audited("error", _unredactable() or _redact.redact_value(
             {"error": _envelope.envelope(f"{device}:{tool}", str(exc))}
-        )
+        ))
     except NewtonError as exc:
-        write_audit(tool, device, "error")
-        return _unredactable() or {"error": _redact.redact_text(str(exc))}
+        return audited(
+            "error", _unredactable() or {"error": _redact.redact_text(str(exc))}
+        )
     except Exception:
         _log_unexpected_error(tool, device)
-        write_audit(tool, device, "error")
-        return {"error": "internal server error"}
+        return audited("error", {"error": "internal server error"})
 
 
 # The envelope rewrites the text it holds, so what a tool shows can
@@ -4760,7 +4876,11 @@ def newton_ad_list_checks() -> dict[str, Any]:
     "uac-clear, disable, enable, enc-types, unlock, member-add, "
     "member-remove, maq, user-create or move. `sam_names` holds the "
     "sAMAccountNames of the target: one for an account, two for a "
-    "membership (the group first), none for maq. `value` holds the int or "
+    "membership (the group first), none for maq. A name is 1 to 20 "
+    "characters of lowercase letters, digits, '.', '_' and '-', starting "
+    "with a letter or a digit (a computer's ends in $): write a mixed-case "
+    "name in lowercase (the directory compares names without their case); a "
+    "name with a space cannot be named. `value` holds the int or "
     "the guid the verb needs: the bit of a uac-clear (4194304, 32, 128 "
     "or 65536; 524288 is refused, as it needs SeEnableDelegationPrivilege), "
     "the encryption types of enc-types, the quota of "

@@ -908,3 +908,43 @@ def test_program_lock_is_free_after_subcommand(router, sub):
     # We do not assert res.rc here: confirm/abort may return non-zero
     # on this state, and the focus is the lock release (M46).
     assert lock_is_free(router), (sub, res.rc, res.out, res.err)
+
+
+# ---- entries the guard quarantined are named in the status line --
+
+
+def _status_line(router, sid):
+    res = router.forced(f"status {sid}", role="read", timeout=30)
+    assert res.rc == 0, (res.rc, res.out, res.err)
+    assert res.out.count("\n") == 1, res.out
+    return res.out.rstrip("\n")
+
+
+def test_status_names_quarantined_entries_after_guard_restore(router):
+    """A config file that appeared during the window (a package install,
+    a LuCI add) is moved to the guard's quarantine when the guard restores.
+    The status line of that session ends ` quarantined=<n>` so the host
+    can tell the owner where the file went; before the restore it does not."""
+    from test_abort import apply_happy
+
+    plan = router.fresh_plan()
+    apply_happy(router, plan)
+    router.write("etc/config/myvpn", b"config vpn 'x'\n")
+    router.write("etc/config/other", b"config other 'y'\n")
+    assert " quarantined=" not in _status_line(router, plan.sid)
+    router.write("control/rollback.rc", "1\n")
+    res = router.forced(f"abort {plan.sid}", caller="agent-one", timeout=30)
+    assert (res.rc, res.out) == (0, f"aborted {plan.sid} rolled-back-by-guard\n")
+    qdir = router.root / "etc/newton/quarantine" / plan.sid
+    assert (qdir / "myvpn").read_bytes() == b"config vpn 'x'\n"
+    line = _status_line(router, plan.sid)
+    assert line.startswith(f"rolled-back sid={plan.sid} "), line
+    assert line.endswith(" quarantined=2"), line
+    # another session's status does not carry this session's count
+    assert " quarantined=" not in _status_line(router, "f" * 32)
+
+
+def test_status_without_quarantine_keeps_six_fields(router):
+    plan = applied(router)
+    line = _status_line(router, plan.sid)
+    assert len(line.split()) == 6, line

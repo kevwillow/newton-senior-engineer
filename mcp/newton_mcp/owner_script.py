@@ -113,7 +113,7 @@ UNDO_LINES: tuple[str, ...] = (
     "      else",
     '        if [ "$undo_mins" -eq 1 ]; then undo_text="1 minute"; else undo_text="$undo_mins minutes"; fi',
     "      fi",
-    '      die "the router has a leftover undo file from $undo_text ago (its web service restarted during a change). If nobody is changing the router right now, reboot it, or as root run: rm -rf /var/run/rpcd/snapshot-files"',
+    '      die "the router has a leftover undo file from $undo_text ago (its web service restarted during a change, so that change was never confirmed or rolled back). The live settings may still hold that change: /var/run/rpcd/snapshot-files holds the settings from before it, and a reboot or deleting that folder loses them. To undo the change, as root run: cp /var/run/rpcd/snapshot-files/* /etc/config/ && reload_config && rm -rf /var/run/rpcd/snapshot-files. To keep it, if nobody is changing the router right now, reboot it, or as root run: rm -rf /var/run/rpcd/snapshot-files"',
     "    fi",
     "  fi",
     '  die "another change is waiting for confirmation (LuCI or Newton)"',
@@ -202,7 +202,6 @@ TEMPLATE_LINES: tuple[str, ...] = (
     "@@window_var@@",
     'die() { echo "NEWTON-STOP: $*"; exit 1; }',
     '[ "$(id -u </dev/null)" = 0 ] || die "this must run as root"',
-    'echo "NEWTON-APPLYING plan=$PLAN"',
     'W=$(mktemp -d /tmp/newton-owner.XXXXXX </dev/null) || die "no private directory"',
     "trap 'rm -rf \"$W\"' EXIT",
     "trap 'rm -rf \"$W\"; exit 1' HUP INT TERM",
@@ -212,6 +211,10 @@ TEMPLATE_LINES: tuple[str, ...] = (
     'want() { got=$(uci -q get "$1" </dev/null) && [ "$got" = "$2" ] || die "the router changed since the plan: $1"; }',
     'absent() { if uci -q get "$1" >/dev/null </dev/null; then die "the router changed since the plan: $1"; fi; }',
     "@@preconditions@@",
+    # The applying marker comes after every stop that leaves the router
+    # untouched: newton-router-setup settles the approval as not reached
+    # (and the owner may run the plan again) only for a stop before it.
+    'echo "NEWTON-APPLYING plan=$PLAN"',
     'echo "NEWTON-CHECKED plan=$PLAN"',
     'SID=$(ubus call session create "{\\"timeout\\":$((WINDOW + 120))}" </dev/null | jsonfilter -e \'@.ubus_rpc_session\')',
     DROP_SESSION_LINE,
@@ -236,7 +239,7 @@ TEMPLATE_SKELETON = "\n".join(TEMPLATE_LINES) + "\n"
 
 #: The sha256 of the template skeleton.  Changing the template means
 #: changing this number in the same review.
-TEMPLATE_SHA256 = "640894606d64e77ae66765e352ed337dd6f38694e6ad5b4bd2e78b47e39e259e"
+TEMPLATE_SHA256 = "22651ef7db5ade608881323cc6654cceb682000e8b57f2df56e5d05f22ca1b16"
 
 
 def template_sha256() -> str:
@@ -623,7 +626,6 @@ def parse_script(data: bytes) -> ScriptPlan:
 
     cursor.expect('die() { echo "NEWTON-STOP: $*"; exit 1; }')
     cursor.expect('[ "$(id -u </dev/null)" = 0 ] || die "this must run as root"')
-    cursor.expect('echo "NEWTON-APPLYING plan=$PLAN"')
     cursor.expect(
         'W=$(mktemp -d /tmp/newton-owner.XXXXXX </dev/null) || die "no private '
         'directory"'
@@ -665,6 +667,7 @@ def parse_script(data: bytes) -> ScriptPlan:
             break
         cursor.take()
 
+    cursor.expect('echo "NEWTON-APPLYING plan=$PLAN"')
     cursor.expect('echo "NEWTON-CHECKED plan=$PLAN"')
     cursor.expect(
         'SID=$(ubus call session create "{\\"timeout\\":$((WINDOW + 120))}" '

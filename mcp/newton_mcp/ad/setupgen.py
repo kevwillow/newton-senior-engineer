@@ -908,8 +908,26 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+#: The words newton-ad-setup hands to the write setup only when they come
+#: first (scripts/newton-ad-setup reads the first word alone).
+WRITE_WORDS = ("write", "approval-key")
+WRITE_ORDER_ERROR = (
+    "error: 'write' and 'approval-key' must come first, before every option: "
+    "newton-ad-setup write windows|samba --domain DNS --pubkey FILE --device "
+    "NAME --host HOST --ou DN, or newton-ad-setup approval-key NAME"
+)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Print the setup script of one collector host."""
+    words = sys.argv[1:] if argv is None else argv
+    if words and words[0] not in ("windows", "samba") and any(
+        word in WRITE_WORDS for word in words
+    ):
+        # The options came first: the launcher read an option as the first
+        # word and sent the write setup here, where "write" is no platform.
+        print(WRITE_ORDER_ERROR, file=sys.stderr)
+        return 2
     args = _parser().parse_args(argv)
     try:
         pubkey = _read_public_key(Path(args.pubkey))

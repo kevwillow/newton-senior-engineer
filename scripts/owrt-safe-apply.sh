@@ -491,7 +491,13 @@ apply)
 	up1=$(uptime_s) || die "cannot read uptime"
 	ubus call uci apply "{\"rollback\":true,\"timeout\":$T,\"ubus_rpc_session\":\"$1\"}" || die "apply failed"
 	up2=$(uptime_s) || up2=$up1
-	printf 'up %s\n' "$(( up2 + T ))" > "$LOCK/$1.applied"
+	# the deadline file is this helper's only record of the apply: without
+	# it, status says staged and abort never rolls back, so roll back now
+	if ! printf 'up %s\n' "$(( up2 + T ))" > "$LOCK/$1.applied"; then
+		rm -f "$LOCK/$1.applied" 2>/dev/null
+		ubus call uci rollback "{\"ubus_rpc_session\":\"$1\"}" || die "cannot record the apply deadline in $LOCK, and the rollback failed: the change auto-reverts in ${T}s. Check uci show and logread."
+		die "cannot record the apply deadline in $LOCK; rolled the change back."
+	fi
 	echo "APPLIED with rollback. Auto-revert in ${T}s unless: $0 confirm $1"
 	;;
 confirm)

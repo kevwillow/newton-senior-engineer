@@ -1423,6 +1423,58 @@ def test_approve_of_a_damaged_scan_request_still_says_why(monkeypatch, capsys):
     assert "scan request was modified or is invalid" in err, err
 
 
+@pytest.mark.parametrize("folder", ["plans", "scan-requests"])
+def test_ad_change_of_a_router_plan_or_scan_id_names_the_plain_form(
+    monkeypatch, capsys, folder
+):
+    """the ad-change word on the id of a router plan or a scan
+    request said only "plan record not found or invalid"; it names the
+    command without the word, as the reverse mistake names ad-change."""
+    records = approve.state_dir() / folder
+    records.mkdir(parents=True)
+    (records / f"{SID}.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(approve.sys, "stdin", TerminalInput())
+
+    assert approve.main(["ad-change", SID]) == 2
+
+    err = capsys.readouterr().err
+    assert "not an Active Directory plan" in err, err
+    assert f"without the ad-change word: newton-approve {SID}" in err, err
+    assert "plan record not found" not in err, err
+
+
+def test_an_installed_ad_change_of_a_router_plan_names_the_sudo_form(
+    monkeypatch, capsys, tmp_path
+):
+    monkeypatch.setenv("NEWTON_HOME", str(tmp_path / "home"))
+    records = approve.state_dir() / "plans"
+    records.mkdir(parents=True)
+    (records / f"{SID}.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(approve.sys, "stdin", TerminalInput())
+
+    assert approve.main(["ad-change", SID]) == 2
+
+    err = capsys.readouterr().err
+    assert f"sudo -u newton /usr/local/bin/newton-approve {SID}" in err, err
+
+
+def test_ad_change_of_an_id_that_is_also_an_ad_plan_goes_to_the_ad_approval(
+    monkeypatch, capsys
+):
+    """An id with an AD plan is the AD approval's, even if a router plan
+    of the same id were there too: the hint never hides the AD plan."""
+    for folder in ("plans", "ad-plans"):
+        records = approve.state_dir() / folder
+        records.mkdir(parents=True)
+        (records / f"{SID}.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(approve.sys, "stdin", TerminalInput())
+
+    assert approve.main(["ad-change", SID]) == 1
+
+    err = capsys.readouterr().err
+    assert "plan record not found or invalid" in err, err
+
+
 # ---- the first-approval warning in the terminal --------------------
 
 

@@ -88,10 +88,15 @@ def test_read_refuses_each_bad_name_without_logging_it(configured, monkeypatch, 
 def test_valid_but_unknown_device_is_logged_as_given(configured):
     before = audit_lines(configured)
     result = server.newton_read("other-router", "uci show")
-    assert result["error"] == "unknown device: other-router"
+    assert result["error"].startswith(
+        "unknown device: other-router: not in the inventory "
+    )
     after = audit_lines(configured)
     assert len(after) == len(before) + 1
-    assert after[-1].endswith("tool=newton_read device=other-router result=error")
+    assert re.search(
+        r"tool=newton_read device=other-router result=error dur_ms=\d+ bytes=\d+$",
+        after[-1],
+    ), after[-1]
 
 
 def test_oneline_replaces_every_control_character():
@@ -116,3 +121,34 @@ def test_audit_line_keeps_the_key_value_shape(configured):
     assert re.fullmatch(
         r"\S+ tool=\S+ device=\S+ result=.*", line)
     json.dumps(line)  # still one plain line
+
+
+def test_a_tool_call_records_its_time_and_the_size_of_its_result(configured, monkeypatch):
+    """The owner can read what a session cost from the audit log: each
+    tool call says how long it took and how many bytes of JSON it handed
+    the model."""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock["now"])
+
+    def slow_read(_service):
+        clock["now"] += 0.25
+        return {"result": "ok", "text": "x" * 1000}
+
+    result = server.call_tool("newton_read", "lab", slow_read)
+
+    line = audit_lines(configured)[-1]
+    match = re.fullmatch(
+        r"\S+ tool=newton_read device=lab result=ok dur_ms=(\d+) bytes=(\d+)", line
+    )
+    assert match, line
+    assert int(match.group(1)) == 250
+    assert int(match.group(2)) == len(json.dumps(result, ensure_ascii=False).encode())
+
+
+def test_a_refused_tool_call_records_its_cost_too(configured):
+    result = server.newton_read("other-router", "uci show")
+
+    line = audit_lines(configured)[-1]
+    match = re.search(r"result=error dur_ms=(\d+) bytes=(\d+)$", line)
+    assert match, line
+    assert int(match.group(2)) == len(json.dumps(result, ensure_ascii=False).encode())

@@ -218,7 +218,7 @@ def test_an_archive_of_another_owner_is_never_used(
     # the archive is owned by the test's uid; the helper now wants another
     monkeypatch.setattr(dc.helper, "INSTALL_OWNER_UID", archive.stat().st_uid + 1)
 
-    assert dc.helper.sweep(now) is True
+    assert dc.helper.sweep(now) == ""
 
     assert dc.records() == [f"{TXID}.json"]
     assert not _archived(dc).exists()

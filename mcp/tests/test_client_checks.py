@@ -1149,6 +1149,15 @@ def test_vc19_08_the_old_forced_command_word_maps_to_the_repair_message():
     )
 
 
+def test_vc19_08b_an_installed_repair_message_names_the_sudo_form(monkeypatch, tmp_path):
+    """the installed launcher refuses the bare name."""
+    monkeypatch.setenv("NEWTON_HOME", str(tmp_path / "home"))
+    assert cc.old_forced_command_message("inside-a") == (
+        "re-run sudo -u newton /usr/local/bin/newton-vantage-setup inside-a "
+        "install-client-checks"
+    )
+
+
 @pytest.mark.parametrize("bad", ["", "Inside-A", "inside_a", "inside-a;reboot", "x" * 33, 7])
 def test_vc19_09_the_repair_message_refuses_a_vantage_name_outside_the_grammar(bad):
     with pytest.raises(cc.ClientCheckError):

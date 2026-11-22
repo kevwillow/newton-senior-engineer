@@ -182,6 +182,44 @@ def test_the_host_key_learning_call_names_the_reason(setup_env):
 	assert "failed (password login)" in line
 
 
+def test_a_changed_host_key_names_the_host_key_and_the_pinned_file(setup_env):
+	"""A router whose host key changed (reimaged, replaced at the
+	same address) refuses the login with ssh exit 255 too, but the
+	password is not the cause: the FAIL line names the host key, the
+	known_hosts file that pins it and the way to clear it, and gives no
+	password or plain-key advice."""
+	env = setup_env
+	env.known_hosts.write_text("%s ssh-ed25519 AAAAC3OLDHOSTKEY0009\n" % HOST)
+	r = env.run(env.device, "upgrade", typed=(GOOD_PW,))
+	assert r.rc == 1
+	line = login_fail_line(r)
+	assert line == (
+		"FAIL admin login to root@%s failed: the router's SSH host key is "
+		"not the one pinned in %s (the router was reinstalled or replaced, "
+		"or something else answers at that address). Check the router's new "
+		"host key fingerprint at its console, then run: ssh-keygen -R %s -f "
+		"%s, and run check again to pin the new key. ssh said: REMOTE HOST "
+		"IDENTIFICATION HAS CHANGED!" % (HOST, env.known_hosts, HOST,
+		                                env.known_hosts))
+	assert "--admin plain-key" not in line
+	assert_before_stopped(r, line)
+
+
+def test_an_unknown_host_key_on_the_plain_key_lane_names_the_host_key(setup_env):
+	"""The plain-key lane gets the same host-key message, not the
+	authorized-keys advice."""
+	env = setup_env
+	env.known_hosts.write_text("%s ssh-ed25519 AAAAC3OLDHOSTKEY0009\n" % HOST)
+	key = make_key(env)
+	r = env.run("--admin", "plain-key", "--plain-key", str(key),
+			env.device, "upgrade")
+	assert r.rc == 1
+	line = login_fail_line(r)
+	assert "the router's SSH host key is not the one pinned in %s" % (
+		env.known_hosts) in line
+	assert "authorized keys" not in line
+
+
 # -- 2. the plain-key lane -------------------------------------------------
 
 def test_plain_key_login_failure_names_the_key(setup_env):

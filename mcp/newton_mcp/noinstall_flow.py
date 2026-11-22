@@ -1125,7 +1125,15 @@ def apply(
         # is consumed, unless the transaction proves ``uci apply`` was
         # never sent or the router refused it.
         reached_router = True
-        outcome = transaction.apply(carried, timeout_s)
+        try:
+            outcome = transaction.apply(carried, timeout_s)
+        except rpcd_txn.RpcdTxnError:
+            # The transaction raises its own errors only where nothing
+            # was applied: a window it refuses before sending, or rpcd
+            # answering the apply with "nothing staged".  The owner's
+            # yes is theirs again; the handler below says so.
+            reached_router = False
+            raise
 
         if outcome.state in (
             rpcd_txn.BUSY, rpcd_txn.REFUSED, rpcd_txn.NOT_SENT

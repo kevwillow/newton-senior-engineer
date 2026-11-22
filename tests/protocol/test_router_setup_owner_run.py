@@ -1382,6 +1382,32 @@ def test_the_precondition_stop_of_the_script_is_not_reached(setup_env):
     ), recorded
 
 
+def test_the_real_scripts_precondition_stop_restores_the_approval(
+    setup_env, tmp_path
+):
+    """The golden script, run for real on the sandbox router of
+    the owner-script shell tests, with a router that changed since the
+    plan.  Its precondition stop must come before its NEWTON-APPLYING
+    line, so the owner run settles the approval with --reached no and
+    the owner may run the plan again."""
+    import test_owner_script_shell as shell_tests
+
+    if not shell_tests._namespaces_work():
+        pytest.skip("the sandbox router needs a user namespace (unshare -Urm)")
+    box = shell_tests.Sandbox(tmp_path / "sandbox")
+    box.set_state({"firewall.cfg0a1b2c.dest_port": "23"})
+    run = box.run((shell_tests.GOLDEN / "apply.sh").read_bytes())
+    assert run.rc == 1, run.out
+    assert "NEWTON-STOP: the router changed since the plan" in run.out
+    assert "NEWTON-APPLYING" not in run.out, run.out
+    env = setup_env
+    proc, recorded = run_mapping(env, run.out.rstrip("\n"), rc=run.rc)
+    assert proc.returncode == 0, proc.stderr.decode()
+    joined = "\n".join(recorded)
+    assert "--reached no" in joined, recorded
+    assert "--reached yes" not in joined, recorded
+
+
 def test_the_read_back_runs_once_after_the_script_was_sent(setup_env, monkeypatch):
     """The read-back runs once.
 

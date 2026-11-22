@@ -530,6 +530,15 @@ def _safe_dir(path: Path, state: Path) -> bool:
         return False
 
 
+def fsync_dir(directory: Path) -> None:
+    """Sync *directory*, so a rename into it survives a crash."""
+    fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _copy_backup(state: Path, record: dict[str, Any], sid: str) -> tuple[str, str, str]:
     raw = record.get("backup_path")
     name = _backup_name(record)
@@ -556,12 +565,17 @@ def _copy_backup(state: Path, record: dict[str, Any], sid: str) -> tuple[str, st
                 raise OSError("temporary backup is not a regular file")
             os.fchmod(target_fd, 0o600)
             digest, reason = _stream_hash(source_fd, target_fd)
+            if digest:
+                # the copy is the only backup off the router: it must be
+                # on disk before its name is
+                os.fsync(target_fd)
         finally:
             os.close(target_fd)
         if not digest:
             tmp.unlink()
             return name, "", f"off-device copy: none (backup was not copied: {reason})"
         tmp.replace(dest)
+        fsync_dir(dest_dir)
         return name, digest, f"off-device copy: receipts/{BACKUP_DIR}/{sid}.tar.gz"
     except OSError:
         try:
@@ -595,8 +609,11 @@ def write_receipt(state: Path, record: dict[str, Any], outcome: str, apply_outpu
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
     os.chmod(tmp, 0o600)
     tmp.replace(target)
+    fsync_dir(directory)
     return target
 
 

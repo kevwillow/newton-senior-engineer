@@ -338,7 +338,8 @@ def test_unknown_device_is_a_plain_error_before_any_read(configured_newton, monk
 
     result = server.newton_guided_audit("missing")
 
-    assert result == {"error": "unknown device: missing"}
+    assert result["error"].startswith("unknown device: missing: not in the inventory ")
+    assert list(result) == ["error"]
     assert calls == []
 
 

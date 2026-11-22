@@ -4,8 +4,8 @@
 # PASS: a line "PASS no foreign DHCP server or router advert on <iface> in <N> s (<n> packets from allowed sources)",
 # then a "NOTE passive check: ..." line (blind spots below); --from-file says "in capture file <file>" instead.
 # FAIL: one "FAIL foreign[<mac>]: <kind> x<n> not in allow list" line per offending source, then a final FAIL line and exit 1.
-# INCONCLUSIVE: lines with no source MAC (a capture on any, tun or wg, or one taken without -e) are reported as
-# unreadable, never as a foreign source; with no FAIL, a final INCONCLUSIVE line and exit 3 (never a pass).
+# INCONCLUSIVE (exit 3, never a pass): lines with no source MAC (a capture on any, tun or wg, or taken without -e) are
+# unreadable, never a foreign source, and with no FAIL end in a final INCONCLUSIVE line; so does a packetless --from-file.
 # Blind spots: the capture is passive (it sends no DHCP discover and no router solicitation), so a server that answers
 # only a client that asks, or by unicast, is not seen, and router adverts can be up to 600 s apart, so a shorter window
 # can miss them; an RA behind IPv6 extension headers is not matched (ip6[40]); the allow list is by source MAC, so a
@@ -39,7 +39,8 @@ cleanup() {
 trap cleanup EXIT
 
 usage_line() {
-	printf 'usage: %s --iface <name> --allow-mac <mac> [--allow-mac <mac>...] [--seconds N] [--from-file <pcap-text>]\n' "${0##*/}"
+	printf 'usage: %s --iface <name> --allow-mac <mac> [--allow-mac <mac>...] [--seconds N]\n' "${0##*/}"
+	printf '       %s --from-file <pcap-text> --allow-mac <mac> [--allow-mac <mac>...]\n' "${0##*/}"
 }
 
 usage() {
@@ -52,9 +53,9 @@ help() {
 	printf '  --iface <name>    interface to capture on; must be an Ethernet interface (not any, tun, wg)\n'
 	printf '  --allow-mac <mac> every MAC that is meant to serve DHCP or send router adverts on this LAN (the house router); never a lab router'"'"'s MAC; may be given multiple times\n'
 	printf '  --seconds N       capture window in seconds (default 120, range 10-3600)\n'
-	printf '  --from-file <pcap-text>    parse a saved tcpdump text capture instead of capturing\n'
+	printf '  --from-file <pcap-text>    parse a saved tcpdump text capture (taken with -e) instead of capturing; --iface and --seconds do not apply\n'
 	printf 'example: sudo scripts/newton-lab-isolation --iface eth0 --allow-mac aa:bb:cc:dd:ee:ff --seconds 300\n'
-	printf 'exit codes: 0 PASS, 1 FAIL, 2 bad arguments, tcpdump missing or failed, capture ended early, 3 INCONCLUSIVE (lines with no source MAC)\n'
+	printf 'exit codes: 0 PASS, 1 FAIL, 2 bad arguments, tcpdump missing or failed, capture ended early, 3 INCONCLUSIVE (lines with no source MAC, or a capture file with no packets)\n'
 	exit 0
 }
 
@@ -110,7 +111,8 @@ while (( $# )); do
 	esac
 done
 
-[[ -n $IFACE ]] || usage
+# a capture file names no interface: --iface is only for a live capture
+[[ -n $IFACE || -n $FROM_FILE ]] || usage
 (( ${#ALLOWED[@]} )) || usage
 
 pass() {
@@ -229,8 +231,13 @@ if (( UNREADABLE > 0 )); then
 	else
 		nlines="$UNREADABLE lines"
 	fi
-	printf 'INCONCLUSIVE unreadable: %s could not be attributed to a source MAC (is --iface an Ethernet interface? any, tun and wg cannot be checked; was the capture taken with -e?); first: %s\n' \
-		"$nlines" "$FIRST_UNREADABLE"
+	if [[ -n $FROM_FILE ]]; then
+		hint='was the capture taken on an Ethernet interface with -e? any, tun and wg cannot be checked'
+	else
+		hint='is --iface an Ethernet interface? any, tun and wg cannot be checked'
+	fi
+	printf 'INCONCLUSIVE unreadable: %s could not be attributed to a source MAC (%s); first: %s\n' \
+		"$nlines" "$hint" "$FIRST_UNREADABLE"
 fi
 
 if (( FAILURES )); then
@@ -248,6 +255,13 @@ fi
 if (( UNREADABLE > 0 )); then
 	printf 'INCONCLUSIVE no foreign source seen %s, but %s could not be read, so the check did not pass\n' \
 		"$WHERE" "$nlines"
+	exit 3
+fi
+
+# a live capture that saw nothing observed its window; a file with no
+# packets (an empty or wrong file) observed nothing at all
+if [[ -n $FROM_FILE ]] && (( ALLOWED_TOTAL + FOREIGN_TOTAL + UNREADABLE == 0 )); then
+	printf 'INCONCLUSIVE capture file %s contains no packets, so it proves nothing\n' "$FROM_FILE"
 	exit 3
 fi
 

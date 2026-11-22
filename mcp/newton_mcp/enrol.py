@@ -42,6 +42,7 @@ from pathlib import Path
 from . import approval_proof as _proof
 from . import approve
 from . import grants
+from .ad.write.inventory import AD_PLATFORMS
 
 
 USAGE = (
@@ -125,7 +126,7 @@ def _enrol_totp(device: str) -> int:
         if status == _proof.PASS_NO_FINGERPRINT:
             print(
                 f"newton-enrol: no approval fingerprint on record for {device}; "
-                f"run newton-router-setup {device} approval-key first; "
+                f"run {approve._launcher('newton-router-setup')} {device} approval-key first; "
                 "nothing was enrolled",
                 file=sys.stderr,
             )
@@ -181,7 +182,7 @@ def _set_level(device: str, level: str) -> int:
     if level == _proof.LEVEL_TOTP and _proof.load_totp(device) is None:
         print(
             f"newton-enrol: {device} has no TOTP record; enrol one with "
-            f"newton-enrol totp {device}",
+            f"{approve._launcher('newton-enrol')} totp {device}",
             file=sys.stderr,
         )
         return 1
@@ -217,12 +218,15 @@ def _rotate(device: str) -> int:
             file=sys.stderr,
         )
         return 1
-    home = os.environ.get("NEWTON_HOME", DEFAULT_NEWTON_HOME)
-    setup = f"{home}/scripts/newton-router-setup"
+    setup = _setup_tool()
     if not os.path.isfile(setup):
+        # The path just found missing is never offered as the command to
+        # run: the owner is told how to point newton-enrol at the tool.
         print(
-            f"newton-enrol: {setup} is missing; run this yourself:\n"
-            f"  {setup} {device} approval-key",
+            f"newton-enrol: {setup} is missing; set NEWTON_HOME to the "
+            "folder that holds scripts/newton-router-setup (the Newton "
+            "install or a Newton checkout) and run "
+            f"{approve._launcher('newton-enrol')} rotate {device} again",
             file=sys.stderr,
         )
         print(
@@ -247,9 +251,15 @@ def _rotate(device: str) -> int:
         )
         return 1
     if result.returncode != 0:
+        # The setup tool writes the router's approve.key before its
+        # selftest, so a failure can leave the router on the new key
+        # while this host still holds the old proofs.
         print(
             f"newton-enrol: the approval key change failed (exit {result.returncode}); "
-            "nothing on this host was changed",
+            f"the router {device} may already hold the new key (see the "
+            "setup tool's messages above), and the old TOTP record, lockout "
+            "and acknowledgement are kept; run "
+            f"{approve._launcher('newton-enrol')} rotate {device} again",
             file=sys.stderr,
         )
         return result.returncode
@@ -262,16 +272,67 @@ def _rotate(device: str) -> int:
         pass
     _proof.set_level(device, _proof.LEVEL_PASSPHRASE)
     print(
-        f"newton-enrol: enrol the authenticator again with newton-enrol totp {device}"
+        "newton-enrol: enrol the authenticator again with "
+        f"{approve._launcher('newton-enrol')} totp {device}"
     )
     return 0
 
 
-def _known_devices() -> tuple[frozenset[str] | None, str]:
-    """The device names of the inventory, or None and why it cannot be read.
+def _setup_tool() -> str:
+    """The newton-router-setup a rotation runs.
 
-    Only the names are read: a typo in the device name must not end in
-    "No easy grant" while the real grant stays open.
+    NEWTON_HOME names it when set (the installed launchers set it).
+    Without it the installed copy under the default home is used, and
+    when there is none, the copy of the source tree this module runs
+    from: a source checkout has no /opt/newton.
+    """
+    home = os.environ.get("NEWTON_HOME")
+    if home:
+        return f"{home}/scripts/newton-router-setup"
+    installed = f"{DEFAULT_NEWTON_HOME}/scripts/newton-router-setup"
+    if os.path.isfile(installed):
+        return installed
+    source = Path(__file__).resolve().parents[2] / "scripts" / "newton-router-setup"
+    if source.is_file():
+        return str(source)
+    return installed
+
+
+def _ad_refusal(command: str, device: str) -> int:
+    """Refuse a router-only command on an Active Directory entry.
+
+    An AD approval (newton-approve ad-change) asks for the passphrase
+    only, and its key lives on the DCs, not on a router: rotate would run
+    newton-router-setup against a DC, and an authenticator would never be
+    asked for.
+    """
+    if command == "rotate":
+        print(
+            f"newton-enrol: {device} is an Active Directory entry, and rotate "
+            "changes a router's approval key. To replace the AD approval "
+            "passphrase, remove the approval key file on every DC of the "
+            "domain, run the DC write setup again on each with the new "
+            "passphrase, then run "
+            f"{approve._launcher('newton-ad-setup')} approval-key {device} "
+            "for the domain on the Newton host; nothing was changed",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"newton-enrol: {device} is an Active Directory entry: AD "
+            "approvals ask for the approval passphrase only, so an "
+            "authenticator app is never asked for there; nothing was changed",
+            file=sys.stderr,
+        )
+    return 2
+
+
+def _known_devices() -> tuple[dict[str, str] | None, str]:
+    """The device names of the inventory with their platforms, or None
+    and why it cannot be read.
+
+    Only the names and platforms are read: a typo in the device name must
+    not end in "No easy grant" while the real grant stays open.
     """
     path = Path(
         os.environ.get("NEWTON_INVENTORY", "~/.config/newton/devices.toml")
@@ -283,10 +344,14 @@ def _known_devices() -> tuple[frozenset[str] | None, str]:
     devices = data.get("devices", {})
     if not isinstance(devices, dict):
         return None, f"the inventory {path} has no [devices] table"
-    return frozenset(name for name in devices if isinstance(name, str)), ""
+    return {
+        name: str(entry.get("platform", "")) if isinstance(entry, dict) else ""
+        for name, entry in devices.items()
+        if isinstance(name, str)
+    }, ""
 
 
-def _unknown(device: str, known: frozenset[str]) -> int:
+def _unknown(device: str, known: dict[str, str]) -> int:
     names = ", ".join(sorted(known)) or "none"
     print(
         f"newton-enrol: unknown device {device}: the inventory names {names}",
@@ -349,6 +414,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if device not in known:
         return _unknown(device, known)
+    if known[device] in AD_PLATFORMS and (
+        command in ("totp", "rotate")
+        or (command == "level" and args[2] == _proof.LEVEL_TOTP)
+    ):
+        return _ad_refusal(command, device)
     # The owner types the passphrase and reads the seed, so those commands
     # only run in a terminal; grant-off asks for and shows no secret.
     if not sys.stdin.isatty():

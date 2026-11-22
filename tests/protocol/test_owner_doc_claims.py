@@ -451,3 +451,121 @@ def test_install_doc_offers_the_authenticator_on_no_install_too():
     step = _section(_text(INSTALL_DOC), "**7f.**", "**7g.**")
     assert "On a no-install router" in step
     assert "newton-enrol totp router1" in " ".join(step.split()[:80])
+
+
+# ---- owner-doc claims, continued ----
+
+OWRT_CHANGE = REPO / "scripts/owrt-change.sh"
+
+
+@pytest.mark.parametrize("path", READMES, ids=lambda p: str(p.relative_to(REPO)))
+def test_readme_hold_window_is_the_timeout_minus_15_s(path):
+    """owrt-change.sh ends the hold 15 s before the plan's timeout
+    (deadline = SECONDS + T - 15), as SKILL.md says."""
+    assert "deadline=$((SECONDS + T - 15))" in _text(OWRT_CHANGE)
+    assert "the hold ends at `timeout_s` minus 15 s" in _flat(SKILL)
+    for line in _lines_with(_text(path), "The hold window is"):
+        assert "The hold window is the plan's timeout minus 15 s" in line, line
+
+
+def test_release_readme_evidence_ticks_only_the_client_that_was_run():
+    """no run with Codex or OpenCode is recorded
+    (docs/SETUP-CLIENTS.md 'Not confirmed'); a tick line that names them
+    says they were not run."""
+    clients = _flat(REPO / "docs/SETUP-CLIENTS.md")
+    assert "was not tested here" in clients
+    evidence = _section(_text(RELEASE_README), "**Lab and test evidence**", "### ")
+    for line in evidence.splitlines():
+        if line.startswith("- ✓") and ("Codex" in line or "OpenCode" in line):
+            assert "not run" in line, line
+
+
+def test_setup_clients_names_claude_desktop_only_as_not_supported():
+    """outside its own section, every line of SETUP-CLIENTS.md
+    that names Claude Desktop says it is not supported."""
+    text = _text(REPO / "docs/SETUP-CLIENTS.md")
+    section = _section(text, "### Claude Desktop", "\n#")
+    assert "Claude Desktop is not supported" in " ".join(section.split())
+    rest = text.replace(section, "")
+    for line in rest.splitlines():
+        if "Claude Desktop" in line:
+            assert "not supported" in line, line
+
+
+def test_skill_ad_change_status_names_not_found():
+    """the tool answers not_found too (server.py description)."""
+    server = _text(REPO / "mcp/newton_mcp/server.py")
+    assert "armed, confirmed, undone, undo_failed, refused or not_found" in " ".join(server.split())
+    flat = _flat(SKILL)
+    assert (
+        "`newton_ad_change_status(device, plan_id)` shows `armed`, `confirmed`, `undone`, "
+        "`undo_failed`, `refused` or `not_found`"
+    ) in flat
+
+
+SECURITY_SCOPE_R4 = [
+    "scripts/newton-wan-health.sh",
+    "scripts/newton-wan-health.init",
+    "scripts/newton-scan",
+    "scripts/newton-rules",
+]
+
+
+def test_security_scope_names_the_wan_health_scan_and_rules_code():
+    """newton-wan-health.sh runs as root on the router, newton-scan
+    on the vantage, newton-rules as the newton user."""
+    scope = _section(_text(SECURITY), "## In scope", "## Out of scope")
+    for path in SECURITY_SCOPE_R4:
+        assert (REPO / path).exists(), path
+        assert f"`{path}`" in scope, path
+
+
+def test_security_md_places_every_script():
+    """every file under scripts/ is named in scope or out of
+    scope, so a reporter can tell (the scrub's own files are not in the
+    public tree)."""
+    import tomllib
+
+    excluded = set(tomllib.loads(_text(SCRUB_RULES))["tree"]["exclude"]) if SCRUB_RULES.exists() else set()
+    text = _text(SECURITY)
+    for path in sorted((REPO / "scripts").iterdir()):
+        rel = f"scripts/{path.name}"
+        if not path.is_file() or rel in excluded:
+            continue
+        assert f"`{rel}`" in text, rel
+
+
+BOOTSTRAP_OLDER_NOTE = (
+    "A bootstrap installed by an earlier release asks for a 12-hex prefix of the id instead"
+)
+
+
+@pytest.mark.parametrize("path", [RELEASE_README, SKILL, INSTALL_DOC, SETUP_DOC],
+                         ids=lambda p: str(p.relative_to(REPO)))
+def test_bootstrap_docs_say_an_older_bootstrap_asks_for_12_hex_and_to_self_update(path):
+    """--from-snapshot never replaces the bootstrap, so an
+    existing install keeps the old prompt until its self-update."""
+    assert "--from-snapshot never touches" in _text(INSTALLER_SRC)
+    flat = _flat(path)
+    assert BOOTSTRAP_OLDER_NOTE in flat, path.name
+    assert "newton-bootstrap self-update <repo>" in flat, path.name
+
+
+SKILL_SIZE_CAP = 100 * 1024
+
+
+def test_skill_md_stays_under_its_size_cap():
+    """SKILL.md loads whole on every trigger; a ceiling stops it
+    growing without anyone deciding to.  Move detail to references/ before
+    raising the cap."""
+    size = len(SKILL.read_bytes())
+    assert size <= SKILL_SIZE_CAP, size
+
+
+def test_skill_description_scopes_the_broadest_triggers():
+    """generic network questions load the skill only when the
+    network is one Newton manages."""
+    head = _text(SKILL).split("\n---\n", 1)[0]
+    description = next(line for line in head.splitlines() if line.startswith("description:"))
+    assert "'how fast is my internet' on a network Newton manages" in description
+    assert "or network config on a Linux host" not in description

@@ -71,7 +71,9 @@ Tell them what to expect, in these words or close to them:
 - It shows the commit id; compare it with the one you confirmed in step 2, then type `install ` and the full 40-hex id.
 - It creates a separate `newton` account that holds the router keys, installs Newton under `/opt/newton`, and sets up
   the approval commands. Later updates use `newton-bootstrap install <repo> <40-hex>`; it asks for `install ` and the full
-  40-hex id.
+  40-hex id. A bootstrap installed by an earlier release asks for a 12-hex prefix of the id instead: type what its
+  prompt asks for, then run `newton-bootstrap self-update <repo> <40-hex>` from the same root shell (the update says
+  when the installed bootstrap differs from the release's).
 - It asks one optional question about Claude Code's managed settings (`allowManagedHooksOnly`), so only system-level hooks
   run; this is the guard that stops another tool from answering Newton's approval dialog for you. The default is no: the
   user's own Claude Code hooks keep working, and every approval still needs their passphrase or authenticator code. If
@@ -80,6 +82,8 @@ Tell them what to expect, in these words or close to them:
   line to add instead.
 - It does not ask for the approval passphrase yet; the user picks it when the first router is added, in step 7e (no-install) or step 7f (installed).
 Wait until the user says it finished. If it printed an error, ask them to paste the error text and stop.
+Then tell them to type `exit` to leave the root shell: every command in step 7 runs as their own account, and the
+Newton setup commands refuse to run from a root shell ("run this from your own account, not from a root shell").
 
 ## 5. Register the server
 ```sh
@@ -153,7 +157,7 @@ e. Choose the access mode with the user. The **no-install** mode is the default 
 What Newton puts on your router
 
 Newton's executable code is a small set of POSIX shell scripts; it also writes the configuration and service entries listed below.
-No package is installed and nothing is compiled: about 218 KB of shell in 6 files.
+No package is installed and nothing is compiled: about 220 KB of shell in 6 files.
 
   /usr/libexec/newton/newton-router     149 KB  the program Newton talks to
   /usr/libexec/newton/newton-safe-apply   25 KB  the change helper
@@ -170,7 +174,10 @@ settings in /etc/config/newton_wanhealth, the boot links
 19 lines in /etc/sysupgrade.conf, so a firmware upgrade
 keeps them. The guard service runs at boot; the WAN-health check stays idle
 until you set newton_wanhealth.main.enabled=1 and list the WAN interfaces
-(iface) and the probe targets (target) it watches. One more line goes into
+(iface) and the probe targets (target) it watches. Once on, it pings a target
+from every listed WAN every interval seconds (5 by default), about 85 MB a
+month per WAN: leave a metered WAN out of iface or raise interval. One more
+line goes into
 /etc/dropbear/authorized_keys, but the install does not write it: swap-key
 or add-key does.
 
@@ -211,7 +218,10 @@ On purpose it keeps the guard's saved copies of your settings
 /etc/config/newton_wanhealth, the copy of your keys from before swap-key,
 /etc/dropbear/authorized_keys.newton-prev, and the /etc/sysupgrade.conf file.
 The Newton lines go out of that file; the file itself stays, empty when the
-install created it. The copy of the keys holds the key line swap-key took
+install created it. The kept copies of your settings are no longer in
+/etc/sysupgrade.conf, so the next firmware upgrade drops them: copy them off
+the router first if you still want them. The copy of the keys holds the key
+line swap-key took
 out; if you still want that key to log in, copy the line back first. To
 remove those by hand:
   rm -rf /etc/newton /usr/libexec/newton /etc/config/newton_wanhealth /etc/dropbear/authorized_keys.newton-prev
@@ -261,7 +271,7 @@ metered WAN out of `iface`. After changing its settings, run `reload_config` on 
    NOTE no-install: Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays.
    NOTE no-install: Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval.
    NOTE no-install: Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run.
-   NOTE installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 218 KB), no packages and no compiled code.
+   NOTE installed: Newton puts a program on the router: a small set of shell scripts (6 files, about 220 KB), no packages and no compiled code.
    NOTE installed: Newton's key can run that program and nothing else, so the agent never gets a root shell.
    NOTE installed: If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck.
    NOTE installed: More checks can run, and fewer changes need a script.

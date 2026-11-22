@@ -687,6 +687,37 @@ def test_the_dialog_refuses_when_the_script_does_not_fit(tmp_path: Path) -> None
     assert result["session_id"] in str(excinfo.value)
 
 
+def test_an_installed_dialog_names_the_sudo_form_when_the_script_does_not_fit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """the installed launcher refuses the bare name, so the
+    owner-run hint is its sudo form."""
+    from newton_mcp import elicit_approval
+
+    result = _plan_flow(tmp_path)
+    state = result["_service"].state
+    record = _record(state, result["session_id"])
+    explanation, digest = approve.validate_plan_for_approval(record)
+    monkeypatch.setenv("NEWTON_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(elicit_approval, "OWNER_SCRIPT_MESSAGE_CAP", 10)
+    with pytest.raises(approve.ApprovalRefused) as excinfo:
+        elicit_approval._dialog_text(
+            "lab-r1",
+            result["session_id"],
+            record,
+            explanation,
+            digest,
+            True,
+            "passphrase",
+            _classification(),
+            False,
+        )
+    assert (
+        "`sudo -u newton /usr/local/bin/newton-router-setup lab-r1 owner-run "
+        f"{result['session_id']}`"
+    ) in str(excinfo.value)
+
+
 def _classification():
     from newton_mcp import change_classes
 

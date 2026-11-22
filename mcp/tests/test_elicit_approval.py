@@ -554,6 +554,86 @@ def test_a_replayed_totp_code_is_rejected(clock):
     assert not _approval_path(OTHER_SID).exists()
 
 
+def test_a_totp_device_without_a_record_names_newton_enrol(clock):
+    """the fallback for a device set to TOTP with no TOTP record
+    named ``newton-router-setup ... approval-key``, which never writes a
+    TOTP record, so the same refusal came back for ever.  It names
+    newton-enrol totp, and the way back to the passphrase."""
+    _write_plan(_plan())
+    _write_fingerprint()
+    proof.set_level(DEVICE, proof.LEVEL_TOTP)
+    ctx = _FakeContext(clock)
+
+    outcome = _run_approval(ctx)
+
+    assert outcome.status == "fallback"
+    assert f"no TOTP approval key on record for {DEVICE}" in outcome.message
+    assert f"newton-enrol totp {DEVICE}" in outcome.message
+    assert f"newton-enrol level {DEVICE} passphrase" in outcome.message
+    assert "approval-key" not in outcome.message
+    assert ctx.messages == []
+
+
+def test_an_installed_totp_device_without_a_record_names_the_sudo_form(
+    clock, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("NEWTON_HOME", str(tmp_path / "home"))
+    _write_plan(_plan())
+    _write_fingerprint()
+    proof.set_level(DEVICE, proof.LEVEL_TOTP)
+
+    outcome = _run_approval(_FakeContext(clock))
+
+    assert (
+        f"sudo -u newton /usr/local/bin/newton-enrol totp {DEVICE}" in outcome.message
+    )
+
+
+def test_an_installed_device_without_a_fingerprint_names_the_sudo_form(
+    clock, monkeypatch, tmp_path
+):
+    """the installed launcher refuses the bare name, so the
+    hint is its sudo form."""
+    monkeypatch.setenv("NEWTON_HOME", str(tmp_path / "home"))
+    _write_plan(_plan())
+    ctx = _FakeContext(clock)
+
+    outcome = _run_approval(ctx)
+
+    assert outcome.status == "fallback"
+    assert (
+        f"run sudo -u newton /usr/local/bin/newton-router-setup {DEVICE} approval-key"
+        in outcome.message
+    )
+    assert ctx.messages == []
+
+
+def test_a_fingerprint_gone_during_the_dialog_names_the_sudo_form(
+    clock, monkeypatch, tmp_path
+):
+    """the fingerprint was there when the dialog opened and gone
+    when the answer was checked; the hint is the installed sudo form."""
+    monkeypatch.setenv("NEWTON_HOME", str(tmp_path / "home"))
+    _write_plan(_plan())
+    _write_fingerprint()
+    monkeypatch.setattr(
+        elicit_approval.approval_proof,
+        "verify_passphrase",
+        lambda device, answer: (proof.PASS_NO_FINGERPRINT, None),
+    )
+    ctx = _FakeContext(clock)
+
+    outcome = _run_approval(ctx)
+
+    assert outcome.status == "fallback"
+    assert len(ctx.messages) == 1
+    assert (
+        f"run sudo -u newton /usr/local/bin/newton-router-setup {DEVICE} approval-key"
+        in outcome.message
+    )
+    assert not proof._lockout_path(DEVICE).exists()
+
+
 def test_cancel_at_once_falls_back(clock):
     _write_plan(_plan())
     _write_fingerprint()

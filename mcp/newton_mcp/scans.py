@@ -124,6 +124,13 @@ VERSION_FIELD_RE = re.compile(r"^version=([0-9]{1,4})\.([0-9]{1,4})\.([0-9]{1,4}
 MAX_GREPABLE_LINES = 10_000
 MAX_GREPABLE_LINE = 4096
 MAX_HOSTS = 256
+# The most open ports one nmap result hands back (findings, report update
+# and envelope alike); the host and port counts stay whole.  A /24 with
+# its top 100 ports open would otherwise be ~25,000 findings.
+MAX_SCAN_PORTS = 500
+# The start of a Host: line, enough to name the host of a line too long
+# to parse.  Only the validated address is ever kept.
+HOST_PREFIX_RE = re.compile(r"^Host: ([0-9]{1,3}(?:\.[0-9]{1,3}){3}) ")
 # a planned scan request without consent is unusable forever
 # without a bound; the 30-minute window matches the consent window the
 # operator already accepts.  Enforced in ``load_request`` so the run
@@ -1036,6 +1043,21 @@ def _invalid(cause: str) -> str:
     return f"scan consent record is invalid ({cause}); {CONSENT_NEXT_STEP}"
 
 
+def _consent_required(request_id: str) -> str:
+    """The refusal of a scan with no consent: the command that approves it.
+
+    The installed launcher refuses the bare name, so the hint is the
+    form ``approve._launcher`` gives (imported here, not at the top:
+    approve imports this module).
+    """
+    from . import approve
+
+    return (
+        "scan consent is required; run "
+        f"{approve._launcher('newton-approve')} {request_id}"
+    )
+
+
 def consume_consent(state: Path, request: dict[str, Any], device: str) -> dict[str, Any]:
     request_id = str(request["id"])
     path = consent_path(state, request_id)
@@ -1045,7 +1067,7 @@ def consume_consent(state: Path, request: dict[str, Any], device: str) -> dict[s
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        raise ScanError("scan consent is required; run newton-approve with the request id") from None
+        raise ScanError(_consent_required(request_id)) from None
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise ScanError(_invalid("it cannot be read")) from exc
     if not isinstance(value, dict) or set(value) != CONSENT_KEYS:
@@ -1083,7 +1105,7 @@ def consume_consent(state: Path, request: dict[str, Any], device: str) -> dict[s
     except FileNotFoundError:
         if used.exists():
             raise ScanError(f"scan consent was already used; {CONSENT_NEXT_STEP}") from None
-        raise ScanError("scan consent is required; run newton-approve with the request id") from None
+        raise ScanError(_consent_required(request_id)) from None
     return value
 
 
@@ -1194,6 +1216,53 @@ def parse_grepable(raw: str) -> list[dict[str, Any]]:
             by_address.items(), key=lambda item: int(ipaddress.IPv4Address(item[0]))
         )
     ]
+
+
+def oversized_hosts(raw: str) -> list[str]:
+    """The addresses of the Host: lines too long for ``parse_grepable``.
+
+    nmap puts every open port of a host on its one Host: line, so the
+    most exposed host is the one whose line passes MAX_GREPABLE_LINE.
+    The parser skips such a line; the caller must say the result is
+    partial and name these hosts, never report them as having no open
+    port.  Only the validated address is returned.
+    """
+    seen: set[str] = set()
+    found: list[str] = []
+    for index, line in enumerate(raw.splitlines()):
+        if index >= MAX_GREPABLE_LINES:
+            break
+        if len(line) <= MAX_GREPABLE_LINE:
+            continue
+        match = HOST_PREFIX_RE.match(line[:32])
+        if not match:
+            continue
+        try:
+            address = str(ipaddress.IPv4Address(match.group(1)))
+        except ValueError:
+            continue
+        if address in seen or len(found) >= MAX_HOSTS:
+            continue
+        seen.add(address)
+        found.append(address)
+    return found
+
+
+def cap_ports(
+    hosts: list[dict[str, Any]], limit: int = MAX_SCAN_PORTS
+) -> tuple[list[dict[str, Any]], bool]:
+    """The hosts with at most *limit* ports in all, in order; True when cut."""
+    if sum(len(host["ports"]) for host in hosts) <= limit:
+        return hosts, False
+    kept: list[dict[str, Any]] = []
+    left = limit
+    for host in hosts:
+        if left <= 0:
+            break
+        ports = host["ports"][:left]
+        kept.append({"address": host["address"], "ports": ports})
+        left -= len(ports)
+    return kept, True
 
 
 def parse_timed_out(raw: str) -> list[str]:

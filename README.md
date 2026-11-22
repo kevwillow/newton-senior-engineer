@@ -56,7 +56,7 @@ modes are shown side by side, in plain words, before the router is touched.
 
 **no-install:** Newton puts nothing on the router except one web-interface user. Every change uses OpenWrt's own undo timer. Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays. Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval. Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run.
 
-**installed:** Newton puts a program on the router: a small set of shell scripts (6 files, about 218 KB), no packages and no compiled code. Newton's key can run that program and nothing else, so the agent never gets a root shell. If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck. More checks can run, and fewer changes need a script. uninstall removes Newton's program and key; it keeps the guard's saved settings and the rest of /etc/newton (its lock and log), the program directory, the WAN-health settings in /etc/config/newton_wanhealth, the keys from before swap-key and the sysupgrade file: the saved settings and the copy of your keys are what you restore by hand.
+**installed:** Newton puts a program on the router: a small set of shell scripts (6 files, about 220 KB), no packages and no compiled code. Newton's key can run that program and nothing else, so the agent never gets a root shell. If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck. More checks can run, and fewer changes need a script. uninstall removes Newton's program and key; it keeps the guard's saved settings and the rest of /etc/newton (its lock and log), the program directory, the WAN-health settings in /etc/config/newton_wanhealth, the keys from before swap-key and the sysupgrade file: the saved settings and the copy of your keys are what you restore by hand.
 
 The uninstall takes out every Newton key line on the router, for every host and label, including the key the Newton
 server itself uses; the next section lists what it removes and keeps, and how to put each key back.
@@ -74,7 +74,7 @@ prints the same text on your terminal before it asks you to agree:
 What Newton puts on your router
 
 Newton's executable code is a small set of POSIX shell scripts; it also writes the configuration and service entries listed below.
-No package is installed and nothing is compiled: about 218 KB of shell in 6 files.
+No package is installed and nothing is compiled: about 220 KB of shell in 6 files.
 
   /usr/libexec/newton/newton-router     149 KB  the program Newton talks to
   /usr/libexec/newton/newton-safe-apply   25 KB  the change helper
@@ -91,7 +91,10 @@ settings in /etc/config/newton_wanhealth, the boot links
 19 lines in /etc/sysupgrade.conf, so a firmware upgrade
 keeps them. The guard service runs at boot; the WAN-health check stays idle
 until you set newton_wanhealth.main.enabled=1 and list the WAN interfaces
-(iface) and the probe targets (target) it watches. One more line goes into
+(iface) and the probe targets (target) it watches. Once on, it pings a target
+from every listed WAN every interval seconds (5 by default), about 85 MB a
+month per WAN: leave a metered WAN out of iface or raise interval. One more
+line goes into
 /etc/dropbear/authorized_keys, but the install does not write it: swap-key
 or add-key does.
 
@@ -132,7 +135,10 @@ On purpose it keeps the guard's saved copies of your settings
 /etc/config/newton_wanhealth, the copy of your keys from before swap-key,
 /etc/dropbear/authorized_keys.newton-prev, and the /etc/sysupgrade.conf file.
 The Newton lines go out of that file; the file itself stays, empty when the
-install created it. The copy of the keys holds the key line swap-key took
+install created it. The kept copies of your settings are no longer in
+/etc/sysupgrade.conf, so the next firmware upgrade drops them: copy them off
+the router first if you still want them. The copy of the keys holds the key
+line swap-key took
 out; if you still want that key to log in, copy the line back first. To
 remove those by hand:
   rm -rf /etc/newton /usr/libexec/newton /etc/config/newton_wanhealth /etc/dropbear/authorized_keys.newton-prev
@@ -169,11 +175,13 @@ the authenticator QR code. Prefer to do it by hand? See [Manual install](docs/IN
 
 Updating: every install after the first goes through `/usr/local/sbin/newton-bootstrap`, from a root shell:
 `newton-bootstrap install <repo> <40-hex-commit-id>`. It checks the commit itself and asks you to type `install `
-and the full 40-hex id. [Manual install](docs/INSTALL.md) has the steps.
+and the full 40-hex id. A bootstrap installed by an earlier release asks for a 12-hex prefix of the id instead: type
+what its prompt asks for, then update the bootstrap itself with `newton-bootstrap self-update <repo> <40-hex-commit-id>`
+(the update says so when the two differ). [Manual install](docs/INSTALL.md) has the steps.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![OpenWrt 25.12](https://img.shields.io/badge/OpenWrt-25.12-00B5E2)](#supported-devices)
-[![Status: 1.4.0](https://img.shields.io/badge/Status-1.4.0-2f9a54)](#status)
+[![Status: 1.4.1](https://img.shields.io/badge/Status-1.4.1-2f9a54)](#status)
 
 ## What it looks like
 
@@ -222,7 +230,7 @@ except the changes Newton always asks about.
 
 Everything Newton does, in one list.
 
-- ✓ = in the current release, 1.4.0.
+- ✓ = in the current release, 1.4.1.
 
 A ✓ line says so when the feature works in one mode only, was run only in the virtual lab, or is covered by tests
 with no recorded run on a real router.
@@ -282,7 +290,7 @@ with no recorded run on a real router.
 - ✓ Questions stay read-only. "Why is the Wi-Fi slow?" never changes anything.
 - ✓ Setup helpers: `newton-router-setup` (check, install, no-install, offer-installed, approval-key, swap-key, add-key, revoke, profile lab or prod, upgrade, rollback, uninstall, lab-snapshot, owner-run, owner-finish), `newton-enrol` (totp, level passphrase or totp, rotate, grant-off), `newton-vantage-setup` (sets up the client machine for client checks and scans), `newton-doctor`, and `newton-bootstrap` for updates.
 - ✓ `newton-router-setup swap-key` warns that it removes the plain key from the router (after the swap that key no longer logs in as root) and asks before it does; `--remove-plain-key` skips the question. The no-install uninstall asks before it deletes the device's owner scripts and plan records. Covered by tests only.
-- ✓ A no-install mode for OpenWrt (`newton-router-setup DEVICE no-install`): nothing of Newton on the router but one limited web-interface user. Newton applies DHCP reservations and DNS entries itself under OpenWrt's own undo timer; every other change comes to you as a script you approve and run. Changes that could lock you out of management access or through the firewall are refused at plan time. It offers six tools (list devices, read, plan, apply, status, abort): no backup tool, undo after confirm, hardening levels, scans or guided audit. It cannot read the rpcd, uhttpd or dropbear config, files, cron, keys, passwords or packages, and every no-install plan says so.
+- ✓ A no-install mode for OpenWrt (`newton-router-setup DEVICE no-install`): nothing of Newton on the router but one limited web-interface user. Newton applies DHCP reservations and DNS entries itself under OpenWrt's own undo timer; every other change comes to you as a script you approve and run. Changes that could lock you out of management access or through the firewall are refused at plan time. It offers seven tools (list devices, read, plan, apply, status, abort, end an easy grant): no backup tool, undo after confirm, hardening levels, scans or guided audit. It cannot read the rpcd, uhttpd or dropbear config, files, cron, keys, passwords or packages, and every no-install plan says so.
 - ✓ `scripts/newton-rules` (`add`, `remove`, `list`) for the network rules file. Planning does not read the file yet, so a rule changes nothing in this release.
 
 **Hardening**
@@ -316,7 +324,7 @@ with no recorded run on a real router.
 - ✓ 96 scenario files in [`lab/scenarios`](lab/scenarios) for the virtual router (no full run of them is recorded in this repository), and a separate real-router suite in [`lab/scenarios-pulsar`](lab/scenarios-pulsar) (Wi-Fi included, through a USB adapter on the test client); its README lists which scenarios are ported. Its full run passed 97 of 97 scenarios on the Asus RT-AX57M (2026-10-23).
 - ✓ A lab isolation check (`scripts/newton-lab-isolation`): it watches a home-network interface for DHCP server replies and IPv6 router adverts and fails on any from a source not on its allow list. Its allow list is by MAC address, so a lab device that spoofs an allowed address passes.
 - ✓ A support table generated from test results, with each device's undo method and what is untested.
-- ✓ Works with Claude Code, Codex, OpenCode and any MCP client that runs on the Newton host (Claude Desktop is not supported: it has no Linux build).
+- ✓ Tested with Claude Code. Setup notes for Codex, OpenCode and other MCP clients that run on the Newton host are in [docs/SETUP-CLIENTS.md](docs/SETUP-CLIENTS.md) (not run; Claude Desktop is not supported: it has no Linux build).
 - ✓ On-demand reference docs for OpenWrt, nftables and networking concepts.
 
 ### Active Directory
@@ -368,7 +376,7 @@ That is the **installed** mode. In the **no-install** mode the changes do not go
 web API, over HTTPS pinned by the certificate, the undo is OpenWrt's own rpcd timer (which lives in the router's RAM),
 and a change is confirmed only when every mandatory check passes and the router's values read back as the staged ones.
 
-The wrapper takes **probe lists**, not a free-form shell check: lists of 19 fixed types, sealed on the router at plan time. A manifest id is expanded by the host into probe lists before staging, so the router never sees an id. In the installed mode the apply confirms on its own after three passing rounds. If the affected path cannot be tested from the router, the agent host or a registered client, apply with hold (covered by tests only: `newton_apply_change` with `hold=true`, or `owrt-change.sh apply ... --hold`): the same rounds run, nothing is confirmed and the undo stays armed; you test from a client, then `newton_confirm_change` (`owrt-change.sh confirm`) keeps the change or `abort` rolls it back before the window closes. If neither comes, the router rolls the change back. The hold window is the plan's timeout (90 s by default, 60 to 600 s), and the verify rounds use part of it: for a client test, plan the change with a longer timeout. An abort of a change that is already confirmed is refused; `newton_plan_undo` plans its reverse.
+The wrapper takes **probe lists**, not a free-form shell check: lists of 19 fixed types, sealed on the router at plan time. A manifest id is expanded by the host into probe lists before staging, so the router never sees an id. In the installed mode the apply confirms on its own after three passing rounds. If the affected path cannot be tested from the router, the agent host or a registered client, apply with hold (covered by tests only: `newton_apply_change` with `hold=true`, or `owrt-change.sh apply ... --hold`): the same rounds run, nothing is confirmed and the undo stays armed; you test from a client, then `newton_confirm_change` (`owrt-change.sh confirm`) keeps the change or `abort` rolls it back before the window closes. If neither comes, the router rolls the change back. The hold window is the plan's timeout minus 15 s (the timeout is 90 s by default, 60 to 600 s), and the verify rounds use part of it: for a client test, plan the change with a longer timeout. An abort of a change that is already confirmed is refused; `newton_plan_undo` plans its reverse.
 
 ### Approvals
 
@@ -447,17 +455,17 @@ upstreams and a test client on Proxmox, and runs the scenarios against them. [`d
 explains the method. [`docs/TESTING-FOR-REVIEWERS.md`](docs/TESTING-FOR-REVIEWERS.md) lists what to try first, and
 the things we most want broken.
 
-Test suites at the 1.4.0 release gate, run in the full development tree (this public tree leaves out some development-only tests, so its own counts are lower):
+Test suites at the 1.4.1 release gate, run in the full development tree (this public tree leaves out some development-only tests, so its own counts are lower):
 
 | Suite | Path | Passing |
 |---|---|---|
-| MCP server | `mcp/tests/` | 10,867 (15 skipped) |
-| Router program | `device/openwrt/newton-router/tests/` | 3,353 |
-| Guard | `device/openwrt/newton-guard/tests/` | 184 |
-| Protocol | `tests/protocol/` | 3,565 (5 skipped) |
-| Lab scenarios | `lab/tests/` + live runs | 1,279 |
+| MCP server | `mcp/tests/` | 10,953 (15 skipped) |
+| Router program | `device/openwrt/newton-router/tests/` | 3,361 |
+| Guard | `device/openwrt/newton-guard/tests/` | 186 |
+| Protocol | `tests/protocol/` | 3,656 (5 skipped) |
+| Lab scenarios | `lab/tests/` + live runs | 1,289 |
 | Profiles | `tests/profiles/` | 112 |
-| Serial console | `tests/serial/` | 318 |
+| Serial console | `tests/serial/` | 329 |
 
 ## Repository layout
 
@@ -490,14 +498,14 @@ See [`SECURITY.md`](SECURITY.md).
 
 ## Status
 
-**Released: 1.4.0.** OpenWrt in the installed and no-install modes (plus experimental VyOS, MikroTik and Junos), the
+**Released: 1.4.1.** OpenWrt in the installed and no-install modes (plus experimental VyOS, MikroTik and Junos), the
 one-line setup, in-client approvals, undo after confirm, client-side checks and receipts. 1.1 added the no-install
 mode: Newton puts nothing on the router but one limited web-interface user, applies DHCP reservations and DNS entries
 under OpenWrt's own undo timer, and hands every other change to you as a script you approve and run. 1.4.0 adds the
 Active Directory audit and the Active Directory changes, with the six `newton_ad_*` tools, `scripts/newton-ad-setup`, the
 `/usr/local/bin/newton-ad-setup` launcher and `newton-approve ad-change`; an apply that holds the confirm for a test
 you run from a client, with the `newton_confirm_change` tool (covered by tests only); and all the fixes since 1.1.3. It has
-twenty-four MCP tools. Active Directory changes are approved by you, with the undo armed on the domain controller until Newton confirms; once confirmed, Newton does not undo it (a known limit: if the PDC role moves while an earlier change of the same target is still armed on the old PDC, that domain controller's undo can write the earlier before-image over the new change): you plan the reverse change; an unlock has no undo and is written at once. The Active Directory work was tested live on two-DC Windows Server 2025 and Samba 4.22 lab
+twenty-four MCP tools. 1.4.1 is a fixes release (a fourth review round, no new tools; `CHANGELOG.md` lists the fixes). Active Directory changes are approved by you, with the undo armed on the domain controller until Newton confirms; once confirmed, Newton does not undo it (a known limit: if the PDC role moves while an earlier change of the same target is still armed on the old PDC, that domain controller's undo can write the earlier before-image over the new change): you plan the reverse change; an unlock has no undo and is written at once. The Active Directory work was tested live on two-DC Windows Server 2025 and Samba 4.22 lab
 domains, on code from just before the latest helper changes: the write setups, disable and enable, the machine account
 quota, unlock, the rollback of a withheld confirm, the refusal of a request for another device, and confirmation on
 every domain controller. Covered by tests only: the 48 audit checks (against collector output measured on lab domain

@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from newton_mcp import owner_script
+from newton_mcp import owner_script, rpcd_txn
 from newton_mcp.owner_script import ScriptError, ScriptPlan
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "owner"
@@ -113,6 +113,22 @@ def test_template_sha256_pin():
     assert owner_script.TEMPLATE_SHA256 == hashlib.sha256(
         owner_script.TEMPLATE_SKELETON.encode("utf-8")
     ).hexdigest()
+
+
+def test_the_applying_line_comes_after_every_stop_that_touches_nothing():
+    """The owner run settles the approval as not reached only for
+    a stop printed before NEWTON-APPLYING.  Every stop that leaves the
+    router untouched (not root, no private directory, uncommitted
+    changes, a pending window, a precondition) comes before that line,
+    and the line comes before the session the change is staged in."""
+    lines = list(owner_script.TEMPLATE_LINES)
+    applying = lines.index('echo "NEWTON-APPLYING plan=$PLAN"')
+    assert applying > lines.index("@@preconditions@@")
+    assert applying > lines.index(
+        '[ -z "$(uci changes </dev/null)" ] || die "the router has uncommitted changes"'
+    )
+    session = next(i for i, line in enumerate(lines) if "session create" in line)
+    assert applying < session
 
 
 def test_template_skeleton_has_one_marker_per_variable_line():
@@ -408,11 +424,13 @@ def test_a_leftover_undo_file_names_the_way_out(plan):
     """
     text = owner_script.render_script(plan).decode()
     assert 'if [ "$undo_age" -ge 900 ]; then' in text
+    # The same words as rpcd_txn.leftover_undo_message: the
+    # folder is the only copy of the settings from before the change
     assert (
-        "the router has a leftover undo file from $undo_text ago (its web "
-        "service restarted during a change). If nobody is changing the router "
-        "right now, reboot it, or as root run: rm -rf /var/run/rpcd/snapshot-files"
+        'die "' + rpcd_txn.leftover_undo_message(7200).replace(
+            "2 hours", "$undo_text") + '"'
     ) in text
+    assert "cp /var/run/rpcd/snapshot-files/* /etc/config/ && reload_config" in text
 
 
 @pytest.mark.parametrize("plan", ALL_PLANS)

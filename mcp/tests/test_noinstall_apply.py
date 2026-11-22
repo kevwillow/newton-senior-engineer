@@ -2050,3 +2050,31 @@ def test_the_status_of_a_kept_owner_script_change_says_it_is_on_the_router(
     assert status["result"] == "unknown", status
     assert "the change is on the router and stayed" in status["notes"][0], status
     assert "the router restarted or someone else confirmed" in status["notes"]
+
+
+def test_a_router_with_nothing_staged_at_the_apply_gives_the_approval_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """rpcd answers the apply with 'nothing staged' (code 5): no change was
+    applied, so the result is not_applied, the approval goes back to the
+    owner and no receipt is written.  It used to read as UNKNOWN
+    with an 'unknown' receipt and a spent approval."""
+    router, clock = _setup(tmp_path, monkeypatch)
+    before = dict(router.sections)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    _approve(state, sid, _record(state, sid))
+    router.apply_code = 5
+
+    result = _apply(tmp_path, monkeypatch, router, clock, sid)
+
+    assert result["result"] == "not_applied", result
+    assert any("nothing was applied" in note for note in result["notes"]), result
+    assert router.sections == before
+    assert router.count("uci", "confirm") == 0
+    assert (state / "approvals" / f"{sid}.json").exists()
+    assert not (state / "approvals" / f"{sid}.used").exists()
+    assert not list((state / "receipts").glob(f"*-{sid}.md"))
+    aborted = _server.newton_abort_change("lab-r1", sid)
+    assert aborted["result"] == "aborted", aborted

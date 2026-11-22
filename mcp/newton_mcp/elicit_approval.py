@@ -13,6 +13,7 @@ import hmac
 import math
 import os
 import time
+from time import time as _wall_clock
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -321,7 +322,8 @@ def _dialog_text(
         if len(message) > OWNER_SCRIPT_MESSAGE_CAP:
             raise approve.ApprovalRefused(
                 "the script of this plan does not fit in the approval dialog; "
-                f"approve and run this one with `newton-router-setup "
+                "approve and run this one with "
+                f"`{approve._launcher('newton-router-setup')} "
                 f"{safe_device} owner-run {session_id}`"
             )
     return message
@@ -595,14 +597,19 @@ async def _collect_locked(
             safe_device = approve._sanitize_terminal_value(device_name)
             return _fallback(
                 f"no approval fingerprint on record for {safe_device}; "
-                f"run newton-router-setup {safe_device} approval-key",
+                f"run {approve._launcher('newton-router-setup')} {safe_device} approval-key",
                 session_id,
             )
     elif approval_proof.load_totp(device_name) is None:
+        # Only newton-enrol totp writes a TOTP record: approval-key never
+        # does, so naming it here would bring the same refusal back.
         safe_device = approve._sanitize_terminal_value(device_name)
+        enrol = approve._launcher("newton-enrol")
         return _fallback(
             f"no TOTP approval key on record for {safe_device}; "
-            f"run newton-router-setup {safe_device} approval-key",
+            f"enrol the authenticator app with {enrol} totp {safe_device}, "
+            f"or go back to the passphrase with {enrol} level {safe_device} "
+            "passphrase",
             session_id,
         )
 
@@ -676,6 +683,7 @@ async def _collect_locked(
     except (AttributeError, TypeError):
         return _fallback("the client returned no approval answer", session_id)
 
+    answered_at: float | None = None
     try:
         if level == approval_proof.LEVEL_PASSPHRASE:
             status, key = approval_proof.verify_passphrase(device_name, secret)
@@ -683,7 +691,7 @@ async def _collect_locked(
                 return _fallback(
                     "no approval fingerprint on record for "
                     f"{approve._sanitize_terminal_value(device_name)}; "
-                    "run newton-router-setup "
+                    f"run {approve._launcher('newton-router-setup')} "
                     f"{approve._sanitize_terminal_value(device_name)} approval-key",
                     session_id,
                 )
@@ -700,7 +708,14 @@ async def _collect_locked(
                 remaining = approval_proof.record_failure(device_name)
                 return _wrong(device_name, remaining, session_id)
         else:
-            key = approval_proof.verify_totp(device_name, secret)
+            # A HIGH plan's code is checked here and spent only after the
+            # second confirmation: a fumbled confirmation must not use up
+            # the code, or the owner's retry with it counts as a miss.
+            # The spend checks it against the time it was typed.
+            answered_at = _wall_clock()
+            key = approval_proof.verify_totp(
+                device_name, secret, now=answered_at, consume=not high
+            )
             if key is None:
                 remaining = approval_proof.record_failure(device_name)
                 return _wrong(device_name, remaining, session_id)
@@ -721,7 +736,23 @@ async def _collect_locked(
             ctx, device_name, session_id, classification
         )
         if second is not None:
+            del key
             return second
+        if level != approval_proof.LEVEL_PASSPHRASE:
+            try:
+                key = approval_proof.verify_totp(
+                    device_name, secret, now=answered_at
+                )
+            except Exception:
+                return _fallback("the approval answer could not be checked", session_id)
+            if key is None:
+                # It matched a moment ago, so this is no wrong answer:
+                # another approval spent the same code in between.
+                return _fallback(
+                    "that authenticator code was used by another approval "
+                    "in the meantime; nothing approved; wait for the next code",
+                    session_id,
+                )
 
     grant_note = ""
     grant_hours = getattr(data, "grant_hours", "0")

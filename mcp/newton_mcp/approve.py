@@ -1534,6 +1534,19 @@ def main(argv: list[str] | None = None) -> int:
         if not sys.stdin.isatty():
             print("newton-approve: stdin must be an interactive terminal", file=sys.stderr)
             return 1
+        if not (state_dir() / "ad-plans" / f"{plan_id}.json").exists() and (
+            (state_dir() / "plans" / f"{plan_id}.json").exists()
+            or _scans.request_path(state_dir(), plan_id).exists()
+        ):
+            # The reverse of the hint below: a router plan or a scan
+            # request is approved without the ad-change word.
+            print(
+                "newton-approve: this is not an Active Directory plan but a "
+                "router plan or a scan request; approve it without the "
+                f"ad-change word: {_launcher('newton-approve')} {plan_id}",
+                file=sys.stderr,
+            )
+            return 2
         ok, refusal = approve_ad_change(plan_id)
         if not ok:
             print(f"newton-approve: {refusal}", file=sys.stderr)

@@ -151,14 +151,21 @@ def leftover_undo_message(seconds: int) -> str:
     """The message of an undo file the router forgot about.
 
     The window is still refused: the change may be live and Newton
-    cannot prove it is not.  The message says how the owner gets the
-    router back into a state Newton can work with.
+    cannot prove it is not.  The folder is the only copy on the router of
+    the settings from before that change (a reboot or an rm loses it), so
+    the message says how to put them back before it says how to clear it.
+    The owner script and newton-router-setup print the same words.
     """
     return (
         f"the router has a leftover undo file from {age_text(seconds)} ago "
-        "(its web service restarted during a change). If nobody is changing "
-        "the router right now, reboot it, or as root run: "
-        "rm -rf /var/run/rpcd/snapshot-files"
+        "(its web service restarted during a change, so that change was never "
+        "confirmed or rolled back). The live settings may still hold that "
+        "change: /var/run/rpcd/snapshot-files holds the settings from before "
+        "it, and a reboot or deleting that folder loses them. To undo the "
+        "change, as root run: cp /var/run/rpcd/snapshot-files/* /etc/config/ "
+        "&& reload_config && rm -rf /var/run/rpcd/snapshot-files. To keep it, "
+        "if nobody is changing the router right now, reboot it, or as root "
+        "run: rm -rf /var/run/rpcd/snapshot-files"
     )
 
 

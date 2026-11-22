@@ -74,7 +74,7 @@ CLOSING_NOTES = [
     "NOTE no-install: Newton applies only DHCP static leases and DNS "
     "entries itself; every other change is a script you approve and run.",
     "NOTE installed: Newton puts a program on the router: a small set of "
-    "shell scripts (6 files, about 218 KB), no packages and no compiled "
+    "shell scripts (6 files, about 220 KB), no packages and no compiled "
     "code.",
     "NOTE installed: Newton's key can run that program and nothing else, "
     "so the agent never gets a root shell.",
@@ -502,11 +502,20 @@ def test_no_install_names_a_leftover_undo_file_and_the_way_out(setup_env):
     r = run_noinstall(env)
     assert r.rc == 1
     lines = r.out.splitlines()
+    # The folder is the only copy of the settings from before the
+    # change, so the message says how to put them back before it says how
+    # to clear it
     assert lines[-1] == (
         "STOPPED no-install r1: the router has a leftover undo file from "
-        "2 hours ago (its web service restarted during a change). If nobody "
-        "is changing the router right now, reboot it, or as root run: "
-        "rm -rf /var/run/rpcd/snapshot-files"
+        "2 hours ago (its web service restarted during a change, so that "
+        "change was never confirmed or rolled back). The live settings may "
+        "still hold that change: /var/run/rpcd/snapshot-files holds the "
+        "settings from before it, and a reboot or deleting that folder loses "
+        "them. To undo the change, as root run: cp "
+        "/var/run/rpcd/snapshot-files/* /etc/config/ && reload_config && rm "
+        "-rf /var/run/rpcd/snapshot-files. To keep it, if nobody is changing "
+        "the router right now, reboot it, or as root run: rm -rf "
+        "/var/run/rpcd/snapshot-files"
     ), lines
 
 

@@ -3261,8 +3261,32 @@ cmd_status() {
 				;;
 		esac
 	fi
-	printf '%s sid=%s guard=%s rpcd=%s config=%s boot=%s\n' "$word" "$sid" "$g" "$r" "$c" "$b"
+	# The guard moves config entries that were not in the saved
+	# copy to /etc/newton/quarantine/<sid>/ when it restores, and keeps
+	# them until the owner removes them; name the count so the host can say
+	# where they went. The field is there only when the count is not 0.
+	quarantine_count "$sid"
+	if [ "$QUARANTINE_N" -gt 0 ]; then
+		printf '%s sid=%s guard=%s rpcd=%s config=%s boot=%s quarantined=%s\n' "$word" "$sid" "$g" "$r" "$c" "$b" "$QUARANTINE_N"
+	else
+		printf '%s sid=%s guard=%s rpcd=%s config=%s boot=%s\n' "$word" "$sid" "$g" "$r" "$c" "$b"
+	fi
 	return 0
+}
+
+# quarantine_count SID: QUARANTINE_N = the number of entries the guard's
+# restore of SID moved into $R/etc/newton/quarantine/SID (its .seq stamp
+# is hidden, so not counted); 0 when there is no such directory.
+quarantine_count() {
+	local entry
+	QUARANTINE_N=0
+	[ -d "$R/etc/newton/quarantine/$1" ] || return 0
+	set +f
+	for entry in "$R/etc/newton/quarantine/$1"/*; do
+		[ -e "$entry" ] || [ -L "$entry" ] || continue
+		QUARANTINE_N=$((QUARANTINE_N + 1))
+	done
+	set -f
 }
 
 # abort_clean SID HOW [keep_last]: a row returned 0. Destroy the

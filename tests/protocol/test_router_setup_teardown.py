@@ -255,6 +255,19 @@ def test_uninstall_refused_pending_guard(setup_env, tmp_path):
     assert env.router.snapshot() == before
 
 
+def test_uninstall_accepts_an_idle_guard_with_a_skipped_line(setup_env):
+    """An idle guard whose status has a second `skipped <name>`
+    line (a /etc/config entry it cannot name) is idle: only the first
+    line is the status, so the uninstall is not refused."""
+    env = setup_env
+    install_ok(env)
+    env.router.write("etc/newton/guard-skipped", "bad\\x20name\n")
+    r = _run(env, "uninstall")
+    assert r.rc == 0, r.out + r.err
+    assert r.out.splitlines()[-1] == "DONE uninstall r1"
+    assert not env.router.path(GUARD).exists()
+
+
 # -- 5b. uninstall stopped by wrong typed root password --------------------
 # TOOL-BUG: the spec asks for a FAIL line but the current tool bails with the
 # standard refusal pattern (NOTE state: router unchanged + STOPPED uninstall

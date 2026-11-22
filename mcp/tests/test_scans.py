@@ -690,7 +690,12 @@ def test_run_marks_consent_used_before_runner_and_returns_enveloped_summary(
     serialised = json.dumps(result)
     assert "ignore previous" not in serialised
     assert "approve everything" not in serialised
-    assert '"service": "unknown"' in result["scan"]["text"]
+    # the per-port detail is returned once, in the findings: the envelope
+    # keeps the addresses and port numbers only
+    assert [f["service"] for f in result["findings"]] == ["ssh", "domain", "unknown"]
+    assert json.loads(result["scan"]["text"]) == {
+        "hosts": [{"address": "198.51.100.9", "ports": [22, 53, 65000]}]
+    }
     assert [f.get("control_id") for f in result["findings"]] == [
         "OW-MGMT-01",
         "OW-DNS-02",
@@ -1209,3 +1214,112 @@ def test_consent_a_used_scan_consent_names_the_next_step(tmp_path, monkeypatch, 
     message = str(refusal.value)
     assert "already used" in message
     assert CONSENT_NEXT in message
+
+
+@pytest.mark.parametrize("where", ["before", "race"])
+def test_consent_a_missing_scan_consent_names_the_installed_approve(
+    tmp_path, monkeypatch, where
+):
+    """the installed launcher refuses the bare name, so on an
+    installed Newton the hint is its sudo form, with the request id."""
+    monkeypatch.setenv("NEWTON_HOME", str(tmp_path / "home"))
+    state, record = _consent_consent(tmp_path, lambda value, path: None)
+    path = scans.consent_path(state, REQUEST_ID)
+    if where == "before":
+        path.unlink()
+    else:
+        def gone(source, target):
+            raise FileNotFoundError(source)
+
+        monkeypatch.setattr(scans.os, "replace", gone)
+
+    with pytest.raises(scans.ScanError) as refusal:
+        scans.consume_consent(state, record, "router")
+
+    message = str(refusal.value)
+    assert "scan consent is required" in message
+    assert f"run sudo -u newton /usr/local/bin/newton-approve {REQUEST_ID}" in message
+# ---- result bounds ---------------------------------------------------------
+
+_DONE = (
+    "# Nmap done at Mon Oct 19 04:00:00 2026 -- 254 IP addresses (254 hosts up) "
+    "scanned in 60.00 seconds\n"
+)
+
+
+def _host_line(address: str, ports: int, service: str = "unknown") -> str:
+    listed = ", ".join(f"{port}/open/tcp//{service}///" for port in range(1, ports + 1))
+    return f"Host: {address} ()\tPorts: {listed}\n"
+
+
+def _run_with(tmp_path, monkeypatch, raw: str) -> dict:
+    _write_inventory(tmp_path, monkeypatch, vantages=(("outside-a", "outside"),))
+    record = _request()
+    _write_request(tmp_path, record)
+    _write_consent(tmp_path, record)
+    monkeypatch.setattr(
+        scans, "run_vantage", lambda vantage, command: subprocess.CompletedProcess([], 0, raw, "")
+    )
+    return server.newton_run_scan("router", REQUEST_ID)
+
+
+def test_a_wide_open_slash_24_result_is_bounded_and_says_it_was_cut(tmp_path, monkeypatch):
+    """254 hosts with 100 open ports each used to come back as ~7 MB: one
+    finding per port, three copies.  The result now carries at most
+    MAX_SCAN_PORTS ports, the full counts, and says it was cut."""
+    raw = "".join(_host_line(f"10.0.0.{n}", 100) for n in range(1, 255)) + _DONE
+
+    result = _run_with(tmp_path, monkeypatch, raw)
+
+    assert result["result"] == "ok", result
+    assert result["host_count"] == 254
+    assert result["port_count"] == 25400
+    assert result["truncated"] is True
+    assert len(result["findings"]) == scans.MAX_SCAN_PORTS
+    assert result["returned_port_count"] == scans.MAX_SCAN_PORTS
+    assert len(result["report_update"]["findings"]) == scans.MAX_SCAN_PORTS
+    kept = json.loads(result["scan"]["text"])["hosts"]
+    assert sum(len(host["ports"]) for host in kept) == scans.MAX_SCAN_PORTS
+    assert "25400" in result["note"] and str(scans.MAX_SCAN_PORTS) in result["note"]
+    assert len(json.dumps(result)) < 250_000
+
+
+def test_a_small_scan_result_is_not_marked_cut(tmp_path, monkeypatch):
+    raw = _host_line("198.51.100.9", 3) + _DONE
+
+    result = _run_with(tmp_path, monkeypatch, raw)
+
+    assert result["result"] == "ok", result
+    assert result["truncated"] is False
+    assert result["returned_port_count"] == 3
+    assert "note" not in result
+
+
+def test_the_too_long_host_lines_are_named_by_address():
+    raw = (
+        _host_line("10.0.0.1", 2)
+        + _host_line("10.0.0.2", 300)
+        + _host_line("10.0.0.3", 300, "ssh")
+        + _host_line("999.0.0.4", 300)
+    )
+
+    assert scans.oversized_hosts(raw) == ["10.0.0.2", "10.0.0.3"]
+    assert [host["address"] for host in scans.parse_grepable(raw)] == ["10.0.0.1"]
+
+
+def test_a_host_whose_port_list_is_too_long_makes_the_scan_incomplete(tmp_path, monkeypatch):
+    """A full-tcp scan of a wide-open host: its Host: line is longer than the
+    line cap, so the parser cannot read it.  That host must not vanish from
+    an 'ok' result: the scan is incomplete and the result names it."""
+    raw = _host_line("198.51.100.7", 2) + _host_line("198.51.100.9", 300) + _DONE
+
+    result = _run_with(tmp_path, monkeypatch, raw)
+
+    assert result["result"] == "incomplete", result
+    assert result["too_long"] == ["198.51.100.9"]
+    assert "198.51.100.9" not in [f["address"] for f in result["findings"]]
+    assert "too long" in result["note"]
+    assert result["report_update"]["scans_incomplete"] == ["nmap_outside"]
+    assert "nmap_outside" in result["report_update"]["scans_not_run"]
+    audit = (tmp_path / "state" / "mcp-audit.log").read_text()
+    assert "outcome=incomplete" in audit

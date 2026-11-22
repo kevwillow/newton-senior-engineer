@@ -1,8 +1,9 @@
 # Set up Newton MCP clients
 
-How to register the installed `newton-mcp` server with Claude Code, Codex,
-Claude Desktop and OpenCode. The server is the same for every client; only
-the registration snippet and config file differ.
+How to register the installed `newton-mcp` server with Claude Code, Codex
+and OpenCode (Claude Desktop is not supported; see its section below). The
+server is the same for every client; only the registration snippet and
+config file differ.
 
 Scope: one host, one user. The repo does not document a multi-user or remote
 install of the MCP server.
@@ -89,9 +90,9 @@ account so the agent never owns the router credentials
 
 ## Client registrations
 
-The repo gives full snippets for Claude Code and Codex. For Claude Desktop
-and OpenCode the repo only gives the generic JSON form; check the client's
-docs for the config file path and key names (see "Not confirmed" below).
+The repo gives full snippets for Claude Code and Codex. For OpenCode the
+repo only gives the generic JSON form; check the client's docs for the config
+file path and key names (see "Not confirmed" below). Claude Desktop is not supported.
 
 ### Claude Code
 
@@ -250,12 +251,12 @@ The following items are not stated in `README.md`, `SKILL.md`,
 `scripts/newton-install`, or `scripts/newton-doctor`. Check each client's
 docs before wiring it up:
 
-- The Claude Desktop and OpenCode entries above follow each client's own
-  documentation; neither was registered and run against an installed server.
+- The OpenCode entry and the Claude Desktop entry (Claude Desktop is not supported)
+  follow each client's own documentation; neither was registered and run against an installed server.
 - The exact field name Codex expects for the stdio `args` list (TOML
   `args = [...]` shown in `README.md` (Quickstart) is what the repo documents; no
   alternative form is shown).
-- Whether Claude Desktop or OpenCode require the `sudo` binary to live on
+- Whether OpenCode requires the `sudo` binary to live on
   the `PATH` the client uses (the launcher assumes
   `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin` -
   the launcher text in `perform_install` in `scripts/newton-install`).

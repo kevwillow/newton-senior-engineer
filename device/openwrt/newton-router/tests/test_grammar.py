@@ -479,3 +479,62 @@ def test_read_row_declares_127_for_tool_missing(router):
     assert res.err == "error tool-missing iwinfo\n", (res.err, res.out)
     assert res.out == ""
     assert "/" not in res.err, res.err
+
+
+# ---- the stdout and exit columns match the program ---------------
+#
+# The exit column lists every exit code a request that PASSED the grammar
+# stage can give. Grammar-level refusals (exit 2, test_adversarial_* above)
+# and the role/owner refusals every row shares (exit 3, no-such-txn / role)
+# are the common classes of design 3.7 and are not repeated per row; a
+# subcommand's own refusals (abort's not-owner and already-confirmed) are.
+
+
+@pytest.mark.parametrize("sub", ["hello", "hostname", "fw-loaded"])
+def test_built_sample_stdout_matches_the_stdout_column(router, sub):
+    """A host that matches a built subcommand's answer against the table's
+    stdout regex accepts the program's real answer (the hello row once
+    pinned an older version= than the program prints)."""
+    row = BY_SUB[sub]
+    res = router.forced(row["sample"], role=role_for(row), timeout=15)
+    assert res.rc == 0, (res.rc, res.err)
+    allowed = {int(x) for x in row["exit"].split(",")}
+    assert res.rc in allowed
+    assert res.out.count("\n") <= 1, res.out
+    assert re.fullmatch(row["stdout"], res.out.removesuffix("\n")) is not None, (
+        row["stdout"],
+        res.out,
+    )
+
+
+def test_hello_version_in_the_table_is_the_programs():
+    """The hello row pins the exact version the program prints."""
+    prog = (Path(__file__).resolve().parents[1] / "newton-router").read_text()
+    m = re.search(r"printf 'hello %s api=1 version=([0-9.]+) ", prog)
+    assert m is not None
+    assert f"version={re.escape(m.group(1))} " in BY_SUB["hello"]["stdout"]
+
+
+def test_abort_exit_column_declares_not_owner(router):
+    """abort exits 3 for a non-owner of a live txn; the row declares it."""
+    allowed = {int(x) for x in BY_SUB["abort"]["exit"].split(",")}
+    plan = router.fresh_plan(caller="agent-one")
+    res = router.forced(
+        f"abort {plan.sid}", caller="agent-two", role="change", timeout=30
+    )
+    assert res.err == "error not-owner\n"
+    assert res.rc in allowed, (res.rc, sorted(allowed))
+
+
+def test_abort_exit_column_declares_already_confirmed(router):
+    """abort of a confirmed SID exits 3 (already-confirmed); the row
+    declares it."""
+    from test_confirm import applied
+
+    allowed = {int(x) for x in BY_SUB["abort"]["exit"].split(",")}
+    plan = applied(router)
+    res = router.forced(f"confirm {plan.sid}")
+    assert res.rc == 0, (res.rc, res.err)
+    res = router.forced(f"abort {plan.sid}", caller="agent-one", timeout=30)
+    assert res.err == "error already-confirmed\n", (res.rc, res.err)
+    assert res.rc in allowed, (res.rc, sorted(allowed))

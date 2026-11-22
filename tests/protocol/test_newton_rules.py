@@ -621,3 +621,81 @@ def test_nr20_34_rewriting_a_file_with_hand_comments_says_they_are_dropped(tmp_p
     quiet = add(tmp_path, "pulsar", "r-three", "iot", "dhcp")
     assert quiet.returncode == 0, quiet.stderr
     assert "not kept" not in quiet.stderr
+
+
+def _backups(tmp_path):
+    return sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("rules.toml.bak"))
+
+
+def test_nr20_35_a_write_that_drops_hand_comments_keeps_a_copy_first(tmp_path):
+    """The note is not the only trace: before the rewrite, the old file
+    (comments included) is copied to rules.toml.bak, mode 0600, and the
+    note names it. A later drop never overwrites that copy."""
+    assert add_simple(tmp_path).returncode == 0
+    assert _backups(tmp_path) == []
+    path = rules_path(tmp_path)
+    first = path.read_text() + "# keep the printer rule until spring\n"
+    path.write_text(first)
+    path.chmod(0o600)
+    result = add(tmp_path, "pulsar", "r-two", "iot", "dns")
+    assert result.returncode == 0, result.stderr
+    backup = tmp_path / "rules.toml.bak"
+    assert backup.read_text() == first
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    assert f"a copy of the old file is in {backup}" in result.stderr, result.stderr
+    assert "keep the printer rule" not in path.read_text()
+
+    second = path.read_text() + "# a second note\n"
+    path.write_text(second)
+    path.chmod(0o600)
+    again = run_rules(tmp_path, "remove", "pulsar", "r-two")
+    assert again.returncode == 0, again.stderr
+    assert backup.read_text() == first
+    names = _backups(tmp_path)
+    assert len(names) == 2, names
+    other = tmp_path / next(n for n in names if n != "rules.toml.bak")
+    assert other.read_text() == second
+    assert stat.S_IMODE(other.stat().st_mode) == 0o600
+    assert f"a copy of the old file is in {other}" in again.stderr, again.stderr
+
+
+def test_nr20_36_the_comment_copy_never_follows_a_planted_symlink(tmp_path):
+    assert add_simple(tmp_path).returncode == 0
+    path = rules_path(tmp_path)
+    path.write_text(path.read_text() + "# a note\n")
+    path.chmod(0o600)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("untouched\n")
+    (tmp_path / "rules.toml.bak").symlink_to(victim)
+    result = add(tmp_path, "pulsar", "r-two", "iot", "dns")
+    assert result.returncode == 0, result.stderr
+    assert victim.read_text() == "untouched\n"
+    assert (tmp_path / "rules.toml.bak").is_symlink()
+    copies = [n for n in _backups(tmp_path) if n != "rules.toml.bak"]
+    assert len(copies) == 1 and "# a note" in (tmp_path / copies[0]).read_text(), copies
+
+
+def test_nr20_37_a_comment_copy_that_cannot_be_written_refuses_the_write(tmp_path, monkeypatch):
+    """When the copy cannot be made, nothing is rewritten: the comments
+    stay in rules.toml and the owner is told why."""
+    import importlib.machinery, importlib.util
+    loader = importlib.machinery.SourceFileLoader("newton_rules_mod", str(RULES))
+    spec = importlib.util.spec_from_loader("newton_rules_mod", loader)
+    mod = importlib.util.module_from_spec(spec); loader.exec_module(mod)
+    assert add_simple(tmp_path).returncode == 0
+    path = rules_path(tmp_path)
+    before = path.read_text() + "# a note\n"
+    path.write_text(before)
+    path.chmod(0o600)
+    real_open = os.open
+
+    def no_backup(name, flags, *rest):
+        if ".bak" in os.fspath(name):
+            raise PermissionError(13, "Permission denied")
+        return real_open(name, flags, *rest)
+
+    monkeypatch.setattr(mod.os, "open", no_backup)
+    monkeypatch.setenv("NEWTON_INVENTORY", str(tmp_path / "devices.toml"))
+    rc = mod.main(["add", "pulsar", "r-two", "iot", "dns"])
+    assert rc == 1
+    assert path.read_text() == before
