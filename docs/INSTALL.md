@@ -488,7 +488,7 @@ action. Everything they created stays until you remove it yourself.
 
 ## 10. Add an Active Directory domain controller
 
-The Active Directory audit and changes are on the main branch, not yet released. `SKILL.md` ("Active Directory",
+The Active Directory audit and changes are new in 1.4.0. `SKILL.md` ("Active Directory",
 "Setup") says what each setup script does on the domain controller and the rules for a domain with more than one DC.
 This step gives the commands on the Newton host. Every command runs in your own terminal, one at a time. This guide
 uses `dc1` for the audit entry, `dc1-ops` for the write entry, `ad.example.com` for the domain and `192.0.2.21` for

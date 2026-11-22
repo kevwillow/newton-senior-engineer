@@ -122,14 +122,15 @@ def test_the_in_progress_banner_is_dated_no_earlier_than_its_items():
 
 
 @dev_only
-def test_the_readme_status_counts_the_ad_checks_merged_on_main():
+def test_the_readme_status_counts_the_ad_checks_released_in_1_4_0():
     from newton_mcp.ad import catalogue
 
     status = _section(_text(DEV_README), "## Status", "### Test counts")
     assert f"{len(catalogue.CHECKS)} checks" in status, status
     assert "on a branch, not released" not in status, status
+    assert "not yet in a release" not in status, status
     for line in _lines_with(status, "Active Directory audit (1.3"):
-        assert "merged on main" in line, line
+        assert "1.4.0 added" in line, line
 
 
 @dev_only

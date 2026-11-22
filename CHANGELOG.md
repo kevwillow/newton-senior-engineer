@@ -13,6 +13,8 @@ Two version numbers exist and are separate:
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-21
+
 ### Added
 - An Active Directory audit for Windows Server AD and Samba AD domains: `newton_ad_list_checks` and
   `newton_ad_audit`, 48 read-only checks (privileged groups, Kerberos and password policy, risky account flags,
@@ -1522,6 +1524,7 @@ Early work on the safe apply path, in short:
   from a verified commit).
 - **Profiles:** Standard, Hardened and Lockdown tier files generated from `profiles/openwrt/manifest.toml`.
 
-[Unreleased]: https://github.com/kevwillow/newton-senior-engineer/compare/v1.1.3...HEAD
+[Unreleased]: https://github.com/kevwillow/newton-senior-engineer/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/kevwillow/newton-senior-engineer/releases/tag/v1.4.0
 [1.1.3]: https://github.com/kevwillow/newton-senior-engineer/releases/tag/v1.1.3
 [1.1.2]: https://github.com/kevwillow/newton-senior-engineer/releases/tag/v1.1.2

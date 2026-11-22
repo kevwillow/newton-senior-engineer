@@ -50,7 +50,7 @@ def _read(relative: str) -> str:
 
 def _unreleased() -> str:
     text = _read("CHANGELOG.md")
-    start = text.index("## [Unreleased]")
+    start = text.index("## [1.4.0]")
     end = text.index("## [", start + 3)
     return text[start:end]
 
@@ -64,15 +64,15 @@ def _skill_ad_changes() -> str:
 
 def _roadmap_row(relative: str) -> str:
     for line in _path(relative).read_text(encoding="utf-8").splitlines():
-        if line.startswith("| 1.4 |"):
+        if line.startswith("| 1.4.0 |"):
             return _flat(line)
-    raise AssertionError(f"{relative} has no 1.4 row")
+    raise AssertionError(f"{relative} has no 1.4.0 row")
 
 
 def _readme_ad_line() -> str:
     text = _read("docs/release/README-1.0.md")
-    start = text.index("- **1.4:**")
-    end = text.index("- **1.5:**", start)
+    start = text.index("**Released: 1.4.0.**")
+    end = text.index("Planned, with no dates:", start)
     return text[start:end]
 
 
@@ -232,7 +232,7 @@ def test_the_readme_scopes_the_third_value_to_an_error_the_server_did_not_answer
 def _provenance() -> str:
     text = _readme_ad_section()
     start = text.index("The live runs (2026-11-12)")
-    end = text.index("- ◇ A read-only audit", start)
+    end = text.index("- ✓ A read-only audit", start)
     return text[start:end]
 
 

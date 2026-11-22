@@ -21,7 +21,7 @@ setup it applies the change only after you approve it yourself, in your own term
 you gave a scoped grant (a lab router on a development checkout can also skip it; see Approvals). On an OpenWrt router
 in the **installed** mode it covers VLANs, Wi-Fi, firewall rules, port forwards, DHCP, DNS and dual-WAN; in the
 **no-install** mode Newton applies DHCP reservations and DNS entries itself, and every other change is a script you
-approve and run. On Active Directory, on the main branch ahead of its release, it covers a read-only audit and a small
+approve and run. On Active Directory it covers a read-only audit and a small
 set of account changes. Rollback timers and approvals are not new. Newton puts them together around each change, and each
 part below holds only in the modes it names:
 
@@ -173,7 +173,7 @@ and the full 40-hex id. [Manual install](docs/INSTALL.md) has the steps.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![OpenWrt 25.12](https://img.shields.io/badge/OpenWrt-25.12-00B5E2)](#supported-devices)
-[![Status: 1.1.3](https://img.shields.io/badge/Status-1.1.3-2f9a54)](#status)
+[![Status: 1.4.0](https://img.shields.io/badge/Status-1.4.0-2f9a54)](#status)
 
 ## What it looks like
 
@@ -211,7 +211,7 @@ Newton:  NEWTON RESULT: CONFIRMED  router1  3f9c2a1e  IoT network on VLAN 20
 - "Fail over to my backup internet when the main line drops."
 - "Harden this router." (three levels: Standard, Hardened, Lockdown; [Hardening](#features) says what each one carries)
 - "Undo yesterday's change." (installed mode)
-- "Audit my Active Directory domain." / "Disable the account of the person who left." (on the main branch, see [Active Directory](#active-directory))
+- "Audit my Active Directory domain." / "Disable the account of the person who left." (see [Active Directory](#active-directory))
 
 Questions like "why is the Wi-Fi slow?" stay read-only. Newton changes nothing outside a plan. On the default prod
 profile you approve each plan, unless it falls inside a scoped grant you gave. An installed Newton asks for every plan;
@@ -222,9 +222,7 @@ except the changes Newton always asks about.
 
 Everything Newton does, in one list.
 
-- ✓ = in the current release, 1.1.3.
-- ◆ = on the main branch, ahead of release, tested live on a lab domain.
-- ◇ = on the main branch, ahead of release, covered by tests only.
+- ✓ = in the current release, 1.4.0.
 
 A ✓ line says so when the feature works in one mode only, was run only in the virtual lab, or is covered by tests
 with no recorded run on a real router.
@@ -249,8 +247,8 @@ with no recorded run on a real router.
 - ✓ A receipt for every change: what changed, who approved it, what was checked, and how to undo it, plus a copy of the backup kept on the Newton host. A receipt that cannot be written never changes the result. Covered by tests.
 - ✓ An audit log with the masked diff. Under the MCP server it records the operator as `mcp`; who approved a change is in its receipt.
 - ✓ Around the apply and the rollback, Newton restarts the firewall when a change touches named nft objects, and restarts dnsmasq and checks DNS and DHCP when logd restarted.
-- ◇ Apply with hold, for a change only you can test from a client (installed OpenWrt routers only): `newton_apply_change` with `hold=true` (`owrt-change.sh apply ... --hold`) runs the same verify rounds and does not confirm, so the undo stays armed. `newton_confirm_change` (`owrt-change.sh confirm`) keeps the change after one more verify round; `newton_abort_change` rolls it back; if neither comes before the window ends, the router rolls it back. Refused for a change to named nft objects and for a plan with client checks. A held apply writes a receipt with outcome unknown; the confirm adds a confirmed one.
-- ◇ An abort of a change that was already confirmed is refused and points to `newton_plan_undo`, instead of reporting success while the change stays live. When the router no longer knows the session, Newton asks for its status and records a rollback only when the router says it rolled back; otherwise it says the outcome is not known.
+- ✓ Apply with hold, for a change only you can test from a client (installed OpenWrt routers only): `newton_apply_change` with `hold=true` (`owrt-change.sh apply ... --hold`) runs the same verify rounds and does not confirm, so the undo stays armed. `newton_confirm_change` (`owrt-change.sh confirm`) keeps the change after one more verify round; `newton_abort_change` rolls it back; if neither comes before the window ends, the router rolls it back. Refused for a change to named nft objects and for a plan with client checks. A held apply writes a receipt with outcome unknown; the confirm adds a confirmed one. Covered by tests only.
+- ✓ An abort of a change that was already confirmed is refused and points to `newton_plan_undo`, instead of reporting success while the change stays live. When the router no longer knows the session, Newton asks for its status and records a rollback only when the router says it rolled back; otherwise it says the outcome is not known. Covered by tests only.
 
 **Approvals you control**
 - ✓ An approval dialog in Claude Code, asking for your passphrase, or for an authenticator code (TOTP) once you add one with `newton-enrol totp`.
@@ -268,7 +266,7 @@ with no recorded run on a real router.
 
 **Security**
 - ✓ The router keys belong to a separate `newton` account. The AI's user can't read them, and `newton-doctor` checks this. The launchers run only as `newton`, in a clean environment. Only `newton-mcp` runs without your password, and it takes no arguments; every other launcher asks for your sudo password each time, and the installer checks its sudoers file with `visudo`. The separation holds only if the AI's user has no passwordless sudo or other root path of its own: `newton-doctor` reports that, but cannot fix it.
-- ✓ An MCP server with seventeen tools (`newton_list_devices`, `newton_read`, `newton_backup`, `newton_plan_change`, `newton_plan_undo`, `newton_apply_change`, `newton_change_status`, `newton_abort_change`, `newton_grant_off`, `newton_list_tiers`, `newton_plan_tier`, `newton_guided_recommend`, `newton_guided_audit`, `newton_plan_scan`, `newton_run_scan`, `newton_list_getters` and `newton_get_state`) and no tool that runs arbitrary commands, upgrades or installs packages; the only reboot is the RouterOS (CHR) undo. `newton_list_getters` and `newton_get_state` are experimental read-only reads of non-OpenWrt devices by fixed getter id (never command text). The main branch adds seven more: `newton_confirm_change`, which keeps a change applied with hold, and the six `newton_ad_*` tools for Active Directory (see [Active Directory](#active-directory)).
+- ✓ An MCP server with twenty-four tools (`newton_list_devices`, `newton_read`, `newton_backup`, `newton_plan_change`, `newton_plan_undo`, `newton_apply_change`, `newton_change_status`, `newton_abort_change`, `newton_grant_off`, `newton_list_tiers`, `newton_plan_tier`, `newton_guided_recommend`, `newton_guided_audit`, `newton_plan_scan`, `newton_run_scan`, `newton_list_getters`, `newton_get_state`, `newton_confirm_change`, `newton_ad_list_checks`, `newton_ad_audit`, `newton_ad_plan_change`, `newton_ad_apply_change`, `newton_ad_change_status` and `newton_ad_abort_change`) and no tool that runs arbitrary commands, upgrades or installs packages; the only reboot is the RouterOS (CHR) undo. `newton_list_getters` and `newton_get_state` are experimental read-only reads of non-OpenWrt devices by fixed getter id (never command text). `newton_confirm_change` keeps a change applied with hold, and the six `newton_ad_*` tools are for Active Directory (see [Active Directory](#active-directory)).
 - ✓ No Newton tool can run a shell command. Reads go through a fixed list, and the router program has a closed grammar of 25 subcommands, so a factory reset, a raw flash write, a bootloader change or a firewall flush cannot be expressed. The "never" and "ask first" lists in `SKILL.md` are instructions to the agent; the serial console script is the only Newton code with a command blocklist.
 - ✓ Wi-Fi keys and passwords in fields and values masked before they reach the AI. A secret written out as prose is not detected.
 - ✓ Device text (hostnames, Wi-Fi names, logs, scan results) marked as untrusted data, with prompt-injection tests. The marking tells the model the text is data; the model is still trusted to treat it that way.
@@ -283,7 +281,7 @@ with no recorded run on a real router.
 - ✓ A smaller option offered next to a risky request, such as VPN-only access instead of a public port forward.
 - ✓ Questions stay read-only. "Why is the Wi-Fi slow?" never changes anything.
 - ✓ Setup helpers: `newton-router-setup` (check, install, no-install, offer-installed, approval-key, swap-key, add-key, revoke, profile lab or prod, upgrade, rollback, uninstall, lab-snapshot, owner-run, owner-finish), `newton-enrol` (totp, level passphrase or totp, rotate, grant-off), `newton-vantage-setup` (sets up the client machine for client checks and scans), `newton-doctor`, and `newton-bootstrap` for updates.
-- ◇ `newton-router-setup swap-key` warns that it removes the plain key from the router (after the swap that key no longer logs in as root) and asks before it does; `--remove-plain-key` skips the question. The no-install uninstall asks before it deletes the device's owner scripts and plan records.
+- ✓ `newton-router-setup swap-key` warns that it removes the plain key from the router (after the swap that key no longer logs in as root) and asks before it does; `--remove-plain-key` skips the question. The no-install uninstall asks before it deletes the device's owner scripts and plan records. Covered by tests only.
 - ✓ A no-install mode for OpenWrt (`newton-router-setup DEVICE no-install`): nothing of Newton on the router but one limited web-interface user. Newton applies DHCP reservations and DNS entries itself under OpenWrt's own undo timer; every other change comes to you as a script you approve and run. Changes that could lock you out of management access or through the firewall are refused at plan time. It offers six tools (list devices, read, plan, apply, status, abort): no backup tool, undo after confirm, hardening levels, scans or guided audit. It cannot read the rpcd, uhttpd or dropbear config, files, cron, keys, passwords or packages, and every no-install plan says so.
 - ✓ `scripts/newton-rules` (`add`, `remove`, `list`) for the network rules file. Planning does not read the file yet, so a rule changes nothing in this release.
 
@@ -323,9 +321,9 @@ with no recorded run on a real router.
 
 ### Active Directory
 
-On the main branch, ahead of release, through six more MCP tools: `newton_ad_list_checks`, `newton_ad_audit`,
+Through six more MCP tools: `newton_ad_list_checks`, `newton_ad_audit`,
 `newton_ad_plan_change`, `newton_ad_apply_change`, `newton_ad_change_status` and `newton_ad_abort_change`.
-◆ = tested live on a lab domain; ◇ = covered by tests only.
+Each line says whether it was tested live on a lab domain or is covered by tests only.
 
 The live runs (2026-11-12) used the code from before the last changes. Both write helpers changed after those runs.
 The Samba write helper now has a sweep timer that its write setup installs, settles a failed write and an unlock whose
@@ -334,20 +332,20 @@ error. The Windows write helper now reads a failed write again: the after-image 
 server is undone at once, the before-image after a failure with no answer from the server stays armed, and a third
 value is never undone. On Newton's side, every plan lists the domain controllers it reads, the undo outcome is reported
 back in more detail, a connection lost mid-apply is reported with the step that was lost, and an unlock is never
-aborted. All of these changes are covered by tests only. The ◆ items below refer to those runs and to the code that
+aborted. All of these changes are covered by tests only. The lines below that say live refer to those runs and to the code that
 ran in them; the log of those runs is not kept in this repository.
 
-- ◇ A read-only audit of Windows Server AD and Samba AD domains: 48 checks (`newton_ad_list_checks`, `newton_ad_audit`) covering privileged groups, Kerberos and password policy, risky account flags, delegation, LDAP signing, channel binding and NTLM, stale accounts, ACLs, credentials left in SYSVOL, and backup keys. Every check runs on both kinds of domain. A check whose read failed is UNKNOWN, never PASS. The checks are tested against collector output measured on lab domain controllers; the audit tool was not part of the latest live runs.
-- ◇ How the audit reads: a key-only SSH login of an ordinary `newton-audit` account that can run one fixed command (`collector.ps1` on Windows, `newton-ad-samba` through sudoers on Samba). The collectors never return password hashes, LAPS or BitLocker secrets, gMSA passwords, KDS root keys, trust secrets, backup-key values or key credentials, and never return a SYSVOL `cpassword` value. Newton refuses a document from the wrong collector, from a collector whose query set is out of date, or from an audit login that turns out to be privileged. An earlier version of the collectors ran on lab domain controllers; the Windows collector's SYSVOL read has changed since and has not run live.
-- ◆ Setup scripts that Newton prints and you run as a Domain Admin: `scripts/newton-ad-setup windows|samba` for the audit, and `scripts/newton-ad-setup write windows|samba` for changes, from a source tree; on an installed Newton they are `/opt/newton/scripts/newton-ad-setup windows|samba` and `/opt/newton/scripts/newton-ad-setup write windows|samba` (see docs/INSTALL.md step 10), since `/usr/local/bin/newton-ad-setup` takes only `approval-key <device>`. The write setup creates the `newton-ops` account, which is never in a privileged group (the setup refuses one that is), and delegates on the PDC emulator only the rights the changes below need. It derives your approval key on the domain controller from the passphrase you type there. The Windows write setup also adds the "log on as a batch job" right to the Default Domain Controllers Policy, after a `Backup-GPO`, and edits `sshd_config`; run it over a password login, not a key login. A second domain controller is set up with `--domain-device` naming the first, so both hold the same approval key. The four write setups (two DCs of each kind) ran live; the audit setups are not part of those runs. The Samba write setup's sweep timer (`newton-ad-sweep.service` and `newton-ad-sweep.timer`) was added after those runs and is covered by tests only.
-- ◆ Disable and enable an account. A privileged account is never disabled, and neither is the built-in Administrator. Live for a user account on two-DC Windows Server 2025 and Samba 4.22 domains; computer accounts are covered by tests only.
-- ◆ Set the machine account quota (`ms-DS-MachineAccountQuota`, 0 to 1000) on the domain head, found by the `ad_domain_guid` in the inventory. Live on both kinds of domain.
-- ◆ Unlock a locked-out account. An unlock has nothing to put back, so no undo is armed: the change stays written once it is written on the PDC emulator, and the DC normally records it `confirmed` then (a DC that cannot write that record keeps it armed). Privileged accounts can be unlocked too (covered by tests; the live target was an ordinary user). A Windows domain controller needs a write helper with the unlock fix (re-run the write setup); an older helper reports a conflict after a good unlock. Live on both kinds of domain.
-- ◇ Clear account flags, set Kerberos encryption types (DES is never turned on), add or remove a member of a non-privileged group, create a user (created disabled, with a generated password shown once when you approve), and move an object between OUs. Covered by tests on the current code; an earlier version of the domain-controller helpers ran these in the lab, but not through Newton's plan and apply.
-- ◆ The undo is armed on the domain controller before it writes (a `systemd-run` timer on Samba, a scheduled task on Windows). A withheld confirm rolled back on both domain controllers of both domains. Covered by tests only: a confirm the domain controller refused after every domain controller showed the change is `not_confirmed`, and Newton reads the domain controller's record of the change (when that record cannot be read, the result says Newton does not know whether the confirm was recorded, and the record may read `confirmed`) to say whether the change is still armed until its undo runs (an unlock stays written) or, when that record shows its undo already ran, to carry that undo's `dc_state` (a record that says `confirmed`, written before the error, makes the result `confirmed`); a failed write whose re-read shows neither the before-image nor the after-image after an error the server did not answer itself (on Samba a lost connection or a busy or unavailable server; on Windows a reply with no result code, while a busy reply the server sent counts as answered) is `apply_unknown` with the `live` value, never `refused`, and its undo never writes over the other change; after a code the server answered, the result is a `conflict` and nothing was written, even when the re-read shows the after-image (somebody else made the same change, and the undo never runs over it; when the domain controller cannot record that, the result is `apply_unknown`, and when its store takes neither the mark nor the refused record (a full disk, say), its answer carries `unmarked` and Newton says that its undo may write the before-image over somebody else's change); a second apply of a plan whose earlier apply reached the domain controller, or may have, is refused before it is sent (`replay` with code `not_sent`) and keeps the earlier receipt; a pending receipt is an earlier apply that may have reached the DC until the DC's record of the transaction answers `not_found`. If the connection to a domain controller fails mid-apply, Newton still writes the receipt (a final receipt that cannot be written is named in `receipt_error` and never changes the result; before it sends the apply, Newton writes a pending receipt (`apply_unknown`) and syncs it to the disk; when that receipt cannot be written, nothing is sent and the apply is refused with code `not_sent`), and the result says which step was lost and tells you to run `newton_ad_change_status`; a change that is not confirmed is put back by the domain controller itself at or after its `undo_at`, when it next runs the undo (on a Samba domain controller whose write setup was run with this release, a sweep timer retries an undo whose run did not finish or that a reboot dropped about once a minute, while an `undo_failed` record is final; a Samba domain controller set up before that, and a Windows domain controller, retry one at the next Newton request to it), except an unlock, which has no undo and stays written, and a new user whose objectGUID the DC did not record (the connection can fail between the add and that record), which the domain controller leaves in place and records `undo_failed` with its DN in `conflicts`. After a lost apply the DC may already have run the undo, when it could not finish the apply after its write: its record then says `undone` or `undo_failed`. A connection lost while a domain controller is read back counts as that domain controller not showing the change, so the change is aborted, except an unlock, which is not aborted (covered by tests) and reaches the other domain controllers by replication. A domain controller that answers the apply with an error that can follow a write it tried is reported `apply_unknown`, not `refused`, unless its own record of the change says `refused` (covered by tests). The domain controller accepts an approval from one minute before its start time to its expiry, so its clock must track the Newton host's.
-- ◆ A change that names another device is refused by every domain controller.
-- ◆ Two or more domain controllers: a plan reads every domain controller that has a write entry in the inventory, and a change is confirmed only when every one of them shows it; otherwise it is aborted. An inventory with only a second domain controller is refused. Newton does not list the domain controllers of the directory itself, so one without a write entry is never checked; every plan lists the domain controllers it reads and warns about this (covered by tests). Writes go to the PDC emulator only: if the PDC role moves to a domain controller without a write entry, every change is refused until the inventory follows. A move of the PDC role was not tested live.
-- ◆ Approval in your own terminal: `sudo -u newton /usr/local/bin/newton-ad-setup approval-key <device>` records your approval key's fingerprint, and `sudo -u newton /usr/local/bin/newton-approve ad-change <plan_id>` approves one change. It rebuilds the change from the plan itself, asks you to type `approve` and the first 8 characters of the plan id, then your passphrase, and gives a token valid for 30 minutes that the domain controller checks before it arms its undo. The Newton host keeps only the fingerprint, never the key; someone holding the fingerprint could still guess the passphrase offline, at the cost of 600,000 PBKDF2 rounds per guess. Passphrase only: no dialog and no authenticator code, and a HIGH AD change shows a warning but asks no second typed question. The approval logic ran live against real domain controllers from a source tree; the installed launchers have not been run live yet.
+- ✓ A read-only audit of Windows Server AD and Samba AD domains: 48 checks (`newton_ad_list_checks`, `newton_ad_audit`) covering privileged groups, Kerberos and password policy, risky account flags, delegation, LDAP signing, channel binding and NTLM, stale accounts, ACLs, credentials left in SYSVOL, and backup keys. Every check runs on both kinds of domain. A check whose read failed is UNKNOWN, never PASS. The checks are tested against collector output measured on lab domain controllers; the audit tool was not part of the latest live runs. Covered by tests only.
+- ✓ How the audit reads: a key-only SSH login of an ordinary `newton-audit` account that can run one fixed command (`collector.ps1` on Windows, `newton-ad-samba` through sudoers on Samba). The collectors never return password hashes, LAPS or BitLocker secrets, gMSA passwords, KDS root keys, trust secrets, backup-key values or key credentials, and never return a SYSVOL `cpassword` value. Newton refuses a document from the wrong collector, from a collector whose query set is out of date, or from an audit login that turns out to be privileged. An earlier version of the collectors ran on lab domain controllers; the Windows collector's SYSVOL read has changed since and has not run live. Covered by tests only.
+- ✓ Setup scripts that Newton prints and you run as a Domain Admin: `scripts/newton-ad-setup windows|samba` for the audit, and `scripts/newton-ad-setup write windows|samba` for changes, from a source tree; on an installed Newton they are `/opt/newton/scripts/newton-ad-setup windows|samba` and `/opt/newton/scripts/newton-ad-setup write windows|samba` (see docs/INSTALL.md step 10), since `/usr/local/bin/newton-ad-setup` takes only `approval-key <device>`. The write setup creates the `newton-ops` account, which is never in a privileged group (the setup refuses one that is), and delegates on the PDC emulator only the rights the changes below need. It derives your approval key on the domain controller from the passphrase you type there. The Windows write setup also adds the "log on as a batch job" right to the Default Domain Controllers Policy, after a `Backup-GPO`, and edits `sshd_config`; run it over a password login, not a key login. A second domain controller is set up with `--domain-device` naming the first, so both hold the same approval key. The four write setups (two DCs of each kind) ran live; the audit setups are not part of those runs. The Samba write setup's sweep timer (`newton-ad-sweep.service` and `newton-ad-sweep.timer`) was added after those runs and is covered by tests only.
+- ✓ Disable and enable an account. A privileged account is never disabled, and neither is the built-in Administrator. Live for a user account on two-DC Windows Server 2025 and Samba 4.22 domains; computer accounts are covered by tests only.
+- ✓ Set the machine account quota (`ms-DS-MachineAccountQuota`, 0 to 1000) on the domain head, found by the `ad_domain_guid` in the inventory. Live on both kinds of domain.
+- ✓ Unlock a locked-out account. An unlock has nothing to put back, so no undo is armed: the change stays written once it is written on the PDC emulator, and the DC normally records it `confirmed` then (a DC that cannot write that record keeps it armed). Privileged accounts can be unlocked too (covered by tests; the live target was an ordinary user). A Windows domain controller needs a write helper with the unlock fix (re-run the write setup); an older helper reports a conflict after a good unlock. Live on both kinds of domain.
+- ✓ Clear account flags, set Kerberos encryption types (DES is never turned on), add or remove a member of a non-privileged group, create a user (created disabled, with a generated password shown once when you approve), and move an object between OUs. Covered by tests on the current code; an earlier version of the domain-controller helpers ran these in the lab, but not through Newton's plan and apply.
+- ✓ The undo is armed on the domain controller before it writes (a `systemd-run` timer on Samba, a scheduled task on Windows). A withheld confirm rolled back on both domain controllers of both domains. Covered by tests only: a confirm the domain controller refused after every domain controller showed the change is `not_confirmed`, and Newton reads the domain controller's record of the change (when that record cannot be read, the result says Newton does not know whether the confirm was recorded, and the record may read `confirmed`) to say whether the change is still armed until its undo runs (an unlock stays written) or, when that record shows its undo already ran, to carry that undo's `dc_state` (a record that says `confirmed`, written before the error, makes the result `confirmed`); a failed write whose re-read shows neither the before-image nor the after-image after an error the server did not answer itself (on Samba a lost connection or a busy or unavailable server; on Windows a reply with no result code, while a busy reply the server sent counts as answered) is `apply_unknown` with the `live` value, never `refused`, and its undo never writes over the other change; after a code the server answered, the result is a `conflict` and nothing was written, even when the re-read shows the after-image (somebody else made the same change, and the undo never runs over it; when the domain controller cannot record that, the result is `apply_unknown`, and when its store takes neither the mark nor the refused record (a full disk, say), its answer carries `unmarked` and Newton says that its undo may write the before-image over somebody else's change); a second apply of a plan whose earlier apply reached the domain controller, or may have, is refused before it is sent (`replay` with code `not_sent`) and keeps the earlier receipt; a pending receipt is an earlier apply that may have reached the DC until the DC's record of the transaction answers `not_found`. If the connection to a domain controller fails mid-apply, Newton still writes the receipt (a final receipt that cannot be written is named in `receipt_error` and never changes the result; before it sends the apply, Newton writes a pending receipt (`apply_unknown`) and syncs it to the disk; when that receipt cannot be written, nothing is sent and the apply is refused with code `not_sent`), and the result says which step was lost and tells you to run `newton_ad_change_status`; a change that is not confirmed is put back by the domain controller itself at or after its `undo_at`, when it next runs the undo (on a Samba domain controller whose write setup was run with this release, a sweep timer retries an undo whose run did not finish or that a reboot dropped about once a minute, while an `undo_failed` record is final; a Samba domain controller set up before that, and a Windows domain controller, retry one at the next Newton request to it), except an unlock, which has no undo and stays written, and a new user whose objectGUID the DC did not record (the connection can fail between the add and that record), which the domain controller leaves in place and records `undo_failed` with its DN in `conflicts`. After a lost apply the DC may already have run the undo, when it could not finish the apply after its write: its record then says `undone` or `undo_failed`. A connection lost while a domain controller is read back counts as that domain controller not showing the change, so the change is aborted, except an unlock, which is not aborted (covered by tests) and reaches the other domain controllers by replication. A domain controller that answers the apply with an error that can follow a write it tried is reported `apply_unknown`, not `refused`, unless its own record of the change says `refused` (covered by tests). The domain controller accepts an approval from one minute before its start time to its expiry, so its clock must track the Newton host's.
+- ✓ A change that names another device is refused by every domain controller. Tested live on a lab domain.
+- ✓ Two or more domain controllers: a plan reads every domain controller that has a write entry in the inventory, and a change is confirmed only when every one of them shows it; otherwise it is aborted. An inventory with only a second domain controller is refused. Newton does not list the domain controllers of the directory itself, so one without a write entry is never checked; every plan lists the domain controllers it reads and warns about this (covered by tests). Writes go to the PDC emulator only: if the PDC role moves to a domain controller without a write entry, every change is refused until the inventory follows. A move of the PDC role was not tested live.
+- ✓ Approval in your own terminal: `sudo -u newton /usr/local/bin/newton-ad-setup approval-key <device>` records your approval key's fingerprint, and `sudo -u newton /usr/local/bin/newton-approve ad-change <plan_id>` approves one change. It rebuilds the change from the plan itself, asks you to type `approve` and the first 8 characters of the plan id, then your passphrase, and gives a token valid for 30 minutes that the domain controller checks before it arms its undo. The Newton host keeps only the fingerprint, never the key; someone holding the fingerprint could still guess the passphrase offline, at the cost of 600,000 PBKDF2 rounds per guess. Passphrase only: no dialog and no authenticator code, and a HIGH AD change shows a warning but asks no second typed question. The approval logic ran live against real domain controllers from a source tree; the installed launchers have not been run live yet.
 - Newton does not change privileged groups, delete objects, reset passwords, reset krbtgt, or change trusts, functional levels or Group Policy. The write account and krbtgt are never a target or a member. Privileged accounts can be targeted only by the flag, encryption-type and unlock changes.
 
 ## How a change works
@@ -370,7 +368,7 @@ That is the **installed** mode. In the **no-install** mode the changes do not go
 web API, over HTTPS pinned by the certificate, the undo is OpenWrt's own rpcd timer (which lives in the router's RAM),
 and a change is confirmed only when every mandatory check passes and the router's values read back as the staged ones.
 
-The wrapper takes **probe lists**, not a free-form shell check: lists of 19 fixed types, sealed on the router at plan time. A manifest id is expanded by the host into probe lists before staging, so the router never sees an id. In the installed mode the apply confirms on its own after three passing rounds. If the affected path cannot be tested from the router, the agent host or a registered client, apply with hold (on the main branch, covered by tests only: `newton_apply_change` with `hold=true`, or `owrt-change.sh apply ... --hold`): the same rounds run, nothing is confirmed and the undo stays armed; you test from a client, then `newton_confirm_change` (`owrt-change.sh confirm`) keeps the change or `abort` rolls it back before the window closes. If neither comes, the router rolls the change back. The hold window is the plan's timeout (90 s by default, 60 to 600 s), and the verify rounds use part of it: for a client test, plan the change with a longer timeout. An abort of a change that is already confirmed is refused; `newton_plan_undo` plans its reverse.
+The wrapper takes **probe lists**, not a free-form shell check: lists of 19 fixed types, sealed on the router at plan time. A manifest id is expanded by the host into probe lists before staging, so the router never sees an id. In the installed mode the apply confirms on its own after three passing rounds. If the affected path cannot be tested from the router, the agent host or a registered client, apply with hold (covered by tests only: `newton_apply_change` with `hold=true`, or `owrt-change.sh apply ... --hold`): the same rounds run, nothing is confirmed and the undo stays armed; you test from a client, then `newton_confirm_change` (`owrt-change.sh confirm`) keeps the change or `abort` rolls it back before the window closes. If neither comes, the router rolls the change back. The hold window is the plan's timeout (90 s by default, 60 to 600 s), and the verify rounds use part of it: for a client test, plan the change with a longer timeout. An abort of a change that is already confirmed is refused; `newton_plan_undo` plans its reverse.
 
 ### Approvals
 
@@ -388,7 +386,7 @@ The wrapper takes **probe lists**, not a free-form shell check: lists of 19 fixe
 - No dialog in your client, or you walked away? After about three minutes (180 s) Newton stops waiting and tells you how to
   approve from your terminal with `newton-approve`.
 - Three wrong answers in the approval dialog lock approvals on that device for 5 minutes, doubling each time up to 24 hours; the terminal `newton-approve <session_id>` fallback for a router change counts no wrong answers and does not check the lock.
-- Active Directory changes (on the main branch) are approved only in a terminal, with
+- Active Directory changes are approved only in a terminal, with
   `sudo -u newton /usr/local/bin/newton-approve ad-change <plan_id>` and your passphrase; see [Active Directory](#active-directory).
 
 ## What it will never do
@@ -401,7 +399,7 @@ The wrapper takes **probe lists**, not a free-form shell check: lists of 19 fixe
 - Treat text from your devices (hostnames, Wi-Fi names, logs) as instructions. It is marked as untrusted data.
 - Show your Wi-Fi keys or passwords to the AI. Keys and passwords in fields and values are masked; a secret written out
   as prose is not detected.
-- On Active Directory (on the main branch): change privileged groups, delete objects, reset passwords or krbtgt, or
+- On Active Directory: change privileged groups, delete objects, reset passwords or krbtgt, or
   change trusts, functional levels or Group Policy.
 
 ## Supported devices
@@ -420,8 +418,8 @@ applied and then undone on RouterOS and Junos, and an eighth scenario checks tha
 | VyOS (rolling), experimental | virtual image, in the lab | `commit-confirm`, reload mode | changes |
 | MikroTik RouterOS 7, experimental | CHR virtual image, in the lab | scheduled restore (undo is a reboot) | changes |
 | Juniper Junos, experimental | vJunos virtual image, in the lab | `commit confirmed` | changes |
-| Windows Server 2025 AD, on main | a two-DC lab domain | undo task on the domain controller | disable, enable, unlock, machine account quota; the audit is covered by tests |
-| Samba AD 4.22, on main | a two-DC lab domain | undo timer on the domain controller | disable, enable, unlock, machine account quota; the audit is covered by tests |
+| Windows Server 2025 AD | a two-DC lab domain | undo task on the domain controller | disable, enable, unlock, machine account quota; the audit is covered by tests |
+| Samba AD 4.22 | a two-DC lab domain | undo timer on the domain controller | disable, enable, unlock, machine account quota; the audit is covered by tests |
 
 OpenWrt 25.12.6 changed where rpcd keeps its sessions; 1.1.3 fixes Newton for it, and that fix was tested end
 to end on a GL.iNet GL-MT3000 running vanilla OpenWrt 25.12.6 (the log of that run is not kept in this repository). The seven support
@@ -430,7 +428,7 @@ program 1.3.1 and OpenWrt 25.12.6.
 
 OpenWrt is the supported platform. The other three router platforms are experimental: they pass their scenarios
 on virtual images only, so try them on a device you can reach by console before you trust them on one you can't. The
-AD rows are on the main branch, ahead of release; [Active Directory](#active-directory) lists which changes ran live.
+[Active Directory](#active-directory) lists which changes ran live.
 
 The full table, with versions and what is not tested, is generated from the test results:
 [`docs/SUPPORT.md`](docs/SUPPORT.md). Linux hosts and more vendors are planned ([roadmap](docs/ROADMAP.md)).
@@ -449,19 +447,17 @@ upstreams and a test client on Proxmox, and runs the scenarios against them. [`d
 explains the method. [`docs/TESTING-FOR-REVIEWERS.md`](docs/TESTING-FOR-REVIEWERS.md) lists what to try first, and
 the things we most want broken.
 
-Test suites at the 1.1.3 release gate:
+Test suites at the 1.4.0 release gate, run in the full development tree (this public tree leaves out some development-only tests, so its own counts are lower):
 
 | Suite | Path | Passing |
 |---|---|---|
-| MCP server | `mcp/tests/` | 6,739 (1 skipped) |
-| Router program | `device/openwrt/newton-router/tests/` | 3,341 |
-| Guard | `device/openwrt/newton-guard/tests/` | 183 |
-| Protocol | `tests/protocol/` | 3,058 (5 skipped) |
-| Lab scenarios | `lab/tests/` + live runs | 1,263 |
+| MCP server | `mcp/tests/` | 10,867 (15 skipped) |
+| Router program | `device/openwrt/newton-router/tests/` | 3,353 |
+| Guard | `device/openwrt/newton-guard/tests/` | 184 |
+| Protocol | `tests/protocol/` | 3,565 (5 skipped) |
+| Lab scenarios | `lab/tests/` + live runs | 1,279 |
 | Profiles | `tests/profiles/` | 112 |
-| Serial console | `tests/serial/` | 43 |
-
-On the main branch, `mcp/tests/ad/` holds the Active Directory tests; they are not in the 1.1.3 gate above.
+| Serial console | `tests/serial/` | 318 |
 
 ## Repository layout
 
@@ -475,7 +471,7 @@ docs/                     install guide, roadmap, testing method, design package
 lab/                      the lab runner, its scenarios and the example lab files
 profiles/openwrt/         standard, hardened and lockdown profiles and their manifest
 device/openwrt/           on-router programs: newton-router and newton-guard
-mcp/newton_mcp/           the newton-mcp server (seventeen tools in 1.1.3, twenty-four on main)
+mcp/newton_mcp/           the newton-mcp server (twenty-four tools)
 mcp/newton_mcp/ad/        the Active Directory audit and changes; collector/ holds the domain-controller programs
                           (collector.ps1, newton-ad-samba, write.ps1, newton-ad-samba-write)
 scripts/                  the change wrapper, the installer and bootstrap, and the setup (router and AD), doctor
@@ -488,35 +484,32 @@ references/               on-demand OpenWrt, nftables and networking-concepts do
 
 The AI is treated as an untrusted planner, and deterministic code decides. The router keys belong to a separate OS
 account. An approval is a single-use token bound to the exact change and the router's current config, and it
-expires. On an installed OpenWrt router set to the prod profile (the default), or for a change Newton always asks about, the router program checks it a second time on the device; a router set to lab skips that check by design, and there only the Newton host checks it. In the no-install mode and on VyOS, RouterOS and Junos only the Newton host checks it. For an Active Directory change (on the main branch) the domain controller checks the token itself before it arms its undo. The full threat model is in
+expires. On an installed OpenWrt router set to the prod profile (the default), or for a change Newton always asks about, the router program checks it a second time on the device; a router set to lab skips that check by design, and there only the Newton host checks it. In the no-install mode and on VyOS, RouterOS and Junos only the Newton host checks it. For an Active Directory change the domain controller checks the token itself before it arms its undo. The full threat model is in
 [`docs/design/04-SECURITY-AND-SAFETY-MODEL.md`](docs/design/04-SECURITY-AND-SAFETY-MODEL.md). Found a hole?
 See [`SECURITY.md`](SECURITY.md).
 
 ## Status
 
-**Released: 1.1.3.** OpenWrt in the installed and no-install modes (plus experimental VyOS, MikroTik and Junos), the
+**Released: 1.4.0.** OpenWrt in the installed and no-install modes (plus experimental VyOS, MikroTik and Junos), the
 one-line setup, in-client approvals, undo after confirm, client-side checks and receipts. 1.1 added the no-install
 mode: Newton puts nothing on the router but one limited web-interface user, applies DHCP reservations and DNS entries
-under OpenWrt's own undo timer, and hands every other change to you as a script you approve and run. 1.1.3 fixed
-changes on OpenWrt 25.12.6 and added the `newton-rules` tool, which has no effect yet. It has seventeen MCP tools.
-
-**On the main branch, ahead of release:** an apply that holds the confirm for a test you run from a client, with the `newton_confirm_change` tool (covered by tests only); the Active Directory audit (planned for 1.3) and the Active Directory
-changes (planned for 1.4), with the six `newton_ad_*` tools, `scripts/newton-ad-setup`, the
-`/usr/local/bin/newton-ad-setup` launcher and `newton-approve ad-change`. Tested live on two-DC Windows Server 2025
-and Samba 4.22 lab domains, on code from just before the latest helper changes: the write setups, disable and enable, the machine account quota, unlock, the rollback of a
-withheld confirm, the refusal of a request for another device, and confirmation on every domain controller. Covered
-by tests only: the 48 audit checks (against collector output measured on lab domain controllers), the other five
-changes, and the installed AD launchers. [`CHANGELOG.md`](CHANGELOG.md) lists them and their limits.
+under OpenWrt's own undo timer, and hands every other change to you as a script you approve and run. 1.4.0 adds the
+Active Directory audit and the Active Directory changes, with the six `newton_ad_*` tools, `scripts/newton-ad-setup`, the
+`/usr/local/bin/newton-ad-setup` launcher and `newton-approve ad-change`; an apply that holds the confirm for a test
+you run from a client, with the `newton_confirm_change` tool (covered by tests only); and all the fixes since 1.1.3. It has
+twenty-four MCP tools. Active Directory changes are approved by you, with the undo armed on the domain controller until Newton confirms; once confirmed, Newton does not undo it (a known limit: if the PDC role moves while an earlier change of the same target is still armed on the old PDC, that domain controller's undo can write the earlier before-image over the new change): you plan the reverse change; an unlock has no undo and is written at once. The Active Directory work was tested live on two-DC Windows Server 2025 and Samba 4.22 lab
+domains, on code from just before the latest helper changes: the write setups, disable and enable, the machine account
+quota, unlock, the rollback of a withheld confirm, the refusal of a request for another device, and confirmation on
+every domain controller. Covered by tests only: the 48 audit checks (against collector output measured on lab domain
+controllers), the other five changes, and the installed AD launchers. [`CHANGELOG.md`](CHANGELOG.md) lists them and
+their limits.
 
 Planned, with no dates:
 
-- **1.2:** network rules (rules like "the work laptop reaches the printer", re-checked on every change),
-  reviewed recipes for common jobs, a blast-radius view and a network map tool.
-- **1.3:** release the read-only Active Directory audit that is on the main branch.
-- **1.4:** release the Active Directory changes that are on the main branch: each approved by you, with the undo armed
-  on the domain controller until Newton confirms; a change is confirmed only when every domain controller with a write
-  entry in the inventory shows it, and aborted otherwise. Once confirmed, Newton does not undo it (a known limit: if the PDC role moves while an earlier change of the same target is still armed on the old PDC, that domain controller's undo can write the earlier before-image over the new change): you plan the reverse
-  change. An unlock has no undo and is written at once. Still to build for 1.4: a reviewed
+- **1.2:** the rest of network rules (the store shipped in 1.1.3; planning does not read it yet, so the rules are not
+  re-checked on every change), reviewed recipes for common jobs, a blast-radius view, a recovery card and a network
+  map tool.
+- **Still to build from the Active Directory changes:** a reviewed
   script you run yourself for the AD changes Newton will not make (deletes, password resets, krbtgt, trusts,
   privileged groups), and Group Policy edits.
 - **1.5:** Active Directory build mode, opt-in: a whole domain from one plan you approve. Not on the main branch.

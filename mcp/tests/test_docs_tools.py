@@ -105,30 +105,24 @@ def _release_readme() -> Path:
 
 
 AD_TOOL_NAMES = frozenset(name for name in server.TOOL_NAMES if name.startswith("newton_ad_"))
-# Main-branch tools that are not AD tools and are not in the 1.1.3 release.
-MAIN_ONLY_TOOL_NAMES = frozenset({"newton_confirm_change"})
 
 
-def test_the_release_readme_counts_the_released_tools_and_the_ones_on_main() -> None:
-    """The public README names the seventeen released tools on its feature
-    line, the six AD tools of the main branch elsewhere, and both counts on
-    its layout line."""
+def test_the_release_readme_counts_the_tools() -> None:
+    """The public README names all twenty-four tools on its feature line and
+    says twenty-four tools on its layout line."""
     text = _release_readme().read_text(encoding="utf-8")
-    released = server.TOOL_NAMES - AD_TOOL_NAMES - MAIN_ONLY_TOOL_NAMES
-    assert len(released) == 17 and len(AD_TOOL_NAMES) == 6
+    assert len(server.TOOL_NAMES) == 24 and len(AD_TOOL_NAMES) == 6
     feature = [
         line
         for line in text.splitlines()
         if "newton_list_devices" in line and "newton_read" in line
     ]
     assert feature, "the release README has no feature line listing newton tools"
-    assert "seventeen tools" in feature[0]
-    for name in sorted(released):
+    assert "twenty-four tools" in feature[0]
+    for name in sorted(server.TOOL_NAMES):
         assert name in feature[0], f"the feature line does not list {name}"
-    for name in sorted(AD_TOOL_NAMES):
-        assert f"`{name}`" in text, f"the release README does not name {name}"
     layout = [line for line in text.splitlines() if line.startswith("mcp/newton_mcp/ ")]
-    assert layout and "(seventeen tools in 1.1.3, twenty-four on main)" in layout[0]
+    assert layout and "(twenty-four tools)" in layout[0]
 
 
 @pytest.mark.skipif(

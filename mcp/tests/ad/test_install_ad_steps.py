@@ -260,5 +260,5 @@ def test_the_samba_collector_is_said_to_run_as_root_through_sudo() -> None:
     setup = re.sub(r"\s+", " ", _skill_ad_setup())
     assert "as root through sudo, with no arguments" in setup
     changelog = CHANGELOG_MD.read_text(encoding="utf-8")
-    unreleased = changelog.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
+    unreleased = changelog.split("## [1.4.0]", 1)[1].split("\n## [", 1)[0]
     assert "as root through sudo, with no arguments" in re.sub(r"\s+", " ", unreleased)

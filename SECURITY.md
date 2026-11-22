@@ -2,7 +2,7 @@
 
 Newton is an MCP server and an agent skill that changes routers with an undo armed on the router before every write: over SSH
 in the installed mode, and over the router's own web API (HTTPS, pinned certificate) in the OpenWrt no-install mode.
-On the main branch it also changes Active Directory domains, with the undo armed on the domain controller (an unlock
+It also changes Active Directory domains, with the undo armed on the domain controller (an unlock
 has no undo; see Known limits).
 
 ## Reporting a vulnerability
@@ -29,7 +29,7 @@ Remove addresses and keys from everything you send. Reports are handled by the m
 - The change scripts: `scripts/owrt-change.sh` (agent host) and `scripts/owrt-safe-apply.sh` (runs on the router).
 - The installer and setup scripts: `scripts/newton-install`, `scripts/newton-bootstrap`, `scripts/newton-router-setup`, `scripts/newton-doctor`.
 - Approval enrolment: `newton-enrol` (`mcp/newton_mcp/enrol.py`).
-- The Active Directory write path (on the main branch): `mcp/newton_mcp/ad/write/` on the Newton host, the helpers it runs on a domain controller (`mcp/newton_mcp/ad/collector/write.ps1` on Windows, `mcp/newton_mcp/ad/collector/newton-ad-samba-write` on Samba), and the setup script `scripts/newton-ad-setup`.
+- The Active Directory write path: `mcp/newton_mcp/ad/write/` on the Newton host, the helpers it runs on a domain controller (`mcp/newton_mcp/ad/collector/write.ps1` on Windows, `mcp/newton_mcp/ad/collector/newton-ad-samba-write` on Samba), and the setup script `scripts/newton-ad-setup`.
 - The scan vantage scripts: `scripts/newton-vantage-setup`, `scripts/newton-vantage-run`, `scripts/newton-vantage-check`.
 - The serial console script: `scripts/newton-serial.py`.
 
@@ -45,7 +45,7 @@ Remove addresses and keys from everything you send. Reports are handled by the m
 - The AI is an untrusted planner. Deterministic code decides.
 - The router keys belong to a separate OS account (`newton`) that the AI's user cannot read. `newton-doctor` checks this.
 - An approval is a single-use token that expires, bound to the exact change and the router's current config. On an installed OpenWrt router set to the prod profile (the default), or for a change Newton always asks about, the router program checks it again on the device; a router set to lab skips that check by design, and there only the Newton host checks it. In the no-install mode and on VyOS, RouterOS and Junos only the Newton host checks it.
-- For an Active Directory change (on the main branch) the domain controller checks the approval token itself before it arms its undo.
+- For an Active Directory change the domain controller checks the approval token itself before it arms its undo.
 - What the router's check proves depends on the approval level. At the passphrase level the key comes from the passphrase you type and is not stored. At the authenticator (TOTP) level, and while a grant is live, the Newton host keeps the router's approval key in the `newton` account's state, so whoever controls that account can make approvals within what the level or the grant allows; the router cannot tell them apart.
 - An approved change can run code as root on the router: some OpenWrt options and configs run commands or write files (the `exec-option`, `exec-config` and `exec-include` leash operations). Newton asks for an approval for them on a lab device too, but approving one approves that code.
 - A write through the MCP tools arms an undo on the device first: a timer on the router (in the no-install mode held in the router's RAM), the platform's own confirm or a scheduled restore on VyOS, RouterOS and Junos, or an undo the domain controller runs itself for an Active Directory change. An AD unlock has no undo (see Known limits), and the serial console script `scripts/newton-serial.py` arms none. In the installed mode a guard on the router survives reboots. When the guard restores a change on its own, the files go back but running firewall, network and rpcd settings can stay changed until a reboot, so check the router or reboot it. The router's undo covers its settings (`/etc/config`), not packages or other files.
@@ -63,7 +63,7 @@ The full threat model is [`docs/design/04-SECURITY-AND-SAFETY-MODEL.md`](docs/de
   leases and DNS entries by itself in that mode.
 - Approval on VyOS, MikroTik RouterOS and Junos is checked by the Newton host only. The device does not check it again. See [`docs/design/04-SECURITY-AND-SAFETY-MODEL.md`](docs/design/04-SECURITY-AND-SAFETY-MODEL.md), section Approvals.
 - On MikroTik RouterOS (CHR), undo is a reboot into a saved backup. See [`docs/design/05-DEVICE-ABSTRACTION-AND-VENDOR-STRATEGY.md`](docs/design/05-DEVICE-ABSTRACTION-AND-VENDOR-STRATEGY.md).
-- Active Directory changes (on the main branch): an unlock has no undo and stays written, and a new user whose objectGUID the domain controller did not record (the connection can fail between the add and that record) is left in place by the DC's undo, which records `undo_failed` with its DN in `conflicts`. `CHANGELOG.md` ("Unreleased") lists the other AD limits.
+- Active Directory changes: an unlock has no undo and stays written, and a new user whose objectGUID the domain controller did not record (the connection can fail between the add and that record) is left in place by the DC's undo, which records `undo_failed` with its DN in `conflicts`. `CHANGELOG.md` ("1.4.0", "Known limits") lists the other AD limits.
 - ADR-020: 1.0 has no per-device rate limit on changes. Each production change already needs its own approval. Placeholder fingerprints let a model test a guess at a low-entropy secret, one planning step per guess. Use high-entropy secrets.
 - A passphrase typed into the approval dialog passes through the Claude Code process. With Claude Code debug logging on,
   it is written to the debug log, and an installed Claude Code hook could read it. `newton-doctor` warns when debug logging
