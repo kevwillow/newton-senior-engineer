@@ -276,6 +276,7 @@ def test_the_verify_prints_one_line(
 SILENT_COMMANDS = frozenset(
     {
         "Add-ADGroupMember",  # no -PassThru
+        "Add-NewtonSharedRootRead",  # the function of the script, it returns nothing
         "Copy-Item",  # no -PassThru
         "Remove-Item",  # no -PassThru
         "Set-Acl",  # the cmdlet writes nothing

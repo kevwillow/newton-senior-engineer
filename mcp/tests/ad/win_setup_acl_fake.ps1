@@ -21,11 +21,17 @@ function New-FakeSid([string]$Value) {
     return $sid
 }
 
-function New-FakeRule([string]$Sid, [string]$Rights) {
+function New-FakeRule([string]$Sid, [string]$Rights, [string]$Inheritance = '', [string]$Propagation = '') {
+    # The rule of the file system.  The flags of the inheritance and of
+    # the propagation are held as they are given: a rule that inherits
+    # nothing and a rule that inherits the children are not the same
+    # rule, and a test has to be able to tell them apart.
     return [PSCustomObject]@{
         IdentityReference = (New-FakeSid $Sid)
         FileSystemRights = [System.Security.AccessControl.FileSystemRights]$Rights
         AccessControlType = [System.Security.AccessControl.AccessControlType]::Allow
+        InheritanceFlags = $Inheritance
+        PropagationFlags = $Propagation
     }
 }
 
@@ -83,7 +89,16 @@ function New-Object {
         return (New-FakeSid ([string]$ArgumentList[0]))
     }
     if ($TypeName -eq 'System.Security.AccessControl.FileSystemAccessRule') {
-        return (New-FakeRule ([string]$ArgumentList[0].Value) ([string]$ArgumentList[1]))
+        # The identity of the rule is a SID object, and it may be the
+        # SID of an account of the directory, which the fake holds as
+        # its text.
+        $identity = $ArgumentList[0]
+        if ($identity -is [string]) { $identity = (New-FakeSid $identity) }
+        $inheritance = ''
+        if ($ArgumentList.Count -gt 2) { $inheritance = [string]$ArgumentList[2] }
+        $propagation = ''
+        if ($ArgumentList.Count -gt 3) { $propagation = [string]$ArgumentList[3] }
+        return (New-FakeRule ([string]$identity.Value) ([string]$ArgumentList[1]) $inheritance $propagation)
     }
     Microsoft.PowerShell.Utility\New-Object @PSBoundParameters
 }

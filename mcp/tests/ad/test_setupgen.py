@@ -5,6 +5,12 @@ Domain Admin on the domain controller.  The tests here read the printed
 script and check that it carries every step, that it carries no
 password and no private key, and that the blobs it embeds are the
 package files themselves.
+
+The access control list of the install root is the one thing that is
+run: the step 3 of the script runs under pwsh against the fakes of
+Active Directory and of the file system, and the rules it writes are
+read back.  The install root is shared with the write path of Newton,
+and the two setups must not take the read of each other away.
 """
 
 from __future__ import annotations
@@ -16,11 +22,23 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import fake_setup
 from newton_mcp.ad import forbidden, setupgen
+from windows_run import (
+    ACL_FAKE,
+    ACL_SUMMARY,
+    AD_FAKE,
+    AUDIT_SID,
+    OPS_SID,
+    audit_only_model,
+    run_program,
+    step_text,
+    two_accounts_model,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -1455,3 +1473,111 @@ def test_the_script_repairs_the_owner_and_the_mode_of_an_unchanged_sudoers_file(
     ownership = _ownership_of(state, sudoers)
     assert "uid=0" in ownership, ownership
     assert "user=root" in ownership, ownership
+
+
+# ---- the shared install root ------------------------------------------------
+
+
+def _audit_acl_program(script: str, tmp_path: Path) -> str:
+    """The program that runs the step 3 of the script on the fakes.
+
+    The install root is a folder of the sandbox, and the rules of the
+    file system are the ones of the fake: the script writes them and
+    the program writes them back, so a test may read them.
+    """
+    root = tmp_path / "ad"
+    return "\n".join(
+        [
+            "$ErrorActionPreference = 'Stop'",
+            f". '{AD_FAKE}'",
+            f". '{ACL_FAKE}'",
+            f"$AdDir = '{root}'",
+            "$AuditName = 'newton-audit'",
+            "$OpsName = 'newton-ops'",
+            step_text(script, 3),
+            ACL_SUMMARY,
+        ]
+    )
+
+
+def _rules_of(recorded: dict[str, Any], path: str) -> list[dict[str, str]]:
+    """The rules of the access control list of one path."""
+    return recorded["acls"][path]["rules"]
+
+
+def _rule_of(rules: list[dict[str, str]], sid: str) -> dict[str, str] | None:
+    """The rule of one account, or nothing when the account has none."""
+    for rule in rules:
+        if rule["sid"] == sid:
+            return rule
+    return None
+
+
+def test_the_install_root_keeps_the_read_of_the_write_account(
+    script: str, tmp_path: Path
+) -> None:
+    """The install root gives newton-ops a read, and nothing else.
+
+    The install root is shared by the two paths of Newton: the write
+    helper reads it, and the collector reads it.  The setup of the
+    collector takes the root for itself, and it takes the read of the
+    write account away when it does: the write helper cannot read the
+    access control list of the root any more, and it refuses to work.
+    """
+    program = _audit_acl_program(script, tmp_path)
+
+    result, recorded = run_program(program, tmp_path, two_accounts_model())
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    rules = _rules_of(recorded, str(tmp_path / "ad"))
+    ops = _rule_of(rules, OPS_SID)
+    assert ops is not None, rules
+    assert ops["rights"] == "ReadAndExecute"
+    assert ops["inheritance"] == "None"
+    assert "The read of newton-ops on the install root was kept" in result.stdout
+
+
+def test_the_install_root_gives_no_read_to_an_account_that_is_not_there(
+    script: str, tmp_path: Path
+) -> None:
+    """There is no rule for newton-ops when the account is not there.
+
+    The account of the write path may be absent: the collector setup
+    then gives it no read, and it stops there.  It is not an error, and
+    the owner is told that the rule is not there.
+    """
+    program = _audit_acl_program(script, tmp_path)
+
+    result, recorded = run_program(program, tmp_path, audit_only_model())
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    rules = _rules_of(recorded, str(tmp_path / "ad"))
+    assert _rule_of(rules, OPS_SID) is None, rules
+    audit = _rule_of(rules, AUDIT_SID)
+    assert audit is not None, rules
+    assert audit["rights"] == "ReadAndExecute"
+    assert "There is no newton-ops account" in result.stdout
+
+
+def test_the_three_collector_files_keep_their_own_rules(
+    script: str, tmp_path: Path
+) -> None:
+    """The read of the write account is on the root and on nothing else.
+
+    The three files of the collector are the files of the audit path:
+    the write path reads the root and not the files of the collector.
+    """
+    program = _audit_acl_program(script, tmp_path)
+
+    result, recorded = run_program(program, tmp_path, two_accounts_model())
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    root = str(tmp_path / "ad")
+    for name in ("collector.ps1", "queries.json", "forbidden.json"):
+        rules = _rules_of(recorded, str(tmp_path / "ad" / name))
+        assert _rule_of(rules, OPS_SID) is None, (name, rules)
+        audit = _rule_of(rules, AUDIT_SID)
+        assert audit is not None, (name, rules)
+        assert audit["rights"] == "ReadAndExecute"
+        assert audit["inheritance"] == "None", (name, rules)
+    assert _rule_of(_rules_of(recorded, root), OPS_SID) is not None

@@ -21,19 +21,28 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from newton_mcp.ad import setupgen
 from newton_mcp.ad import setupgen_write as write
 from pwsh_path import PWSH
 from windows_run import (
     ACL_FAKE,
+    ACL_SUMMARY,
     AD_FAKE,
+    AUDIT_SID,
     CREATOR_OWNER_SID,
+    DEVICE,
+    DOMAIN,
     DOMAIN_DN,
     GUID_MACHINE_ACCOUNT_QUOTA,
     GUID_USER,
     GUID_USER_ACCOUNT_CONTROL,
+    HOST,
     OPS_SID,
     OU,
     PDC_POLICY_PATH,
+    PUBLIC_KEY,
     ZERO_GUID,
     delegation_program,
     fake_model,
@@ -42,6 +51,7 @@ from windows_run import (
     recorded_calls,
     run_program,
     step_text,
+    two_accounts_model,
 )
 
 
@@ -652,3 +662,212 @@ def test_an_unprotected_install_root_is_denied(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip() == "ok"
+
+
+# ---- the shared install root ------------------------------------------------
+
+
+@pytest.fixture
+def audit_script() -> str:
+    """The printed Windows collector setup script (the 1.3 one)."""
+    return setupgen.windows_script(
+        domain=DOMAIN,
+        pubkey=setupgen.validate_public_key(PUBLIC_KEY),
+        device=DEVICE,
+        host=HOST,
+    )
+
+
+def _function(script: str, name: str) -> str:
+    """The text of one function of the script, or nothing when it has none."""
+    lines = script.splitlines()
+    for index, line in enumerate(lines):
+        if not line.startswith(f"function {name}"):
+            continue
+        for end in range(index + 1, len(lines)):
+            if lines[end] == "}":
+                return "\n".join(lines[index : end + 1])
+    return ""
+
+
+def _rules_of(recorded: dict, path: str) -> list[dict[str, str]]:
+    """The rules of the access control list of one path."""
+    return recorded["acls"][path]["rules"]
+
+
+def _rule_of(rules: list[dict[str, str]], sid: str) -> dict[str, str] | None:
+    """The rule of one account, or nothing when the account has none."""
+    for rule in rules:
+        if rule["sid"] == sid:
+            return rule
+    return None
+
+
+def _paths(tmp_path: Path) -> dict[str, str]:
+    """The paths of the install of the write path, in the sandbox."""
+    root = tmp_path / "ad"
+    return {
+        "root": str(root),
+        "tx": str(root / "tx"),
+        "helper": str(root / "write.ps1"),
+        "device": str(root / "device.txt"),
+    }
+
+
+def _write_acl_program(script: str, tmp_path: Path) -> str:
+    """The program that runs the step 4 of the write setup on the fakes."""
+    paths = _paths(tmp_path)
+    return "\n".join(
+        [
+            "$ErrorActionPreference = 'Stop'",
+            f". '{AD_FAKE}'",
+            f". '{ACL_FAKE}'",
+            _function(script, "Set-NewtonInstallAcl"),
+            _function(script, "Add-NewtonSharedRootRead"),
+            f"$AdDir = '{paths['root']}'",
+            f"$TxDir = '{paths['tx']}'",
+            f"$HelperPath = '{paths['helper']}'",
+            f"$DeviceFilePath = '{paths['device']}'",
+            "$AuditName = 'newton-audit'",
+            f"$opsSid = '{OPS_SID}'",
+            step_text(script, 4),
+            ACL_SUMMARY,
+        ]
+    )
+
+
+def test_the_install_root_keeps_the_read_of_the_collector_account(
+    windows_script: str, tmp_path: Path
+) -> None:
+    """The install root gives newton-audit a read, and nothing else.
+
+    The install root is shared by the two paths of Newton: the
+    collector reads it, and the write helper reads it.  The setup of
+    the write path takes the root for itself, and it takes the read of
+    the collector account away when it does: the collector cannot read
+    the access control list of the root any more, and it refuses to
+    answer.
+    """
+    program = _write_acl_program(windows_script, tmp_path)
+
+    result, recorded = run_program(program, tmp_path, two_accounts_model())
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    rules = _rules_of(recorded, _paths(tmp_path)["root"])
+    audit = _rule_of(rules, AUDIT_SID)
+    assert audit is not None, rules
+    assert audit["rights"] == "ReadAndExecute"
+    assert audit["inheritance"] == "None"
+    assert "The read of newton-audit on the install root was kept" in result.stdout
+
+
+def test_the_install_root_gives_no_read_to_an_account_that_is_not_there(
+    windows_script: str, tmp_path: Path
+) -> None:
+    """There is no rule for newton-audit when the account is not there.
+
+    The account of the collector may be absent: the write setup then
+    gives it no read, and it stops there.  It is not an error, and the
+    owner is told that the rule is not there.
+    """
+    program = _write_acl_program(windows_script, tmp_path)
+
+    result, recorded = run_program(program, tmp_path, fake_model())
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    rules = _rules_of(recorded, _paths(tmp_path)["root"])
+    assert _rule_of(rules, AUDIT_SID) is None, rules
+    assert "There is no newton-audit account" in result.stdout
+
+
+def test_the_files_of_the_write_path_keep_their_own_rules(
+    windows_script: str, tmp_path: Path
+) -> None:
+    """The read of the collector account is on the root and on nothing else.
+
+    The helper, the device name and the transaction store are the
+    files of the write path: the collector reads the root and not the
+    files of the write path.
+    """
+    program = _write_acl_program(windows_script, tmp_path)
+
+    result, recorded = run_program(program, tmp_path, two_accounts_model())
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    paths = _paths(tmp_path)
+    for name in ("helper", "device", "tx"):
+        rules = _rules_of(recorded, paths[name])
+        assert _rule_of(rules, AUDIT_SID) is None, (name, rules)
+    assert _rule_of(_rules_of(recorded, paths["root"]), AUDIT_SID) is not None
+
+
+def _order_program(
+    audit: str, script: str, tmp_path: Path, audit_first: bool
+) -> str:
+    """The program that runs the two setups, in the order asked for."""
+    paths = _paths(tmp_path)
+    collector = step_text(audit, 3)
+    writer = step_text(script, 4)
+    steps = [collector, writer] if audit_first else [writer, collector]
+    return "\n".join(
+        [
+            "$ErrorActionPreference = 'Stop'",
+            f". '{AD_FAKE}'",
+            f". '{ACL_FAKE}'",
+            _function(script, "Set-NewtonInstallAcl"),
+            _function(script, "Add-NewtonSharedRootRead"),
+            f"$AdDir = '{paths['root']}'",
+            f"$TxDir = '{paths['tx']}'",
+            f"$HelperPath = '{paths['helper']}'",
+            f"$DeviceFilePath = '{paths['device']}'",
+            "$AuditName = 'newton-audit'",
+            "$OpsName = 'newton-ops'",
+            f"$opsSid = '{OPS_SID}'",
+            *steps,
+            ACL_SUMMARY,
+        ]
+    )
+
+
+def test_the_collector_setup_and_the_write_setup_leave_both_reads(
+    audit_script: str, windows_script: str, tmp_path: Path
+) -> None:
+    """The collector setup and then the write setup leave both reads.
+
+    The order of the two setups is the order of the AD build: the
+    collector setup runs, and the write setup runs after it.  Neither
+    of them may take the read of the other account away: the collector
+    reads the root, and the write helper reads it too.
+    """
+    program = _order_program(audit_script, windows_script, tmp_path, True)
+
+    result, recorded = run_program(program, tmp_path, two_accounts_model())
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    rules = _rules_of(recorded, _paths(tmp_path)["root"])
+    for sid in (AUDIT_SID, OPS_SID):
+        rule = _rule_of(rules, sid)
+        assert rule is not None, (sid, rules)
+        assert rule["rights"] == "ReadAndExecute"
+
+
+def test_the_write_setup_and_the_collector_setup_leave_both_reads(
+    audit_script: str, windows_script: str, tmp_path: Path
+) -> None:
+    """The write setup and then the collector setup leave both reads.
+
+    The other order is the one of an owner who adds the write path
+    after the collector, or the one of a controller that is set up
+    again.  The write helper reads the root, and the collector reads
+    it too.
+    """
+    program = _order_program(audit_script, windows_script, tmp_path, False)
+
+    result, recorded = run_program(program, tmp_path, two_accounts_model())
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    rules = _rules_of(recorded, _paths(tmp_path)["root"])
+    for sid in (AUDIT_SID, OPS_SID):
+        rule = _rule_of(rules, sid)
+        assert rule is not None, (sid, rules)
+        assert rule["rights"] == "ReadAndExecute"

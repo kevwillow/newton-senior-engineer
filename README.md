@@ -181,7 +181,7 @@ what its prompt asks for, then update the bootstrap itself with `newton-bootstra
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![OpenWrt 25.12](https://img.shields.io/badge/OpenWrt-25.12-00B5E2)](#supported-devices)
-[![Status: 1.4.1](https://img.shields.io/badge/Status-1.4.1-2f9a54)](#status)
+[![Status: 1.4.2](https://img.shields.io/badge/Status-1.4.2-2f9a54)](#status)
 
 ## What it looks like
 
@@ -230,7 +230,7 @@ except the changes Newton always asks about.
 
 Everything Newton does, in one list.
 
-- ✓ = in the current release, 1.4.1.
+- ✓ = in the current release, 1.4.2.
 
 A ✓ line says so when the feature works in one mode only, was run only in the virtual lab, or is covered by tests
 with no recorded run on a real router.
@@ -455,11 +455,11 @@ upstreams and a test client on Proxmox, and runs the scenarios against them. [`d
 explains the method. [`docs/TESTING-FOR-REVIEWERS.md`](docs/TESTING-FOR-REVIEWERS.md) lists what to try first, and
 the things we most want broken.
 
-Test suites at the 1.4.1 release gate, run in the full development tree (this public tree leaves out some development-only tests, so its own counts are lower):
+Test suites at the 1.4.2 release gate, run in the full development tree (this public tree leaves out some development-only tests, so its own counts are lower):
 
 | Suite | Path | Passing |
 |---|---|---|
-| MCP server | `mcp/tests/` | 10,953 (15 skipped) |
+| MCP server | `mcp/tests/` | 10,966 (15 skipped) |
 | Router program | `device/openwrt/newton-router/tests/` | 3,361 |
 | Guard | `device/openwrt/newton-guard/tests/` | 186 |
 | Protocol | `tests/protocol/` | 3,656 (5 skipped) |
@@ -498,14 +498,14 @@ See [`SECURITY.md`](SECURITY.md).
 
 ## Status
 
-**Released: 1.4.1.** OpenWrt in the installed and no-install modes (plus experimental VyOS, MikroTik and Junos), the
+**Released: 1.4.2.** OpenWrt in the installed and no-install modes (plus experimental VyOS, MikroTik and Junos), the
 one-line setup, in-client approvals, undo after confirm, client-side checks and receipts. 1.1 added the no-install
 mode: Newton puts nothing on the router but one limited web-interface user, applies DHCP reservations and DNS entries
 under OpenWrt's own undo timer, and hands every other change to you as a script you approve and run. 1.4.0 adds the
 Active Directory audit and the Active Directory changes, with the six `newton_ad_*` tools, `scripts/newton-ad-setup`, the
 `/usr/local/bin/newton-ad-setup` launcher and `newton-approve ad-change`; an apply that holds the confirm for a test
 you run from a client, with the `newton_confirm_change` tool (covered by tests only); and all the fixes since 1.1.3. It has
-twenty-four MCP tools. 1.4.1 is a fixes release (a fourth review round, no new tools; `CHANGELOG.md` lists the fixes). Active Directory changes are approved by you, with the undo armed on the domain controller until Newton confirms; once confirmed, Newton does not undo it (a known limit: if the PDC role moves while an earlier change of the same target is still armed on the old PDC, that domain controller's undo can write the earlier before-image over the new change): you plan the reverse change; an unlock has no undo and is written at once. The Active Directory work was tested live on two-DC Windows Server 2025 and Samba 4.22 lab
+twenty-four MCP tools. 1.4.1 is a fixes release (a fourth review round, no new tools; `CHANGELOG.md` lists the fixes), and 1.4.2 fixes two Active Directory bugs found on a Windows Server 2025 controller: the audit setup and the write setup no longer strip each other's read of the shared install folder, and a search root the audit account may not read is reported as access denied, not as an error. Active Directory changes are approved by you, with the undo armed on the domain controller until Newton confirms; once confirmed, Newton does not undo it (a known limit: if the PDC role moves while an earlier change of the same target is still armed on the old PDC, that domain controller's undo can write the earlier before-image over the new change): you plan the reverse change; an unlock has no undo and is written at once. The Active Directory work was tested live on two-DC Windows Server 2025 and Samba 4.22 lab
 domains, on code from just before the latest helper changes: the write setups, disable and enable, the machine account
 quota, unlock, the rollback of a withheld confirm, the refusal of a request for another device, and confirmation on
 every domain controller. Covered by tests only: the 48 audit checks (against collector output measured on lab domain

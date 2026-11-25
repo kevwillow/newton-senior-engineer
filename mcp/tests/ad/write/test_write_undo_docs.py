@@ -71,7 +71,7 @@ def _roadmap_row(relative: str) -> str:
 
 def _readme_ad_line() -> str:
     text = _read("docs/release/README-1.0.md")
-    start = text.index("**Released: 1.4.1.**")
+    start = text.index("**Released: ")
     end = text.index("Planned, with no dates:", start)
     return text[start:end]
 

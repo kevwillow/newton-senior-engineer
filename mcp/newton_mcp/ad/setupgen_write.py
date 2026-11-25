@@ -90,6 +90,12 @@ NO_HELPER = "the write helper is not in this build"
 # The domain account of the write path.
 OPS_NAME = "newton-ops"
 
+# The domain account of the collector.  The install root is shared by
+# the two paths of Newton, and the two setups keep the read of each
+# other's account on it: the account of the collector reads the root,
+# and the account of the write path reads it too.
+AUDIT_NAME = "newton-audit"
+
 # The local account of the Samba login.
 LOGIN_NAME = "newton-ops-ssh"
 
@@ -576,6 +582,8 @@ def windows_write_script(
         .replace("@@DEVICE@@", device)
         .replace("@@DOMAIN_DEVICE@@", domain_device)
         .replace("@@HOST@@", host)
+        .replace("@@OPS_NAME@@", OPS_NAME)
+        .replace("@@AUDIT_NAME@@", AUDIT_NAME)
         .replace("@@DOMAIN_DN@@", domain_dn(domain))
         .replace("@@CREATOR_OWNER_SID@@", CREATOR_OWNER_SID)
         .replace("@@OUS@@", _win_ous_block(ous)),
@@ -733,7 +741,8 @@ $Domain = '@@DOMAIN@@'
 $Device = '@@DEVICE@@'
 $DomainDevice = '@@DOMAIN_DEVICE@@'
 $WriteHost = '@@HOST@@'
-$OpsName = 'newton-ops'
+$OpsName = '@@OPS_NAME@@'
+$AuditName = '@@AUDIT_NAME@@'
 $DomainDn = '@@DOMAIN_DN@@'
 $DcOuDn = 'OU=Domain Controllers,@@DOMAIN_DN@@'
 $CreatorOwnerSid = '@@CREATOR_OWNER_SID@@'
@@ -1501,6 +1510,18 @@ function Set-NewtonInstallAcl([string]$Path, [string]$OpsSid, [string]$OpsRights
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
+function Add-NewtonSharedRootRead([string]$Path, [object]$Sid) {
+    # The read of the account of the other path of Newton on the
+    # shared install root.  The rule is explicit and it inherits
+    # nothing: the account reads the root and not the files beside it.
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    $none = [System.Security.AccessControl.PropagationFlags]::None
+    $noInheritance = [System.Security.AccessControl.InheritanceFlags]::None
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($Sid, 'ReadAndExecute', $noInheritance, $none, $allow)))
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
 function Get-ApprovalKeyHex([string]$Passphrase, [string]$DeviceName) {
     # The approval key K: PBKDF2-HMAC-SHA256, the UTF-8 bytes of the
     # passphrase, the salt "newton-approve-v1:" and the device, 600000
@@ -1618,6 +1639,20 @@ New-Item -ItemType Directory -Path $AdDir -Force | Out-Null
 # and the rules the folder inherits from ProgramData are gone.  A local
 # user may not write beside the helper.
 Set-NewtonInstallAcl $AdDir $opsSid 'ReadAndExecute' 'ContainerInherit, ObjectInherit'
+
+# The install root is shared with the collector: the account of the
+# collector reads it, and it reads nothing else of it.  The account is
+# looked up the way the account of the write path is looked up: one
+# exact match of the SamAccountName.  It may be absent, and then there
+# is no rule for it and there is no error.
+$auditUsers = @(Get-ADUser -Filter "SamAccountName -eq '$AuditName'")
+if ($auditUsers.Count -gt 1) { throw 'there is more than one newton-audit account' }
+if ($auditUsers.Count -eq 1) {
+    Add-NewtonSharedRootRead $AdDir $auditUsers[0].SID
+    Write-Host 'The read of newton-audit on the install root was kept: the collector reads it.'
+} else {
+    Write-Host 'There is no newton-audit account: the install root does not give it a read.'
+}
 
 @@HELPER@@
 [System.IO.File]::WriteAllBytes($HelperPath, [System.Convert]::FromBase64String($helperB64))
@@ -1952,6 +1987,7 @@ def samba_write_script(
         .replace("@@DEVICE@@", device)
         .replace("@@DOMAIN_DEVICE@@", domain_device)
         .replace("@@HOST@@", host)
+        .replace("@@OPS_NAME@@", OPS_NAME)
         .replace("@@DOMAIN_DN@@", domain_dn(domain))
         .replace("@@KEYLINE@@", pubkey)
         .replace("@@OUS@@", _samba_ous_block(ous)),
@@ -2003,7 +2039,7 @@ DOMAIN='@@DOMAIN@@'
 DEVICE='@@DEVICE@@'
 DOMAIN_DEVICE='@@DOMAIN_DEVICE@@'
 WRITE_HOST='@@HOST@@'
-OPS_NAME='newton-ops'
+OPS_NAME='@@OPS_NAME@@'
 LOGIN_NAME='newton-ops-ssh'
 DOMAIN_DN='@@DOMAIN_DN@@'
 SCHEMA_DN="CN=Schema,CN=Configuration,${DOMAIN_DN}"

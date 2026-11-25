@@ -104,6 +104,13 @@ DEVICE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 # The name of the one-shot task that restarts sshd.
 RESTART_TASK = "Newton-Ad-SshdRestart"
 
+# The names of the two domain accounts of Newton.  The install root of
+# the collector is shared with the write path, and the two setups keep
+# the read of each other's account on it: the account of the collector
+# reads the root, and the account of the write path reads it too.
+AUDIT_NAME = "newton-audit"
+OPS_NAME = "newton-ops"
+
 
 class SetupError(Exception):
     """The setup script cannot be generated.
@@ -224,7 +231,9 @@ def windows_script(
     parts = [
         _HEADER.replace("@@DOMAIN@@", domain)
         .replace("@@DEVICE@@", device)
-        .replace("@@HOST@@", host),
+        .replace("@@HOST@@", host)
+        .replace("@@AUDIT_NAME@@", AUDIT_NAME)
+        .replace("@@OPS_NAME@@", OPS_NAME),
         _STEP_ACCOUNT,
         _STEP_FILES.replace("@@COLLECTOR@@", _b64_literal("collectorB64", collector))
         .replace("@@QUERIES@@", _b64_literal("queriesB64", queries))
@@ -289,6 +298,7 @@ def samba_script(
         _SAMBA_HEADER.replace("@@DOMAIN@@", domain)
         .replace("@@DEVICE@@", device)
         .replace("@@HOST@@", host)
+        .replace("@@AUDIT_NAME@@", AUDIT_NAME)
         .replace("@@KEYLINE@@", pubkey),
         _SAMBA_STEP_ACCOUNT,
         _SAMBA_STEP_LOCAL,
@@ -322,7 +332,8 @@ Set-StrictMode -Version 3
 $Domain = '@@DOMAIN@@'
 $Device = '@@DEVICE@@'
 $CollectorHost = '@@HOST@@'
-$AuditName = 'newton-audit'
+$AuditName = '@@AUDIT_NAME@@'
+$OpsName = '@@OPS_NAME@@'
 $AdDir = 'C:\\ProgramData\\Newton\\ad'
 $SshdConfig = 'C:\\ProgramData\\ssh\\sshd_config'
 $SshdBackup = 'C:\\ProgramData\\ssh\\sshd_config.bak-newton'
@@ -401,8 +412,18 @@ $system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
 $auditUser = @(Get-ADUser -Filter "SamAccountName -eq '$AuditName'")
 if ($auditUser.Count -ne 1) { throw 'the newton-audit account is missing' }
 $auditSid = $auditUser[0].SID
+# The install root is shared with the write path: the account of the
+# write path reads it, and it reads nothing else of it.  The account
+# is looked up the way the account of the collector is looked up: one
+# exact match of the SamAccountName.  It may be absent, and then there
+# is no rule for it and there is no error.
+$opsUser = @(Get-ADUser -Filter "SamAccountName -eq '$OpsName'")
+if ($opsUser.Count -gt 1) { throw 'there is more than one newton-ops account' }
+$opsSid = $null
+if ($opsUser.Count -eq 1) { $opsSid = $opsUser[0].SID }
 $allow = [System.Security.AccessControl.AccessControlType]::Allow
 $none = [System.Security.AccessControl.PropagationFlags]::None
+$noInheritance = [System.Security.AccessControl.InheritanceFlags]::None
 $children = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
 $paths = @(
     @{ path = $AdDir; inheritance = $children },
@@ -419,6 +440,16 @@ foreach ($entry in $paths) {
     $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($system, 'FullControl', $entry.inheritance, $none, $allow)))
     $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($auditSid, 'ReadAndExecute', $entry.inheritance, $none, $allow)))
     Set-Acl -LiteralPath $entry.path -AclObject $acl
+}
+if ($null -ne $opsSid) {
+    # The read of the write account is on the root and on nothing else:
+    # the rule is explicit and it inherits nothing.
+    $rootAcl = Get-Acl -LiteralPath $AdDir
+    $rootAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($opsSid, 'ReadAndExecute', $noInheritance, $none, $allow)))
+    Set-Acl -LiteralPath $AdDir -AclObject $rootAcl
+    Write-Host 'The read of newton-ops on the install root was kept: the write path reads it.'
+} else {
+    Write-Host 'There is no newton-ops account: the install root does not give it a read.'
 }
 Write-Host 'The directory and the three files are protected: Administrators and SYSTEM have full control, newton-audit has read and execute.'
 """
@@ -567,7 +598,7 @@ set -euo pipefail
 DOMAIN='@@DOMAIN@@'
 DEVICE='@@DEVICE@@'
 COLLECTOR_HOST='@@HOST@@'
-AUDIT_NAME='newton-audit'
+AUDIT_NAME='@@AUDIT_NAME@@'
 LOGIN_NAME='newton-ssh'
 SBIN_DIR='/usr/local/sbin'
 LIB_DIR='/usr/local/lib/newton-ad'

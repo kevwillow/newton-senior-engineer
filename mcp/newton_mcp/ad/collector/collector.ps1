@@ -126,6 +126,26 @@ function Get-StatusForError {
     return ,@{ status = 'error'; error_code = 'other' }
 }
 
+function Get-SearchRootStatusForError {
+    # The error of the search root itself, and not of a row.
+    #
+    # ADSI answers 0x8007200A ("the specified directory service attribute or
+    # value does not exist") when it cannot read the search root: the base
+    # of the query is there, but the account may not read it.  That is an
+    # access problem and not a missing object, so it is denied here.
+    #
+    # The mapping is only for the root: a row that came back is readable,
+    # and the error of a row keeps the mapping of Get-StatusForError.
+    param($ErrorRecord)
+    $code = Get-ComErrorCode $ErrorRecord
+    if ($code -eq '0x8007200A') { return ,@{ status = 'denied'; error_code = 'access_denied' } }
+    $mapped = Get-StatusForError $ErrorRecord
+    return ,@{
+        status = [string]$mapped['status']
+        error_code = [string]$mapped['error_code']
+    }
+}
+
 function Get-ComLargeInteger {
     param($Value)
     try {
@@ -381,53 +401,66 @@ function Invoke-CollectorQuery {
             $errorCode = 'other'
         } else {
             $searchRoot = 'LDAP://' + [string]$Context['dns_host'] + '/' + $base
-            $searcher = New-Object System.DirectoryServices.DirectorySearcher
-            $searcher.SearchRoot = New-Object System.DirectoryServices.DirectoryEntry($searchRoot)
-            $searcher.Filter = $filter
-            if ($scopeName -eq 'base') {
-                $searcher.SearchScope = [System.DirectoryServices.SearchScope]::Base
-            } else {
-                $searcher.SearchScope = [System.DirectoryServices.SearchScope]::Subtree
-            }
-            $searcher.PageSize = $script:PageSize
-            $searcher.SizeLimit = $limit + 1
-            $searcher.ServerTimeLimit = [TimeSpan]::FromSeconds($script:ServerTimeLimitSeconds)
-            foreach ($attribute in $attributes) {
-                [void]$searcher.PropertiesToLoad.Add([string]$attribute)
-            }
-            if (-not $searcher.PropertiesToLoad.Contains('distinguishedName')) {
-                [void]$searcher.PropertiesToLoad.Add('distinguishedName')
-            }
-            if ($needDescriptor) {
-                [void]$searcher.PropertiesToLoad.Add('nTSecurityDescriptor')
-                $searcher.SecurityMasks = [System.DirectoryServices.SecurityMasks]'Owner,Dacl'
-            }
-            $results = $searcher.FindAll()
-            $collected = New-Object System.Collections.ArrayList
-            foreach ($result in $results) {
-                if ($collected.Count -ge $limit) {
-                    $status = 'truncated'
-                    $errorCode = 'size_limit'
-                    break
+            # The search is tried on its own: the error of the search root
+            # is not the error of a row, and the two are mapped apart.
+            $results = $null
+            $searched = $false
+            try {
+                $searcher = New-Object System.DirectoryServices.DirectorySearcher
+                $searcher.SearchRoot = New-Object System.DirectoryServices.DirectoryEntry($searchRoot)
+                $searcher.Filter = $filter
+                if ($scopeName -eq 'base') {
+                    $searcher.SearchScope = [System.DirectoryServices.SearchScope]::Base
+                } else {
+                    $searcher.SearchScope = [System.DirectoryServices.SearchScope]::Subtree
                 }
-                $rowTruncated = $false
-                $rowTruncatedRef = [ref]$rowTruncated
-                $row = New-ResultRow $result $attributes $rowTruncatedRef $needDescriptor
-                $rowJson = $row | ConvertTo-Json -Depth 12 -Compress
-                $rowBytes = [Text.Encoding]::UTF8.GetByteCount([string]$rowJson)
-                if (($script:ByteTotal + $rowBytes) -gt $script:ByteLimit) {
-                    $status = 'truncated'
-                    $errorCode = 'byte_limit'
-                    break
+                $searcher.PageSize = $script:PageSize
+                $searcher.SizeLimit = $limit + 1
+                $searcher.ServerTimeLimit = [TimeSpan]::FromSeconds($script:ServerTimeLimitSeconds)
+                foreach ($attribute in $attributes) {
+                    [void]$searcher.PropertiesToLoad.Add([string]$attribute)
                 }
-                $script:ByteTotal = $script:ByteTotal + $rowBytes
-                [void]$collected.Add($row)
-                if ($rowTruncatedRef.Value) {
-                    $status = 'truncated'
-                    $errorCode = 'size_limit'
+                if (-not $searcher.PropertiesToLoad.Contains('distinguishedName')) {
+                    [void]$searcher.PropertiesToLoad.Add('distinguishedName')
                 }
+                if ($needDescriptor) {
+                    [void]$searcher.PropertiesToLoad.Add('nTSecurityDescriptor')
+                    $searcher.SecurityMasks = [System.DirectoryServices.SecurityMasks]'Owner,Dacl'
+                }
+                $results = $searcher.FindAll()
+                $searched = $true
+            } catch {
+                $mapped = Get-SearchRootStatusForError $_
+                $status = [string]$mapped['status']
+                $errorCode = [string]$mapped['error_code']
             }
-            $rows = $collected.ToArray()
+            if ($searched) {
+                $collected = New-Object System.Collections.ArrayList
+                foreach ($result in $results) {
+                    if ($collected.Count -ge $limit) {
+                        $status = 'truncated'
+                        $errorCode = 'size_limit'
+                        break
+                    }
+                    $rowTruncated = $false
+                    $rowTruncatedRef = [ref]$rowTruncated
+                    $row = New-ResultRow $result $attributes $rowTruncatedRef $needDescriptor
+                    $rowJson = $row | ConvertTo-Json -Depth 12 -Compress
+                    $rowBytes = [Text.Encoding]::UTF8.GetByteCount([string]$rowJson)
+                    if (($script:ByteTotal + $rowBytes) -gt $script:ByteLimit) {
+                        $status = 'truncated'
+                        $errorCode = 'byte_limit'
+                        break
+                    }
+                    $script:ByteTotal = $script:ByteTotal + $rowBytes
+                    [void]$collected.Add($row)
+                    if ($rowTruncatedRef.Value) {
+                        $status = 'truncated'
+                        $errorCode = 'size_limit'
+                    }
+                }
+                $rows = $collected.ToArray()
+            }
         }
     } catch {
         $mapped = Get-StatusForError $_

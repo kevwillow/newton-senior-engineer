@@ -44,6 +44,11 @@ DEVICE = "windc1"
 HOST = "windc1.win.newton.test"
 OPS_SID = "S-1-5-21-1-2-3-1105"
 
+#: The SID of the account of the collector.  The install root is shared
+#: by the two paths of Newton, and each of them keeps the read of the
+#: other account on it.
+AUDIT_SID = "S-1-5-21-1-2-3-1106"
+
 #: The FQDN of the PDC of the domain.  It is the answer of
 #: ``(Get-ADDomain).PDCEmulator``, and the share of the SYSVOL of the
 #: policy is under it.
@@ -365,6 +370,71 @@ def fake_model(**overrides: Any) -> dict[str, Any]:
     }
     built.update(overrides)
     return built
+
+
+def audit_account() -> dict[str, Any]:
+    """The account of the collector, as the model of the domain holds it."""
+    return {
+        "sam": "newton-audit",
+        "SamAccountName": "newton-audit",
+        "Name": "newton-audit",
+        "DistinguishedName": f"CN=newton-audit,{OU}",
+        "SID": AUDIT_SID,
+        "userAccountControl": 512,
+        "tokenGroups": ["S-1-5-21-1-2-3-513"],
+    }
+
+
+def two_accounts_model(**overrides: Any) -> dict[str, Any]:
+    """The model of the domain with the two accounts of Newton in it.
+
+    The install root is shared by the two paths of Newton, and each of
+    the setups may find the account of the other one in the domain.
+    """
+    model = fake_model()
+    model["users"] = [model["users"][0], audit_account()]
+    model.update(overrides)
+    return model
+
+
+def audit_only_model(**overrides: Any) -> dict[str, Any]:
+    """The model of the domain with the account of the collector only.
+
+    The account of the write path is absent: a domain that has no
+    write path yet has no newton-ops.
+    """
+    model = fake_model()
+    model["users"] = [audit_account()]
+    model.update(overrides)
+    return model
+
+
+#: The PowerShell that writes the access control lists the fake of the
+#: file system holds.  Every rule is written with its identity, its
+#: rights, its flags of inheritance and its flags of propagation, so
+#: that a test may read them and tell a rule that inherits nothing
+#: from a rule that inherits the children.
+ACL_SUMMARY = """
+$summary = @{}
+foreach ($path in $script:FakeAcls.Keys) {
+    $acl = $script:FakeAcls[$path]
+    $rules = @()
+    foreach ($rule in @($acl.Access)) {
+        $rules += ,@{
+            sid = [string]$rule.IdentityReference.Value
+            rights = [string]$rule.FileSystemRights
+            inheritance = [string]$rule.InheritanceFlags
+            propagation = [string]$rule.PropagationFlags
+        }
+    }
+    $summary[$path] = @{
+        owner = [string]$acl.Owner
+        protected = [bool]$acl.Protected
+        rules = $rules
+    }
+}
+@{ acls = $summary } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $env:NEWTON_FAKE_OUT -Encoding utf8
+"""
 
 
 def run_program(

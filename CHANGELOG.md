@@ -13,6 +13,27 @@ Two version numbers exist and are separate:
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-11-24
+
+### Fixed
+- AD setups, Windows: the 1.3 audit setup and the 1.4 write setup no longer strip each other's read of the shared
+  install root `C:\ProgramData\Newton\ad`. Each re-protected the folder for its own account only, so whichever ran second
+  broke the other: after the audit setup and then the write setup the audit login always answered "the install is not
+  safe" (measured on a Server 2025 controller on 2026-11-24), and the reverse order makes the write helper refuse its
+  install. Each setup now also gives the other Newton account a read of the root folder only, when that account exists.
+  Run the printed setup scripts again on each controller that has both. **Covered by tests only.**
+- AD collector, Windows: a search root the audit account may not read is reported as access denied and not as an error.
+  ADSI answers 0x8007200A ("the specified directory service attribute or value does not exist") when it cannot read the
+  search root itself, which is what the `CN=Password Settings Container` base answers to the ordinary audit account
+  (measured on a Server 2025 controller on 2026-11-24: the password settings query fails with that error, a control search
+  of `CN=Users` reads six rows, and the Administrator reads both).
+  The collector mapped that error to `error`/`other`, so the audit reported AD-A-35 as UNKNOWN with the reason ERROR. The collector now maps it to `denied`/`access_denied` where the search starts,
+  and only there: the same error raised while a row that came back is read keeps the mapping it had. The audit turns
+  `denied` into ACCESS_DENIED, as it did for every other denied read before. The query set did not change, so its hash
+  did not change and the audit does not refuse the document; the collector's bytes did change, so run the printed setup
+  script again on each controller to install the new collector. **Covered by tests only:** the mapping is exercised in
+  PowerShell against a fake searcher that raises the COM error, once where the search starts and once where a row is read.
+
 ## [1.4.1] - 2026-11-22
 
 ### Fixed
