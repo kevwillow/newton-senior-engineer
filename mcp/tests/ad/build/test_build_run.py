@@ -1632,6 +1632,93 @@ def test_a_state_directory_that_cannot_be_written_stops_run_lock_unavailable(
     assert not approve.build_run_state_path(PLAN_ID).exists()
 
 
+def _full_disk_after(monkeypatch: pytest.MonkeyPatch, saves: int) -> list[int]:
+    """The run state's first ``saves`` writes succeed, every later one
+    fails as a full disk does (ENOSPC); the list counts the attempts."""
+    import errno
+
+    real = approve._atomic_write
+    tries: list[int] = []
+
+    def write(path, value):
+        if path == approve.build_run_state_path(PLAN_ID):
+            tries.append(1)
+            if len(tries) > saves:
+                raise OSError(errno.ENOSPC, "No space left on device")
+        return real(path, value)
+
+    monkeypatch.setattr(approve, "_atomic_write", write)
+    return tries
+
+
+def test_a_state_directory_with_no_room_stops_before_anything_is_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of the merge (2026-11-23): os.access passes on a full disk,
+    so the first save is tried before anything goes out; when it fails
+    the run stops state_unwritable and sends nothing."""
+    build = Build(monkeypatch)
+    _full_disk_after(monkeypatch, 0)
+    state = build.run()
+    assert state["state"] == "stopped", state
+    assert state["reason"] == "state_unwritable", state
+    assert "nothing was sent" in state["detail"], state
+    assert build.transport.requests == []
+    assert build.adapters.taken == []
+    assert _lock_is_free()
+
+
+@pytest.mark.parametrize("saves", [1, 2, 3, 5, 8])
+def test_a_save_that_fails_after_a_send_stops_and_says_what_went_out(
+    monkeypatch: pytest.MonkeyPatch, saves: int
+) -> None:
+    """A disk that fills up mid-run: the save after a stage fails.  The
+    run stops state_write_failed with the stage and device instead of a
+    traceback, frees the lock, and says the helper's journal on the
+    server holds what ran."""
+    build = Build(monkeypatch)
+    _full_disk_after(monkeypatch, saves)
+    state = build.run()
+    assert state["state"] == "stopped", state
+    assert state["reason"] == "state_write_failed", state
+    assert "journal" in state["detail"], state
+    assert state["plan_id"] == PLAN_ID, state
+    assert _lock_is_free()
+
+
+@pytest.mark.parametrize("stage", ["0", "3", "5", "6"])
+def test_a_call_after_a_failed_save_does_not_run_a_finished_stage_again(
+    monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    """Codex review of 1.5.1: the disk fills up right after a stage ran on
+    the server, so its done never reaches the run state.  Once space is
+    freed the next call reads the journal: every stage runs exactly once
+    and the build ends done."""
+    import errno
+
+    build = Build(monkeypatch)
+    real = approve._atomic_write
+    full = {"on": True}
+
+    def write(path, value):
+        if (
+            full["on"]
+            and path == approve.build_run_state_path(PLAN_ID)
+            and ("build1", stage, "run") in build.transport.actions()
+        ):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real(path, value)
+
+    monkeypatch.setattr(approve, "_atomic_write", write)
+    state = build.drive()
+    assert (state["state"], state["reason"]) == ("stopped", "state_write_failed"), state
+    assert _runs(build).count(("build1", stage)) == 1
+    full["on"] = False
+    state = build.drive()
+    assert state["state"] == "done", state
+    runs = _runs(build)
+    assert all(runs.count(run) == 1 for run in runs), runs
+    assert _lock_is_free()
+
+
 def test_the_status_answers_while_the_lock_is_held(monkeypatch: pytest.MonkeyPatch) -> None:
     build = Build(monkeypatch)
     assert build.run()["state"] == "stopped_for_approval"

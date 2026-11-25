@@ -279,7 +279,12 @@ class _Runner:
         return fresh
 
     def _save(self) -> None:
-        _approve._atomic_write(_approve.build_run_state_path(self.plan_id), self.state)
+        try:
+            _approve._atomic_write(_approve.build_run_state_path(self.plan_id), self.state)
+        except OSError as exc:
+            # a full disk, an exhausted quota: os.access passed, the write
+            # did not (review of the merge, 2026-11-23)
+            raise _SaveFailed(str(exc)) from exc
 
     def _receipt(self, device: str, stage: str, action: str, answer: Mapping[str, Any] | None, note: str = "") -> None:
         entry: dict[str, Any] = {
@@ -1052,6 +1057,10 @@ class _Runner:
             raise _Stop("unknown_outside_accepted", device, ACCEPTANCE_STAGE, ",".join(unproved))
 
 
+class _SaveFailed(Exception):
+    """The run state could not be written to the state directory."""
+
+
 def _passed(answer: Mapping[str, Any], name: str) -> bool:
     """True when the answer holds the check ``name`` and it passed."""
     return any(
@@ -1101,7 +1110,9 @@ def run_build(
     another plan id for the same servers).  A run that finds the lock held
     stops ``run_in_progress`` and sends nothing.  A state directory that
     cannot be written stops ``run_lock_unavailable`` and sends nothing:
-    the run state could not be saved there.
+    the run state could not be saved there.  A run state that cannot be
+    written (a full disk) stops ``state_unwritable`` before anything is
+    sent, or ``state_write_failed`` after (DESIGN-1.5 point 85).
     """
     if not isinstance(plan_id, str) or _approve.PLAN_ID_RE.fullmatch(plan_id) is None:
         return {"state": STOPPED, "reason": "schema", "detail": "the plan id is not 32 lowercase hexadecimal characters"}
@@ -1168,7 +1179,35 @@ def run_build(
             )
         except _approve.ApprovalRefused as exc:
             return {"plan_id": plan_id, "state": STOPPED, "reason": "plan_mismatch", "detail": str(exc)}
-        return runner.run()
+        try:
+            # one real write before anything goes out: os.access says
+            # nothing of the room left on the disk
+            runner._save()
+        except _SaveFailed as exc:
+            return {
+                "plan_id": plan_id,
+                "state": STOPPED,
+                "reason": "state_unwritable",
+                "detail": f"the run state could not be written ({exc}), so nothing was sent: free space in the "
+                "state directory and call again",
+            }
+        try:
+            return runner.run()
+        except _SaveFailed as exc:
+            answer = dict(runner.state)
+            answer.update(
+                {
+                    "plan_id": plan_id,
+                    "state": STOPPED,
+                    "reason": "state_write_failed",
+                    "detail": f"the run state could not be saved during stage {runner.state.get('stage')} of "
+                    f"{runner.state.get('device')} ({exc}); requests may have gone out since the last save, and "
+                    "the helper's journal on the server holds what ran. The status on disk is older than this "
+                    "answer. Free space in the state directory and call again: the run reads each journal "
+                    "and does not repeat a stage the journal records as done",
+                }
+            )
+            return answer
     finally:
         os.close(lock)
 

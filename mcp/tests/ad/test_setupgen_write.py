@@ -1806,7 +1806,10 @@ def test_step_3_on_samba_refuses_a_different_passphrase_and_keeps_the_key(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "different approval key" in captured.err
-    assert "nothing was changed" in captured.err.lower()
+    # the account and delegation steps ran before this one
+    assert "nothing was changed" not in captured.err.lower()
+    assert "the key was not changed and the setup stopped" in captured.err.lower()
+    assert "have already run" in captured.err
 
 
 def test_step_3_on_windows_compares_an_installed_key_before_it_writes(
@@ -1821,7 +1824,8 @@ def test_step_3_on_windows_compares_an_installed_key_before_it_writes(
 
     assert check < write_at
     assert "this DC already holds a different approval key" in step
-    assert "nothing was changed" in step.lower()
+    assert "nothing was changed" not in step.lower()
+    assert "have already run" in step
     guarded = step[check:write_at]
     assert "throw" in guarded
     assert "-ne $keyHex" in guarded

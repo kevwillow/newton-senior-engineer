@@ -1207,6 +1207,14 @@ The stage 10 audit of the built domain (lab run 5, 2026-11-24, real Server 2025,
     read of the registry proves the LAPS values.
     Unmeasured on BUILD1/BUILD2: all of it.
 
+85. A full disk (1.5.1). `os.access` passes on a full disk or an exhausted quota, and the save of the run state then
+    raised out of the tool. Now the runner writes the run state once before anything goes out: when that write fails
+    the run stops `state_unwritable` and nothing is sent. A save that fails later, after requests went out, stops
+    `state_write_failed` with the stage and device it was in, frees the lock and says that the helper's journal on the
+    server holds what ran and that the status on disk is older than the answer. A call after the owner frees space
+    reads each journal and does not repeat a stage the journal records as done. Tested on fakes only (a write that
+    raises ENOSPC from the first save, and from the 2nd, 3rd, 4th, 6th and 9th; and a call after the disk was freed, which runs each stage once).
+
 ## Out of scope
 
 Brownfield domains, raising a level, more than two DCs, child domains, AD CS, DHCP, file servers, Entra Connect,

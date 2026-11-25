@@ -121,7 +121,10 @@ def test_the_build_write_variant_says_the_truth_about_a_different_key(stubs: byt
     assert "Nothing was changed" not in build
     assert setupgen_write.WIN_KEY_MISMATCH_BUILD in build
     assert "typed now" in owner
-    assert "Nothing was changed" in owner
+    # The owner's script ran the account and delegation steps before the
+    # key step, so it must not say nothing was changed either.
+    assert "Nothing was changed" not in owner
+    assert "its earlier steps (the newton-ops account and its delegation) have already run" in owner
 
 
 def test_the_build_collector_variant_has_no_restart(stubs: bytes) -> None:

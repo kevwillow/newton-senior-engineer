@@ -19,6 +19,7 @@ numbers only go up.
 | 1.4.1 | Fixes from the fourth review round, no new tools: the firewall restart that a rolled-back change on named nft objects now owes and says so, the no-install grant-off, bounded nmap results, the guard keeping quarantined config files, the upgrade of a restored or failed guard, the TOTP approval hint and the installed launcher forms in every hint, the Active Directory install-check refusals and status reasons, serial console and installer robustness. [`CHANGELOG.md`](CHANGELOG.md) lists them. |
 | 1.4.2 | Two Active Directory fixes on Windows domain controllers, no new tools: the 1.3 audit setup and the 1.4 write setup no longer strip each other's read of the shared install folder, and the collector reports a search root the audit account may not read as access denied instead of an error |
 | 1.5.0 | Active Directory build mode (opt-in): a new two-controller Windows Server 2025 domain from one plan the owner approves, in stages 0 to 10 with a checkpoint before each write stage, a fresh approval before each stage that asks, and Newton's own audit as the acceptance; one full build measured on Proxmox |
+| 1.5.1 | Two fixes, no new tools: a state directory with no room left stops an AD build with `state_unwritable` (nothing sent) or `state_write_failed` instead of an error, and the AD write setups no longer say nothing was changed when they stop at a different approval key after their first steps ran |
 
 ## Planned
 

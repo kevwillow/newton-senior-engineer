@@ -923,7 +923,7 @@ if (Test-Path -LiteralPath $ApprovalKeyPath) {
     if ($installedKey -ne $keyHex) {
         $keyHex = $null
         $installedKey = $null
-        throw ('this DC already holds a different approval key: the passphrase typed now is not the one it was set up with. Nothing was changed. Run the setup again with the domain''s approval passphrase. To change the passphrase on purpose, remove ' + $ApprovalKeyPath + ' on every DC of the domain, run the setup again on each, then run newton-ad-setup approval-key for the domain on the Newton host.')
+        throw ('this DC already holds a different approval key: the passphrase typed now is not the one it was set up with. The key was not changed and the setup stopped; its earlier steps (the newton-ops account and its delegation) have already run. Run the setup again with the domain''s approval passphrase. To change the passphrase on purpose, remove ' + $ApprovalKeyPath + ' on every DC of the domain, run the setup again on each, then run newton-ad-setup approval-key for the domain on the Newton host.')
     }
 }
 if ($null -eq $installedKey) {

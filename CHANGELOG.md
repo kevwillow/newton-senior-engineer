@@ -13,6 +13,18 @@ Two version numbers exist and are separate:
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-11-25
+
+### Fixed
+- AD build mode: a state directory with no room left (a full disk, an exhausted quota) no longer makes
+  `newton_ad_build_run` raise. The run state is written once before anything is sent; when that fails the run stops
+  `state_unwritable` and nothing goes out. A save that fails later stops `state_write_failed`, names the stage and
+  device, frees the run lock, and says the helper's journal on the server holds what ran; calling again after freeing
+  space does not repeat a stage the journal records as done. **Covered by tests only** (fakes that raise ENOSPC).
+- AD write setups, Windows and Samba: a domain controller that already holds a different approval key no longer says
+  "Nothing was changed". The setup creates the newton-ops account and its delegation before it reaches the key, so it
+  now says the key was not changed, the setup stopped, and those earlier steps have already run.
+
 ## [1.5.0] - 2026-11-24
 
 ### Added
