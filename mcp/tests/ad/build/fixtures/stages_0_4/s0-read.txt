@@ -1,0 +1,12 @@
+task identity: build1\administrator | auth NTLM
+task start 2026-11-13T16:02:59.0576748Z
+os: Microsoft Windows Server 2025 Standard Evaluation | Version 10.0.26100 | BuildNumber 26100 | OperatingSystemSKU 79
+cs: Name BUILD1 | DomainRole 2 | PartOfDomain False | Workgroup WORKGROUP
+AD-Domain-Services Available | DNS Available | RSAT-AD-PowerShell Available | RSAT-ADDS-Tools Available
+Get-NetIPAddress: Ethernet 192.0.2.41 /24 PrefixOrigin Manual
+Get-NetRoute 0.0.0.0/0: Ethernet NextHop 192.0.2.1 RouteMetric 256
+C: free bytes 26017886208 (24.2 GB)
+Resolve-DnsName build.newton.test -DnsOnly True FAIL in 490 ms: System.ComponentModel.Win32Exception | NativeErrorCode 1460 | build.newton.test : This operation returned because the timeout period expired | ERROR_TIMEOUT,Microsoft.DnsClient.Commands.ResolveDnsName
+QEMU-GA: Running, Automatic
+VirtIO Serial Driver: OK, System, PCI\VEN_1AF4&DEV_1003&SUBSYS_00031AF4&REV_00\3&267A616A&0&40
+task end 2026-11-13T16:03:04.0984197Z

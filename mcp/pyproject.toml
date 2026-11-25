@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "newton-mcp"
-version = "1.4.2"
+version = "1.5.0"
 description = "Safe OpenWrt change-protocol MCP server"
 requires-python = ">=3.11"
-dependencies = ["mcp>=1.0,<2"]
+dependencies = ["mcp>=1.0,<2", "dnspython>=2.6,<3"]
 
 [project.optional-dependencies]
 test = ["pytest>=8.0", "pyserial"]
@@ -20,6 +20,7 @@ newton-rpcd = "newton_mcp.rpcd_cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = ["*.egg", ".*", "_darcs", "CVS", "dist", "node_modules", "venv", "{arch}"]
 markers = [
     "real_fw4_precheck: opt out of the conftest autouse that stubs NewtonService._refuse_failing_fw4 (these tests exercise the real precheck).",
 ]

@@ -1,0 +1,6 @@
+"BUILTIN\Administrators","Alias","S-1-5-32-544","Mandatory group, Enabled by default, Enabled group, Group owner"
+"NBUILD\Domain Admins","Group","S-1-5-21-1000000001-1000000002-1000000003-512","Mandatory group, Enabled by default, Enabled group"
+"NBUILD\Enterprise Admins","Group","S-1-5-21-1000000001-1000000002-1000000003-519","Mandatory group, Enabled by default, Enabled group"
+"NBUILD\Schema Admins","Group","S-1-5-21-1000000001-1000000002-1000000003-518","Mandatory group, Enabled by default, Enabled group"
+"Service asserted identity","Well-known group","S-1-18-2","Mandatory group, Enabled by default, Enabled group"
+"Mandatory Label\High Mandatory Level","Label","S-1-16-12288",""

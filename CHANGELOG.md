@@ -13,6 +13,148 @@ Two version numbers exist and are separate:
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-24
+
+### Added
+- Active Directory build mode (opt-in): `newton_ad_build_plan`, `newton_ad_build_run` and `newton_ad_build_status` build a
+  new domain with two domain controllers on two fresh Windows Server 2025 servers, in stages 0 to 10, from one plan the owner
+  reviews and approves with `newton-approve`, and a fresh approval before each stage that asks for one. A helper on each
+  server runs the stages and keeps a journal; a Proxmox or Hyper-V checkpoint is taken before each write stage. The stages:
+  base settings and features, the forest, the AD Recycle Bin, the Windows LAPS schema, the structure (OUs, groups, the
+  owner's admin account in Domain Admins and Protected Users and not delegated, the password policy, a fine-grained policy
+  for tier 0 admins, the machine account quota 0, the built-in Administrator disabled or given a random password by plan
+  option), the baseline GPOs (including Windows LAPS for the domain controllers with the encrypted DSRM password backup),
+  the second controller by offline domain join with replication checked both ways, the newton-audit and newton-ops logins,
+  the build account removed, and Newton's own Active Directory audit as the acceptance: stage 10 stops on any finding
+  outside the plan's accepted list. One build runs at a time per state directory. **Measured:** one full build passed
+  stages 0 to 10 on Windows Server 2025 evaluation VMs on Proxmox (2026-11-24). Not measured: the Hyper-V checkpoints on a
+  real Hyper-V host. Never run it on an existing domain.
+- `newton-ad-discover --preflight`: an opt-in preflight of every domain controller the tool found, read-only, from the host
+  the tool runs on. It connects to the ports 22 (SSH), 389 (LDAP) and 88 (Kerberos) with a 3 s timeout each (the connection
+  is closed at once, nothing is ever sent) and reads the clock of the controller with one SNTP query on UDP 123 (over IPv6
+  when the address of the controller is an IPv6 address): a 48 byte client packet (mode 3) whose transmit timestamp holds
+  the local time and a random fraction, and a reply that is only accepted when it is exactly 48 bytes long (up to 512 bytes
+  are read, and any length other than 48 is refused, so a longer datagram is not trimmed to a length that looks right),
+  comes from a time server
+  (mode 4) whose clock is synchronized (leap indicator 3 is refused), has a stratum of 1 to 15, carries a transmit
+  timestamp that is not all zero (bytes 40..47; RFC 4330 section 5 check 4: such a reply is discarded, so the clock is
+  UNKNOWN and never a skew), and carries the transmit
+  timestamp of the request (bytes 40..47) in its originate timestamp (bytes 24..31, the offsets of RFC 4330 figure 1), so
+  a reply to another query is never read as the clock of the controller.
+  It prints every port as open, closed or timeout, the clock skew of the controller in seconds, and FAIL when the clock is
+  more than 300 s off (the Kerberos default), with the step to sync the clocks; a controller whose time cannot be read (a
+  timeout, a network error, or a reply that is not accepted) is UNKNOWN. A controller whose LDAP
+  port 389 or Kerberos port 88 is not open (closed or timed out) is a FAIL as well, and that FAIL wins over the UNKNOWN of
+  a clock that cannot be read; the SSH port 22 is still only reported, because the setup script installs SSH later. The run
+  then exits 1 (0 when every controller passed); without the flag nothing changes and nothing is contacted. The probes run in
+  the same run as the list of controllers, before the owner has read it, so the owner runs the tool without `--preflight`
+  first, checks the list against their own controllers, and only then runs it again with the flag. That second run reads DNS
+  again: the first list does not limit what the second run probes, and the addresses it probes are the ones that run prints;
+  nothing is pinned, so the second run trusts DNS as much as the first one did. Limits: the preflight reaches
+  only the addresses DNS gave and only the first address of each controller, and it cannot read the clock of a controller
+  that has no address at all. **Covered by tests only, unmeasured on a lab DC:** the tests use fake sockets and a fixed
+  clock, so no controller was contacted.
+- `scripts/newton-ad-discover`: give it a domain and it finds the domain controllers and the PDC emulator from DNS
+  (SRV `_ldap._tcp.dc._msdcs.<domain>` and `_ldap._tcp.pdc._msdcs.<domain>`, then A and AAAA) and prints the read
+  inventory entries and the `newton-ad-setup windows|samba` command for each DC; with `--write --ops-pubkey FILE --ou ...` it also
+  prints the `newton-ad-setup write` commands, PDC first, every other DC with `--domain-device`; the write commands
+  carry the operations key and never the audit key, and the same key given twice is refused. It only prints: no
+  credentials, nothing is run. DNS answers are untrusted: host names must be plain letters, digits and hyphens inside
+  the domain (at most 253 characters), at most 32 DCs are used, anything else is skipped with a printed reason, an
+  address with a scope id is dropped with a printed reason (the tool never connects to it), every
+  value is shell-quoted, and the output tells the owner to check the list against their DCs. The work one host can cost
+  is bounded: at most 64 A and AAAA records are read for it and at most 8 scope-id refusals are printed for it, and what
+  was cut is said out loud. Limits: tested with a fake
+  resolver only, not against a real Windows or Samba DNS server; it cannot see a DC whose records are missing from DNS;
+  without a PDC record it withholds the write commands (exit 6). New dependency: `dnspython` (ISC licence), used only by
+  this tool.
+- `newton-ad-discover --fetch-host-keys`: the tool also asks `ssh-keyscan` for the host keys of every domain controller
+  it found and prints, for every key, its SHA256 fingerprint (the way `ssh-keygen -lf` prints it) and the ready
+  `known_hosts` line, so the owner does not have to pin the host keys by hand. The scan is one per controller
+  (`ssh-keyscan -T 5 -t ed25519,ecdsa,rsa -p 22 <host>`), run with an argument list, never through a shell, and with a
+  timeout; a controller whose scan fails, or that has no key, gets a plain line and keeps the placeholder `known_hosts`
+  line. A scan travels over the network, so it can be spoofed: the tool says so and tells the owner to compare every
+  fingerprint with the one the controller shows at its console before trusting it. When a controller has more valid host
+  keys than the cap of 8, the tool says the list was cut, so the owner knows the fingerprints and the
+  ready `known_hosts` lines shown are not all of them.
+  `--resolver` is for the lookups of the discovery only: `ssh-keyscan` resolves the host name of a scan with the system
+  resolver, so the scan can land on another address than the one DNS gave, which is one more reason to compare every
+  fingerprint at the controller. Nothing is written, and without the flag the tool behaves exactly as before. Limits:
+  tested with a fake scan only, never against a real domain controller.
+- Four DNS checks in the Active Directory audit (52 in all), read-only, on Windows and Samba: AD-A-68a a primary
+  zone allows non-secure dynamic updates (high); AD-A-68b a zone that takes dynamic updates has aging off (low);
+  AD-A-69a a domain controller has no `_ldap._tcp.<domain>` SRV record (medium); AD-A-69b that SRV record names a host
+  that is not a domain controller (medium). They read the `dnsZone` and `dnsNode` objects of the DomainDnsZones
+  partition and the domain controller computer objects through three new queries, with the rights the read account
+  already has; the constants and encodings come from MS-DNSP (design note `docs/proposals/ad/DESIGN-dns-helpers.md`
+  lists each with its section). **Covered by tests only, unmeasured on a lab DC:** the fixtures are built from the
+  spec's encodings, not read from a DC, and whether the ordinary audit account can read these DNS objects is not
+  confirmed (if it cannot, the checks say UNKNOWN, never PASS). Limits: only the domain's own DomainDnsZones partition is
+  read (not ForestDnsZones, `_msdcs` zones or the legacy container); the aging check does not read the server-level
+  scavenging setting; a DNS name with a label that is not ASCII is refused, though the spec allows such a label, so
+  the check says UNKNOWN instead of reading the name; zone transfers and forwarders are NOT checked, because MS-DNSP
+  stores neither in the zone object and reading them needs more rights than the read account has. The query set changed,
+  so its hash changed: run the printed setup script again on each DC to install the new `queries.json`; until then the
+  audit refuses the older collector's document as out of date.
+  A DNS base the audit account may not read is reported as access denied (ACCESS_DENIED), like every other denied read.
+- `newton_plan_ad_forward`: plans the OpenWrt change that forwards an Active Directory DNS domain to its domain
+  controllers (dnsmasq conditional forwarding). Give the domain and 1 to 8 private DC addresses; Newton reads
+  `uci show dhcp` and builds one `add_list dhcp.@dnsmasq[0].server='/<domain>/<dc>'` per controller, plus
+  `add_list dhcp.@dnsmasq[0].rebind_domain='/<domain>/'` when rebind protection is not off (OpenWrt's default is on,
+  and it drops private-range answers). Lines already on the router are not added again (all present: `no_change`,
+  nothing staged); nothing is removed. An entry the router already holds is matched by the address it names
+  (`fd00:0:0:0:0:0:0:1` is `fd00::1` and `::ffff:192.0.2.10` is `192.0.2.10`, so the same address is never added
+  twice; a scoped text such as `fd00::1%br-lan` is compared as text, so it is never proof that the
+  address without the scope is there). A domain the router marks local-only (dnsmasq's `server=/<domain>/` with no address, or its
+  `local=/<domain>/`) is planned normally: a forward for the same domain wins over that entry, so the
+  plan says in a note that the router marks the domain local-only and that the forward overrides it. An `address`
+  entry for the domain itself that carries an address (`address=/<domain>/<ip>`, `address=/<domain>/#`, or the same
+  with `/.<domain>/`, `/<domain>./` or `/*.<domain>/`) is refused and nothing is staged: dnsmasq answers A and AAAA lookups itself, and the owner removes
+  that entry through `newton_plan_change` first; a local-only `/*.<domain>/` entry is refused too. An `address` entry, a local-only entry, or a
+  `server` entry to another address, for a name
+  below the domain does not stop the forward of the domain but keeps those names from reaching the domain
+  controllers, which the plan says in one note. `ad_forward.notes` is Newton's own wording; the router's other entries
+  for the domain come back as device data in `ad_forward.existing_servers`. It uses the normal plan, approval, apply and
+  undo path with the device-side rollback; a no-install router gets an owner script, as for any list change. Measured
+  with dnsmasq 2.91 on Linux, not on a router. With it the tool count is 25; the three build tools of this release make 28.
+- `newton-doctor ad`: a read-only check of the Active Directory entries of the inventory, run as the `newton` account
+  (`sudo -u newton /usr/local/bin/newton-doctor ad`). It reads local files only and contacts no DC. It reports a write
+  entry whose `ad_domain` names no write entry of the inventory, a domain with two domain devices, a DC that has an audit
+  entry but no write entry (only where it can tell: an inventory that does not load may hold that write entry, so then
+  the doctor says it cannot be judged until the inventory loads), a `key_file` that is a placeholder, missing, or not
+  owned by `newton` and 0600, a `known_hosts` that is a placeholder, missing, not owned by `newton` or writable by group
+  or others, a pinned `known_hosts` with no key for the host, and a domain device with no recorded approval fingerprint,
+  each with the command that fixes it. An inventory Newton itself refuses to load is a finding too: the check asks
+  Newton's own inventory loader, so a refusal (a device name or a platform it does not accept, an AD entry without a
+  valid host, user or port, a bad `auth`, `profile` or `proxy_command`, a `key_file` or `known_hosts` that is not a path,
+  an entry of another platform without a `known_hosts` file) is named in the loader's own words: Newton loads no device
+  from that inventory, so the run exits 1. Every value of the inventory is untrusted text: a value reaches a
+  printed command only when it passes the grammar the inventory loader uses for that field and cannot look like an
+  option, and the command quotes it; otherwise the next step is the one fixed line that edits the entry. Exit codes as
+  the rest of the doctor: 0 clean, 1 a finding, 3 something could not be judged, 2 wrong arguments or account. Nothing
+  records the fingerprint each DC printed, so it shows the recorded one for the owner to compare.
+
+### Fixed
+- `newton-doctor ad` asks the inventory loader Newton itself uses whether the inventory loads, instead of deciding
+  with a copy of its rules. An inventory Newton refuses is now a finding (Newton loads no device from it), so such a
+  run exits 1 instead of a run of PASS lines, and the doctor's own scan of the entries still names every entry it finds
+  wrong, because the loader stops at the first one. An error the loader did not expect is INCONCLUSIVE, never a PASS.
+  While the inventory does not load, the doctor claims nothing about a pairing: it does not say that a domain has audit
+  entries only, nor that a write entry has no audit entry, but that the pairing cannot be judged until the inventory
+  loads. An `ad_domain` that names an entry of the file that Newton does not load now says so, instead of saying that
+  the inventory does not hold the entry.
+- `newton-doctor ad` pairs a DC's audit entry and write entry by a normalised host (lowercase, one trailing dot
+  removed), so a host that differs only in case or ends in a dot no longer reads as a missing write entry. When one
+  entry gives an IP address and the other a name, the doctor resolves no name, so the pairing cannot be confirmed: it
+  says so as INCONCLUSIVE (the run exits 3) instead of calling the write entry missing. It names no write entry as the
+  partner of the audit entry: it lists the write entries of the domain whose address is of the other kind (IP versus
+  name), and says the owner must use the same host text in both entries of a DC. A write entry that is unpaired for
+  another reason keeps its own note. A DC that really has no write entry is still a finding, but only where the doctor
+  can tell: an inventory that holds an entry Newton does not load may hide that write entry.
+  The IP-versus-name test looks at every write entry of the domain, paired or not. The setup command of a missing
+  write entry never names a device already in the file: the next step is then `sudoedit`. While the inventory does not
+  load, or could not be judged, the doctor makes no pairing claim.
+
 ## [1.4.2] - 2026-11-24
 
 ### Fixed

@@ -63,7 +63,7 @@ Untested: Tested on a virtual image only, no hardware.
 
 ## Linux hosts
 
-Release: 1.6. Undo type: timer.
+Release: 1.7. Undo type: timer.
 
 Shapes: a = happy path (a confirmed change); b = management IP lockout rolls back; c = management firewall drop rolls back; d = injection in a change is rejected; e = bad syntax is rejected; f = a service is reachable after the change; g = uplinks down rolls back.
 
@@ -71,4 +71,4 @@ Shapes: a = happy path (a confirmed change); b = management IP lockout rolls bac
 |---|---|---|---|---|---|---|---|---|---|---|
 | Linux hosts | - | no recorded run (untested) | not run | not run | not run | not run | not run | not run | not run | - |
 
-Untested: Every shape: planned for 1.6, tested per network stack.
+Untested: Every shape: planned for 1.7, tested per network stack.

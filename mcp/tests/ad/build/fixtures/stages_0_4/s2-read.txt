@@ -1,0 +1,96 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-13T16:15:00.7148367Z
+dcdiag /q exit 0 in 0 s, 42 lines:
+         There are warning or error events within the last 24 hours after the
+
+         SYSVOL has been shared.  Failing SYSVOL replication problems may cause
+
+         Group Policy problems. 
+         ......................... BDC1 failed test DFSREvent
+
+         An error event occurred.  EventID: 0xC0001B7A
+
+            Time Generated: 11/13/2026   16:03:56
+
+            Event String:
+
+            The OpenSSH SSH Server service terminated unexpectedly.  It has done this 1 time(s).
+
+         An error event occurred.  EventID: 0xC0001B7A
+
+            Time Generated: 11/13/2026   16:07:06
+
+            Event String:
+
+            The OpenSSH SSH Server service terminated unexpectedly.  It has done this 1 time(s).
+
+         An error event occurred.  EventID: 0x00000422
+
+            Time Generated: 11/13/2026   16:12:32
+
+            Event String:
+
+            The processing of Group Policy failed. Windows attempted to read the file \\build.newton.test\sysvol\build.newton.test\Policies\{31B2F340-016D-11D2-945F-00C04FB984F9}\gpt.ini from a domain controller and was not successful. Group Policy settings may not be applied until this event is resolved. This issue may be transient and could be caused by one or more of the following: 
+
+
+         An error event occurred.  EventID: 0xC0000007
+
+            Time Generated: 11/13/2026   16:14:05
+
+            Event String:
+
+            The Security Account Manager failed a KDC request in an unexpected way. The error is in the data field. The account name was  and lookup type 0x108.
+
+         ......................... BDC1 failed test SystemLog
+
+dcdiag exit 0 in 0 s; test lines:
+
+         ......................... BDC1 passed test Connectivity
+         ......................... BDC1 passed test Advertising
+         ......................... BDC1 passed test FrsEvent
+         ......................... BDC1 failed test DFSREvent
+         ......................... BDC1 passed test SysVolCheck
+         ......................... BDC1 passed test KccEvent
+         ......................... BDC1 passed test KnowsOfRoleHolders
+         ......................... BDC1 passed test MachineAccount
+         ......................... BDC1 passed test NCSecDesc
+         ......................... BDC1 passed test NetLogons
+         ......................... BDC1 passed test ObjectsReplicated
+         ......................... BDC1 passed test Replications
+         ......................... BDC1 passed test RidManager
+         ......................... BDC1 passed test Services
+         ......................... BDC1 failed test SystemLog
+         ......................... BDC1 passed test VerifyReferences
+         ......................... ForestDnsZones passed test CheckSDRefDom
+         ......................... ForestDnsZones passed test
+         ......................... DomainDnsZones passed test CheckSDRefDom
+         ......................... DomainDnsZones passed test
+         ......................... Schema passed test CheckSDRefDom
+         ......................... Schema passed test CrossRefValidation
+         ......................... Configuration passed test CheckSDRefDom
+         ......................... Configuration passed test CrossRefValidation
+         ......................... build passed test CheckSDRefDom
+         ......................... build passed test CrossRefValidation
+         ......................... build.newton.test passed test LocatorCheck
+         ......................... build.newton.test passed test Intersite
+
+Name     Path                                              
+----     ----                                              
+NETLOGON C:\WINDOWS\SYSVOL\sysvol\build.newton.test\SCRIPTS
+SYSVOL   C:\WINDOWS\SYSVOL\sysvol                          
+
+
+
+SYSVOLReady: 1
+SRV _ldap._tcp.dc._msdcs.build.newton.test -> bdc1.build.newton.test:389
+SRV _kerberos._tcp.build.newton.test -> bdc1.build.newton.test:88
+SRV _gc._tcp.build.newton.test -> bdc1.build.newton.test:3268
+SRV _ldap._tcp.pdc._msdcs.build.newton.test -> bdc1.build.newton.test:389
+ForestMode Windows2025Forest DomainMode Windows2025Domain | forest build.newton.test | NetBIOS NBUILD | DomainSID S-1-5-21-1000000001-1000000002-1000000003
+msDS-Behavior-Version: forest 10 domain 10
+dns client after promotion: 127.0.0.1
+DNS forwarders: 192.0.2.1
+newton-build memberships (Get-ADPrincipalGroupMembership): Administrators, Domain Admins, Domain Users, Enterprise Admins, Schema Admins
+task end 2026-11-13T16:15:07.9254629Z
+
+

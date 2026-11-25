@@ -34,6 +34,11 @@ SKILL_TEXT_PENDING = frozenset(
         "newton_ad_apply_change",
         "newton_ad_change_status",
         "newton_ad_abort_change",
+        # The three AD build tools (PLAN-1.5 task 8): their SKILL.md text
+        # is task 9's, which needs the maintainer's approval on the exact diff.
+        "newton_ad_build_plan",
+        "newton_ad_build_run",
+        "newton_ad_build_status",
     }
 )
 
@@ -108,21 +113,21 @@ AD_TOOL_NAMES = frozenset(name for name in server.TOOL_NAMES if name.startswith(
 
 
 def test_the_release_readme_counts_the_tools() -> None:
-    """The public README names all twenty-four tools on its feature line and
-    says twenty-four tools on its layout line."""
+    """The public README names all twenty-eight tools on its feature line and
+    says twenty-eight tools on its layout line."""
     text = _release_readme().read_text(encoding="utf-8")
-    assert len(server.TOOL_NAMES) == 24 and len(AD_TOOL_NAMES) == 6
+    assert len(server.TOOL_NAMES) == 28 and len(AD_TOOL_NAMES) == 9
     feature = [
         line
         for line in text.splitlines()
         if "newton_list_devices" in line and "newton_read" in line
     ]
     assert feature, "the release README has no feature line listing newton tools"
-    assert "twenty-four tools" in feature[0]
+    assert "twenty-eight tools" in feature[0]
     for name in sorted(server.TOOL_NAMES):
         assert name in feature[0], f"the feature line does not list {name}"
     layout = [line for line in text.splitlines() if line.startswith("mcp/newton_mcp/ ")]
-    assert layout and "(twenty-four tools)" in layout[0]
+    assert layout and "(twenty-eight tools)" in layout[0]
 
 
 @pytest.mark.skipif(
@@ -130,14 +135,14 @@ def test_the_release_readme_counts_the_tools() -> None:
     reason="README.md is the release README in the public tree; the test above covers it",
 )
 def test_readme_counts_and_tools() -> None:
-    """README lists twenty-four tools and every tool name."""
+    """README lists twenty-eight tools and every tool name."""
     readme_text = README_MD.read_text(encoding="utf-8")
     # The word "eleven tools" must not appear anywhere.
     assert "eleven tools" not in readme_text, (
         "README.md still says 'eleven tools' after the tool count grew"
     )
 
-    # The MCP server feature line mentions 'twenty-four tools' and every tool name.
+    # The MCP server feature line mentions 'twenty-eight tools' and every tool name.
     feature_lines = [
         line
         for line in readme_text.splitlines()
@@ -145,15 +150,15 @@ def test_readme_counts_and_tools() -> None:
     ]
     assert feature_lines, "README.md has no feature line listing newton tools"
     feature_line = feature_lines[0]
-    assert "twenty-four tools" in feature_line, (
-        f"Feature line does not say 'twenty-four tools': {feature_line[:120]!r}"
+    assert "twenty-eight tools" in feature_line, (
+        f"Feature line does not say 'twenty-eight tools': {feature_line[:120]!r}"
     )
     for tool_name in sorted(server.TOOL_NAMES):
         assert tool_name in feature_line, (
             f"Feature line does not list {tool_name}"
         )
 
-    # The repository-layout line for mcp/newton_mcp/ says "(twenty-four tools)".
+    # The repository-layout line for mcp/newton_mcp/ says "(twenty-eight tools)".
     layout_lines = [
         line
         for line in readme_text.splitlines()
@@ -163,8 +168,8 @@ def test_readme_counts_and_tools() -> None:
         "README.md has no repository-layout line for mcp/newton_mcp/"
     )
     layout_line = layout_lines[0]
-    assert "(twenty-four tools)" in layout_line, (
-        f"Layout line does not say '(twenty-four tools)': {layout_line!r}"
+    assert "(twenty-eight tools)" in layout_line, (
+        f"Layout line does not say '(twenty-eight tools)': {layout_line!r}"
     )
 
 
@@ -222,11 +227,11 @@ _NUMBER_WORD_TOOLS = re.compile(
 
 def test_setup_clients_tool_count_matches_the_server() -> None:
     """docs/SETUP-CLIENTS.md names no tool count but the server's own."""
-    assert len(server.TOOL_NAMES) == 24
+    assert len(server.TOOL_NAMES) == 28
     text = SETUP_CLIENTS_MD.read_text(encoding="utf-8")
     counts = {match.group(1).lower() for match in _NUMBER_WORD_TOOLS.finditer(text)}
-    assert counts <= {"twenty-four"}, (
-        f"docs/SETUP-CLIENTS.md says {sorted(counts)} tools; the server has twenty-four"
+    assert counts <= {"twenty-eight"}, (
+        f"docs/SETUP-CLIENTS.md says {sorted(counts)} tools; the server has twenty-eight"
     )
 
 
@@ -357,15 +362,20 @@ def _planned_rows() -> list[str]:
 def test_the_roadmap_plans_hosts_and_the_persona_before_more_vendors() -> None:
     """The maintainer's order (2026-11-19): AD build mode, the protocol
     contract, hosts, the security engineer persona, then more vendors;
-    the read-only dashboard is parked at the end of the backlog."""
+    the read-only dashboard is parked at the end of the backlog.  AD
+    build mode shipped in 1.5.0, so it is a released row now."""
     rows = _planned_rows()
+    path = PUBLIC_ROADMAP_SRC if PUBLIC_ROADMAP_SRC.exists() else PRIVATE_ROADMAP
+    text = path.read_text(encoding="utf-8")
+    released = text[text.index("## Released"):text.index("## Planned")]
+    assert "| 1.5.0 | Active Directory build mode" in released
 
     def index(needle: str) -> int:
         found = [i for i, row in enumerate(rows) if needle in row]
         assert len(found) == 1, (needle, rows)
         return found[0]
 
-    order = [index(n) for n in ("build mode", "protocol contract", "Hosts:", "security engineer persona", "More vendors")]
+    order = [index(n) for n in ("protocol contract", "Hosts:", "security engineer persona", "More vendors")]
     assert order == sorted(order), order
     assert "dashboard" not in rows[index("Network rules")]
     backlog = rows[index("| Backlog |")]

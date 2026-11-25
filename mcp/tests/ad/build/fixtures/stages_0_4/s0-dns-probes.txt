@@ -1,0 +1,4 @@
+Resolve-DnsName build.newton.test -Server 127.0.0.1 OK in 10 ms: A 192.0.2.41
+Resolve-DnsName nothere-7f3a.build.newton.test -Server 127.0.0.1 FAIL in 55 ms: System.ComponentModel.Win32Exception | NativeErrorCode 9003 | nothere-7f3a.build.newton.test : DNS name does not exist | DNS_ERROR_RCODE_NAME_ERROR,Microsoft.DnsClient.Commands.ResolveDnsName
+Resolve-DnsName nothere-7f3a.newton.test -Server 127.0.0.1 FAIL in 11087 ms: System.ComponentModel.Win32Exception | NativeErrorCode 9002 | nothere-7f3a.newton.test : DNS server failure | RCODE_SERVER_FAILURE,Microsoft.DnsClient.Commands.ResolveDnsName
+Resolve-DnsName nothere-7f3a.newton.test -Server 192.0.2.1 FAIL in 12020 ms: System.ComponentModel.Win32Exception | NativeErrorCode 1460 | nothere-7f3a.newton.test : This operation returned because the timeout period expired | ERROR_TIMEOUT,Microsoft.DnsClient.Commands.ResolveDnsName

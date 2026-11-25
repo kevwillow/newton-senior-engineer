@@ -99,6 +99,31 @@ def test_inventory_bad_platform(tmp_path, monkeypatch):
         server.load_inventory()
 
 
+def test_load_inventory_reads_the_path_it_is_given(tmp_path, monkeypatch):
+    """The doctor asks about the inventory it checks, not the default one."""
+    default = tmp_path / "default.toml"
+    default.write_text("[devices.quasar]\nplatform='openwrt'\nhost='192.0.2.1'\nuser='root'\n")
+    other = tmp_path / "other.toml"
+    other.write_text("[devices.pulsar]\nplatform='openwrt'\nhost='192.0.2.2'\nuser='root'\n")
+    monkeypatch.setenv("NEWTON_INVENTORY", str(default))
+    devices = server.load_inventory(path=other)
+    assert list(devices) == ["pulsar"], devices
+
+
+def test_load_inventory_without_a_path_keeps_the_default(tmp_path, monkeypatch):
+    """No path means the inventory of the environment, as before."""
+    default = tmp_path / "default.toml"
+    default.write_text("[devices.quasar]\nplatform='openwrt'\nhost='192.0.2.1'\nuser='root'\n")
+    monkeypatch.setenv("NEWTON_INVENTORY", str(default))
+    devices = server.load_inventory()
+    assert list(devices) == ["quasar"], devices
+
+
+def test_load_inventory_with_a_path_refuses_a_missing_file(tmp_path):
+    with pytest.raises(server.NewtonError, match="inventory file not found"):
+        server.load_inventory(path=tmp_path / "gone.toml")
+
+
 def test_password_file_mode_rejected(tmp_path, monkeypatch):
     password = tmp_path / "password"
     password.write_text("secret")

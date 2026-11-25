@@ -1,0 +1,22 @@
+
+
+Repadmin: running command /showbackup against full DC localhost
+
+
+
+Loc.USN                           Originating DSA  Org.USN  Org.Time/Date        Ver Attribute
+
+=======                           =============== ========= =============        === =========
+
+DC=ForestDnsZones,DC=build,DC=newton,DC=test
+
+DC=DomainDnsZones,DC=build,DC=newton,DC=test
+
+CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test
+
+CN=Configuration,DC=build,DC=newton,DC=test
+
+DC=build,DC=newton,DC=test
+
+
+

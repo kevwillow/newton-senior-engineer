@@ -132,3 +132,19 @@ def test_the_password_settings_the_account_cannot_read_are_access_denied() -> No
 
     assert result.status == model.Status.UNKNOWN
     assert result.reason == model.UnknownReason.ACCESS_DENIED
+
+
+def test_the_dns_zones_the_account_cannot_read_are_access_denied() -> None:
+    """The DNS partition is read the same way, and the checks of the
+    zones say the same thing."""
+    status = _search("search", UNREADABLE_ROOT)
+    document = measured.audit_json()
+    for query_id in ("dns_zones", "dns_ldap_srv"):
+        measured.set_query_status(
+            document, query_id, status["status"], status["error_code"]
+        )
+
+    for check_id in ("AD-A-68a", "AD-A-68b", "AD-A-69a", "AD-A-69b"):
+        result = _run(check_id, document)
+        assert result.status == model.Status.UNKNOWN, check_id
+        assert result.reason == model.UnknownReason.ACCESS_DENIED, check_id

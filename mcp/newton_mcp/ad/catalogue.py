@@ -23,8 +23,8 @@ audit was allowed to see the data before the check runs:
 - ``required_attrs``: the attributes every readable object always has; a
   row without one of them makes the check UNKNOWN too.
 
-The checks live in the three modules under ``checks/`` (accounts,
-domain and ACL); ``CHECKS`` below joins them in that order.
+The checks live in the modules under ``checks/`` (accounts, domain, ACL
+and DNS); ``CHECKS`` below joins them in that order.
 """
 
 from __future__ import annotations
@@ -62,10 +62,12 @@ class Check:
 # class has to exist before their bodies run.
 from .checks import accounts as _accounts  # noqa: E402
 from .checks import acl as _acl  # noqa: E402
+from .checks import dns as _dns  # noqa: E402
 from .checks import domain as _domain  # noqa: E402
 
 CHECKS: list[Check] = [
     *_accounts.CHECKS,
     *_domain.CHECKS,
     *_acl.CHECKS,
+    *_dns.CHECKS,
 ]

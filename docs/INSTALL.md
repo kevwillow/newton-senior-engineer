@@ -522,7 +522,20 @@ sudo -u newton cat /var/lib/newton/.ssh/dc1-audit.pub > dc1-audit.pub
 sudo -u newton cat /var/lib/newton/.ssh/dc1-ops.pub > dc1-ops.pub
 ```
 
-**10b.** Print the two setup scripts, as yourself, from the same directory. For a Samba DC:
+**10b.** Optional first step: let Newton find the DCs. Give it the domain, the audit public key and, for the write
+commands, the operations public key (a different key; the same key twice is refused); it asks DNS for
+the domain controllers and the PDC emulator and prints the exact commands of 10b to 10c for each DC (it only prints,
+runs nothing and holds no credential):
+
+```sh
+/opt/newton/scripts/newton-ad-discover --domain ad.example.com --platform samba --pubkey dc1-audit.pub --write --ops-pubkey dc1-ops.pub --ou 'OU=Staff,DC=ad,DC=example,DC=com'
+```
+DNS answers are untrusted: check the list against your own DCs before you run a printed command. It skips names that are
+not plain host names inside the domain and says why; with `--write` it prints the PDC emulator first. If DNS has no
+records it says so and exits non-zero. Use the manual commands below when you prefer them, or when discovery cannot
+name the PDC emulator.
+
+**10b (manual).** Print the two setup scripts, as yourself, from the same directory. For a Samba DC:
 
 ```sh
 /opt/newton/scripts/newton-ad-setup samba --domain ad.example.com --pubkey dc1-audit.pub --device dc1 --host 192.0.2.21 > dc1-audit-setup.sh
@@ -584,6 +597,30 @@ emulator's write entry). Type the passphrase you typed on every DC of the domain
 sudo -u newton /usr/local/bin/newton-ad-setup approval-key dc1-ops
 ```
 The fingerprint it prints must equal the one each DC printed.
+
+**10g.** Check what you added. This reads the inventory, the keys, the pinned host keys and the recorded fingerprint on
+this machine only and contacts no DC. It lists every entry that is inconsistent (a DC with an audit entry but no write
+entry, a `key_file` or `known_hosts` that is still a placeholder, a key with the wrong owner or mode, a host key that
+is not pinned, a missing approval fingerprint), each with the command that fixes it. It exits 0 when nothing is wrong:
+
+```sh
+sudo -u newton /usr/local/bin/newton-doctor ad
+```
+An inventory Newton itself refuses to load is a finding too: this check asks Newton's own inventory loader, so a
+refusal (a device name or a platform it does not accept, an AD entry without a valid host, user or port, a bad `auth`,
+`profile` or `proxy_command`, a `key_file` or `known_hosts` that is not a path, an entry of another platform without a
+`known_hosts` file) is named in the loader's own words: Newton loads no device from that inventory, so the run exits 1.
+
+Two things it cannot judge, so it says so instead of guessing. A DC whose audit entry gives an IP address and whose
+write entry gives a name cannot be paired without resolving a name, which this check never does: it lists every write
+entry of that domain whose address is of the other kind (IP versus name), paired with an audit entry or not, and you
+must give both entries of a DC the same host text. A DC is reported as missing its write entry only when every write
+entry of its domain gives an address of the same kind (IP versus name) as its audit entry. That run exits 3. And while
+the inventory does not load, the check says nothing about a pairing at all: it does not call a domain that has audit
+entries only an audit-only domain, nor a write entry without an audit entry one without, but that the pairing cannot be
+judged until the inventory loads. That run exits 1, because the refusal itself is a finding.
+
+It cannot see what each DC printed, so it shows the recorded fingerprint for you to compare with those.
 
 ## 11. A client machine for client checks and scans (optional)
 

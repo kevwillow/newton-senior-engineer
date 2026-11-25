@@ -1,0 +1,157 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-13T16:15:23.6533645Z
+schema before : objectVersion 91
+  ms-LAPS-Password : absent
+  ms-LAPS-PasswordExpirationTime : absent
+  ms-LAPS-EncryptedPassword : absent
+  ms-LAPS-EncryptedPasswordHistory : absent
+  ms-LAPS-EncryptedDSRMPassword : absent
+  ms-LAPS-EncryptedDSRMPasswordHistory : absent
+  ms-Mcs-AdmPwd : absent
+  computer mayContain msLAPS-*: 
+  BeginProcessing started
+  Creating LDAP binding to specified domain controller 'localhost'
+  Port not specified - will default to 389
+  Successfully created LDAP binding
+  Verifying that current machine is AD domain-joined
+  Success: current machine is domain-joined to 'NBUILD'
+  Running on a domain controller - verifying that the current process is elevated
+  Success: current process is elevated
+  Calling DC-locator to locate a DC in the  domain
+  DC-locator succeeded:
+  Name:BDC1.build.newton.test Address:\\192.0.2.41 AddressType:1 DomainGuid:00000000-0000-0000-0000-0000000000d1 DomainDnsName:build.newton.test ForestDnsName:build.newton.test Flags:0xe007f3fd DcSiteName:Default-First-Site-Name ClientSiteName:Default-First-Site-Name 
+  Binding to domain controller BDC1.build.newton.test
+  Bound LDAP connection to schema FSMO BDC1.build.newton.test
+  Successfully bound to domain controller:
+   DC: BDC1.build.newton.test
+   DC functional level: 10
+   Domain info:
+     Domain DNS name: build.newton.test
+     Domain NC: DC=build,DC=newton,DC=test
+     Domain functional level: 10
+   Forest info:
+     Forest DNS name: build.newton.test
+     Forest NC: DC=build,DC=newton,DC=test
+     Config NC: CN=Configuration,DC=build,DC=newton,DC=test
+     Schema NC: CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test
+     Forest functional level: 10
+  BeginProcessing completed
+  
+  ProcessRecord started
+  Invoking schemaUpdateNow on DC
+  Successfully invoked schemaUpdateNow on DC
+  
+  Issuing LDAP search request for 'CN=ms-LAPS-Password,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  Did not find the 'CN=ms-LAPS-Password,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test' schema attribute in AD
+  Adding the 'ms-LAPS-Password' schema attribute to the AD schema.
+  Adding new schema attribute: 'CN=ms-LAPS-Password,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  Successfully added new schema attribute: 'CN=ms-LAPS-Password,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  
+  Issuing LDAP search request for 'CN=ms-LAPS-PasswordExpirationTime,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  Did not find the 'CN=ms-LAPS-PasswordExpirationTime,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test' schema attribute in AD
+  Adding the 'ms-LAPS-PasswordExpirationTime' schema attribute to the AD schema.
+  Adding new schema attribute: 'CN=ms-LAPS-PasswordExpirationTime,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  Successfully added new schema attribute: 'CN=ms-LAPS-PasswordExpirationTime,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  
+  Issuing LDAP search request for 'CN=ms-LAPS-EncryptedPassword,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  Did not find the 'CN=ms-LAPS-EncryptedPassword,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test' schema attribute in AD
+  Adding the 'ms-LAPS-EncryptedPassword' schema attribute to the AD schema.
+  Adding new schema attribute: 'CN=ms-LAPS-EncryptedPassword,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  Successfully added new schema attribute: 'CN=ms-LAPS-EncryptedPassword,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  
+  Issuing LDAP search request for 'CN=ms-LAPS-EncryptedPasswordHistory,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  Did not find the 'CN=ms-LAPS-EncryptedPasswordHistory,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test' schema attribute in AD
+  Adding the 'ms-LAPS-EncryptedPasswordHistory' schema attribute to the AD schema.
+  Adding new schema attribute: 'CN=ms-LAPS-EncryptedPasswordHistory,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  Successfully added new schema attribute: 'CN=ms-LAPS-EncryptedPasswordHistory,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  
+  Issuing LDAP search request for 'CN=ms-LAPS-EncryptedDSRMPassword,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  Did not find the 'CN=ms-LAPS-EncryptedDSRMPassword,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test' schema attribute in AD
+  Adding the 'ms-LAPS-EncryptedDSRMPassword' schema attribute to the AD schema.
+  Adding new schema attribute: 'CN=ms-LAPS-EncryptedDSRMPassword,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  Successfully added new schema attribute: 'CN=ms-LAPS-EncryptedDSRMPassword,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  
+  Issuing LDAP search request for 'CN=ms-LAPS-EncryptedDSRMPasswordHistory,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  Did not find the 'CN=ms-LAPS-EncryptedDSRMPasswordHistory,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test' schema attribute in AD
+  Adding the 'ms-LAPS-EncryptedDSRMPasswordHistory' schema attribute to the AD schema.
+  Adding new schema attribute: 'CN=ms-LAPS-EncryptedDSRMPasswordHistory,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  Successfully added new schema attribute: 'CN=ms-LAPS-EncryptedDSRMPasswordHistory,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  
+  Issuing LDAP search request for 'CN=ms-LAPS-CurrentPasswordVersion,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  Did not find the 'CN=ms-LAPS-CurrentPasswordVersion,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test' schema attribute in AD
+  Adding the 'ms-LAPS-CurrentPasswordVersion' schema attribute to the AD schema.
+  Adding new schema attribute: 'CN=ms-LAPS-CurrentPasswordVersion,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  Successfully added new schema attribute: 'CN=ms-LAPS-CurrentPasswordVersion,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  
+  Issuing LDAP search request for 'CN=ms-LAPS-Encrypted-Password-Attributes,CN=Extended-Rights,CN=Configuration,DC=build,DC=newton,DC=test'
+  Did not find 'CN=ms-LAPS-Encrypted-Password-Attributes,CN=Extended-Rights,CN=Configuration,DC=build,DC=newton,DC=test' extended right AD
+  Did not find the 'CN=ms-LAPS-Encrypted-Password-Attributes,CN=Extended-Rights,CN=Configuration,DC=build,DC=newton,DC=test' extended right in AD
+  Adding the 'ms-LAPS-Encrypted-Password-Attributes' extended right to AD.
+  Adding new extended right: 'CN=ms-LAPS-Encrypted-Password-Attributes,CN=Extended-Rights,CN=Configuration,DC=build,DC=newton,DC=test'
+  Successfully added new extended right: 'CN=ms-LAPS-Encrypted-Password-Attributes,CN=Extended-Rights,CN=Configuration,DC=build,DC=newton,DC=test'
+  
+  Invoking schemaUpdateNow on DC
+  Successfully invoked schemaUpdateNow on DC
+  
+  Querying existing mayContain attribute for the 'CN=computer,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test' classSchema
+  Issuing LDAP search request for 'CN=computer,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  Got LDAP response for 'CN=computer,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  The 'CN=computer,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test' classSchema has the following mayContains:
+    msSFU30Name
+    nisMapName
+    msSFU30NisDomain
+    msSFU30Aliases
+  The 'computer' classSchema is missing the following mayContain: msLAPS-PasswordExpirationTime
+  The 'computer' classSchema is missing the following mayContain: msLAPS-Password
+  The 'computer' classSchema is missing the following mayContain: msLAPS-EncryptedPassword
+  The 'computer' classSchema is missing the following mayContain: msLAPS-EncryptedPasswordHistory
+  The 'computer' classSchema is missing the following mayContain: msLAPS-EncryptedDSRMPassword
+  The 'computer' classSchema is missing the following mayContain: msLAPS-EncryptedDSRMPasswordHistory
+  The 'computer' classSchema is missing the following mayContain: msLAPS-CurrentPasswordVersion
+  The 'computer' classSchema is missing 7 out of 7 LAPS mayContains
+  Updating the mayContain attribute on the 'computer' class schema attribute in the AD schema.
+  Modifying mayContain on: 'CN=computer,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  Successfully modified mayContain on: 'CN=computer,CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test'
+  
+  Invoking schemaUpdateNow on DC
+  Successfully invoked schemaUpdateNow on DC
+  
+  ProcessRecord completed
+  
+  EndProcessing started
+  EndProcessing completed
+  
+Update-LapsADSchema returned in 1016 ms
+schema after : objectVersion 91
+  ms-LAPS-Password : present, lDAPDisplayName msLAPS-Password, schemaIDGUID e95aa6f5-1f87-4e83-a213-ff09e5941996
+  ms-LAPS-PasswordExpirationTime : present, lDAPDisplayName msLAPS-PasswordExpirationTime, schemaIDGUID 9b5c1e57-ff56-4f14-9bd2-aa657d0390a9
+  ms-LAPS-EncryptedPassword : present, lDAPDisplayName msLAPS-EncryptedPassword, schemaIDGUID 3d0be8e4-b268-46b9-9a2a-de2301fa5cae
+  ms-LAPS-EncryptedPasswordHistory : present, lDAPDisplayName msLAPS-EncryptedPasswordHistory, schemaIDGUID ec250db9-15d4-4886-9e93-68f8a7d9df38
+  ms-LAPS-EncryptedDSRMPassword : present, lDAPDisplayName msLAPS-EncryptedDSRMPassword, schemaIDGUID 7fcdfb83-6396-457f-a518-d0b4dc0944e9
+  ms-LAPS-EncryptedDSRMPasswordHistory : present, lDAPDisplayName msLAPS-EncryptedDSRMPasswordHistory, schemaIDGUID 292d652a-ba0e-48e7-988d-10150df64436
+  ms-Mcs-AdmPwd : absent
+  computer mayContain msLAPS-*: msLAPS-CurrentPasswordVersion, msLAPS-EncryptedDSRMPassword, msLAPS-EncryptedDSRMPasswordHistory, msLAPS-EncryptedPassword, msLAPS-EncryptedPasswordHistory, msLAPS-Password, msLAPS-PasswordExpirationTime
+Set-LapsADComputerSelfPermission: OU=Domain Controllers,DC=build,DC=newton,DC=test
+
+
+Name              : Domain Controllers
+DistinguishedName : OU=Domain Controllers,DC=build,DC=newton,DC=test
+
+
+
+
+OU ACEs for SELF:
+  NT AUTHORITY\SELF | ReadProperty, WriteProperty, ExtendedRight | Allow | ObjectType f3531ec6-6330-4f8e-8d39-7a671fbac605 () | InheritanceType Descendents | InheritedObjectType bf967a86-0de6-11d0-a285-00aa003049e2 | IsInherited False
+  NT AUTHORITY\SELF | ReadProperty, WriteProperty | Allow | ObjectType 9b5c1e57-ff56-4f14-9bd2-aa657d0390a9 (msLAPS-PasswordExpirationTime) | InheritanceType Descendents | InheritedObjectType bf967a86-0de6-11d0-a285-00aa003049e2 | IsInherited False
+  NT AUTHORITY\SELF | WriteProperty | Allow | ObjectType e95aa6f5-1f87-4e83-a213-ff09e5941996 (msLAPS-Password) | InheritanceType Descendents | InheritedObjectType bf967a86-0de6-11d0-a285-00aa003049e2 | IsInherited False
+  NT AUTHORITY\SELF | Self | Allow | ObjectType 9b026da6-0d3c-465c-8bee-5199d7165cba () | InheritanceType Descendents | InheritedObjectType bf967a86-0de6-11d0-a285-00aa003049e2 | IsInherited True
+  NT AUTHORITY\SELF | WriteProperty | Allow | ObjectType ea1b7b93-5e48-46d5-bc6c-4df4fda78a35 () | InheritanceType Descendents | InheritedObjectType bf967a86-0de6-11d0-a285-00aa003049e2 | IsInherited True
+  NT AUTHORITY\SELF | ReadProperty, WriteProperty | Allow | ObjectType 3f78c3e5-f79a-46bd-a0b8-9d18116ddc79 () | InheritanceType All | InheritedObjectType 00000000-0000-0000-0000-000000000000 | IsInherited True
+  NT AUTHORITY\SELF | ReadProperty, WriteProperty, ExtendedRight | Allow | ObjectType 91e647de-d96f-4b70-9557-d63ff4f3ccd8 () | InheritanceType All | InheritedObjectType 00000000-0000-0000-0000-000000000000 | IsInherited True
+Remove-ADGroupMember 'Enterprise Admins' newton-build: ok
+Remove-ADGroupMember 'Schema Admins' newton-build: ok
+Get-ADPrincipalGroupMembership after: Administrators, Domain Admins, Domain Users
+  Domain Admins members: Administrator, newton-build
+  Enterprise Admins members: Administrator
+  Schema Admins members: Administrator
+task end 2026-11-13T16:15:26.4965072Z

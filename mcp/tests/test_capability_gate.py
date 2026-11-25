@@ -26,6 +26,7 @@ DEVICE_TOOLS = {
     "newton_abort_change",
     "newton_grant_off",
     "newton_plan_tier",
+    "newton_plan_ad_forward",
     "newton_guided_audit",
     "newton_plan_scan",
     "newton_run_scan",
@@ -43,6 +44,9 @@ NO_DEVICE_TOOLS = {
     "newton_list_tiers",
     "newton_guided_recommend",
     "newton_ad_list_checks",
+    "newton_ad_build_plan",
+    "newton_ad_build_run",
+    "newton_ad_build_status",
 }
 
 TOOL_KWARGS: dict[str, dict[str, Any]] = {
@@ -64,6 +68,7 @@ TOOL_KWARGS: dict[str, dict[str, Any]] = {
     "newton_abort_change": {"device": "vy1", "session_id": "0" * 32},
     "newton_grant_off": {"device": "vy1"},
     "newton_plan_tier": {"device": "vy1", "tier": "standard"},
+    "newton_plan_ad_forward": {"device": "vy1", "domain": "corp.example.com", "dc_addresses": ["192.0.2.10"]},
     "newton_guided_audit": {"device": "vy1"},
     "newton_plan_scan": {"device": "vy1", "kind": "inside", "profile": "quick", "interface": "lan"},
     "newton_run_scan": {"device": "vy1", "request_id": "0" * 32},
@@ -85,6 +90,7 @@ DEVICE_METHOD_TOOLS = {
     "plan": "newton_plan_change",
     "plan_undo": "newton_plan_undo",
     "plan_tier": "newton_plan_tier",
+    "plan_ad_forward": "newton_plan_ad_forward",
     "apply": "newton_apply_change",
     "confirm": "newton_confirm_change",
     "status": "newton_change_status",
@@ -274,6 +280,9 @@ def test_mv1_3_03_openwrt_capabilities_and_device_lookup_are_unchanged(
         "newton_ad_apply_change",
         "newton_ad_change_status",
         "newton_ad_abort_change",
+        "newton_ad_build_plan",
+        "newton_ad_build_run",
+        "newton_ad_build_status",
     }
 
     service = server.NewtonService()

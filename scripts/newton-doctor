@@ -173,6 +173,50 @@ declare -A ROOT_SOCKET_WHY=(
 )
 EXPECTED_MCP_RULE='(newton) NOPASSWD: /usr/local/bin/newton-mcp ""'
 
+# `newton-doctor ad`: a read-only check of the Active Directory entries of the
+# inventory, run as the newton account (it owns the keys and the inventory):
+#   sudo -u newton /usr/local/bin/newton-doctor ad
+# It reads local files only, contacts no host and needs no --router.  The
+# checks live in newton_mcp/ad/doctor.py.  Exit codes: 0 clean, 1 at least
+# one FAIL, 3 nothing failed but something could not be judged, 2 usage or
+# the wrong account.
+run_ad_check() {
+	if (( $# )); then
+		printf 'usage: newton-doctor ad\n' >&2
+		exit 2
+	fi
+	local py inventory state setup_command code_dir
+	local -a expect=()
+	if (( NEWTON_DOCTOR_SEAMS )); then
+		code_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+		if [[ -x $code_dir/mcp/.venv/bin/python ]]; then
+			py=$code_dir/mcp/.venv/bin/python
+		else
+			py=python3
+		fi
+		if [[ -n $ROOT ]]; then
+			inventory=$INVENTORY
+			state=$NEWTON_DIR/state
+		else
+			inventory=${NEWTON_INVENTORY:-$HOME/.config/newton/devices.toml}
+			state=${NEWTON_STATE_DIR:-$HOME/.local/state/newton}
+		fi
+		setup_command=$code_dir/scripts/newton-ad-setup
+		PYTHONPATH=$code_dir/mcp${PYTHONPATH:+:$PYTHONPATH} "$py" -m newton_mcp.ad.doctor \
+			--inventory "$inventory" --state-dir "$state" --setup-command "$setup_command"
+		exit $?
+	fi
+	# the installed copy: the installed code, the installed paths, and only as newton
+	exec /opt/newton/venv/bin/python -I -m newton_mcp.ad.doctor \
+		--inventory /var/lib/newton/devices.toml --state-dir /var/lib/newton/state \
+		--setup-command /opt/newton/scripts/newton-ad-setup --expect-user newton
+}
+
+if [[ ${1:-} == ad ]]; then
+	shift
+	run_ad_check "$@"
+fi
+
 usage() {
 	printf 'usage: %s --router user@host [--router user@host]... [--device NAME]...\n' "${0##*/}" >&2
 	exit 2

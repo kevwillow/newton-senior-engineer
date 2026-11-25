@@ -1834,6 +1834,87 @@ def test_approve_launcher_requires_one_id_and_preserves_validated_sudo_user(tmp_
     assert "valid non-root SUDO_USER" in rejected.stderr
 
 
+def _approve_launcher(tmp_path):
+    fake_id = tmp_path / "id"
+    make_executable(
+        fake_id,
+        "#!/bin/sh\n"
+        "if [ \"${2:-}\" = newton ]; then echo 4242; else echo \"${FAKE_UID:-4242}\"; fi\n",
+    )
+    fake_env = tmp_path / "env"
+    make_executable(fake_env, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+    launcher = tmp_path / "newton-approve"
+    text = launcher_text("approve_launcher_tmp").replace(
+        "/usr/bin/id", str(fake_id)
+    ).replace("/usr/bin/env", str(fake_env))
+    make_executable(launcher, text)
+    env = os.environ.copy()
+    env["SUDO_USER"] = "labuser"
+    return launcher, env
+
+
+PLAN = "0123456789abcdef0123456789abcdef"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["ad-build", PLAN],
+        *(["ad-build-stage", PLAN, stage] for stage in ("0", "2", "7", "9", "10")),
+    ],
+)
+def test_approve_launcher_forwards_the_ad_build_subcommands_exactly(tmp_path, args):
+    # PLAN-1.5 task 8: the installed newton-approve takes the two AD build
+    # subcommands (`ad-build <plan>`, `ad-build-stage <plan> <stage>`) and
+    # forwards exactly those words to newton-approve, nothing more.
+    launcher, env = _approve_launcher(tmp_path)
+    good = run(launcher, *args, env=env)
+    assert good.returncode == 0, good.stderr
+    assert good.stdout.splitlines()[-1 - len(args):] == [
+        "/opt/newton/venv/bin/newton-approve",
+        *args,
+    ]
+    assert good.stdout.splitlines()[:7] == [
+        "-i",
+        "NEWTON_HOME=/opt/newton",
+        "NEWTON_STATE_DIR=/var/lib/newton/state",
+        "NEWTON_INVENTORY=/var/lib/newton/devices.toml",
+        "HOME=/var/lib/newton",
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SUDO_USER=labuser",
+    ]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["ad-build"],
+        ["ad-build", "BAD"],
+        ["ad-build", PLAN.upper()],
+        ["ad-build", PLAN + "0"],
+        ["ad-build", PLAN, "2"],
+        ["ad-build-stage"],
+        ["ad-build-stage", PLAN],
+        ["ad-build-stage", PLAN, "11"],
+        ["ad-build-stage", PLAN, "02"],
+        ["ad-build-stage", PLAN, "-1"],
+        ["ad-build-stage", PLAN, ""],
+        ["ad-build-stage", PLAN, "2", "3"],
+        ["ad-build-stage", "BAD", "2"],
+        ["ad-build-stage", "2", PLAN],
+        ["ad-build-other", PLAN],
+        ["AD-BUILD", PLAN],
+        [PLAN, PLAN],
+        ["--", PLAN],
+    ],
+)
+def test_approve_launcher_refuses_any_other_form_of_the_ad_build_subcommands(tmp_path, args):
+    launcher, env = _approve_launcher(tmp_path)
+    refused = run(launcher, *args, env=env)
+    assert refused.returncode == 2, (args, refused.stdout)
+    assert "newton-approve" not in refused.stdout
+
+
 @pytest.fixture
 def doctor_env(tmp_path):
     fake_root = tmp_path / "root"

@@ -159,7 +159,8 @@ def test_approve_launcher_preview_names_the_ad_change_form(tmp_path):
     assert (
         "Would install launcher: /usr/local/bin/newton-approve "
         "(root:root 0755; clean environment; newton user only; "
-        "one 32-hex argument, or ad-change and one 32-hex argument)"
+        "one 32-hex argument, ad-change or ad-build and one 32-hex argument, "
+        "or ad-build-stage, one 32-hex argument and a stage 0-10)"
     ) in result.stdout
 
 

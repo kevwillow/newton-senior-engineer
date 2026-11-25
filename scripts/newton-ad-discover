@@ -1,0 +1,92 @@
+#!/bin/sh
+# newton-ad-discover -- find the domain controllers of a domain from DNS and print the
+# newton-ad-setup commands for them.
+#
+# usage:
+#   newton-ad-discover --domain DNS --platform windows|samba --pubkey FILE
+#                      [--write --ops-pubkey FILE --ou DN [--ou DN ...]] [--resolver IP] [--preflight]
+#                      [--fetch-host-keys]
+#
+# It asks DNS for the SRV records _ldap._tcp.dc._msdcs.<domain> (every DC) and
+# _ldap._tcp.pdc._msdcs.<domain> (the PDC emulator), then for the A and AAAA records of the
+# hosts it found, and prints the DCs (the PDC marked), a read inventory entry and the
+# newton-ad-setup command for each DC. With --write it also prints the
+# "newton-ad-setup write" commands, the PDC first and every other DC with
+# --domain-device <the PDC's device>. The write commands take the operations key
+# (--ops-pubkey), never the audit key; the two must be different keys.
+#
+# With --preflight it also checks every DC it found, from the host this script runs on:
+# it connects to the ports 22 (SSH), 389 (LDAP) and 88 (Kerberos) and closes each
+# connection at once (nothing is ever sent on them), and it reads the clock of the DC
+# with one SNTP query on UDP 123. The reply of that query is used only when it is exactly
+# 48 bytes long (up to 512 bytes are read, and any length other than 48 is refused), comes
+# from a time server whose clock is synchronized, carries a transmit timestamp that is not
+# all zero, and carries the transmit timestamp of the request in its originate timestamp.
+# It prints every port as open, closed or timeout, the clock skew of the DC in seconds,
+# and FAIL when the clock is more than 300 s off (the Kerberos default) or when the LDAP
+# port 389 or the Kerberos port 88 of the DC is not open (closed or timed out); a DC whose
+# time cannot be read is UNKNOWN unless one of those ports fails it (FAIL wins). The SSH
+# port 22 is only reported: the setup script
+# installs SSH later, so a closed port 22 does not fail the run.
+#
+# With --fetch-host-keys it also asks ssh-keyscan for the host keys of every DC it found
+# (one scan per DC: ssh-keyscan -T 5 -t ed25519,ecdsa,rsa -p 22 <host>, run with an
+# argument list, never through a shell, and with a timeout) and prints, for every key, its
+# SHA256 fingerprint (the way ssh-keygen -lf prints it) and the ready known_hosts line, so
+# the owner does not have to pin the host keys by hand. A scan travels over the network, so
+# it can be spoofed: compare every fingerprint with the one the DC shows at its console
+# (ssh-keygen -lf on the DC's host key) before you trust it. A DC whose scan fails, or that
+# has no key, gets a plain line and keeps the placeholder known_hosts line. A DC with more
+# valid host keys than the cap of 8 gets a printed note that the list was cut
+# (the fingerprints and the ready known_hosts lines are then not all of them).
+#
+# --resolver is for the lookups of the discovery only: ssh-keyscan resolves the host name
+# of a scan with the system resolver, so the scan can land on another address than the one
+# DNS gave, which is one more reason to compare every fingerprint at the DC.
+#
+# It prints and never runs a setup command, holds no credential and writes nothing; the
+# only thing it ever runs is ssh-keyscan, and only with --fetch-host-keys. DNS answers are
+# untrusted: every host name must be plain letters, digits and hyphens, end in the domain and
+# be at most 253 characters, at most 32 DCs are used, anything else is skipped with a printed
+# reason, and every printed value is shell-quoted. The work one host can cost is bounded too:
+# at most 64 A and AAAA records are read for it and at most 8 scope-id refusals are printed
+# for it, and what was cut is said out loud. Check the list against your own DCs before
+# you run a command; the SSH host key pinning in the setup still protects the logins. The
+# preflight probes the addresses DNS gave in the same run, before you have read that list: run
+# this tool without --preflight first, check the list against your own DCs, and only then run it
+# again with --preflight. That second run reads DNS again:
+# the first list does not limit what the second run probes, and the addresses it probes are
+# the ones that run prints. Nothing is pinned: this tool adds no trust.
+#
+# exit codes: 0 the commands were printed; 1 the preflight failed (--preflight: a DC whose
+# LDAP port 389 or Kerberos port 88 is not open, a DC whose clock is more than 300 s off,
+# or a DC whose clock could not be read; it comes before 6);
+# 2 the arguments or the public key were refused; 3 DNS has no domain controller records for
+# the domain (NXDOMAIN or no answer); 4 DNS did not answer in time (or no resolver is
+# configured); 5 records were found but none is usable (all were refused); 6 --write was asked
+# and the PDC emulator cannot be named (no record, or not in the DC list): the read commands
+# are printed, the write commands are not.
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(dirname -- "$SCRIPT_DIR")
+
+if [ -n "${NEWTON_PYTHON:-}" ]; then
+	PYTHON="$NEWTON_PYTHON"
+elif [ -x "$ROOT/mcp/.venv/bin/python" ]; then
+	PYTHON="$ROOT/mcp/.venv/bin/python"
+elif [ -x "$ROOT/venv/bin/python" ]; then
+	# the installed code root: /opt/newton/venv
+	PYTHON="$ROOT/venv/bin/python"
+else
+	PYTHON=python3
+fi
+
+PYTHONPATH="$ROOT/mcp${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+
+# The printed commands name the sibling launcher, wherever Newton is installed.
+NEWTON_AD_SETUP="${NEWTON_AD_SETUP:-$SCRIPT_DIR/newton-ad-setup}"
+export NEWTON_AD_SETUP
+
+exec "$PYTHON" -m newton_mcp.ad.discover "$@"

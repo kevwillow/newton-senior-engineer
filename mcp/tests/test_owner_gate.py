@@ -27,6 +27,7 @@ from newton_mcp import owner_verify
 from noinstall_answers import data
 from noinstall_fakes import FakeRouter
 from test_inventory_noinstall import (
+    BUILD_PLAN_TOOLS,
     DEVICE_FREE_TOOLS,
     NO_INSTALL_ALLOWED,
     no_install_message,
@@ -94,7 +95,7 @@ def test_every_other_device_tool_still_refuses_a_no_install_device(
 
     monkeypatch.setattr(subprocess, "run", guarded_run)
 
-    assert set(TOOL_CALLS) | DEVICE_FREE_TOOLS == set(server.TOOL_NAMES)
+    assert set(TOOL_CALLS) | DEVICE_FREE_TOOLS | BUILD_PLAN_TOOLS == set(server.TOOL_NAMES)
     for tool, args in TOOL_CALLS.items():
         if tool in NO_INSTALL_ALLOWED:
             continue

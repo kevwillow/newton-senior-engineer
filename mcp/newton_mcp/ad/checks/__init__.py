@@ -14,6 +14,7 @@ from __future__ import annotations
 from .. import catalogue as _catalogue  # noqa: F401  (breaks the cycle)
 from . import accounts  # noqa: F401
 from . import acl  # noqa: F401
+from . import dns  # noqa: F401
 from . import domain  # noqa: F401
 
-__all__ = ["accounts", "acl", "domain"]
+__all__ = ["accounts", "acl", "dns", "domain"]

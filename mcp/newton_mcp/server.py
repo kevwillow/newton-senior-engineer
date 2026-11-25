@@ -40,6 +40,7 @@ from . import grants as _grants
 from . import inventory_file as _inventory_file
 from . import probes as _probes
 from . import redact as _redact
+from . import ad_forward as _ad_forward
 from . import scans as _scans
 from . import ssh_path as _ssh_path
 from . import tiers as _tiers
@@ -87,6 +88,7 @@ TOOL_NAMES = {
     "newton_grant_off",
     "newton_list_tiers",
     "newton_plan_tier",
+    "newton_plan_ad_forward",
     "newton_guided_recommend",
     "newton_guided_audit",
     "newton_plan_scan",
@@ -99,6 +101,9 @@ TOOL_NAMES = {
     "newton_ad_apply_change",
     "newton_ad_change_status",
     "newton_ad_abort_change",
+    "newton_ad_build_plan",
+    "newton_ad_build_run",
+    "newton_ad_build_status",
 }
 
 # The tools that answer for a no-install device (ADR-021 point 1).  The read
@@ -117,6 +122,7 @@ NO_INSTALL_TOOLS = frozenset(
         "newton_list_devices",
         "newton_read",
         "newton_plan_change",
+        "newton_plan_ad_forward",
         "newton_apply_change",
         "newton_change_status",
         "newton_abort_change",
@@ -421,8 +427,19 @@ def inventory_file_path() -> Path:
     return Path(os.environ.get("NEWTON_INVENTORY", "~/.config/newton/devices.toml")).expanduser()
 
 
-def load_inventory() -> dict[str, Device]:
-    path = inventory_file_path()
+def load_inventory(path: Path | None = None) -> dict[str, Device]:
+    """Load the devices of the inventory.
+
+    ``path`` is the inventory to read.  ``None`` (the default) keeps the
+    behaviour of always: the inventory of ``NEWTON_INVENTORY``, or
+    ``~/.config/newton/devices.toml``.  A caller that holds an
+    inventory of its own (the doctor reads the one it checks) passes it
+    here, so the loader judges that file and not another one.
+    """
+    if path is None:
+        path = inventory_file_path()
+    else:
+        path = Path(path).expanduser()
     try:
         path.lstat()
     except OSError:
@@ -1532,6 +1549,33 @@ class NewtonService:
         except _AdWriteError as exc:
             raise NewtonError(str(exc)) from None
         return _ad_render.applied(result)
+
+    def ad_build_plan(self, inputs: Any, mode: str = "scripts") -> dict[str, Any]:
+        """Plan one AD build (PLAN-1.5 task 8)."""
+        from .ad.build import tools as _build_tools
+
+        try:
+            return _build_tools.plan_build(inputs, mode)
+        except _build_tools.BuildToolError as exc:
+            raise NewtonError(str(exc)) from None
+
+    def ad_build_run(self, plan_id: str) -> dict[str, Any]:
+        """Drive one approved AD build until it stops."""
+        from .ad.build import tools as _build_tools
+
+        try:
+            return _build_tools.run(plan_id)
+        except _build_tools.BuildToolError as exc:
+            raise NewtonError(str(exc)) from None
+
+    def ad_build_status(self, plan_id: str) -> dict[str, Any]:
+        """The run state of one AD build, as the runner last wrote it."""
+        from .ad.build import tools as _build_tools
+
+        try:
+            return _build_tools.status(plan_id)
+        except _build_tools.BuildToolError as exc:
+            raise NewtonError(str(exc)) from None
 
     def ad_abort_change(self, device: str, plan_id: str) -> dict[str, Any]:
         """Abort one change: the domain controller puts the before-image back."""
@@ -2868,6 +2912,67 @@ class NewtonService:
                 )
         return result
 
+    def plan_ad_forward(
+        self,
+        device_name: str,
+        domain: Any,
+        dc_addresses: Any,
+        timeout_s: int | None = None,
+        *,
+        explanation: Any = None,
+        owner_confirmed_in_chat: Any = None,
+    ) -> dict[str, Any]:
+        """Plan the dnsmasq change that forwards an AD domain to its DCs.
+
+        Newton builds the lines (``ad_forward``) from the validated domain
+        and addresses and from what the router holds now, then hands them
+        to the same ``plan()`` every change uses: the seal, the explanation,
+        the approval and the device-side rollback are not new code, and a
+        no-install router is planned by the no-install flow as before.
+
+        Order: the inputs are checked and the owner's yes is required before
+        the router is read.  A router that already holds every line is a
+        no-op: nothing is staged.
+        """
+        self.device_for("newton_plan_ad_forward", device_name)
+        try:
+            name = _ad_forward.validate_domain(domain)
+            addresses = _ad_forward.validate_dcs(dc_addresses)
+        except _ad_forward.ForwardError as exc:
+            raise NewtonError(str(exc)) from exc
+        if owner_confirmed_in_chat is not True:
+            raise NewtonError(OWNER_CONFIRMATION_HELP)
+        try:
+            text = _scans.router_text(
+                self.read(device_name, "uci show dhcp"), "dhcp configuration"
+            )
+            forward = _ad_forward.build_plan(name, addresses, text)
+        except (_scans.ScanError, _ad_forward.ForwardError) as exc:
+            raise NewtonError(str(exc)) from exc
+        shown = {
+            "domain": forward.domain,
+            "dc_addresses": forward.dc_addresses,
+            "lines": forward.lines,
+            "already_present": forward.already_present,
+            "notes": forward.notes,
+            # The router's own entries for this domain are device data: they
+            # come back in an envelope, never in a note (hard rule 9).
+            "existing_servers": _envelope.envelope(
+                f"{device_name}:uci show dhcp", "\n".join(forward.existing_servers)
+            ),
+        }
+        if forward.noop:
+            return {"result": "no_change", "message": forward.message, "ad_forward": shown}
+        planned = self.plan(
+            device_name,
+            "\n".join(forward.lines) + "\n",
+            timeout_s,
+            _tool="newton_plan_ad_forward",
+            explanation=explanation,
+            owner_confirmed_in_chat=owner_confirmed_in_chat,
+        )
+        return {**planned, "ad_forward": shown}
+
     def _refuse_failing_fw4(self, device_name: str) -> None:
         """Refuse plan() up front when `fw4 check` on the router already fails.
 
@@ -4150,8 +4255,10 @@ def call_tool(tool: str, device: str, fn: Any) -> dict[str, Any]:
 # The envelope rewrites the text it holds, so what a tool shows can
 # differ from the router.  The whole note is in the server instructions and
 # in the description of every tool that returns router text verbatim (a
-# read, a diff, a change log); the other tools carry a short pointer to it,
-# so every session's tool list does not carry 23 copies.
+# read, a diff, a change log): ten of the twenty-eight tools.  Seventeen
+# more carry a short pointer to it and one (newton_list_devices) carries
+# neither, so every session's tool list does not carry twenty-eight copies
+# of the note.  newton_plan_ad_forward is one of the ten.
 ENVELOPE_REWRITE_NOTE = (
     "Newton rewrites that text, so it can differ from the router's own: control bytes and "
     "ANSI escapes are removed, every `</` is shown as `< /`, and a line that names Newton or "
@@ -4223,8 +4330,7 @@ _READ_DESCRIPTION = _envelope_docstring(
     "On a no-install router only the reads its web API allows are available\n"
     "(config, status, logs, leases, ping, traceroute, nslookup); the others are\n"
     "refused by name and say what installed access would be needed.\n"
-    "Returns the result inside an untrusted-device-data envelope (see server\n"
-    "description)."
+    "Returns the result inside an untrusted-device-data envelope."
 )
 
 
@@ -4702,8 +4808,7 @@ def newton_plan_scan(
     "nmap scan only validated IPv4 addresses and open TCP ports are "
     "retained; raw nmap output, hostnames, MACs, vendors, and OS data are "
     "discarded. For a wifi survey the router scans with its own radio and "
-    "only channel counts and look-alike network names are kept; every name "
-    "comes back inside an untrusted-device-data envelope and no BSSID is "
+    "only channel counts and look-alike network names are kept; no BSSID is "
     "kept at all."
 ))
 def newton_run_scan(device: str, request_id: str) -> dict[str, Any]:
@@ -4714,46 +4819,40 @@ def newton_run_scan(device: str, request_id: str) -> dict[str, Any]:
 
 @_off_loop_tool(description=_envelope_pointer_docstring(
     "List the three hardening tiers with their batch count, probe lines, "
-    "placeholder names, and the controls the planner will NEVER carry. A "
-    "tier is a hardening level, not a device profile; it is applied batch "
-    "by batch in order, each batch is its own plan / approval / apply / "
-    "confirm cycle, so a failed batch rolls back only itself while "
-    "earlier batches stay applied. Controls in `skipped` are lab-bound "
-    "(name a lab-only interface, zone or address) or conditional (need a "
-    "package the router does not have) and are never planned. Resolve the "
-    "placeholder values for the chosen batch with the existing read tool "
-    "(e.g. `uci get`) before calling `newton_plan_tier`. A placeholder like "
-    "`{fw_wan_zone}` wants the UCI section id (e.g. `@zone[1]` or a named "
-    "section id), NOT the zone's name option (`wan`)."
+    "placeholder names and the controls the planner will NEVER carry "
+    "(`skipped`: lab-bound, naming a lab-only interface, zone or address, "
+    "or conditional on a package the router lacks). A tier is a hardening "
+    "level, not a device profile, applied batch by batch in order: each "
+    "batch is its own plan / approval / apply / confirm cycle, so a failed "
+    "batch rolls back only itself while earlier batches stay applied. A "
+    "placeholder like `{fw_wan_zone}` wants the UCI section id (e.g. "
+    "`@zone[1]` or a named section id), NOT the zone's name option (`wan`). "
+    "Resolve values with the read tool before `newton_plan_tier`."
 ))
 def newton_list_tiers() -> dict[str, Any]:
     return call_tool("newton_list_tiers", "-", lambda s: s.list_tiers())
 
 
 @_off_loop_tool(description=_envelope_pointer_docstring(
-    "Plan ONE batch of a hardening tier. The full tier exceeds the "
-    "router's sealed-probe cap, so it is split into ordered batches that "
-    "each fit; pick the batch with `batch_index` (0-based). A placeholder "
-    "like `{fw_wan_zone}` wants the UCI section id (e.g. `@zone[1]` or a "
-    "named section id), NOT the zone's name option (`wan`). `values` "
-    "resolves the {name} placeholders of the chosen batch (use the "
-    "existing read tool to look them up first). Fail closed: a missing / "
-    "unknown / malformed value name is refused BEFORE any device call, "
-    "and the error message never echoes a rejected value. The router's "
-    "diff + section facts go through the same plan path `newton_plan_"
-    "change` uses, so the seal, ADR-010 touched checks on the RESOLVED "
-    "lines, approval gate, leash and prod-profile decisions all apply. "
-    "When `requires_approval` is true, the user runs `sudo -u newton "
-    "/usr/local/bin/newton-approve <session_id>` and then calls "
-    "`newton_apply_change` -- there is no tier-apply tool. `timeout_s` "
-    "is 60..600 (default 90). The returned `batches_total` tells the "
-    "agent how many more batches the tier has; `skipped` lists every "
-    "control the planner never carries for this tier. Like `newton_plan_change`, "
-    "it requires `owner_confirmed_in_chat=true` (explain the batch to the owner "
-    "and get their yes first) and an `explanation` object (intent, steps with "
-    "exactly one short reason per change line of the batch, expect with 1-8 "
-    "claims, risk); a wrong steps count is refused and the error says how many "
-    "change lines the batch has. Every change needs the owner's approval."
+    "Plan ONE batch of a hardening tier (`batch_index`, 0-based; "
+    "`batches_total` says how many there are). A placeholder like "
+    "`{fw_wan_zone}` wants the UCI section id (e.g. `@zone[1]` or a named "
+    "section id), NOT the zone's name option (`wan`). `values` resolves the "
+    "batch's {name} placeholders (look them up with the read tool first). "
+    "Fail closed: a missing, unknown or malformed name is refused BEFORE "
+    "any device call, and a rejected value is never echoed. The batch takes "
+    "the `newton_plan_change` path, so its seal, touched checks on the "
+    "RESOLVED lines, approval gate, leash and prod-profile decisions all "
+    "apply. Every change needs the owner's approval: when "
+    "`requires_approval` is true, the user runs `sudo -u newton "
+    "/usr/local/bin/newton-approve <session_id>`, then call "
+    "`newton_apply_change` (there is no tier-apply tool). `timeout_s` is "
+    "60..600 (default 90). `skipped` lists every control the planner never "
+    "carries. Like `newton_plan_change`, it requires "
+    "`owner_confirmed_in_chat=true` (explain, and get their yes first) and "
+    "an `explanation` (intent, steps with exactly one reason per change "
+    "line, expect with 1-8 claims, risk); a wrong steps count is refused "
+    "with the right count."
 ))
 def newton_plan_tier(
     device: str,
@@ -4774,12 +4873,35 @@ def newton_plan_tier(
     )
 
 
+@_off_loop_tool(description=_envelope_docstring(
+    "Plan the dnsmasq forward of an AD DNS domain to 1-8 private DC IPs: a line "
+    "per DC, one more if rebind protection is on, less those present. Like "
+    "`newton_plan_change`: needs `owner_confirmed_in_chat=true` and an "
+    "`explanation`, one step per line."
+))
+def newton_plan_ad_forward(
+    device: str,
+    domain: str,
+    dc_addresses: list[str],
+    timeout_s: int | None = None,
+    explanation: dict[str, Any] | None = None,
+    owner_confirmed_in_chat: bool | None = None,
+) -> dict[str, Any]:
+    return call_tool(
+        "newton_plan_ad_forward",
+        device,
+        lambda s: s.plan_ad_forward(
+            device, domain, dc_addresses, timeout_s,
+            explanation=explanation, owner_confirmed_in_chat=owner_confirmed_in_chat,
+        ),
+    )
+
+
 _GUIDED_AUDIT_DESCRIPTION = _envelope_docstring(
     "Run the fixed six-item guided read-only audit for one device: listeners, "
     "services, port forwards, UPnP, Wi-Fi settings, and DHCP devices. Every "
     "router access delegates to the same validated newton_read path; one "
-    "failed read is recorded and does not stop the remaining reads. Device "
-    "stdout and stderr stay inside untrusted-device-data envelopes, and the "
+    "failed read is recorded and does not stop the remaining reads. The "
     "result distinguishes successful non-empty, successful empty, and failed "
     "reads. `result` is `ok` when every read worked, `partial` when some "
     "failed and `failed` when all did; `not_checked` lists each failed command "
@@ -4828,8 +4950,7 @@ def newton_list_getters(device: str) -> dict[str, Any]:
     "catalogue runs. Every call collects the whole directory again: `checks` "
     "narrows the report, not the collection, so ask for the checks you need in "
     "one call rather than one call per check. The report holds the counts and the result of every "
-    "check; every directory string in it is inside an untrusted-device-data "
-    "envelope (see server description). The report is bounded: a check "
+    "check. The report is bounded: a check "
     f"lists at most {_ad_audit_render.MAX_FINDINGS_PER_CHECK} findings and "
     f"a finding at most {_ad_audit_render.MAX_OBJECTS_PER_FINDING} objects, "
     "with the full counts in findings_total and objects_total, and the "
@@ -4870,7 +4991,7 @@ def newton_ad_list_checks() -> dict[str, Any]:
 
 
 @_off_loop_tool(description=_envelope_pointer_docstring(
-    "Plan one Active Directory change in one domain (SPEC-1.4). The device "
+    "Plan one Active Directory change in one domain. The device "
     "is the write entry that stands for the domain: the DCs of that domain "
     "name it in their `ad_domain`. `verb` is one of "
     "uac-clear, disable, enable, enc-types, unlock, member-add, "
@@ -4897,8 +5018,7 @@ def newton_ad_list_checks() -> dict[str, Any]:
     "directory with mode 0600 and the owner approves it out of band with "
     "`sudo -u newton /usr/local/bin/newton-approve ad-change <plan_id>`; "
     "this tool never approves "
-    "anything. Every string the directory gave is inside an "
-    "untrusted-device-data envelope."
+    "anything."
 ))
 def newton_ad_plan_change(
     device: str,
@@ -4915,7 +5035,7 @@ def newton_ad_plan_change(
 
 @_off_loop_tool(description=_envelope_pointer_docstring(
     "Apply one approved Active Directory change and verify it on every DC "
-    "of its domain with a write entry in the inventory (SPEC-1.4). A DC of "
+    "of its domain with a write entry in the inventory. A DC of "
     "the domain without a write entry is never read. The device is the "
     "write entry that stands "
     "for the domain. The plan must be approved already: the "
@@ -4989,8 +5109,7 @@ def newton_ad_plan_change(
     "on the old PDC, that domain controller's undo can write the earlier "
     "before-image over the new change): the owner plans the reverse "
     "change. An unlock has no undo and is written at once. The receipt is written under the state directory and never "
-    "holds the password of a user-create. Every string the directory gave "
-    "is inside an untrusted-device-data envelope."
+    "holds the password of a user-create."
 ))
 def newton_ad_apply_change(device: str, plan_id: str) -> dict[str, Any]:
     return call_tool(
@@ -5010,9 +5129,7 @@ def newton_ad_apply_change(device: str, plan_id: str) -> dict[str, Any]:
     "so. When the DC holds no record of a change whose receipt is still "
     "pending (Newton stopped before it recorded the DC's answer), the result "
     "says no apply of the plan had reached the DC's write when it was read, "
-    "unless an apply sent before Newton stopped is still on its way. "
-    "Every string the "
-    "directory gave is inside an untrusted-device-data envelope."
+    "unless an apply sent before Newton stopped is still on its way."
 ))
 def newton_ad_change_status(device: str, plan_id: str) -> dict[str, Any]:
     return call_tool(
@@ -5043,14 +5160,53 @@ def newton_ad_change_status(device: str, plan_id: str) -> dict[str, Any]:
     "still armed is put back by the DC itself at or after its undo_at, when "
     "it next runs the undo, except a new user whose objectGUID the DC did not "
     "record (an abort after an apply_unknown), which the DC leaves in place "
-    "and records undo_failed with its DN in conflicts. Every string "
-    "the directory gave is inside an untrusted-device-data envelope."
+    "and records undo_failed with its DN in conflicts."
 ))
 def newton_ad_abort_change(device: str, plan_id: str) -> dict[str, Any]:
     return call_tool(
         "newton_ad_abort_change",
         device,
         lambda s: s.ad_abort_change(device, plan_id),
+    )
+
+
+@_off_loop_tool(description=_envelope_pointer_docstring(
+    "Plan an Active Directory build: a new Windows Server 2025 forest root, "
+    "optionally with a replica DC. `inputs` (domain, servers, baseline, "
+    "accepted findings) is grammar-checked; free text is refused. Mode "
+    "\"scripts\" (default) returns the plan and the stages the owner runs: "
+    "no bootstrap, nothing stored. Mode \"agent\" (only when the owner "
+    "opted in) stores the plan and writes each server's bootstrap under the "
+    "state directory for the owner to run; the owner then runs the command "
+    "in `next`. Approves nothing, contacts no server."
+))
+def newton_ad_build_plan(inputs: dict[str, Any], mode: str = "scripts") -> dict[str, Any]:
+    return call_tool(
+        "newton_ad_build_plan", "-", lambda s: s.ad_build_plan(inputs, mode)
+    )
+
+
+@_off_loop_tool(description=_envelope_pointer_docstring(
+    "Run an approved Active Directory build until done, until an "
+    "irreversible stage needs the owner's approval, or until a deviation. "
+    "The checkpoint is taken and verified before such a stage; `next` names "
+    "the owner's approval command, then call again. "
+    "A stopped run goes on only through a resume plan the owner approves. "
+    "One build runs at a time."
+))
+def newton_ad_build_run(plan_id: str) -> dict[str, Any]:
+    return call_tool(
+        "newton_ad_build_run", "-", lambda s: s.ad_build_run(plan_id)
+    )
+
+
+@_off_loop_tool(description=_envelope_pointer_docstring(
+    "One AD build's state as the runner last wrote it: state, stage, stop "
+    "reason, checkpoints awaiting approval, last receipts. No server contact."
+))
+def newton_ad_build_status(plan_id: str) -> dict[str, Any]:
+    return call_tool(
+        "newton_ad_build_status", "-", lambda s: s.ad_build_status(plan_id)
     )
 
 
@@ -5078,30 +5234,22 @@ def newton_get_state(
 
 
 @_off_loop_tool(description=_envelope_pointer_docstring(
-    "Run the guided-setup interview (ROADMAP item 7, v2). With no "
-    "answers, returns the fourteen vendor-neutral interview questions "
-    "(typed: enum, multi_enum, port_list, host_lists). With answers, "
-    "returns a `guided_setup_report` whose controls and statuses are "
-    "DERIVED from the real manifest and tier files; the report never "
-    "echoes device text, never contacts a device, and only plans "
-    "(approval stays out-of-band per batch). Old v1 ids are still "
-    "accepted as aliases. The chosen tier is one of `standard`, "
-    "`hardened`, or `lockdown`. `answers` is an optional object whose "
-    "keys are question ids and whose values are validated against the "
-    "allowed set for each question (lists and dicts are accepted for "
-    "multi-enum, port-list and host-list questions); partial answers "
-    "are otherwise accepted and the unanswered ids are returned under "
-    "the report's `unanswered` key. The tool also returns `summary` "
-    "(one plain English line per answered question), `confirmation_id` "
-    "and `confirmed: false`: the agent should show the summary and ask "
-    "the owner `Is this right?`; a changed answer makes a new record. "
-    "The record is stored server-side for 24 h and logged for the audit "
-    "trail. It is NOT consent and nothing refuses on it (approval stays "
-    "per batch, out of band). Recommendations for gap / skipped / "
-    "audit-only controls carry the derived status (`gap`, `audit-only`, "
-    "`skipped`, or `plan-ready`) so the owner can see what the planner "
-    "would NEVER carry. No tool path, command, file, or device argument "
-    "is accepted."
+    "Run the guided-setup interview. With no answers, returns the fourteen "
+    "vendor-neutral questions (typed: enum, multi_enum, port_list, "
+    "host_lists). With answers (`answers`: an object keyed by question id, "
+    "each value checked against that question's allowed set; lists and "
+    "dicts for multi-enum, port-list and host-list; old v1 ids are aliases; "
+    "partial answers are accepted and `unanswered` lists the rest), returns "
+    "a `guided_setup_report` DERIVED from the real manifest and tier files, "
+    "with `summary` (one plain line per answer), `confirmation_id` and "
+    "`confirmed: false`. Show the summary and ask the owner `Is this right?`; "
+    "a changed answer makes a new record. The record is stored server-side "
+    "for 24 h and logged. It is NOT consent and nothing refuses on it. The "
+    "tier is `standard`, `hardened` or `lockdown`. A control's status is "
+    "`gap`, `audit-only`, `skipped` or `plan-ready`, so the owner sees what "
+    "the planner would NEVER carry. It only plans (approval stays "
+    "out-of-band per batch), never contacts a device, never echoes device "
+    "text, and takes no tool path, command, file or device argument."
 ))
 def newton_guided_recommend(
     answers: dict[str, Any] | None = None,

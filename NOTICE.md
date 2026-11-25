@@ -48,6 +48,13 @@ Files: `index.md`, `glossary.md`, `patterns.md`, `cheatsheet.md`, and chapters u
 - Obligations: credit Larry Peterson and Bruce Davie as the source authors; link the source; indicate that changes were made and the work is not endorsed by the original authors. CC BY 4.0 has no share-alike clause, but the attribution must travel with the files.
 - Note: some specific values (the cheatsheet MTU numbers and the ch06 fq_codel/cake notes) come from general knowledge, not the book.
 
+## 4. Python dependencies that are installed, not shipped
+
+Newton's own code depends on packages that are installed from PyPI and are not part of this repository; each keeps
+its own licence. `dnspython` (ISC licence, Copyright (C) Dnspython Contributors) is used only by
+`scripts/newton-ad-discover`; details in `mcp/newton_mcp/ad/THIRD_PARTY.md`. The other dependencies are the ones
+pinned in `mcp/uv.lock`.
+
 ## Licence texts shipped
 
 The repository follows the REUSE layout. Full texts of every licence it uses are under `LICENSES/`, named by SPDX identifier, and `REUSE.toml` assigns a licence and copyright holder to every file (`reuse lint` passes):

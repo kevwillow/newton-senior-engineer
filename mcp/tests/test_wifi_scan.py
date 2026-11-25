@@ -825,6 +825,7 @@ def test_wifi_adds_no_tool_name():
         "newton_grant_off",
         "newton_list_tiers",
         "newton_plan_tier",
+        "newton_plan_ad_forward",
         "newton_guided_recommend",
         "newton_guided_audit",
         "newton_plan_scan",
@@ -837,6 +838,9 @@ def test_wifi_adds_no_tool_name():
         "newton_ad_apply_change",
         "newton_ad_change_status",
         "newton_ad_abort_change",
+        "newton_ad_build_plan",
+        "newton_ad_build_run",
+        "newton_ad_build_status",
     }
 
 

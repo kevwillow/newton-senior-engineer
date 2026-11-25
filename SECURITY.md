@@ -30,6 +30,7 @@ Remove addresses and keys from everything you send. Reports are handled by the m
 - The installer and setup scripts: `scripts/newton-install`, `scripts/newton-bootstrap`, `scripts/newton-router-setup`, `scripts/newton-doctor`.
 - Approval enrolment: `newton-enrol` (`mcp/newton_mcp/enrol.py`).
 - The Active Directory write path: `mcp/newton_mcp/ad/write/` on the Newton host, the helpers it runs on a domain controller (`mcp/newton_mcp/ad/collector/write.ps1` on Windows, `mcp/newton_mcp/ad/collector/newton-ad-samba-write` on Samba), and the setup script `scripts/newton-ad-setup`.
+- The domain controller discovery script: `scripts/newton-ad-discover` (it reads untrusted DNS answers and prints setup commands).
 - The scan vantage scripts: `scripts/newton-vantage-setup`, `scripts/newton-vantage-run`, `scripts/newton-vantage-check`.
 - The serial console script: `scripts/newton-serial.py`.
 - The WAN-health service the setup tool installs on the router, where it runs as root and changes routes: `scripts/newton-wan-health.sh` and `scripts/newton-wan-health.init`.

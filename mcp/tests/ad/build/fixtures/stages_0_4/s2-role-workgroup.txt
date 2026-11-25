@@ -1,0 +1,8 @@
+task identity: bdc1\administrator | auth NTLM
+task start 2026-11-13T17:16:48.6446514Z
+cs: Name BDC1 | DomainRole 2 | PartOfDomain False | Domain WORKGROUP | Workgroup WORKGROUP
+ProductType: ServerNT
+NTDS Parameters: absent
+NTDS service: Stopped, Disabled
+Get-ADDomain: FAIL Microsoft.ActiveDirectory.Management.ADServerDownException: Unable to find a default server with Active Directory Web Services running.
+task end 2026-11-13T17:16:50.2283918Z

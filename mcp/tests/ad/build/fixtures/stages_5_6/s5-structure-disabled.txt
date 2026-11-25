@@ -1,0 +1,36 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-14T00:30:26.0151967Z
+admin secret file deleted: True
+domain: build.newton.test | DomainSID S-1-5-21-1000000001-1000000002-1000000003
+OU present: OU=IT,DC=build,DC=newton,DC=test
+OU present: OU=Servers,OU=IT,DC=build,DC=newton,DC=test
+OU present: OU=Staff,DC=build,DC=newton,DC=test
+group present: IT Admins
+group present: Staff Users
+owner admin present: owner-admin
+Add-ADGroupMember 512 owner-admin: ok
+Add-ADGroupMember 525 owner-admin: ok
+Set-ADAccountControl AccountNotDelegated: ok
+Set-ADDefaultDomainPasswordPolicy: ok
+machine account quota before: 10
+Set-ADObject ms-DS-MachineAccountQuota: ok
+machine account quota after: 0
+PSO present: Newton Tier 0 Admins
+Add-ADFineGrainedPasswordPolicySubject 512: ok
+built-in Administrator: disabled
+Add-ADGroupMember 525 Administrator: ok
+read-back:
+  OU OU=IT,DC=build,DC=newton,DC=test | Protected True
+  OU OU=Servers,OU=IT,DC=build,DC=newton,DC=test | Protected True
+  OU OU=Staff,DC=build,DC=newton,DC=test | Protected True
+  group IT Admins | Global | Security | CN=IT Admins,CN=Users,DC=build,DC=newton,DC=test
+  group Staff Users | Global | Security | CN=Staff Users,CN=Users,DC=build,DC=newton,DC=test
+  owner admin owner-admin | Enabled True | UPN owner-admin@build.newton.test | pwdLastSet 0 | CN=owner-admin,CN=Users,DC=build,DC=newton,DC=test
+  owner admin groups: Domain Admins (S-1-5-21-1000000001-1000000002-1000000003-512), Domain Users (S-1-5-21-1000000001-1000000002-1000000003-513), Protected Users (S-1-5-21-1000000001-1000000002-1000000003-525)
+  owner admin UAC 1048592 | NOT_DELEGATED True
+  password policy: MinPasswordLength 14 | PasswordHistoryCount 24 | MaxPasswordAge 365.00:00:00 | MinPasswordAge 1.00:00:00 | ComplexityEnabled True | ReversibleEncryptionEnabled False | LockoutThreshold 10 | LockoutDuration 00:15:00 | LockoutObservationWindow 00:15:00
+  PSO Newton Tier 0 Admins | Precedence 10 | MinPasswordLength 20 | PasswordHistoryCount 24 | MaxPasswordAge 365.00:00:00 | MinPasswordAge 1.00:00:00 | ComplexityEnabled True | ReversibleEncryptionEnabled False | LockoutThreshold 10 | LockoutDuration 00:15:00 | LockoutObservationWindow 00:15:00
+  PSO applies to: CN=Domain Admins,CN=Users,DC=build,DC=newton,DC=test
+  built-in Administrator Administrator (S-1-5-21-1000000001-1000000002-1000000003-500) | Enabled False | PasswordLastSet 2026-11-14T00:29:36.8776187Z
+  protected users: Administrator (S-1-5-21-1000000001-1000000002-1000000003-500) | member
+task end 2026-11-14T00:30:28.3047549Z

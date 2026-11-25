@@ -31,6 +31,7 @@ import pytest
 from newton_mcp.ad import catalogue, members, runner, wire
 from newton_mcp.ad.model import Status, UnknownReason
 
+import dns_spec
 import measured
 
 
@@ -92,8 +93,14 @@ def _declared(check: catalogue.Check) -> tuple[str, ...]:
 
 @functools.cache
 def _measured(name: str) -> wire.Document:
-    """The validated measured document, parsed once."""
-    return measured.parse(MEASURED[name]())
+    """The validated measured document, parsed once.
+
+    The DNS queries were never measured, so the measured documents hold
+    them as ``not_collected``; the spec-derived healthy DNS rows of
+    ``dns_spec`` stand in for them here, so the DNS checks are held to
+    the same sentinel, empty and denied rules as every other check.
+    """
+    return measured.parse(dns_spec.with_healthy_dns(MEASURED[name]()))
 
 
 def _with_query(

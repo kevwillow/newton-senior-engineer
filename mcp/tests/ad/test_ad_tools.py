@@ -369,7 +369,7 @@ def test_the_audit_uses_the_query_set_of_the_package() -> None:
     assert queryset.load().sha256 == AUDIT_FIXTURE_HASH
 
 
-AUDIT_FIXTURE_HASH = "f6a57d9647e829b61abdb74aa45a6256653d7b67674ebd3966bd931ddf069116"
+AUDIT_FIXTURE_HASH = "af3c0a66887bf9faa073710cd7ec6f669e702cb705edacf5cf3199faf28e39c0"
 
 
 def test_the_readme_counts_the_checks_and_every_one_runs_on_both_kinds_of_domain() -> None:

@@ -1,0 +1,35 @@
+task identity: build1\administrator | auth NTLM
+task start 2026-11-13T16:03:13.3485287Z
+before ip: 192.0.2.41/24 Manual gw 192.0.2.1
+Rename-Computer: The changes will take effect after you restart the computer BUILD1.
+Rename-Computer done in 214 ms
+The command completed successfully.
+w32tm /config exit 0
+
+AnnounceFlags: 5 (Local)
+Type: NTP (Local)
+NtpServer: 192.0.2.1,0x8 (Local)
+NtpServer (Local)
+w32tm done in 740 ms
+dns client: 192.0.2.1
+Install-WindowsFeature in 27818 ms: Success True RestartNeeded No ExitCode Success
+
+Name                  Success RestartNeeded
+----                  ------- -------------
+AD-Domain-Services       True         False
+RSAT                     True         False
+RSAT-AD-AdminCenter      True         False
+RSAT-AD-PowerShell       True         False
+RSAT-AD-Tools            True         False
+RSAT-ADDS                True         False
+RSAT-ADDS-Tools          True         False
+RSAT-ADLDS               True         False
+RSAT-Role-Tools          True         False
+Windows-Server-Backup    True         False
+
+
+
+after ip: 192.0.2.41/24 Manual gw 192.0.2.1
+task end 2026-11-13T16:03:43.6854675Z
+
+

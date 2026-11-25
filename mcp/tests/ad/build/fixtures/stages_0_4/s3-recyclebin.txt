@@ -1,0 +1,10 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-13T16:15:15.5432068Z
+token groups: NBUILD\Domain Admins, NBUILD\Enterprise Admins, NBUILD\Schema Admins
+before: EnabledScopes count 0 | FeatureScope ForestOrConfigurationSet | RequiredForestMode Windows2008R2Forest
+Enabling 'Recycle Bin Feature' on 'CN=Partitions,CN=Configuration,DC=build,DC=newton,DC=test' is an irreversible action! You will not be able to disable 'Recycle Bin Feature' on 'CN=Partitions,CN=Configuration,DC=build,DC=newton,DC=test' if you proceed.
+Enable-ADOptionalFeature returned in 326 ms
+after: EnabledScopes:
+  CN=Partitions,CN=Configuration,DC=build,DC=newton,DC=test
+msDS-EnabledFeature on Partitions: CN=Recycle Bin Feature,CN=Optional Features,CN=Directory Service,CN=Windows NT,CN=Services,CN=Configuration,DC=build,DC=newton,DC=test
+task end 2026-11-13T16:15:17.6747085Z

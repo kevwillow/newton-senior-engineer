@@ -1,0 +1,22 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-15T19:46:20.5008062Z
+Test-WSMan Kerberos: ProductVersion OS: 10.0.26100 SP: 0.0 Stack: 3.0
+before: CN=BDC2,CN=Computers,DC=build,DC=newton,DC=test | pwdLastSet 134392455248383064 | userAccountControl 4096 | primaryGroupID 515
+dsrm.bin deleted on BDC2: True
+remote identity: nbuild\newton-build | auth Kerberos
+Install-ADDSDomainController returned after 64 s
+
+
+Message        : You must restart this computer to complete the operation.
+                 
+Context        : DCPromo.General.4
+RebootRequired : True
+Status         : Success
+
+
+
+
+shutdown /r /t 10 on BDC2 exit 0
+Invoke-Command returned after 65 s
+after: CN=BDC2,OU=Domain Controllers,DC=build,DC=newton,DC=test | pwdLastSet 134392455248383064 | userAccountControl 532480 | primaryGroupID 516
+task end 2026-11-15T19:47:26.3513004Z

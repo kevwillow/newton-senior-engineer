@@ -1,0 +1,6 @@
+task identity: bdc2\newton-build | auth NTLM
+task start 2026-11-15T19:46:05.0000000Z
+cs: Name BDC2 | DomainRole 3 | PartOfDomain True | Domain build.newton.test
+network profile: DomainAuthenticated
+LastBootUpTime: 2026-11-15T19:45:52.0000000Z
+task end 2026-11-15T19:46:06.0000000Z

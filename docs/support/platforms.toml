@@ -185,9 +185,9 @@ scenarios = ["07-uplink-down"]
 
 [platforms.linux]
 label = "Linux hosts"
-release = "1.6"
+release = "1.7"
 undo = "timer"
-untested = ["Every shape: planned for 1.6, tested per network stack"]
+untested = ["Every shape: planned for 1.7, tested per network stack"]
 
 [[platforms.linux.shape]]
 id = "a"

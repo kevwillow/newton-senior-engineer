@@ -1,0 +1,27 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-14T00:46:52.6474784Z
+GPMC: Available
+Install-WindowsFeature GPMC: Success True RestartNeeded No ExitCode Success
+domain: build.newton.test | target DC=build,DC=newton,DC=test
+before: GPOs of the name: 0
+New-GPO: Newton Baseline 2026.11 Domain | Id 6f69f56c-9a1d-4c31-8875-5259df10338d
+Set-GPRegistryValue HKLM\System\CurrentControlSet\Control\Lsa\LmCompatibilityLevel = 5: ok
+Set-GPRegistryValue HKLM\System\CurrentControlSet\Control\Lsa\NoLMHash = 1: ok
+Set-GPRegistryValue HKLM\System\CurrentControlSet\Control\Lsa\MSV1_0\NTLMMinClientSec = 537395200: ok
+Set-GPRegistryValue HKLM\System\CurrentControlSet\Control\Lsa\MSV1_0\NTLMMinServerSec = 537395200: ok
+Set-GPRegistryValue HKLM\System\CurrentControlSet\Control\Lsa\RestrictAnonymousSAM = 1: ok
+Set-GPRegistryValue HKLM\System\CurrentControlSet\Control\Lsa\RestrictAnonymous = 1: ok
+Set-GPRegistryValue HKLM\System\CurrentControlSet\Services\LanmanWorkstation\Parameters\RequireSecuritySignature = 1: ok
+New-GPLink: Newton Baseline 2026.11 Domain | Target DC=build,DC=newton,DC=test | Enabled True | Order 2
+read-back:
+  GPO Newton Baseline 2026.11 Domain | Id 6f69f56c-9a1d-4c31-8875-5259df10338d | GpoStatus AllSettingsEnabled | Computer DSVersion 7 SysvolVersion 7 | User DSVersion 0 SysvolVersion 0
+  GPO value HKLM\System\CurrentControlSet\Control\Lsa\LmCompatibilityLevel = 5 | DWord | Set
+  GPO value HKLM\System\CurrentControlSet\Control\Lsa\NoLMHash = 1 | DWord | Set
+  GPO value HKLM\System\CurrentControlSet\Control\Lsa\MSV1_0\NTLMMinClientSec = 537395200 | DWord | Set
+  GPO value HKLM\System\CurrentControlSet\Control\Lsa\MSV1_0\NTLMMinServerSec = 537395200 | DWord | Set
+  GPO value HKLM\System\CurrentControlSet\Control\Lsa\RestrictAnonymousSAM = 1 | DWord | Set
+  GPO value HKLM\System\CurrentControlSet\Control\Lsa\RestrictAnonymous = 1 | DWord | Set
+  GPO value HKLM\System\CurrentControlSet\Services\LanmanWorkstation\Parameters\RequireSecuritySignature = 1 | DWord | Set
+  link Default Domain Policy | Enabled True | Enforced False | Order 1
+  link Newton Baseline 2026.11 Domain | Enabled True | Enforced False | Order 2
+task end 2026-11-14T00:47:21.9316806Z

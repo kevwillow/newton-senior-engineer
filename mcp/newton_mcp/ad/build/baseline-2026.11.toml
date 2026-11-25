@@ -1,0 +1,295 @@
+# The Newton AD build baseline 2026.11 (DESIGN-1.5 "Baseline", PLAN-1.5 task 6).
+#
+# One table per setting: the value, the options when there are options,
+# why (in Newton's own words), the source (a learn.microsoft.com page, or
+# a CIS Benchmark item cited by its number only; no CIS text is copied)
+# and the compatibility risk.  Stage 5 applies the settings whose target
+# is the domain's password policy, the fine-grained policy for admins,
+# Protected Users and the built-in Administrator; stage 6 the ones whose
+# target is a baseline GPO.  The helper (helper/build.ps1) holds the same
+# values compiled in, and test_build_baseline.py holds the two equal.
+
+version = "2026.11"
+
+[gpos.domain]
+name = "Newton Baseline 2026.11 Domain"
+link = "domain"
+
+[gpos.dc]
+name = "Newton Baseline 2026.11 Domain Controllers"
+link = "dc"
+
+# --- stage 5: the password policy of the domain -------------------------
+
+[settings.password-min-length]
+stage = 5
+target = "password-policy"
+field = "PasswordMinLength"
+value = "14"
+why = "Fourteen characters is the longest minimum the domain policy takes and makes guessing far slower."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/minimum-password-length"
+cis = "1.1.4"
+risk = "Users with short passwords must pick longer ones at their next change."
+
+[settings.password-history]
+stage = 5
+target = "password-policy"
+field = "PasswordHistory"
+value = "24"
+why = "Stops a user cycling back to an old password."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/enforce-password-history"
+cis = "1.1.1"
+risk = "None known."
+
+[settings.password-max-age]
+stage = 5
+target = "password-policy"
+field = "PasswordMaxAgeDays"
+value = "365"
+why = "A password still changes at least once a year, without the short forced cycles that push users to weak patterns."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/maximum-password-age"
+cis = "1.1.2"
+risk = "Service accounts with set passwords expire after a year unless they are managed accounts."
+
+[settings.password-min-age]
+stage = 5
+target = "password-policy"
+field = "PasswordMinAgeDays"
+value = "1"
+why = "Keeps the history from being emptied by many changes in a row."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/minimum-password-age"
+cis = "1.1.3"
+risk = "A user cannot change a password twice in one day without an admin."
+
+[settings.password-complexity]
+stage = 5
+target = "password-policy"
+field = "PasswordComplexity"
+value = "True"
+why = "Requires mixed character classes, so single dictionary words are refused."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/password-must-meet-complexity-requirements"
+cis = "1.1.5"
+risk = "None known."
+
+[settings.password-reversible]
+stage = 5
+target = "password-policy"
+field = "PasswordReversible"
+value = "False"
+why = "Passwords are never stored in a form that can be turned back into the password."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/store-passwords-using-reversible-encryption"
+cis = "1.1.7"
+risk = "Old CHAP or digest authentication that needs it stops working."
+
+[settings.lockout-threshold]
+stage = 5
+target = "password-policy"
+field = "LockoutThreshold"
+value = "10"
+why = "Ten bad tries lock an account: enough for typing errors, few enough to stop online guessing (the Windows security baseline value)."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/account-lockout-threshold"
+risk = "Anyone who knows an account name can lock it out on purpose."
+
+[settings.lockout-duration]
+stage = 5
+target = "password-policy"
+field = "LockoutMinutes"
+value = "15"
+why = "A locked account unlocks itself after a quarter of an hour."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/account-lockout-duration"
+cis = "1.2.1"
+risk = "A locked user waits 15 minutes or calls an admin."
+
+[settings.lockout-window]
+stage = 5
+target = "password-policy"
+field = "LockoutWindowMinutes"
+value = "15"
+why = "Bad tries are counted over 15 minutes, no longer than the lockout itself."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/reset-account-lockout-counter-after"
+cis = "1.2.4"
+risk = "None known."
+
+# --- stage 5: the fine-grained policy for admins ------------------------
+
+[settings.admin-pso-name]
+stage = 5
+target = "admin-pso"
+field = "PsoName"
+value = "Newton Tier 0 Admins"
+why = "One named fine-grained policy that applies to Domain Admins."
+source = "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/get-started/adac/fine-grained-password-policies"
+risk = "None known."
+
+[settings.admin-pso-precedence]
+stage = 5
+target = "admin-pso"
+field = "PsoPrecedence"
+value = "10"
+why = "A low precedence number, so this policy wins over any later one for the same admins."
+source = "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/get-started/adac/fine-grained-password-policies"
+risk = "None known."
+
+[settings.admin-pso-min-length]
+stage = 5
+target = "admin-pso"
+field = "PsoMinLength"
+value = "20"
+why = "Admin passwords are longer than user ones; the rest of the policy is the domain's."
+source = "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/get-started/adac/fine-grained-password-policies"
+risk = "Domain Admins pick 20-character passwords."
+
+# --- stage 5: accounts ---------------------------------------------------
+
+[settings.protected-users]
+stage = 5
+target = "protected-users"
+field = "ProtectedUsers"
+value = "True"
+why = "The owner's admin account joins Protected Users: no NTLM, no DES or RC4, no delegation, no cached credentials."
+source = "https://learn.microsoft.com/en-us/windows-server/security/credentials-protection-and-management/protected-users-security-group"
+risk = "The admin cannot sign in where only NTLM works, or when no DC answers."
+
+[settings.administrator]
+stage = 5
+target = "builtin-administrator"
+field = "AdministratorOption"
+options = ["random-password", "disabled"]
+why = "The built-in Administrator (RID 500) is a known name: it gets a long random password made in the task and shown to nobody, or it is disabled."
+source = "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/appendix-d--securing-built-in-administrator-accounts-in-active-directory"
+risk = "Disabled, the account is no longer a break-glass login; use the owner's admin account or DSRM."
+
+# --- stage 6: the GPO linked to the domain ------------------------------
+
+[settings.lm-compatibility]
+stage = 6
+target = "gpo:domain"
+key = 'HKLM\System\CurrentControlSet\Control\Lsa'
+name = "LmCompatibilityLevel"
+value = "5"
+why = "Only NTLMv2 is sent and accepted; LM and NTLMv1 are refused."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-lan-manager-authentication-level"
+risk = "Devices that only speak LM or NTLMv1 (very old NAS boxes, printers) cannot authenticate."
+
+[settings.no-lm-hash]
+stage = 6
+target = "gpo:domain"
+key = 'HKLM\System\CurrentControlSet\Control\Lsa'
+name = "NoLMHash"
+value = "1"
+why = "No LM hash is stored at the next password change."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-do-not-store-lan-manager-hash-value-on-next-password-change"
+risk = "None for current Windows."
+
+[settings.ntlm-min-client-sec]
+stage = 6
+target = "gpo:domain"
+key = 'HKLM\System\CurrentControlSet\Control\Lsa\MSV1_0'
+name = "NTLMMinClientSec"
+value = "537395200"
+why = "An NTLM client session needs NTLMv2 session security and 128-bit encryption (both options, 0x20080000)."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-minimum-session-security-for-ntlm-ssp-based-including-secure-rpc-clients"
+risk = "Old servers that cannot negotiate it are unreachable over NTLM."
+
+[settings.ntlm-min-server-sec]
+stage = 6
+target = "gpo:domain"
+key = 'HKLM\System\CurrentControlSet\Control\Lsa\MSV1_0'
+name = "NTLMMinServerSec"
+value = "537395200"
+why = "An NTLM server session needs NTLMv2 session security and 128-bit encryption (both options, 0x20080000)."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-minimum-session-security-for-ntlm-ssp-based-including-secure-rpc-servers"
+risk = "Old clients that cannot negotiate it cannot connect over NTLM."
+
+[settings.restrict-anonymous-sam]
+stage = 6
+target = "gpo:domain"
+key = 'HKLM\System\CurrentControlSet\Control\Lsa'
+name = "RestrictAnonymousSAM"
+value = "1"
+why = "Anonymous sessions cannot list the accounts of a member computer."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-access-do-not-allow-anonymous-enumeration-of-sam-accounts"
+risk = "None known; it is the Windows default."
+
+[settings.restrict-anonymous]
+stage = 6
+target = "gpo:domain"
+key = 'HKLM\System\CurrentControlSet\Control\Lsa'
+name = "RestrictAnonymous"
+value = "1"
+why = "Anonymous sessions cannot list the accounts and shares of a member computer."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-access-do-not-allow-anonymous-enumeration-of-sam-accounts-and-shares"
+risk = "One-way trusts and anonymous share listing stop working."
+
+[settings.smb-client-signing]
+stage = 6
+target = "gpo:domain"
+key = 'HKLM\System\CurrentControlSet\Services\LanmanWorkstation\Parameters'
+name = "RequireSecuritySignature"
+value = "1"
+why = "The SMB client always signs, so SMB sessions cannot be relayed or changed in flight."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/microsoft-network-client-digitally-sign-communications-always"
+risk = "SMB servers that cannot sign (old NAS boxes) are unreachable."
+
+# --- stage 6: the GPO linked to the Domain Controllers OU ---------------
+
+[settings.smb-server-signing]
+stage = 6
+target = "gpo:dc"
+key = 'HKLM\System\CurrentControlSet\Services\LanmanServer\Parameters'
+name = "RequireSecuritySignature"
+value = "1"
+why = "The DCs only accept signed SMB, which protects SYSVOL and NETLOGON traffic."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/microsoft-network-server-digitally-sign-communications-always"
+risk = "SMB clients that cannot sign cannot read SYSVOL."
+
+[settings.ldap-server-signing]
+stage = 6
+target = "gpo:dc"
+key = 'HKLM\System\CurrentControlSet\Services\NTDS\Parameters'
+name = "LDAPServerIntegrity"
+value = "2"
+why = "The DCs require LDAP signing (2, require signature), so simple binds in clear text over 389 are refused."
+source = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/domain-controller-ldap-server-signing-requirements"
+risk = "Applications that bind without signing on port 389 (old scanners, appliances) fail until they use LDAPS or signing."
+
+# The Windows LAPS policy of the DCs.  The values are not ones of the
+# security template: the export of the security policy (the area secedit
+# exports) never holds them, so the read of the registry of stage 6
+# proves them and the secedit check asks for the values of the template
+# only.  The page of the source names the three of them and the
+# requirement of the encryption: the domain must run at the domain
+# functional level 2016 or later.
+
+[settings.laps-backup-directory]
+stage = 6
+target = "gpo:dc"
+key = 'HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\LAPS'
+name = "BackupDirectory"
+value = "2"
+security_template = false
+why = "The DCs keep the password of their local administrator in the directory, where Windows LAPS manages it."
+source = "https://learn.microsoft.com/en-us/windows-server/identity/laps/laps-management-policy-settings"
+risk = "A DC that cannot reach the directory keeps its old local administrator password until the next processing."
+
+[settings.laps-password-encryption]
+stage = 6
+target = "gpo:dc"
+key = 'HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\LAPS'
+name = "ADPasswordEncryptionEnabled"
+value = "1"
+security_template = false
+why = "The password the DCs write to the directory is encrypted there, and only the domain controllers can read it."
+source = "https://learn.microsoft.com/en-us/windows-server/identity/laps/laps-management-policy-settings"
+risk = "A domain below the functional level 2016 does not encrypt the password it writes, so the build refuses it."
+
+[settings.laps-dsrm-backup]
+stage = 6
+target = "gpo:dc"
+key = 'HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\LAPS'
+name = "ADBackupDSRMPassword"
+value = "1"
+security_template = false
+why = "The DCs back up the password of their DSRM account in the directory, so a lost domain controller is recoverable."
+source = "https://learn.microsoft.com/en-us/windows-server/identity/laps/laps-management-policy-settings"
+risk = "A DC whose DSRM password is not in the directory is lost with its own administrator password."

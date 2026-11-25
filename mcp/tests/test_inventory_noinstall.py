@@ -55,6 +55,7 @@ TOOL_CALLS: dict[str, tuple] = {
     "newton_plan_scan": ("lab-r1", "inside", "quick", "lan"),
     "newton_run_scan": ("lab-r1", "0" * 32),
     "newton_plan_tier": ("lab-r1", "standard", 0),
+    "newton_plan_ad_forward": ("lab-r1", "corp.example.com", ["192.0.2.10"]),
     "newton_guided_audit": ("lab-r1",),
     "newton_list_getters": ("lab-r1",),
     "newton_get_state": ("lab-r1", "running_config"),
@@ -71,6 +72,14 @@ DEVICE_FREE_TOOLS = {
     "newton_list_tiers",
     "newton_guided_recommend",
     "newton_ad_list_checks",
+}
+
+# The AD build tools (PLAN-1.5 task 8) take a build plan or its id, never
+# a device of the inventory, so no inventory device reaches them.
+BUILD_PLAN_TOOLS = {
+    "newton_ad_build_plan",
+    "newton_ad_build_run",
+    "newton_ad_build_status",
 }
 
 # The tools that may work on a no-install device.  The read goes to
@@ -322,7 +331,7 @@ def test_every_other_device_tool_refuses_a_no_install_device(
 
     monkeypatch.setattr(subprocess, "run", guarded_run)
 
-    assert set(TOOL_CALLS) | DEVICE_FREE_TOOLS == set(server.TOOL_NAMES)
+    assert set(TOOL_CALLS) | DEVICE_FREE_TOOLS | BUILD_PLAN_TOOLS == set(server.TOOL_NAMES)
     for tool, args in TOOL_CALLS.items():
         if tool in NO_INSTALL_ALLOWED:
             continue

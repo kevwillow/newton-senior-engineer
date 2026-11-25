@@ -1,0 +1,9 @@
+wbadmin 1.0 - Backup command-line tool
+(C) Copyright Microsoft Corporation. All rights reserved.
+
+Backup time: 11/14/2026 7:19 AM 
+Backup target: 1394/USB Disk labeled B:
+Version identifier: 11/14/2026-07:19
+Can recover: Volume(s), File(s), Application(s), System State
+Snapshot ID: {2947caea-5068-4137-94ef-505142d23356}
+

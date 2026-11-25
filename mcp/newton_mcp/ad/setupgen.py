@@ -223,17 +223,39 @@ def windows_script(
     if DEVICE_RE.fullmatch(device) is None:
         raise SetupError("the device name must be [a-z][a-z0-9-]{0,31}")
     pubkey = validate_public_key(pubkey)
+    return fill_windows(
+        windows_template(), domain=domain, device=device, host=host, pubkey=pubkey
+    )
 
+
+#: The placeholders a template of the Windows collector setup leaves for
+#: its fill: the values of one host.  The AD build helper fills the same
+#: placeholders from the plan bytes (``build.ps1``, ``Get-NewtonSetupFill``).
+FILL_FIELDS: tuple[str, ...] = (
+    "@@DOMAIN@@",
+    "@@DEVICE@@",
+    "@@HOST@@",
+    "@@KEYLINE@@",
+    "@@KEYSHA@@",
+)
+
+
+def windows_template(*, build: bool = False) -> str:
+    """The template of the Windows collector setup: the script with the
+    values of one host left as the placeholders of ``FILL_FIELDS``; the
+    three collector files are in it already.
+
+    ``build`` is the variant the AD build's stage 8 runs (the maintainer's decision on
+    open point 34, 2026-11-16): there is no sshd restart step, because the
+    build helper restarts sshd once, after both setups.  Everything else is
+    the owner's script, byte for byte.
+    """
     collector = COLLECTOR_PATH.read_bytes()
     queries = QUERIES_PATH.read_bytes()
     forbidden_bytes = forbidden.dump_json()
 
     parts = [
-        _HEADER.replace("@@DOMAIN@@", domain)
-        .replace("@@DEVICE@@", device)
-        .replace("@@HOST@@", host)
-        .replace("@@AUDIT_NAME@@", AUDIT_NAME)
-        .replace("@@OPS_NAME@@", OPS_NAME),
+        _HEADER.replace("@@AUDIT_NAME@@", AUDIT_NAME).replace("@@OPS_NAME@@", OPS_NAME),
         _STEP_ACCOUNT,
         _STEP_FILES.replace("@@COLLECTOR@@", _b64_literal("collectorB64", collector))
         .replace("@@QUERIES@@", _b64_literal("queriesB64", queries))
@@ -242,15 +264,31 @@ def windows_script(
         .replace("@@HASH_QUERIES@@", _sha256(queries))
         .replace("@@HASH_FORBIDDEN@@", _sha256(forbidden_bytes)),
         _STEP_ACL,
-        _STEP_KEY.replace("@@KEYLINE@@", pubkey),
+        _STEP_KEY,
         _STEP_SSHD,
-        _STEP_RESTART,
-        _STEP_INVENTORY.replace("@@DEVICE@@", device)
-        .replace("@@HOST@@", host)
-        .replace("@@DOMAIN@@", domain)
-        .replace("@@KEYSHA@@", _sha256(pubkey.encode("utf-8"))),
     ]
+    if not build:
+        parts.append(_STEP_RESTART)
+    parts.append(_STEP_INVENTORY)
     return "\n".join(parts)
+
+
+def fill_windows(
+    template: str, *, domain: str, device: str, host: str, pubkey: str
+) -> str:
+    """A template of ``windows_template`` with the values of one host.
+    The caller has checked the values: none of them can hold ``@@``."""
+    values = {
+        "@@DOMAIN@@": domain,
+        "@@DEVICE@@": device,
+        "@@HOST@@": host,
+        "@@KEYLINE@@": pubkey,
+        "@@KEYSHA@@": _sha256(pubkey.encode("utf-8")),
+    }
+    text = template
+    for field in FILL_FIELDS:
+        text = text.replace(field, values[field])
+    return text
 
 
 def samba_script(

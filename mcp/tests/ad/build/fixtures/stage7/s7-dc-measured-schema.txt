@@ -1,0 +1,102 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-24T02:04:20.0000000Z
+cs: Name BDC2 | DomainRole 4 | PartOfDomain True | Domain build.newton.test
+LastBootUpTime: 2026-11-24T01:50:00.0000000Z
+msDS-GenerationId on CN=BDC2,OU=Domain Controllers,DC=build,DC=newton,DC=test: present, 8 bytes, 1a2b3c4d5e6f7a8b
+pwdLastSet before the reset: 134399586000000000
+Reset-ComputerMachinePassword: ok
+pwdLastSet after the reset: 134399592600000000 | 2026-11-24T02:01:00.0000000Z
+nltest /sc_verify exit 0, 5 lines:
+  Flags: b0 HAS_IP  HAS_TIMESERV
+  Trusted DC Name \\BDC1.build.newton.test
+  Trusted DC Connection Status Status = 0 0x0 NERR_Success
+  Trust Verification Status = 0 0x0 NERR_Success
+  The command completed successfully
+read-back after 900 s, 3 polls, converged True
+read-back started: 2026-11-24 02:04:30
+old failures confirmed: True
+repadmin /showrepl * /csv exit 0, 11 lines:
+  showrepl_COLUMNS,Destination DSA Site,Destination DSA,Naming Context,Source DSA Site,Source DSA,Transport Type,Number of Failures,Last Failure Time,Last Success Time,Last Failure Status
+  showrepl_INFO,Default-First-Site-Name,BDC1,"DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC2,RPC,0,0,2026-11-24 02:03:45,0
+  showrepl_INFO,Default-First-Site-Name,BDC1,"CN=Configuration,DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC2,RPC,0,0,2026-11-24 02:03:45,0
+  showrepl_INFO,Default-First-Site-Name,BDC1,"CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC2,RPC,0,0,2026-11-24 02:03:50,0
+  showrepl_INFO,Default-First-Site-Name,BDC1,"DC=DomainDnsZones,DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC2,RPC,0,0,2026-11-24 02:03:45,0
+  showrepl_INFO,Default-First-Site-Name,BDC1,"DC=ForestDnsZones,DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC2,RPC,0,0,2026-11-24 02:03:45,0
+  showrepl_INFO,Default-First-Site-Name,BDC2,"DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC1,RPC,0,0,2026-11-24 02:03:45,0
+  showrepl_INFO,Default-First-Site-Name,BDC2,"CN=Configuration,DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC1,RPC,0,0,2026-11-24 02:03:45,0
+  showrepl_INFO,Default-First-Site-Name,BDC2,"CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC1,RPC,1,2026-11-24 01:59:32,2026-11-24 01:58:10,1908
+  showrepl_INFO,Default-First-Site-Name,BDC2,"DC=DomainDnsZones,DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC1,RPC,0,0,2026-11-24 02:03:45,0
+  showrepl_INFO,Default-First-Site-Name,BDC2,"DC=ForestDnsZones,DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC1,RPC,0,0,2026-11-24 02:03:45,0
+dcdiag exit 0, 71 lines:
+  
+  Directory Server Diagnosis
+  
+  Performing initial setup:
+  
+     Trying to find home server...
+  
+     Home Server = BDC2
+  
+     * Identified AD Forest. 
+     Done gathering initial info.
+  
+  Doing initial required tests
+  
+     Testing server: Default-First-Site-Name\BDC2
+        Starting test: Connectivity
+           ......................... BDC2 passed test Connectivity
+  
+  Doing primary tests
+  
+     Testing server: Default-First-Site-Name\BDC2
+        Starting test: Advertising
+           ......................... BDC2 passed test Advertising
+        Starting test: FrsEvent
+           ......................... BDC2 passed test FrsEvent
+        Starting test: DFSREvent
+           ......................... BDC2 failed test DFSREvent
+        Starting test: SysVolCheck
+           ......................... BDC2 passed test SysVolCheck
+        Starting test: KccEvent
+           ......................... BDC2 passed test KccEvent
+        Starting test: KnowsOfRoleHolders
+           ......................... BDC2 passed test KnowsOfRoleHolders
+        Starting test: MachineAccount
+           ......................... BDC2 passed test MachineAccount
+        Starting test: NCSecDesc
+           ......................... BDC2 passed test NCSecDesc
+        Starting test: NetLogons
+           ......................... BDC2 passed test NetLogons
+        Starting test: ObjectsReplicated
+           ......................... BDC2 passed test ObjectsReplicated
+        Starting test: Replications
+           ......................... BDC2 failed test Replications
+        Starting test: RidManager
+           ......................... BDC2 passed test RidManager
+        Starting test: Services
+           ......................... BDC2 passed test Services
+        Starting test: SystemLog
+           ......................... BDC2 failed test SystemLog
+        Starting test: VerifyReferences
+           ......................... BDC2 passed test VerifyReferences
+  
+     Running partition tests on : ForestDnsZones
+        Starting test: CheckSDRefDom
+           ......................... ForestDnsZones passed test CheckSDRefDom
+        Starting test: CrossRefValidation
+           ......................... ForestDnsZones passed test
+           CrossRefValidation
+  
+     Running partition tests on : Schema
+        Starting test: CheckSDRefDom
+           ......................... Schema passed test CheckSDRefDom
+        Starting test: CrossRefValidation
+           ......................... Schema passed test CrossRefValidation
+  
+     Running enterprise tests on : build.newton.test
+        Starting test: LocatorCheck
+           ......................... build.newton.test passed test LocatorCheck
+        Starting test: Intersite
+           ......................... build.newton.test passed test Intersite
+  
+task end 2026-11-24T02:19:30.0000000Z

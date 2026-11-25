@@ -230,6 +230,21 @@ def _computers_sentinel(
     return False
 
 
+def _dc_hosts_sentinel(
+    rows: tuple[Row, ...],
+    directory: members.Directory,
+) -> bool:
+    """The dc_hosts query must hold a writable domain controller.
+
+    Every domain has at least one, and its primaryGroupID is 516.
+    """
+    for row in rows:
+        for value in row.a.get("primaryGroupID", ()):
+            if value == "516":
+                return True
+    return False
+
+
 # The sentinel of every query that has one.
 SENTINELS: dict[str, Callable[[tuple[Row, ...], members.Directory], bool]] = {
     "domain_head": _one_row,
@@ -249,6 +264,11 @@ SENTINELS: dict[str, Callable[[tuple[Row, ...], members.Directory], bool]] = {
     "fsps": _not_empty,
     # The Recycle Bin Feature object exists in every supported forest.
     "optional_features": _not_empty,
+    # The DNS partition holds the zone of the domain itself, and the zone
+    # holds the _ldap node the domain controllers register in.
+    "dns_zones": _not_empty,
+    "dns_ldap_srv": _not_empty,
+    "dc_hosts": _dc_hosts_sentinel,
 }
 
 

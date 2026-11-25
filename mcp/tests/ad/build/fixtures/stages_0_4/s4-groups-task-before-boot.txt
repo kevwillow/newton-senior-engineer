@@ -1,0 +1,8 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-13T21:50:56.3487754Z
+LastBootUpTime: 2026-11-13T21:48:53.5000000Z
+domain: build.newton.test | DomainSID S-1-5-21-1000000001-1000000002-1000000003
+Get-ADPrincipalGroupMembership: Administrators (S-1-5-32-544), Domain Admins (S-1-5-21-1000000001-1000000002-1000000003-512), Domain Users (S-1-5-21-1000000001-1000000002-1000000003-513)
+  Enterprise Admins (S-1-5-21-1000000001-1000000002-1000000003-519) members: Administrator
+  Schema Admins (S-1-5-21-1000000001-1000000002-1000000003-518) members: Administrator
+task end 2026-11-13T21:50:58.4158961Z

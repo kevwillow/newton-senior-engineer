@@ -1,0 +1,22 @@
+task identity: bdc1\newton-build | auth NTLM
+task start 2026-11-13T16:04:38.0323144Z
+dsrm.bin deleted: True
+A delegation for this DNS server cannot be created because the authoritative parent zone cannot be found or it does not run Windows DNS server. If you are integrating with an existing DNS infrastructure, you should manually create a delegation to this DNS server in the parent zone to ensure reliable name resolution from outside the domain "build.newton.test". Otherwise, no action is required.
+
+
+A delegation for this DNS server cannot be created because the authoritative parent zone cannot be found or it does not run Windows DNS server. If you are integrating with an existing DNS infrastructure, you should manually create a delegation to this DNS server in the parent zone to ensure reliable name resolution from outside the domain "build.newton.test". Otherwise, no action is required.
+
+
+Install-ADDSForest returned after 135 s
+
+
+Message        : You must restart this computer to complete the operation.
+                 
+Context        : DCPromo.General.4
+RebootRequired : True
+Status         : Success
+
+
+
+
+task end 2026-11-13T16:06:54.9837612Z

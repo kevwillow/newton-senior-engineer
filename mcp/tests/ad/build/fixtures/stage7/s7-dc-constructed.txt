@@ -1,0 +1,87 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-15T19:49:00.0000000Z
+cs: Name BDC2 | DomainRole 4 | PartOfDomain True | Domain build.newton.test
+LastBootUpTime: 2026-11-15T19:47:52.0000000Z
+msDS-GenerationId on CN=BDC2,OU=Domain Controllers,DC=build,DC=newton,DC=test: present, 8 bytes, 1a2b3c4d5e6f7a8b
+pwdLastSet before the reset: 134392455248383064
+Reset-ComputerMachinePassword: ok
+pwdLastSet after the reset: 134392457500000000 | 2026-11-15T19:49:10.0000000Z
+nltest /sc_verify exit 0, 5 lines:
+  Flags: b0 HAS_IP  HAS_TIMESERV
+  Trusted DC Name \\BDC1.build.newton.test
+  Trusted DC Connection Status Status = 0 0x0 NERR_Success
+  Trust Verification Status = 0 0x0 NERR_Success
+  The command completed successfully
+dcdiag exit 0, 71 lines:
+  
+  Directory Server Diagnosis
+  
+  Performing initial setup:
+  
+     Trying to find home server...
+  
+     Home Server = BDC2
+  
+     * Identified AD Forest. 
+     Done gathering initial info.
+  
+  Doing initial required tests
+  
+     Testing server: Default-First-Site-Name\BDC2
+        Starting test: Connectivity
+           ......................... BDC2 passed test Connectivity
+  
+  Doing primary tests
+  
+     Testing server: Default-First-Site-Name\BDC2
+        Starting test: Advertising
+           ......................... BDC2 passed test Advertising
+        Starting test: FrsEvent
+           ......................... BDC2 passed test FrsEvent
+        Starting test: DFSREvent
+           ......................... BDC2 failed test DFSREvent
+        Starting test: SysVolCheck
+           ......................... BDC2 passed test SysVolCheck
+        Starting test: KccEvent
+           ......................... BDC2 passed test KccEvent
+        Starting test: KnowsOfRoleHolders
+           ......................... BDC2 passed test KnowsOfRoleHolders
+        Starting test: MachineAccount
+           ......................... BDC2 passed test MachineAccount
+        Starting test: NCSecDesc
+           ......................... BDC2 passed test NCSecDesc
+        Starting test: NetLogons
+           ......................... BDC2 passed test NetLogons
+        Starting test: ObjectsReplicated
+           ......................... BDC2 passed test ObjectsReplicated
+        Starting test: Replications
+           ......................... BDC2 passed test Replications
+        Starting test: RidManager
+           ......................... BDC2 passed test RidManager
+        Starting test: Services
+           ......................... BDC2 passed test Services
+        Starting test: SystemLog
+           ......................... BDC2 failed test SystemLog
+        Starting test: VerifyReferences
+           ......................... BDC2 passed test VerifyReferences
+  
+     Running partition tests on : ForestDnsZones
+        Starting test: CheckSDRefDom
+           ......................... ForestDnsZones passed test CheckSDRefDom
+        Starting test: CrossRefValidation
+           ......................... ForestDnsZones passed test
+           CrossRefValidation
+  
+     Running partition tests on : Schema
+        Starting test: CheckSDRefDom
+           ......................... Schema passed test CheckSDRefDom
+        Starting test: CrossRefValidation
+           ......................... Schema passed test CrossRefValidation
+  
+     Running enterprise tests on : build.newton.test
+        Starting test: LocatorCheck
+           ......................... build.newton.test passed test LocatorCheck
+        Starting test: Intersite
+           ......................... build.newton.test passed test Intersite
+  
+task end 2026-11-15T19:49:16.0000000Z

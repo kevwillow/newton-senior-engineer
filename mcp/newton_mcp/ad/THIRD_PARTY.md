@@ -49,3 +49,15 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## dnspython (a dependency, not copied into the tree)
+
+`discover.py` (`newton-ad-discover`) imports dnspython to ask DNS for the SRV, A and AAAA records of a
+domain. It is installed from PyPI (pinned in `mcp/pyproject.toml`, `mcp/uv.lock` and the hash-pinned
+`mcp/requirements.lock`, version 2.9.2 at the time of writing) and none of its source is in this repository.
+
+- Source: <https://github.com/rthalley/dnspython>
+- Licence: ISC. Copyright (C) Dnspython Contributors; portions Copyright (C) 2001-2017 Nominum, Inc. and
+  Google Inc. Its licence text ships in the installed package (`dnspython-<version>.dist-info/licenses/LICENSE`).
+- Only `newton-ad-discover` uses it. The MCP server and the audit never import it.
+

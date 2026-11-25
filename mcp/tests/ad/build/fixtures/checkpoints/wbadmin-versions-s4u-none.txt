@@ -1,0 +1,5 @@
+wbadmin 1.0 - Backup command-line tool
+(C) Copyright Microsoft Corporation. All rights reserved.
+
+ERROR - No backup was found.
+

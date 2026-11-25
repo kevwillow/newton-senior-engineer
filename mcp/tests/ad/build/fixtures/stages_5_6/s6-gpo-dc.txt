@@ -1,0 +1,22 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-14T00:47:28.0098784Z
+GPMC: Installed
+domain: build.newton.test | target OU=Domain Controllers,DC=build,DC=newton,DC=test
+before: GPOs of the name: 0
+New-GPO: Newton Baseline 2026.11 Domain Controllers | Id 3ce61b99-a701-454c-8788-3e9d6480e3ab
+Set-GPRegistryValue HKLM\System\CurrentControlSet\Services\LanmanServer\Parameters\RequireSecuritySignature = 1: ok
+Set-GPRegistryValue HKLM\System\CurrentControlSet\Services\NTDS\Parameters\LDAPServerIntegrity = 2: ok
+Set-GPRegistryValue HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\LAPS\BackupDirectory = 2: ok
+Set-GPRegistryValue HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\LAPS\ADPasswordEncryptionEnabled = 1: ok
+Set-GPRegistryValue HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\LAPS\ADBackupDSRMPassword = 1: ok
+New-GPLink: Newton Baseline 2026.11 Domain Controllers | Target OU=Domain Controllers,DC=build,DC=newton,DC=test | Enabled True | Order 2
+read-back:
+  GPO Newton Baseline 2026.11 Domain Controllers | Id 3ce61b99-a701-454c-8788-3e9d6480e3ab | GpoStatus AllSettingsEnabled | Computer DSVersion 2 SysvolVersion 2 | User DSVersion 0 SysvolVersion 0
+  GPO value HKLM\System\CurrentControlSet\Services\LanmanServer\Parameters\RequireSecuritySignature = 1 | DWord | Set
+  GPO value HKLM\System\CurrentControlSet\Services\NTDS\Parameters\LDAPServerIntegrity = 2 | DWord | Set
+  GPO value HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\LAPS\BackupDirectory = 2 | DWord | Set
+  GPO value HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\LAPS\ADPasswordEncryptionEnabled = 1 | DWord | Set
+  GPO value HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\LAPS\ADBackupDSRMPassword = 1 | DWord | Set
+  link Default Domain Controllers Policy | Enabled True | Enforced False | Order 1
+  link Newton Baseline 2026.11 Domain Controllers | Enabled True | Enforced False | Order 2
+task end 2026-11-14T00:47:30.2596976Z

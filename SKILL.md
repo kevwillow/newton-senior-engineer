@@ -1,7 +1,7 @@
 ---
 name: newton
 description: "Newton, the network engineer. Configure, troubleshoot and design small-to-large networks from an AI agent over SSH or a serial console, with safety rails that make lockouts and destructive commands less likely. Primary platform: OpenWrt 25.12+ routers (uci, ubus, fw4/nftables, DSA VLANs, dnsmasq/odhcpd, wifi, apk), driven through a tested apply-with-automatic-rollback protocol. Ships as a skill and as an MCP server (newton-mcp) so any MCP client can use the same protocol. Also covers Linux host networking (Proxmox bridges, NetworkManager) and network design (subnetting, VLANs, DHCP/DNS, dual-WAN). Use when the user says 'configure the router', 'add a port forward', 'set up a VLAN', 'change the wifi', 'reserve an IP', 'why is the network slow' or 'how fast is my internet' on a network Newton manages, 'run a speed test', 'test the wifi speed', 'open a port', 'set up dual WAN', 'segment the network', or any task touching uci, ubus, nft, fw4, dnsmasq, odhcpd, wifi, iwinfo, apk/opkg on an OpenWrt device, or bridge or NetworkManager config on a Linux host. Primary use: the owner types /newton (or /network-engineer) to enter Network-engineer mode; every network request runs through that mode's flow."
-version: 1.4.2
+version: 1.5.0
 author: Kev
 license: MIT (scripts, SKILL.md); see references/README.md for reference-doc licenses
 platforms: [linux]
@@ -560,6 +560,7 @@ surface. It has **no tool that runs arbitrary commands**, reboots, upgrades or i
 | `newton_change_status`, `newton_abort_change` | transaction state / discard |
 | `newton_grant_off` | end the easy grant on a device; it can only end or narrow a grant, never open or widen one |
 | `newton_list_tiers`, `newton_plan_tier` | list the three hardening tiers and their non-skipped batches; plan ONE ordered batch through the same `plan()` path (so it needs the same `owner_confirmed_in_chat` and `explanation`; the steps count must equal the batch's change lines and the error names that count); each batch is its own plan, approval, apply, confirm cycle |
+| `newton_plan_ad_forward` | plan the dnsmasq forward of an Active Directory DNS domain to its DCs: `newton_plan_ad_forward(device, domain, dc_addresses, timeout_s, explanation, owner_confirmed_in_chat)` takes 1 to 8 private IPs, builds one `add_list dhcp.@dnsmasq[0].server='/<domain>/<dc>'` each plus `rebind_domain` when rebind protection is on, shows them in `ad_forward.lines` (the steps count must equal the lines), adds only what is missing (`no_change` when all exist) and removes nothing. An `address` entry with an address for the domain itself, or a local-only `/*.<domain>/`, is refused with nothing staged: the owner removes it through `newton_plan_change` first. Other local-only entries for the domain are overridden, and entries for names below it that don't point at these DCs keep those names from them: the plan notes both. `ad_forward.notes` is Newton's own wording; `ad_forward.existing_servers` is device data. Then the normal approval and `newton_apply_change`. Measured with dnsmasq 2.91 on Linux, not on a router |
 | `newton_guided_recommend` | run the guided-setup interview; with no answers return the fourteen questions; with answers return a `guided_setup_report` whose statuses (`plan-ready`, `audit-only`, `skipped`, `gap`) come from the manifest and tier files. No device contact, no command, no path, no plan |
 | `newton_guided_audit` | run the fixed six-item read-only audit for one device (listeners, services, port forwards, UPnP, Wi-Fi settings, DHCP devices) through the existing `newton_read` path; every result stays inside an untrusted-device-data envelope. The services item records a gap (no closed running/enabled-service read). No plan, no scan, no write |
 | `newton_plan_scan` | plan a consent-gated scan without running it: kind is `inside`, `outside` or `wifi`; profile is `quick`, `full-tcp` or `survey`; for `inside` an interface (a non-WAN router name) is required; for `wifi` profile is `survey` and the interface names the router's own radio (`radio0`, `radio1`). For an nmap scan Newton derives the exact IPv4 target from router reads and picks the inventory's single matching vantage; callers cannot supply a target, host, port, flag, or vantage. A `wifi` survey runs on that radio, sends probe requests on every channel and may disturb connected clients briefly; it keeps channel counts and look-alike network names only. Returns the stored request, which the owner then approves out of band with `newton-approve <request id>` |
@@ -687,6 +688,24 @@ The agent prints each setup script; the owner reads it and runs it as a Domain A
 the DC from the agent. On an installed Newton the scripts are printed by `/opt/newton/scripts/newton-ad-setup`, run as
 the owner; from a source tree, by `scripts/newton-ad-setup`.
 
+- Optional first step, discovery: `scripts/newton-ad-discover --domain <dns> --platform windows|samba --pubkey <file>
+  [--write --ou <dn> ...] [--resolver <ip>] [--preflight]` asks DNS for the domain controllers and the PDC emulator and prints the
+  read inventory entries and the exact `newton-ad-setup` command for each DC (with `--write`, the write commands, PDC
+  first, every other DC with `--domain-device`). It only prints; it runs nothing and holds no credential. DNS answers
+  are untrusted: it skips host names that are not plain names inside the domain, says why, and tells the owner to check
+  the list against their DCs (the pinned SSH host key still protects the logins). If it cannot name the PDC emulator it
+  withholds the write commands and says what to do. With `--preflight` it also checks every DC read-only from the host it
+  runs on. LDAP 389 and Kerberos 88 must be open: a DC that does not answer on them fails the run with exit 1, as does a
+  clock more than 300 s off or one it cannot read. Port 22 is only reported: the setup script installs SSH later. The probes
+  run before the owner has read the list: run without the flag first, check the list against their DCs, then run again
+  with it. That second run reads DNS again and nothing is pinned: the first list does not limit what the second run probes.
+  With `--fetch-host-keys` it also asks `ssh-keyscan` for the host keys of each DC and prints their SHA256 fingerprints
+  and the ready `known_hosts` lines; a scan comes over the network and can be spoofed, so the owner compares every
+  fingerprint with the one the DC shows at its console (`ssh-keygen -lf` on the DC's host key) before trusting it. When
+  a DC has more valid host keys than the cap of 8, the tool says the list was cut, so the owner knows the fingerprints and
+  the ready `known_hosts` lines shown are not all of them. `--resolver` is for the lookups of the discovery only: `ssh-keyscan` resolves the host name of a
+  scan with the system resolver, so the scan can land on another address than the one DNS gave, which is one more
+  reason to compare every fingerprint at the DC. The manual commands below stay the way to set up a DC by hand.
 - Audit, per DC: `scripts/newton-ad-setup windows|samba --domain <dns> --pubkey <file> --device <name> --host <host>`.
   It creates an ordinary read account with a key-only, forced-command login and prints the read entry (platform
   `ad-windows` or `ad-samba`). On Samba that one fixed command runs the read-only collector as root through sudo, with
@@ -723,6 +742,7 @@ the owner; from a source tree, by `scripts/newton-ad-setup`.
   state directory, which an installed `newton-approve` never reads) and types, twice, the passphrase they typed on
   every DC of the domain. It prints the fingerprint and stores only that fingerprint, in the newton user's state
   directory, where `newton-approve` checks it. The agent gives the owner the command and never runs it.
+- After setup the owner can check the inventory with `sudo -u newton /usr/local/bin/newton-doctor ad` (read-only, local files only): it names each inconsistent entry with the command that fixes it. The agent gives the owner the command and never runs it.
 
 ### Audit
 
@@ -966,6 +986,10 @@ be `experimental_readonly`). Without the flag it stays read-only.
    of the config) or refused. On CHR, `rolled_back` also means the reboot happened.
 5. **Not covered.** Approval on these platforms is host-only. Hardening tiers, guided setup and scans are OpenWrt-only. Do not plan
    a change on one of these devices that you cannot say how to undo by hand.
+
+### Build mode (1.5, opt-in)
+
+Builds a new two-DC domain on fresh Windows Server 2025 VMs in stages 0-10. `newton_ad_build_plan` checks the owner's inputs and prints the plan and bootstrap; the owner approves the plan, then each stage that asks, with `newton-approve`. `newton_ad_build_run` runs until the next approval or stop; `newton_ad_build_status` reads where it is. A checkpoint comes before each write stage. Never on an existing domain.
 
 ## Other platforms: experimental read-only (T0-exp)
 

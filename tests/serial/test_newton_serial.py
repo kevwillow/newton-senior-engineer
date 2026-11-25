@@ -1209,6 +1209,16 @@ def test_push_interrupted_mid_heredoc_says_the_target_was_not_written(tmp_path, 
         time.sleep(0.2)
         console.resume.set()
         out, err = proc.communicate(timeout=10)
+        # The push has exited, but the fake console reads one byte at a time
+        # and may not have drained the pty yet: closing it now would drop the
+        # Ctrl-C the push wrote last.  Wait for it (the assertion below still
+        # fails if it never came).
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            heredoc_at = console.received.find(b"cat > /etc/config/x")
+            if heredoc_at != -1 and b"\x03" in console.received[heredoc_at:]:
+                break
+            time.sleep(0.02)
     finally:
         if proc.poll() is None:
             proc.kill()

@@ -179,10 +179,10 @@ def _state(tmp_path: Path) -> Path:
 # ---- the taking ------------------------------------------------------------
 
 
-def test_the_backup_holds_the_measured_answers() -> None:
+def test_the_backup_holds_the_measured_answers(tmp_path: Path) -> None:
     client = FakeClient(_answers())
     backup = owner_backup.take(
-        factory(client), _device(Path("/tmp")), ["firewall", "system"]
+        factory(client), _device(tmp_path), ["firewall", "system"]
     )
     assert backup.configs["firewall"] == firewall_data("uci.get.firewall")["values"]
     assert backup.configs["system"] == data("uci.get.system")["values"]
@@ -190,33 +190,33 @@ def test_the_backup_holds_the_measured_answers() -> None:
     assert backup.missing == ()
 
 
-def test_the_backup_reads_the_whole_config_and_not_the_touched_units() -> None:
+def test_the_backup_reads_the_whole_config_and_not_the_touched_units(tmp_path: Path) -> None:
     client = FakeClient(_answers())
-    owner_backup.take(factory(client), _device(Path("/tmp")), ["firewall"])
+    owner_backup.take(factory(client), _device(tmp_path), ["firewall"])
     session = client.sessions[0]
     gets = [args for obj, fn, args in session.calls if obj == "uci" and fn == "get"]
     assert gets == [{"config": "firewall"}]
 
 
-def test_the_backup_uses_one_fresh_short_read_only_session() -> None:
+def test_the_backup_uses_one_fresh_short_read_only_session(tmp_path: Path) -> None:
     client = FakeClient(_answers())
-    owner_backup.take(factory(client), _device(Path("/tmp")), ["firewall", "system"])
+    owner_backup.take(factory(client), _device(tmp_path), ["firewall", "system"])
     assert len(client.logins) == 1
     _user, _password, timeout_s = client.logins[0]
     assert timeout_s == owner_backup.LOGIN_TIMEOUT_S
     assert client.sessions[0].spent is True
 
 
-def test_the_backup_refuses_when_a_window_is_open_on_the_router() -> None:
+def test_the_backup_refuses_when_a_window_is_open_on_the_router(tmp_path: Path) -> None:
     client = FakeClient(
         _answers({("file", "list"): {"entries": [{"name": "dhcp", "type": "file"}]}})
     )
     with pytest.raises(BackupError) as excinfo:
-        owner_backup.take(factory(client), _device(Path("/tmp")), ["firewall"])
+        owner_backup.take(factory(client), _device(tmp_path), ["firewall"])
     assert "waiting for confirmation" in str(excinfo.value)
 
 
-def test_a_leftover_undo_file_names_the_way_out() -> None:
+def test_a_leftover_undo_file_names_the_way_out(tmp_path: Path) -> None:
     """An undo file the router forgot about says how to get rid of it.
 
     After a restart of the router's web service the window is gone but
@@ -236,7 +236,7 @@ def test_a_leftover_undo_file_names_the_way_out() -> None:
         )
     )
     with pytest.raises(BackupError) as excinfo:
-        owner_backup.take(factory(client), _device(Path("/tmp")), ["firewall"])
+        owner_backup.take(factory(client), _device(tmp_path), ["firewall"])
     message = str(excinfo.value)
     assert "leftover undo file" in message, message
     assert "1 hour ago" in message, message
@@ -248,7 +248,7 @@ def test_a_leftover_undo_file_names_the_way_out() -> None:
     ), message
 
 
-def test_a_fresh_undo_file_keeps_the_short_message() -> None:
+def test_a_fresh_undo_file_keeps_the_short_message(tmp_path: Path) -> None:
     """A window that is still young keeps today's message."""
     fresh = int(time.time()) - 60
     client = FakeClient(
@@ -263,13 +263,13 @@ def test_a_fresh_undo_file_keeps_the_short_message() -> None:
         )
     )
     with pytest.raises(BackupError) as excinfo:
-        owner_backup.take(factory(client), _device(Path("/tmp")), ["firewall"])
+        owner_backup.take(factory(client), _device(tmp_path), ["firewall"])
     message = str(excinfo.value)
     assert "waiting for confirmation" in message, message
     assert "leftover undo file" not in message, message
 
 
-def test_an_unreadable_mtime_keeps_the_short_message() -> None:
+def test_an_unreadable_mtime_keeps_the_short_message(tmp_path: Path) -> None:
     """An undo file whose age cannot be read keeps today's message."""
     client = FakeClient(
         _answers(
@@ -281,72 +281,72 @@ def test_an_unreadable_mtime_keeps_the_short_message() -> None:
         )
     )
     with pytest.raises(BackupError) as excinfo:
-        owner_backup.take(factory(client), _device(Path("/tmp")), ["firewall"])
+        owner_backup.take(factory(client), _device(tmp_path), ["firewall"])
     message = str(excinfo.value)
     assert "waiting for confirmation" in message, message
     assert "leftover undo file" not in message, message
 
 
-def test_a_config_the_router_does_not_have_is_refused() -> None:
+def test_a_config_the_router_does_not_have_is_refused(tmp_path: Path) -> None:
     # the measured answer for a config with no file on lab-r1 is [4]
     client = FakeClient(_answers())
     with pytest.raises(BackupError) as excinfo:
-        owner_backup.take(factory(client), _device(Path("/tmp")), ["wireless"])
+        owner_backup.take(factory(client), _device(tmp_path), ["wireless"])
     assert "nothing to back up" in str(excinfo.value)
 
 
-def test_a_config_the_router_does_not_have_is_allowed_when_the_change_creates_it() -> None:
+def test_a_config_the_router_does_not_have_is_allowed_when_the_change_creates_it(tmp_path: Path) -> None:
     client = FakeClient(_answers())
     backup = owner_backup.take(
-        factory(client), _device(Path("/tmp")), ["wireless"], creates=["wireless"]
+        factory(client), _device(tmp_path), ["wireless"], creates=["wireless"]
     )
     assert backup.missing == ("wireless",)
     assert "wireless" not in backup.configs
 
 
-def test_an_unknown_config_is_refused_like_a_refused_answer() -> None:
+def test_an_unknown_config_is_refused_like_a_refused_answer(tmp_path: Path) -> None:
     # the measured answer for an unknown config is [6], not [4]
     client = FakeClient(_answers())
     with pytest.raises(BackupError) as excinfo:
-        owner_backup.take(factory(client), _device(Path("/tmp")), ["nosuchconfig"])
+        owner_backup.take(factory(client), _device(tmp_path), ["nosuchconfig"])
     assert "cannot be read" in str(excinfo.value)
 
 
-def test_a_refused_answer_refuses_the_backup() -> None:
+def test_a_refused_answer_refuses_the_backup(tmp_path: Path) -> None:
     client = FakeClient(_answers({("uci", "get"): 6}))
     with pytest.raises(BackupError) as excinfo:
-        owner_backup.take(factory(client), _device(Path("/tmp")), ["firewall"])
+        owner_backup.take(factory(client), _device(tmp_path), ["firewall"])
     assert "cannot be read" in str(excinfo.value)
 
 
-def test_a_transport_error_refuses_the_backup() -> None:
+def test_a_transport_error_refuses_the_backup(tmp_path: Path) -> None:
     client = FakeClient(_answers({("uci", "get"): RpcdError("the router went away")}))
     with pytest.raises(BackupError) as excinfo:
-        owner_backup.take(factory(client), _device(Path("/tmp")), ["firewall"])
+        owner_backup.take(factory(client), _device(tmp_path), ["firewall"])
     assert "cannot be read" in str(excinfo.value)
 
 
-def test_a_malformed_answer_refuses_the_backup() -> None:
+def test_a_malformed_answer_refuses_the_backup(tmp_path: Path) -> None:
     client = FakeClient(_answers({("uci", "get"): {"no": "values"}}))
     with pytest.raises(BackupError) as excinfo:
-        owner_backup.take(factory(client), _device(Path("/tmp")), ["firewall"])
+        owner_backup.take(factory(client), _device(tmp_path), ["firewall"])
     assert "cannot be read" in str(excinfo.value)
 
 
-def test_a_login_failure_refuses_the_backup() -> None:
+def test_a_login_failure_refuses_the_backup(tmp_path: Path) -> None:
     class Refusing(FakeClient):
         def login(self, username: str, password: str, timeout_s: int) -> FakeSession:
             raise RpcdCallFailed(6)
 
     with pytest.raises(BackupError) as excinfo:
-        owner_backup.take(factory(Refusing(_answers())), _device(Path("/tmp")), ["firewall"])
+        owner_backup.take(factory(Refusing(_answers())), _device(tmp_path), ["firewall"])
     assert "refused the login" in str(excinfo.value)
 
 
-def test_the_backup_names_the_config_it_could_not_read() -> None:
+def test_the_backup_names_the_config_it_could_not_read(tmp_path: Path) -> None:
     client = FakeClient(_answers({("uci", "get"): 6}))
     with pytest.raises(BackupError) as excinfo:
-        owner_backup.take(factory(client), _device(Path("/tmp")), ["firewall"])
+        owner_backup.take(factory(client), _device(tmp_path), ["firewall"])
     assert "firewall" in str(excinfo.value)
 
 
@@ -583,10 +583,10 @@ class RealShapeClient(FakeClient):
         return self._fakes[session.id].call(obj, fn, args)
 
 
-def test_the_backup_works_with_the_real_session_type() -> None:
+def test_the_backup_works_with_the_real_session_type(tmp_path: Path) -> None:
     """(lab-r1) the backup called ``session.call``,
     which the real ``RpcdSession`` does not have; the fakes hid it, and
     every owner plan failed on a real router before any script was made."""
     client = RealShapeClient(_answers())
-    backup = owner_backup.take(factory(client), _device(Path("/tmp")), ["system"])
+    backup = owner_backup.take(factory(client), _device(tmp_path), ["system"])
     assert "system" in backup.configs

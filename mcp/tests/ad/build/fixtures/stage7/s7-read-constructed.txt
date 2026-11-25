@@ -1,0 +1,94 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-15T20:15:00.0000000Z
+poll 1 at 2026-11-15T20:15:00.0000000Z, 0 s: repadmin /showrepl * /csv exit 0, 11 lines
+  replication 0 failures both ways; dcdiag on DC1: exit 0, passed True
+read-back after 40 s, 1 polls, converged True
+read-back started: 2026-11-15 20:15:00
+old failures confirmed: False
+repadmin /showrepl * /csv exit 0, 11 lines:
+  showrepl_COLUMNS,Destination DSA Site,Destination DSA,Naming Context,Source DSA Site,Source DSA,Transport Type,Number of Failures,Last Failure Time,Last Success Time,Last Failure Status
+  showrepl_INFO,Default-First-Site-Name,BDC1,"DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC2,RPC,0,0,2026-11-15 20:16:31,0
+  showrepl_INFO,Default-First-Site-Name,BDC1,"CN=Configuration,DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC2,RPC,0,0,2026-11-15 20:16:31,0
+  showrepl_INFO,Default-First-Site-Name,BDC1,"CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC2,RPC,0,0,2026-11-15 20:16:31,0
+  showrepl_INFO,Default-First-Site-Name,BDC1,"DC=DomainDnsZones,DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC2,RPC,0,0,2026-11-15 20:16:31,0
+  showrepl_INFO,Default-First-Site-Name,BDC1,"DC=ForestDnsZones,DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC2,RPC,0,0,2026-11-15 20:16:31,0
+  showrepl_INFO,Default-First-Site-Name,BDC2,"DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC1,RPC,0,0,2026-11-15 20:16:31,0
+  showrepl_INFO,Default-First-Site-Name,BDC2,"CN=Configuration,DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC1,RPC,0,0,2026-11-15 20:16:31,0
+  showrepl_INFO,Default-First-Site-Name,BDC2,"CN=Schema,CN=Configuration,DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC1,RPC,0,0,2026-11-15 20:16:31,0
+  showrepl_INFO,Default-First-Site-Name,BDC2,"DC=DomainDnsZones,DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC1,RPC,0,0,2026-11-15 20:16:31,0
+  showrepl_INFO,Default-First-Site-Name,BDC2,"DC=ForestDnsZones,DC=build,DC=newton,DC=test",Default-First-Site-Name,BDC1,RPC,0,0,2026-11-15 20:16:31,0
+dcdiag exit 0, 71 lines:
+  
+  Directory Server Diagnosis
+  
+  Performing initial setup:
+  
+     Trying to find home server...
+  
+     Home Server = BDC1
+  
+     * Identified AD Forest. 
+     Done gathering initial info.
+  
+  Doing initial required tests
+  
+     Testing server: Default-First-Site-Name\BDC1
+        Starting test: Connectivity
+           ......................... BDC1 passed test Connectivity
+  
+  Doing primary tests
+  
+     Testing server: Default-First-Site-Name\BDC1
+        Starting test: Advertising
+           ......................... BDC1 passed test Advertising
+        Starting test: FrsEvent
+           ......................... BDC1 passed test FrsEvent
+        Starting test: DFSREvent
+           ......................... BDC1 failed test DFSREvent
+        Starting test: SysVolCheck
+           ......................... BDC1 passed test SysVolCheck
+        Starting test: KccEvent
+           ......................... BDC1 passed test KccEvent
+        Starting test: KnowsOfRoleHolders
+           ......................... BDC1 passed test KnowsOfRoleHolders
+        Starting test: MachineAccount
+           ......................... BDC1 passed test MachineAccount
+        Starting test: NCSecDesc
+           ......................... BDC1 passed test NCSecDesc
+        Starting test: NetLogons
+           ......................... BDC1 passed test NetLogons
+        Starting test: ObjectsReplicated
+           ......................... BDC1 passed test ObjectsReplicated
+        Starting test: Replications
+           ......................... BDC1 passed test Replications
+        Starting test: RidManager
+           ......................... BDC1 passed test RidManager
+        Starting test: Services
+           ......................... BDC1 passed test Services
+        Starting test: SystemLog
+           ......................... BDC1 failed test SystemLog
+        Starting test: VerifyReferences
+           ......................... BDC1 passed test VerifyReferences
+  
+     Running partition tests on : ForestDnsZones
+        Starting test: CheckSDRefDom
+           ......................... ForestDnsZones passed test CheckSDRefDom
+        Starting test: CrossRefValidation
+           ......................... ForestDnsZones passed test
+           CrossRefValidation
+  
+     Running partition tests on : Schema
+        Starting test: CheckSDRefDom
+           ......................... Schema passed test CheckSDRefDom
+        Starting test: CrossRefValidation
+           ......................... Schema passed test CrossRefValidation
+  
+     Running enterprise tests on : build.newton.test
+        Starting test: LocatorCheck
+           ......................... build.newton.test passed test LocatorCheck
+        Starting test: Intersite
+           ......................... build.newton.test passed test Intersite
+  
+DC BDC1 | GC True | RODC False | site Default-First-Site-Name
+DC BDC2 | GC True | RODC False | site Default-First-Site-Name
+task end 2026-11-15T20:15:41.0000000Z

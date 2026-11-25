@@ -53,6 +53,10 @@ QUERY_IDS = [
     "dpapi_backup",
     "pw_attr_presence",
     "keycred_presence",
+    # The DNS readers (DESIGN-dns-helpers.md): spec-derived, unmeasured.
+    "dns_zones",
+    "dns_ldap_srv",
+    "dc_hosts",
 ]
 
 FORBIDDEN_NAMES = {

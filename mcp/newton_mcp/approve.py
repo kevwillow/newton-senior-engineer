@@ -13,10 +13,10 @@ import re
 import sys
 import tempfile
 import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from . import consequences as _consequences
 from . import explanation as _explanation
@@ -1515,6 +1515,1221 @@ def approve_ad_change(
     return True, ""
 
 
+# --------------------------------------------------------------------------
+# The approval of an AD build (PLAN-1.5 task 2)
+#
+# The plan of a build is one document: the owner approves its bytes
+# once, and the helpers receive those bytes with every request.  The
+# approval of the plan mints one token per server, over the digest of
+# those bytes, and the approval of a stage mints one token per server,
+# over the digest of the stage, which binds the checkpoint of the stage.
+#
+# The secrets of the build are derived from the key of the forest root
+# and are shown once, in the owner's terminal: they are never written
+# in the state directory, and the runner never holds them.
+# --------------------------------------------------------------------------
+
+
+#: The window of the plan token of a build: six hours (PLAN-1.5,
+#: Constraints).
+BUILD_PLAN_WINDOW_S = 6 * 60 * 60
+
+#: The window of a stage token of a build: thirty minutes (PLAN-1.5,
+#: Constraints).
+BUILD_STAGE_WINDOW_S = 30 * 60
+
+#: The refusal codes of the build helper (PLAN-1.5, task 3) and the one
+#: of the checkpoint adapter (PLAN-1.5, task 7).  The approval of a
+#: build answers with one of them and with no other.
+BUILD_REFUSAL_CODES: tuple[str, ...] = (
+    "bad_token",
+    "expired",
+    "out_of_order",
+    "journal_busy",
+    "already_done",
+    "plan_mismatch",
+    "schema",
+    "checkpoint_unverified",
+)
+
+#: The kinds of checkpoint of the design (DESIGN-1.5, "Checkpoints").
+BUILD_CHECKPOINT_KINDS: tuple[str, ...] = ("workgroup", "dc")
+
+#: The kind of the checkpoint of every stage that takes one (DESIGN-1.5,
+#: "Checkpoints"): stage 2 takes a workgroup checkpoint, the stages 3,
+#: 4 and 6 a DC one, and stage 7 a DC one on DC1 and a workgroup one on
+#: DC2.
+BUILD_CHECKPOINT_OF_STAGE: dict[tuple[str, str], str] = {
+    ("dc1", "2"): "workgroup",
+    ("dc1", "3"): "dc",
+    ("dc1", "4"): "dc",
+    ("dc1", "6"): "dc",
+    ("dc1", "7"): "dc",
+    ("dc2", "7"): "workgroup",
+}
+
+#: The stages whose checkpoint of a server without a hypervisor is the
+#: all-critical backup (DESIGN-1.5, "Checkpoints", "No hypervisor"): the
+#: stages 2 and 7.  The stages 3, 4 and 6 take the system-state backup,
+#: which cannot undo a promotion and is therefore never the one of the
+#: stages 2 and 7.  The wbadmin adapter demands the same, from the stage
+#: it is given (``newton_mcp.ad.build.checkpoint``; the maintainer, 2026-11-13).
+BUILD_WBADMIN_ALL_CRITICAL_STAGES: tuple[str, ...] = ("2", "7")
+
+#: The labels the sections of the plan are printed under.
+_BUILD_PLAN_LABELS: dict[str, str] = {
+    "domain": "Domain",
+    "servers": "Servers",
+    "baseline": "Baseline",
+    "accepted_findings": "Accepted findings",
+    "ops": "Stage 8, the newton-ops and newton-audit setup",
+    "stages": "Stages",
+    "resume_from": "Resumed from",
+    "start_stage": "Starts at stage",
+    "secrets_from": "Passwords of plan",
+}
+
+#: The labels the items of a list of the plan are printed under.
+_BUILD_ITEM_LABELS: dict[str, str] = {
+    "Servers": "Server",
+    "Accepted findings": "Finding",
+}
+
+#: The stage of a file name: the stage ids of the design are numbers.
+_BUILD_STAGE_FILE_RE = re.compile(r"^[0-9]{1,2}$")
+
+
+class CheckpointVerifier(Protocol):
+    """The checkpoint adapter of the build (PLAN-1.5, task 7).
+
+    The adapter answers one question: is this checkpoint of this server
+    good enough to undo this stage?  It is the adapter that reads the
+    hypervisor, the Proxmox task log or the backup, so the approval
+    asks it itself and never believes the runner's own word.
+
+    The stage is passed by keyword (the maintainer, 2026-11-13): the kind alone
+    does not tell DC1's stage 7 from the stages 3, 4 and 6, and on a
+    server without a hypervisor only an all-critical backup can undo
+    the promotion of stage 2 or 7.
+    """
+
+    def verify(
+        self,
+        server_cfg: Mapping[str, Any],
+        cp: Mapping[str, Any],
+        kind: str,
+        *,
+        stage: str,
+        not_before: int,
+    ) -> bool:
+        """True when the checkpoint may be relied on for the stage, and
+        was taken no earlier than ``not_before`` (DESIGN-1.5
+        "Checkpoints")."""
+        ...
+
+
+class CheckpointVerifierCallable(Protocol):
+    """A callable adapter: the arguments of ``CheckpointVerifier.verify``."""
+
+    def __call__(
+        self,
+        server_cfg: Mapping[str, Any],
+        cp: Mapping[str, Any],
+        kind: str,
+        *,
+        stage: str,
+        not_before: int,
+    ) -> bool: ...
+
+
+#: What the approval of a stage takes: an adapter with a ``verify``
+#: method, or a callable with the same arguments.
+CheckpointAdapter = CheckpointVerifier | CheckpointVerifierCallable
+
+
+def build_plan_dir() -> Path:
+    """The directory the AD build plans and their approvals live in."""
+    return state_dir() / "ad-build-plans"
+
+
+def _checked_build_id(plan_id: str) -> str:
+    """The plan id, when it may be used as a file name."""
+    if not isinstance(plan_id, str) or PLAN_ID_RE.fullmatch(plan_id) is None:
+        raise ValueError("plan id must be 32 lowercase hexadecimal characters")
+    return plan_id
+
+
+def build_plan_path(plan_id: str) -> Path:
+    """The path of one build plan."""
+    return build_plan_dir() / f"{_checked_build_id(plan_id)}.json"
+
+
+def build_approval_path(plan_id: str) -> Path:
+    """The path of the plan approval of one build, beside its plan."""
+    return build_plan_dir() / f"{_checked_build_id(plan_id)}.approval.json"
+
+
+def build_stage_approval_path(plan_id: str, stage: str) -> Path:
+    """The path of the stage approval of one build, beside its plan."""
+    if not isinstance(stage, str) or _BUILD_STAGE_FILE_RE.fullmatch(stage) is None:
+        raise ValueError("the stage of a file name must be a stage of the design")
+    return (
+        build_plan_dir()
+        / f"{_checked_build_id(plan_id)}.stage-{stage}.approval.json"
+    )
+
+
+def build_run_state_path(plan_id: str) -> Path:
+    """The path of the runner's state of one build, beside its plan.
+
+    The runner writes it when it stops for an approval: it holds the
+    digest of the plan that is running, the stage it stopped at and, for
+    every server, the checkpoint that was taken before the stage.  The
+    approval reads the checkpoint from here and verifies it itself.
+    """
+    return build_plan_dir() / f"{_checked_build_id(plan_id)}.run.json"
+
+
+def _refuse_build(code: str, message: str) -> int:
+    """Print one refusal of the approval of a build and return its code.
+
+    A refusal that mirrors a refusal of the build helper carries the
+    code of that helper, so the owner and the runner read the same
+    words.  A refusal of the owner herself -- a confirmation that did
+    not match, a passphrase that did not -- carries no code, because
+    the helper never sees it.
+    """
+    if code and code not in BUILD_REFUSAL_CODES:
+        raise ValueError("the code of a build refusal is not one of the codes")
+    shown = f"{code}: {message}" if code else message
+    print(f"newton-approve: {shown}", file=sys.stderr)
+    return 1
+
+
+def _load_build_plan(plan_id: str) -> tuple[dict[str, Any], str]:
+    """The plan of one build and the digest of its canonical bytes.
+
+    The digest is computed here, from the bytes of the plan, and never
+    read from the plan file: the agent can write that file.
+    """
+    from .ad.build import plan as _build_plan
+
+    try:
+        record = json.loads(build_plan_path(plan_id).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        raise ApprovalRefused("plan record not found or invalid") from None
+    if not isinstance(record, dict):
+        raise ApprovalRefused("plan record not found or invalid")
+    try:
+        digest = _build_plan.digest(record)
+    except _build_plan.BuildPlanRefused:
+        raise ApprovalRefused("plan record is not a build plan") from None
+    return record, digest
+
+
+def _print_build_field(label: str, value: Any, indent: str) -> None:
+    """Print one field of the plan, and every field under it.
+
+    The plan is printed field by field, so no field of it can be left
+    out of what the owner sees.  Every value goes through the
+    sanitiser: it is data, never text the terminal may act on.
+    """
+    if isinstance(value, dict):
+        print(f"{indent}{label}:")
+        for key in value:
+            _print_build_field(str(key), value[key], indent + "  ")
+        return
+    if isinstance(value, list):
+        if value and all(isinstance(item, dict) for item in value):
+            print(f"{indent}{label}:")
+            item_label = _BUILD_ITEM_LABELS.get(label, "Item")
+            for number, item in enumerate(value, start=1):
+                print(f"{indent}  {item_label} {number}:")
+                for key in item:
+                    _print_build_field(str(key), item[key], indent + "    ")
+            return
+        shown = ", ".join(_sanitize_terminal_value(item) for item in value)
+        print(f"{indent}{label}: {shown}")
+        return
+    print(f"{indent}{label}: {_sanitize_terminal_value(value)}")
+
+
+def _print_build_plan(plan_id: str, built: dict[str, Any], digest: str) -> None:
+    """Print the plan of one build, field by field."""
+    print(f"Plan: {_sanitize_terminal_value(plan_id)}")
+    print(f"Digest: {_sanitize_terminal_value(digest[:12])}")
+    for key in built:
+        _print_build_field(
+            _BUILD_PLAN_LABELS.get(key, key), built[key], "  "
+        )
+
+
+def _ask_build_passphrase(plan_id: str) -> tuple[bytes | None, str]:
+    """Ask the owner for the passphrase of the build.
+
+    The passphrase is read here, in this function, and dropped as soon
+    as the key of every server is derived from it.  It never reaches
+    the environment, the argv, a log or a file.
+    """
+    prompt = (
+        "approval passphrase for the AD build "
+        f"{_sanitize_terminal_value(plan_id[:8])}: "
+    )
+    try:
+        passphrase = _getpass(prompt)
+    except (EOFError, KeyboardInterrupt, OSError):
+        return None, "approval passphrase could not be read; approval not created"
+    if not passphrase:
+        return None, "approval passphrase must not be empty; approval not created"
+    try:
+        return passphrase.encode("utf-8"), ""
+    except UnicodeEncodeError:
+        return None, "approval passphrase cannot be used; approval not created"
+
+
+def _build_lock_remaining(built: dict[str, Any]) -> int:
+    """The longest lockout of a server of the plan, or 0.
+
+    The build approvals honour the wrong-answer lockout of every server
+    the passphrase is for, as approve_ad_change does for its one
+    device, and check it before the passphrase is asked.
+    """
+    remaining = 0
+    for server in built["servers"]:
+        remaining = max(remaining, _lock_remaining(server["device"]))
+    return remaining
+
+
+def _build_server_keys(passphrase: bytes, built: dict[str, Any]) -> dict[str, str]:
+    """The key of every server of the plan, derived from one passphrase."""
+    from .ad.build import plan as _build_plan
+
+    keys: dict[str, str] = {}
+    for server in built["servers"]:
+        device = server["device"]
+        keys[device] = _build_plan.server_key(passphrase, device)
+    return keys
+
+
+def _build_dc1_key(built: dict[str, Any], keys: dict[str, str]) -> str | None:
+    """The key of the forest root: the secrets of the domain are its."""
+    for server in built["servers"]:
+        if server["role"] == "dc1":
+            return keys.get(server["device"])
+    return None
+
+
+def _load_build_plan_approval(plan_id: str) -> dict[str, Any]:
+    """The approval of the plan of one build.
+
+    The record is written by the approval of the plan and by nothing
+    else: it is the only thing that says the owner read these bytes
+    and said yes.  A record that is not there, or that cannot be
+    read, is a refusal and never a skip.
+    """
+    try:
+        record = json.loads(
+            build_approval_path(plan_id).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError, ValueError):
+        raise ApprovalRefused("the plan has no approval on record") from None
+    if not isinstance(record, dict):
+        raise ApprovalRefused("the plan approval is not an object")
+    return record
+
+
+def _check_build_fingerprints(
+    record: dict[str, Any], keys: dict[str, str]
+) -> str | None:
+    """The server whose passphrase is not the one of the plan approval.
+
+    The plan approval holds the fingerprint of the key of every server:
+    the fingerprint is the hash of the key under a constant, so it does
+    not grow what a reader of the state directory can do.  A passphrase
+    that does not match it would mint tokens the helpers refuse, so it
+    is caught here instead.
+
+    A record that is not there, that cannot be read, or that holds no
+    fingerprint for a server, is a refusal and never a skip: a skip
+    would mint a token over the key of a passphrase that may be wrong.
+
+    The record is the one the caller already read, so the fingerprints
+    and the plan tokens checked after them come from the same bytes.
+    """
+    fingerprints = record.get("fingerprints")
+    if not isinstance(fingerprints, dict):
+        raise ApprovalRefused("the plan approval holds no fingerprint")
+    for device, key in keys.items():
+        stored = fingerprints.get(device)
+        if not isinstance(stored, str):
+            raise ApprovalRefused(
+                "the plan approval holds no fingerprint for "
+                f"{_sanitize_terminal_value(device)}"
+            )
+        if not hmac.compare_digest(stored, approval_fingerprint(key)):
+            return device
+    return None
+
+
+def _check_build_plan_tokens(
+    record: dict[str, Any], keys: dict[str, str], digest: str
+) -> bool:
+    """Whether the plan tokens of the approval are over this plan.
+
+    The fingerprints of the approval depend on the passphrase and the
+    device, not on the plan: a record copied from an approved plan onto
+    another plan, with its id and its digest swapped, carries them
+    unchanged.  The plan tokens are over the digest of the plan that was
+    approved, so only the key of every server over this digest and the
+    window of the record gives them back.  A token that is not there,
+    or a window that is not one, is a mismatch.
+    """
+    from .ad.build import plan as _build_plan
+
+    tokens = record.get("tokens")
+    if not isinstance(tokens, dict):
+        return False
+    for device, key in keys.items():
+        stored = tokens.get(device)
+        if not isinstance(stored, str):
+            return False
+        try:
+            expected = _build_plan.plan_token(
+                key, digest, record.get("nbf"), record.get("exp")
+            )
+        except (ValueError, TypeError):
+            return False
+        if not hmac.compare_digest(stored, expected):
+            return False
+    return True
+
+
+def _check_setup_fingerprints(keys: dict[str, str]) -> str | None:
+    """The server whose passphrase is not the one of its own setup.
+
+    The fingerprint of a device is written by the setup of that device.
+    When it is on record and it does not match, the passphrase is wrong
+    and no token may be minted.  When it is not on record there is
+    nothing to compare, and the helpers refuse a token of a wrong
+    passphrase themselves.
+    """
+    for device, key in keys.items():
+        status = check_approval_fingerprint(
+            state_dir() / "approval-fp" / device, approval_fingerprint(key)
+        )
+        if status == APPROVAL_FP_MISMATCH:
+            return device
+    return None
+
+
+def _setup_fingerprints_missing(keys: dict[str, str]) -> list[str]:
+    """The servers whose setup wrote no fingerprint on record.
+
+    A fresh build has none: the fingerprint of the setup of a server is
+    written when the setup of that server runs, and the setup of a
+    server of a build is the bootstrap of that server.
+    """
+    missing: list[str] = []
+    for device, key in keys.items():
+        status = check_approval_fingerprint(
+            state_dir() / "approval-fp" / device, approval_fingerprint(key)
+        )
+        if status == APPROVAL_FP_MISSING:
+            missing.append(device)
+    return missing
+
+
+def _restore_cost(method: str, stage: str) -> str:
+    """What it costs to restore the checkpoint of a stage.
+
+    The words are the ones of the design and of the measurements: a
+    snapshot is rolled back and the VM is started again, a Proxmox
+    rollback leaves the VM stopped, and a backup of a server without a
+    hypervisor is a bare-metal restore or a DSRM restore.
+
+    Without a hypervisor the stage says which backup the checkpoint
+    is: the all-critical one before the stages 2 and 7, the system-state
+    one before the stages 3, 4 and 6.  A system-state backup cannot
+    undo a promotion, so it is never the one of the stages 2 and 7.
+    """
+    if method == "hyperv":
+        return (
+            "a snapshot rollback of the VM from the Hyper-V host "
+            "(Restore-VMSnapshot) and a start of the VM again"
+        )
+    if method == "proxmox":
+        return (
+            "a snapshot rollback of the VM with the Proxmox token; the VM is "
+            "left stopped and the owner starts it again"
+        )
+    if stage in BUILD_WBADMIN_ALL_CRITICAL_STAGES:
+        return (
+            "a bare-metal restore or a DSRM restore from the all-critical "
+            "backup; it is not a quick rollback"
+        )
+    return (
+        "a system-state restore of the domain controller through DSRM; it "
+        "cannot undo a promotion, so the all-critical backup is the one "
+        "that can"
+    )
+
+
+def _verify_checkpoint(
+    adapter: CheckpointAdapter,
+    server_cfg: Mapping[str, Any],
+    checkpoint: Mapping[str, Any],
+    kind: str,
+    *,
+    stage: str,
+    not_before: int,
+) -> object:
+    """Ask the adapter about one checkpoint of one stage.
+
+    The adapter is an object with a ``verify`` method or a callable
+    with the same arguments; the stage goes by keyword (the maintainer,
+    2026-11-13), so an adapter that cannot take it raises.  An adapter
+    that raises is an adapter that cannot answer, and an adapter that
+    cannot answer refuses.  The answer is returned as the adapter gave
+    it: only ``True`` verifies, and a truthy answer of another type is
+    never turned into a yes.
+    """
+    method = getattr(adapter, "verify", None)
+    if callable(method):
+        return method(server_cfg, checkpoint, kind, stage=stage, not_before=not_before)
+    if callable(adapter):
+        return adapter(server_cfg, checkpoint, kind, stage=stage, not_before=not_before)
+    raise TypeError("the checkpoint adapter has no verify")
+
+
+def build_plan_approve_command(plan_id: str) -> str:
+    """The command the owner runs to approve the plan of a build again."""
+    return f"{_launcher('newton-approve')} ad-build {plan_id}"
+
+
+def _plan_approval_open(approval: Mapping[str, Any], at: datetime) -> bool:
+    """True while the plan approval of a build is still open at ``at``.
+
+    The approval is open while ``at`` is before its EXP (the maintainer,
+    2026-11-13).  An EXP that is not an integer is never open.
+    """
+    exp = approval.get("exp")
+    if not isinstance(exp, int) or isinstance(exp, bool):
+        return False
+    return int(at.timestamp()) < exp
+
+
+def _plan_approval_expired_text(plan_id: str) -> str:
+    """The refusal of a stage whose plan approval is no longer open."""
+    return (
+        "the plan approval has expired or holds no expiry; re-approve the "
+        f"plan with {build_plan_approve_command(plan_id)}; no token was written"
+    )
+
+
+def _plan_approval_expired_waiting_text(stage: str) -> str:
+    """The refusal of a stage whose plan approval is no longer open while
+    a server waits at the stage with its checkpoint taken (F1 of tri-e1;
+    DESIGN-1.5 open point 52).
+
+    A second approval of the same plan would not get the run going: its
+    NBF raises the checkpoint's ``not_before`` past the waiting
+    checkpoint, every adapter refuses a checkpoint older than the bound,
+    and the runner never takes a stage's checkpoint again.  Only a resume
+    plan at the stage, which the owner approves, goes on.
+    """
+    return (
+        "the plan approval has expired or holds no expiry while the run "
+        f"waits at stage {stage} with its checkpoint taken; a second "
+        "approval of this plan does not restart it (its NBF is later than "
+        "that checkpoint, which then never verifies, and the runner does "
+        "not take it again): the run goes on only through a resume plan "
+        f"(resume_from this plan, start_stage {stage}) the owner approves; "
+        "no token was written"
+    )
+
+
+def _run_waits_with_checkpoint(plan_id: str, digest: str, stage: str) -> bool:
+    """True when the run state of this plan has a server waiting for the
+    approval of ``stage`` with a checkpoint recorded.  Used only to word a
+    refusal: a state that cannot be read, or is of another plan, is False.
+    """
+    try:
+        state = _load_build_run_state(plan_id)
+    except ApprovalRefused:
+        return False
+    if state.get("plan_digest") != digest:
+        return False
+    servers = state.get("servers")
+    if not isinstance(servers, dict):
+        return False
+    return any(
+        isinstance(entry, dict)
+        and entry.get("stage") == stage
+        and entry.get("state") == "stopped_for_approval"
+        and isinstance(entry.get("checkpoint"), dict)
+        for entry in servers.values()
+    )
+
+
+def approve_ad_build(plan_id: str, *, now: datetime | None = None) -> int:
+    """The approval of the plan of one AD build.
+
+    Every field of the plan is printed, the key of every server is
+    derived from the one passphrase of the owner, every DC's DSRM
+    password (each from that server's key) and the admin password (from
+    DC1's) are shown in the terminal, and one plan token per server is
+    written.  The passwords are salted with the build's first plan's
+    digest (``plan.secrets_digest``), so a resume plan shows the ones the
+    first plan installed (DESIGN-1.5 open points 71 and 72).
+
+    The passphrase is asked a second time when no fingerprint of the
+    setup of a server is on record: a typo of the passphrase would
+    derive the wrong key, and the DSRM and the admin password would
+    come from it.
+
+    The plan token covers the read and the reversible stages of that
+    server and is good for six hours.  A refusal that mirrors a refusal
+    of the build helper carries the code of that helper, and nothing is
+    written when the approval is refused.
+    """
+    from .ad.build import plan as _build_plan
+
+    if not isinstance(plan_id, str) or PLAN_ID_RE.fullmatch(plan_id) is None:
+        return _refuse_build(
+            "",
+            "the plan id must be 32 lowercase hexadecimal characters",
+        )
+    try:
+        built, digest = _load_build_plan(plan_id)
+    except ApprovalRefused as exc:
+        return _refuse_build("", f"{exc}; approval not created")
+
+    _print_build_plan(plan_id, built, digest)
+
+    expected = f"approve {plan_id[:8]}"
+    print(f"Type {expected!r} to approve: ", end="", flush=True)
+    confirmation = sys.stdin.readline().rstrip("\r\n")
+    if confirmation != expected:
+        return _refuse_build(
+            "",
+            "the confirmation did not match; approval not created",
+        )
+
+    remaining = _build_lock_remaining(built)
+    if remaining > 0:
+        return _refuse_build("", _locked_text(remaining))
+
+    passphrase, refusal = _ask_build_passphrase(plan_id)
+    if refusal:
+        return _refuse_build("", refusal)
+
+    try:
+        keys = _build_server_keys(passphrase, built)
+    except ValueError as exc:
+        del passphrase
+        return _refuse_build("", f"{exc}; approval not created")
+
+    wrong = _check_setup_fingerprints(keys)
+    if wrong is not None:
+        del passphrase
+        return _refuse_build(
+            "",
+            f"{_sanitize_terminal_value(wrong)}: "
+            f"{_wrong_text(_record_failure(wrong))}",
+        )
+
+    if _setup_fingerprints_missing(keys):
+        again, refusal = _ask_build_passphrase(plan_id)
+        if refusal:
+            del passphrase
+            return _refuse_build("", refusal)
+        same = hmac.compare_digest(again, passphrase)
+        del again
+        if not same:
+            del passphrase
+            return _refuse_build(
+                "",
+                "the two passphrases are not the same; approval not created",
+            )
+    del passphrase
+
+    created = datetime.now(timezone.utc) if now is None else now
+    not_before = int(created.timestamp())
+    not_after = not_before + BUILD_PLAN_WINDOW_S
+
+    tokens: dict[str, str] = {}
+    fingerprints: dict[str, str] = {}
+    try:
+        for device, key in keys.items():
+            tokens[device] = _build_plan.plan_token(
+                key, digest, not_before, not_after
+            )
+            fingerprints[device] = approval_fingerprint(key)
+    except ValueError as exc:
+        return _refuse_build("schema", f"{exc}; approval not created")
+
+    dc1_key = _build_dc1_key(built, keys)
+    if dc1_key is None:
+        return _refuse_build(
+            "schema",
+            "the plan has no forest root; approval not created",
+        )
+    # The salt of the secrets is the build's first plan's digest
+    # (DESIGN-1.5 open point 71): the plan's own for a first plan, its
+    # signed secrets_from for a resume plan, as the helper derives them.
+    salt = _build_plan.secrets_digest(built)
+    # Every DC's DSRM password, each from that server's own K: DC1's helper
+    # sets DC1's at the promotion, DC2's helper writes DC2's at the join
+    # (DESIGN-1.5 "Secrets"; review finding 3 of task 8 part E).
+    dsrms: list[tuple[str, str, str]] = []
+    for role in ("dc1", "dc2"):
+        for server in built["servers"]:
+            if server["role"] == role:
+                device = server["device"]
+                dsrms.append(
+                    (
+                        device,
+                        role,
+                        _build_plan.derive_secret(
+                            keys[device], salt, _build_plan.DSRM_INFO
+                        ),
+                    )
+                )
+    admin = _build_plan.derive_secret(dc1_key, salt, _build_plan.ADMIN_INFO)
+    del keys, dc1_key
+
+    record = {
+        "plan_id": plan_id,
+        "kind": "plan",
+        "plan_digest": digest,
+        "nbf": not_before,
+        "exp": not_after,
+        "created_at": created.isoformat(),
+        "approved_by": os.environ.get("SUDO_USER", ""),
+        "tokens": tokens,
+        "fingerprints": fingerprints,
+    }
+    try:
+        _atomic_write(build_approval_path(plan_id), record)
+    except OSError as exc:
+        return _refuse_build("", f"could not write approval: {exc}")
+    if salt == digest:
+        shown = "shown once, here and nowhere else"
+    else:
+        shown = "the first plan's, unchanged; here and nowhere else"
+        print(
+            "This plan resumes the build: the passwords are the passwords of "
+            f"the build's first plan {_sanitize_terminal_value(salt[:12])}, "
+            "the ones the servers keep or are given."
+        )
+    for device, role, dsrm in dsrms:
+        print(
+            f"DSRM password of {_sanitize_terminal_value(device)} ({role}) "
+            f"({shown}):"
+        )
+        print(f"  {_sanitize_terminal_value(dsrm)}")
+    print(f"Owner's first admin password ({shown}):")
+    print(f"  {_sanitize_terminal_value(admin)}")
+    print(f"Approved plan {plan_id} for {BUILD_PLAN_WINDOW_S // 60} minutes.")
+    return 0
+
+
+def _load_build_run_state(plan_id: str) -> dict[str, Any]:
+    """The runner's state of one build."""
+    try:
+        state = json.loads(build_run_state_path(plan_id).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        raise ApprovalRefused("the run has not stopped for approval") from None
+    if not isinstance(state, dict):
+        raise ApprovalRefused("the run state is not an object")
+    return state
+
+
+def approve_ad_build_stage(
+    plan_id: str,
+    stage: str,
+    *,
+    verifier: CheckpointAdapter | None = None,
+    transport: Any = None,
+    now: datetime | None = None,
+) -> int:
+    """The approval of one irreversible stage of an AD build.
+
+    The plan is read and its approval is read before anything else:
+    the approval of the plan is the only thing that says the owner
+    approved these bytes, and the runner's state file is written by
+    the agent and says nothing of the sort.
+
+    The checkpoint of the stage is verified here, through the adapter
+    itself: the runner's state says which checkpoint was taken, and the
+    adapter says whether it may be relied on.  A stage whose checkpoint
+    does not verify is refused, whatever the runner's state says.
+
+    The checkpoint and what it costs to restore it are printed, and one
+    stage token per server is written.  The token is over the digest of
+    the stage, which holds the id of the verified checkpoint, and is
+    good for thirty minutes.
+
+    The plan approval must still be open (the maintainer, 2026-11-13): at or past
+    its EXP the stage is refused with ``expired``.  When a server already
+    waits at the stage with its checkpoint taken, the refusal names a
+    resume plan at the stage (a second approval of this plan strands that
+    checkpoint; open point 52); otherwise it names the plan approval.
+    Stage 9 is covered by the plan token, so it
+    never gets a stage token.
+
+    The adapter is told how old the checkpoint may be: ``not_before``, the
+    later of the plan approval's NBF and the previous stage's recorded
+    completion on that server, which the approval reads itself from the
+    helper's journal through ``transport`` (a status under the plan
+    token), never from the runner's state file (DESIGN-1.5 "Checkpoints").
+    A read that fails, a journal with no completion of the previous stage,
+    or a time that is not a UTC second refuses the stage.
+    """
+    from .ad.build import plan as _build_plan
+    from .ad.build import transport as _build_transport
+
+    if not isinstance(plan_id, str) or PLAN_ID_RE.fullmatch(plan_id) is None:
+        return _refuse_build(
+            "",
+            "the plan id must be 32 lowercase hexadecimal characters",
+        )
+    if not isinstance(stage, str) or stage not in _build_plan.STAGE_IDS:
+        return _refuse_build(
+            "schema",
+            "the stage is not one of the stages of the design; no token was written",
+        )
+    kind = _build_plan.STAGE_KINDS[stage]
+    if kind == "final":
+        # The maintainer, 2026-11-13: the final stage runs under the plan approval.
+        return _refuse_build(
+            "schema",
+            "stage 9 is the final stage and the plan token covers it; it "
+            "needs no stage token; no token was written",
+        )
+    if kind != "irreversible":
+        return _refuse_build(
+            "schema",
+            "the plan token covers this stage; it needs no stage token; "
+            "no token was written",
+        )
+
+    try:
+        built, digest = _load_build_plan(plan_id)
+    except ApprovalRefused as exc:
+        return _refuse_build("schema", f"{exc}; no token was written")
+
+    try:
+        approval = _load_build_plan_approval(plan_id)
+    except ApprovalRefused as exc:
+        return _refuse_build("plan_mismatch", f"{exc}; no token was written")
+
+    if approval.get("kind") != "plan" or approval.get("plan_digest") != digest:
+        return _refuse_build(
+            "plan_mismatch",
+            "the plan on record is not the plan that was approved; "
+            "no token was written",
+        )
+    if not _plan_approval_open(
+        approval, datetime.now(timezone.utc) if now is None else now
+    ):
+        if _run_waits_with_checkpoint(plan_id, digest, stage):
+            return _refuse_build("expired", _plan_approval_expired_waiting_text(stage))
+        return _refuse_build("expired", _plan_approval_expired_text(plan_id))
+    fingerprints = approval.get("fingerprints")
+    if not isinstance(fingerprints, dict):
+        return _refuse_build(
+            "plan_mismatch",
+            "the plan approval holds no fingerprint; no token was written",
+        )
+
+    try:
+        state = _load_build_run_state(plan_id)
+    except ApprovalRefused as exc:
+        return _refuse_build("schema", f"{exc}; no token was written")
+
+    if state.get("plan_digest") != digest:
+        return _refuse_build(
+            "plan_mismatch",
+            "the run is not running this plan; no token was written",
+        )
+
+    servers = state.get("servers")
+    if not isinstance(servers, dict) or not servers:
+        return _refuse_build(
+            "schema",
+            "the run state holds no server; no token was written",
+        )
+
+    plan_servers = {server["device"]: server for server in built["servers"]}
+    waiting: list[tuple[str, dict[str, Any], dict[str, Any], str]] = []
+    for device in sorted(servers):
+        entry = servers[device]
+        if not isinstance(entry, dict):
+            return _refuse_build(
+                "schema",
+                "the run state of a server is not an object; no token was written",
+            )
+        if entry.get("stage") != stage:
+            continue
+        if entry.get("state") == "done":
+            return _refuse_build(
+                "already_done",
+                "the stage is done; no token was written",
+            )
+        if entry.get("state") != "stopped_for_approval":
+            return _refuse_build(
+                "schema",
+                "the run is not waiting for the approval of this stage; "
+                "no token was written",
+            )
+        server = plan_servers.get(device)
+        if server is None:
+            return _refuse_build(
+                "schema",
+                "the run state holds a server the plan does not have; "
+                "no token was written",
+            )
+        if not isinstance(fingerprints.get(device), str):
+            return _refuse_build(
+                "plan_mismatch",
+                "the plan approval holds no fingerprint for "
+                f"{_sanitize_terminal_value(device)}; no token was written",
+            )
+        if stage not in _build_plan.stage_graph(built, server):
+            return _refuse_build(
+                "schema",
+                "the stage is not in the graph of the server; no token was written",
+            )
+        checkpoint = entry.get("checkpoint")
+        if not isinstance(checkpoint, dict):
+            return _refuse_build(
+                "schema",
+                "the run state holds no checkpoint; no token was written",
+            )
+        checkpoint_id = checkpoint.get("id")
+        if (
+            not isinstance(checkpoint_id, str)
+            or _build_plan.CHECKPOINT_ID_RE.fullmatch(checkpoint_id) is None
+        ):
+            return _refuse_build(
+                "schema",
+                "the checkpoint of the stage holds no id of the design; "
+                "no token was written",
+            )
+        checkpoint_name = checkpoint.get("name")
+        if not isinstance(checkpoint_name, str) or not checkpoint_name:
+            return _refuse_build(
+                "schema",
+                "the checkpoint of the stage holds no name; no token was written",
+            )
+        checkpoint_kind = entry.get("checkpoint_kind")
+        if checkpoint_kind not in BUILD_CHECKPOINT_KINDS:
+            return _refuse_build(
+                "schema",
+                "the run state holds no kind of checkpoint; no token was written",
+            )
+        expected_kind = BUILD_CHECKPOINT_OF_STAGE.get((server["role"], stage))
+        if expected_kind is None or checkpoint_kind != expected_kind:
+            return _refuse_build(
+                "schema",
+                "the checkpoint of the stage is not the kind the design gives it; "
+                "no token was written",
+            )
+        waiting.append(
+            (
+                device,
+                server,
+                {"name": checkpoint_name, "id": checkpoint_id},
+                checkpoint_kind,
+            )
+        )
+
+    if not waiting:
+        return _refuse_build(
+            "schema",
+            "no server waits for the approval of this stage; no token was written",
+        )
+
+    run_id = state.get("run", plan_id)
+    if not isinstance(run_id, str) or PLAN_ID_RE.fullmatch(run_id) is None:
+        return _refuse_build(
+            "schema",
+            "the run state holds no run id; no token was written",
+        )
+    plan_tokens = approval.get("tokens")
+    for device, server, checkpoint, checkpoint_kind in waiting:
+        if verifier is None:
+            return _refuse_build(
+                "checkpoint_unverified",
+                "there is no checkpoint adapter; the checkpoint could not be "
+                "verified; no token was written",
+            )
+        if transport is None:
+            return _refuse_build(
+                "checkpoint_unverified",
+                "there is no helper transport; the journal that bounds the "
+                "checkpoint could not be read; no token was written",
+            )
+        plan_token = plan_tokens.get(device) if isinstance(plan_tokens, dict) else None
+        try:
+            completed = _build_transport.read_completions(
+                transport,
+                device,
+                run=run_id,
+                plan_bytes=_build_plan.canonical_bytes(built),
+                token=plan_token if isinstance(plan_token, str) else "",
+                nbf=approval.get("nbf"),  # type: ignore[arg-type]
+                exp=approval.get("exp"),  # type: ignore[arg-type]
+            )
+            not_before = _build_transport.journal_not_before(
+                completed,
+                graph=_build_plan.stage_graph(built, server),
+                stage=stage,
+                plan_nbf=approval.get("nbf"),  # type: ignore[arg-type]
+            )
+        except (_build_transport.JournalUnreadable, ValueError) as exc:
+            return _refuse_build(
+                "checkpoint_unverified",
+                "the journal of "
+                f"{_sanitize_terminal_value(device)} gave no bound for the "
+                f"checkpoint ({_sanitize_terminal_value(str(exc))}); "
+                "no token was written",
+            )
+        # The DC reads of the real adapters go through this server's
+        # helper, under its plan token, for this stage (PLAN-1.5 task 8
+        # part B0); a verifier that reads through no helper has nothing
+        # to open.
+        open_reads = getattr(verifier, "open_reads", None)
+        close_reads = getattr(verifier, "close_reads", None)
+        try:
+            if callable(open_reads):
+                open_reads(
+                    device,
+                    run=run_id,
+                    plan_bytes=_build_plan.canonical_bytes(built),
+                    token=plan_token if isinstance(plan_token, str) else "",
+                    nbf=approval.get("nbf"),
+                    exp=approval.get("exp"),
+                    stage=stage,
+                )
+            verified = _verify_checkpoint(
+                verifier,
+                server,
+                checkpoint,
+                checkpoint_kind,
+                stage=stage,
+                not_before=not_before,
+            )
+        except Exception as exc:
+            return _refuse_build(
+                "checkpoint_unverified",
+                "the checkpoint of "
+                f"{_sanitize_terminal_value(device)} could not be verified "
+                f"({_sanitize_terminal_value(type(exc).__name__)}); "
+                "no token was written",
+            )
+        finally:
+            if callable(close_reads):
+                close_reads(device)
+        if verified is not True:
+            return _refuse_build(
+                "checkpoint_unverified",
+                "the checkpoint of "
+                f"{_sanitize_terminal_value(device)} did not verify; "
+                "no token was written",
+            )
+
+    print(f"Plan: {_sanitize_terminal_value(plan_id)}")
+    print(f"Digest: {_sanitize_terminal_value(digest[:12])}")
+    print(f"Stage: {_sanitize_terminal_value(stage)} ({_sanitize_terminal_value(kind)})")
+    for device, server, checkpoint, checkpoint_kind in waiting:
+        print(f"Server {device} ({server['role']}):")
+        print(f"  Checkpoint method: {_sanitize_terminal_value(server['checkpoint'])}")
+        print(
+            "  Checkpoint: "
+            f"{_sanitize_terminal_value(checkpoint['name'])} "
+            f"({_sanitize_terminal_value(checkpoint['id'])})"
+        )
+        print(f"  Checkpoint kind: {_sanitize_terminal_value(checkpoint_kind)}")
+        print(
+            "  Restore cost: "
+            f"{_restore_cost(server['checkpoint'], stage)}"
+        )
+
+    expected = f"approve stage {stage} of {plan_id[:8]}"
+    print(f"Type {expected!r} to approve: ", end="", flush=True)
+    confirmation = sys.stdin.readline().rstrip("\r\n")
+    if confirmation != expected:
+        return _refuse_build(
+            "",
+            "the confirmation did not match; approval not created",
+        )
+
+    remaining = _build_lock_remaining(built)
+    if remaining > 0:
+        return _refuse_build("", _locked_text(remaining))
+
+    passphrase, refusal = _ask_build_passphrase(plan_id)
+    if refusal:
+        return _refuse_build("", refusal)
+
+    try:
+        keys = _build_server_keys(passphrase, built)
+    except ValueError as exc:
+        del passphrase
+        return _refuse_build("", f"{exc}; approval not created")
+    del passphrase
+
+    try:
+        wrong = _check_build_fingerprints(approval, keys)
+    except ApprovalRefused as exc:
+        return _refuse_build("", f"{exc}; approval not created")
+    if wrong is not None:
+        return _refuse_build(
+            "",
+            f"{_sanitize_terminal_value(wrong)}: "
+            f"{_wrong_text(_record_failure(wrong))}",
+        )
+    if not _check_build_plan_tokens(approval, keys, digest):
+        return _refuse_build(
+            "plan_mismatch",
+            "the plan approval was not minted for this plan; "
+            "no token was written",
+        )
+
+    created = datetime.now(timezone.utc) if now is None else now
+    if not _plan_approval_open(approval, created):
+        # The owner may have taken the plan approval past its EXP at the
+        # prompts; the check is made again on the clock of the token.
+        return _refuse_build("expired", _plan_approval_expired_text(plan_id))
+    not_before = int(created.timestamp())
+    not_after = not_before + BUILD_STAGE_WINDOW_S
+
+    entries: dict[str, Any] = {}
+    for device, server, checkpoint, checkpoint_kind in waiting:
+        key = keys.get(device)
+        if key is None:
+            return _refuse_build(
+                "schema",
+                "the plan has no server of the run; no token was written",
+            )
+        try:
+            stage_digest = _build_plan.stage_digest(
+                digest, stage, checkpoint["id"]
+            )
+        except _build_plan.BuildPlanRefused:
+            return _refuse_build(
+                "schema",
+                "the id of the checkpoint is outside its grammar; "
+                "no token was written",
+            )
+        try:
+            token = _build_plan.plan_token(key, stage_digest, not_before, not_after)
+        except ValueError as exc:
+            return _refuse_build(
+                "schema",
+                f"{exc}; no token was written",
+            )
+        entries[device] = {
+            "token": token,
+            "stage_digest": stage_digest,
+            "checkpoint": {
+                "name": checkpoint["name"],
+                "id": checkpoint["id"],
+            },
+            "checkpoint_kind": checkpoint_kind,
+        }
+    del keys
+
+    record = {
+        "plan_id": plan_id,
+        "kind": "stage",
+        "stage": stage,
+        "plan_digest": digest,
+        "nbf": not_before,
+        "exp": not_after,
+        "created_at": created.isoformat(),
+        "approved_by": os.environ.get("SUDO_USER", ""),
+        "servers": entries,
+    }
+    try:
+        _atomic_write(build_stage_approval_path(plan_id, stage), record)
+    except OSError as exc:
+        return _refuse_build("", f"could not write approval: {exc}")
+    print(
+        f"Approved stage {stage} of plan {plan_id} for "
+        f"{BUILD_STAGE_WINDOW_S // 60} minutes."
+    )
+    return 0
+
+
+def _main_ad_build(args: list[str]) -> int:
+    """``newton-approve ad-build <plan-id>``: the approval of a build plan."""
+    if len(args) != 2:
+        print("usage: newton-approve ad-build <32-hex-plan-id>", file=sys.stderr)
+        return 2
+    plan_id = args[1]
+    if not PLAN_ID_RE.fullmatch(plan_id):
+        print(
+            "newton-approve: plan id must be 32 lowercase hexadecimal characters",
+            file=sys.stderr,
+        )
+        return 2
+    if not sys.stdin.isatty():
+        print("newton-approve: stdin must be an interactive terminal", file=sys.stderr)
+        return 1
+    return approve_ad_build(plan_id)
+
+
+def build_stage_approve_command(plan_id: str, stage: str) -> str:
+    """The command the owner runs to approve one stage of a build."""
+    return f"{_launcher('newton-approve')} ad-build-stage {plan_id} {stage}"
+
+
+def _main_ad_build_stage(args: list[str]) -> int:
+    """``newton-approve ad-build-stage <plan-id> <stage>``: the approval of
+    one irreversible stage.  The checkpoint adapters and the helper
+    transport come from the owner's build config (``ad-build.toml`` in
+    Newton's config directory), never from the runner."""
+    if len(args) != 3:
+        print(
+            "usage: newton-approve ad-build-stage <32-hex-plan-id> <stage>",
+            file=sys.stderr,
+        )
+        return 2
+    plan_id, stage = args[1], args[2]
+    if not PLAN_ID_RE.fullmatch(plan_id):
+        print(
+            "newton-approve: plan id must be 32 lowercase hexadecimal characters",
+            file=sys.stderr,
+        )
+        return 2
+    if _BUILD_STAGE_FILE_RE.fullmatch(stage) is None:
+        print("newton-approve: the stage must be a stage of the design", file=sys.stderr)
+        return 2
+    if not sys.stdin.isatty():
+        print("newton-approve: stdin must be an interactive terminal", file=sys.stderr)
+        return 1
+    from .ad.build import config as _build_config
+
+    try:
+        loaded = _build_config.load_config()
+    except _build_config.BuildConfigError as exc:
+        return _refuse_build(
+            "checkpoint_unverified",
+            f"{exc} ({_sanitize_terminal_value(str(_build_config.config_path()))}); "
+            "no token was written",
+        )
+    build_transport = _build_config.build_transport(loaded)
+    return approve_ad_build_stage(
+        plan_id,
+        stage,
+        verifier=_build_config.build_adapters(loaded, transport=build_transport),
+        transport=build_transport,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if args and args[0] == "ad-change":
@@ -1552,6 +2767,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"newton-approve: {refusal}", file=sys.stderr)
             return 1
         return 0
+    if args and args[0] == "ad-build":
+        return _main_ad_build(args)
+    if args and args[0] == "ad-build-stage":
+        return _main_ad_build_stage(args)
     if len(args) != 1:
         print("usage: newton-approve <32-hex-plan-or-scan-request-id>", file=sys.stderr)
         return 2

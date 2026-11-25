@@ -1,0 +1,22 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-14T00:27:17.4305080Z
+schema now : objectVersion 91
+  ms-LAPS-Password : absent
+  ms-LAPS-PasswordExpirationTime : absent
+  ms-LAPS-EncryptedPassword : absent
+  ms-LAPS-EncryptedPasswordHistory : absent
+  ms-LAPS-EncryptedDSRMPassword : absent
+  ms-LAPS-EncryptedDSRMPasswordHistory : absent
+  ms-Mcs-AdmPwd : absent
+  computer mayContain msLAPS-*: 
+OU read: OU=Domain Controllers,DC=build,DC=newton,DC=test
+OU ACEs for SELF:
+  NT AUTHORITY\SELF | Self | Allow | ObjectType 9b026da6-0d3c-465c-8bee-5199d7165cba () | InheritanceType Descendents | InheritedObjectType bf967a86-0de6-11d0-a285-00aa003049e2 | IsInherited True
+  NT AUTHORITY\SELF | WriteProperty | Allow | ObjectType ea1b7b93-5e48-46d5-bc6c-4df4fda78a35 () | InheritanceType Descendents | InheritedObjectType bf967a86-0de6-11d0-a285-00aa003049e2 | IsInherited True
+  NT AUTHORITY\SELF | ReadProperty, WriteProperty | Allow | ObjectType 3f78c3e5-f79a-46bd-a0b8-9d18116ddc79 () | InheritanceType All | InheritedObjectType 00000000-0000-0000-0000-000000000000 | IsInherited True
+  NT AUTHORITY\SELF | ReadProperty, WriteProperty, ExtendedRight | Allow | ObjectType 91e647de-d96f-4b70-9557-d63ff4f3ccd8 () | InheritanceType All | InheritedObjectType 00000000-0000-0000-0000-000000000000 | IsInherited True
+Get-ADPrincipalGroupMembership now: Administrators, Domain Admins, Domain Users, Enterprise Admins, Schema Admins
+  Domain Admins members: Administrator, newton-build
+  Enterprise Admins members: Administrator, newton-build
+  Schema Admins members: Administrator, newton-build
+task end 2026-11-14T00:27:19.7951702Z

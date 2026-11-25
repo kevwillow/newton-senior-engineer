@@ -1,0 +1,25 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-14T00:27:36.1668281Z
+schema now : objectVersion 91
+  ms-LAPS-Password : present, lDAPDisplayName msLAPS-Password, schemaIDGUID ec25cc5c-46a7-42ab-90a1-fb73b06146b9
+  ms-LAPS-PasswordExpirationTime : present, lDAPDisplayName msLAPS-PasswordExpirationTime, schemaIDGUID f03e430e-2496-43ea-abd4-f6071c41b793
+  ms-LAPS-EncryptedPassword : present, lDAPDisplayName msLAPS-EncryptedPassword, schemaIDGUID a4e6767a-e3fe-4c44-b3e5-da1ee5939f69
+  ms-LAPS-EncryptedPasswordHistory : present, lDAPDisplayName msLAPS-EncryptedPasswordHistory, schemaIDGUID 37f1c82e-4afd-4ee3-a196-9a1a590d14ef
+  ms-LAPS-EncryptedDSRMPassword : present, lDAPDisplayName msLAPS-EncryptedDSRMPassword, schemaIDGUID ae64fc43-78cd-4b99-bb55-02a16c56715f
+  ms-LAPS-EncryptedDSRMPasswordHistory : present, lDAPDisplayName msLAPS-EncryptedDSRMPasswordHistory, schemaIDGUID 210d86e2-4f18-40b8-9e07-dc33526e678e
+  ms-Mcs-AdmPwd : absent
+  computer mayContain msLAPS-*: msLAPS-CurrentPasswordVersion, msLAPS-EncryptedDSRMPassword, msLAPS-EncryptedDSRMPasswordHistory, msLAPS-EncryptedPassword, msLAPS-EncryptedPasswordHistory, msLAPS-Password, msLAPS-PasswordExpirationTime
+OU read: OU=Domain Controllers,DC=build,DC=newton,DC=test
+OU ACEs for SELF:
+  NT AUTHORITY\SELF | ReadProperty, WriteProperty, ExtendedRight | Allow | ObjectType f3531ec6-6330-4f8e-8d39-7a671fbac605 () | InheritanceType Descendents | InheritedObjectType bf967a86-0de6-11d0-a285-00aa003049e2 | IsInherited False
+  NT AUTHORITY\SELF | ReadProperty, WriteProperty | Allow | ObjectType f03e430e-2496-43ea-abd4-f6071c41b793 (msLAPS-PasswordExpirationTime) | InheritanceType Descendents | InheritedObjectType bf967a86-0de6-11d0-a285-00aa003049e2 | IsInherited False
+  NT AUTHORITY\SELF | WriteProperty | Allow | ObjectType ec25cc5c-46a7-42ab-90a1-fb73b06146b9 (msLAPS-Password) | InheritanceType Descendents | InheritedObjectType bf967a86-0de6-11d0-a285-00aa003049e2 | IsInherited False
+  NT AUTHORITY\SELF | Self | Allow | ObjectType 9b026da6-0d3c-465c-8bee-5199d7165cba () | InheritanceType Descendents | InheritedObjectType bf967a86-0de6-11d0-a285-00aa003049e2 | IsInherited True
+  NT AUTHORITY\SELF | WriteProperty | Allow | ObjectType ea1b7b93-5e48-46d5-bc6c-4df4fda78a35 () | InheritanceType Descendents | InheritedObjectType bf967a86-0de6-11d0-a285-00aa003049e2 | IsInherited True
+  NT AUTHORITY\SELF | ReadProperty, WriteProperty | Allow | ObjectType 3f78c3e5-f79a-46bd-a0b8-9d18116ddc79 () | InheritanceType All | InheritedObjectType 00000000-0000-0000-0000-000000000000 | IsInherited True
+  NT AUTHORITY\SELF | ReadProperty, WriteProperty, ExtendedRight | Allow | ObjectType 91e647de-d96f-4b70-9557-d63ff4f3ccd8 () | InheritanceType All | InheritedObjectType 00000000-0000-0000-0000-000000000000 | IsInherited True
+Get-ADPrincipalGroupMembership now: Administrators, Domain Admins, Domain Users
+  Domain Admins members: Administrator, newton-build
+  Enterprise Admins members: Administrator
+  Schema Admins members: Administrator
+task end 2026-11-14T00:27:38.0181874Z

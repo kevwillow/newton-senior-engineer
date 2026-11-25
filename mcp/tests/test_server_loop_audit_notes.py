@@ -36,6 +36,7 @@ TOOL_ARGUMENTS: dict[str, dict[str, Any]] = {
     "newton_grant_off": {"device": "quasar"},
     "newton_list_tiers": {},
     "newton_plan_tier": {"device": "quasar", "tier": "standard"},
+    "newton_plan_ad_forward": {"device": "quasar", "domain": "corp.example.com", "dc_addresses": ["192.0.2.10"]},
     "newton_guided_recommend": {},
     "newton_guided_audit": {"device": "quasar"},
     "newton_plan_scan": {"device": "quasar", "kind": "wifi", "profile": "survey"},
@@ -48,6 +49,9 @@ TOOL_ARGUMENTS: dict[str, dict[str, Any]] = {
     "newton_ad_apply_change": {"device": "corp", "plan_id": PLAN_ID},
     "newton_ad_change_status": {"device": "corp", "plan_id": PLAN_ID},
     "newton_ad_abort_change": {"device": "corp", "plan_id": PLAN_ID},
+    "newton_ad_build_plan": {"inputs": {}},
+    "newton_ad_build_run": {"plan_id": PLAN_ID},
+    "newton_ad_build_status": {"plan_id": PLAN_ID},
 }
 
 
@@ -301,7 +305,7 @@ def test_the_vendor_listing_and_the_refusal_agree(tmp_path, monkeypatch):
 FULL_NOTE_TOOLS = {
     "newton_read", "newton_backup", "newton_plan_change", "newton_plan_undo",
     "newton_apply_change", "newton_confirm_change", "newton_change_status",
-    "newton_abort_change", "newton_guided_audit",
+    "newton_abort_change", "newton_guided_audit", "newton_plan_ad_forward",
 }
 
 
@@ -327,11 +331,14 @@ def test_the_rewrite_note_is_whole_only_on_the_router_text_tools():
 
 
 def test_the_tool_descriptions_fit_their_budget():
-    """With 23 whole copies of the notes the descriptions came to about
-    35000 characters; with the short pointer on the 14 tools that do not
-    return router text verbatim they stay under 31000."""
+    """With a whole copy of the notes in every description the tool list
+    came to about 35000 characters.  Ten of the twenty-eight tools return
+    router text verbatim and keep the whole note; seventeen more carry the
+    short pointer to it; the last one carries neither.  newton_plan_ad_forward
+    keeps the whole note too, so its description grew and was not shortened;
+    the list stays under 31700."""
     total = sum(len(tool.description or "") for tool in _registered_tools().values())
-    assert total < 31_000, total
+    assert total < 31_700, total
 
 
 # ---- the AD audit collects the whole directory every call --------

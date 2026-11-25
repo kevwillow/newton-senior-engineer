@@ -1083,23 +1083,41 @@ EOF
 #!/bin/sh
 set -eu
 
-# One 32-hex plan id, or the word ad-change and one 32-hex plan id.
-if [ "$#" -eq 2 ] && [ "$1" = ad-change ]; then
-	plan_id=$2
-elif [ "$#" -eq 1 ]; then
-	plan_id=$1
-else
-	echo "newton-approve: one 32-hex plan id, or ad-change and one 32-hex plan id, is required" >&2
+# The argv grammar, exactly: <plan id>, ad-change <plan id>, ad-build <plan id>, or
+# ad-build-stage <plan id> <stage> (PLAN-1.5 task 8), a plan id being 32
+# lowercase hex and a stage one of the design's 0 to 10.
+usage() {
+	echo "newton-approve: exactly one 32-hex plan id, ad-change <32-hex plan id>, ad-build <32-hex plan id> or ad-build-stage <32-hex plan id> <stage 0-10> is required" >&2
 	exit 2
-fi
-if [ "${#plan_id}" -ne 32 ]; then
-	echo "newton-approve: one 32-hex plan id, or ad-change and one 32-hex plan id, is required" >&2
-	exit 2
-fi
-case $plan_id in
-	*[!0-9a-f]*)
-		echo "newton-approve: one 32-hex plan id, or ad-change and one 32-hex plan id, is required" >&2
-		exit 2
+}
+is_plan_id() {
+	[ "${#1}" -eq 32 ] || return 1
+	case $1 in
+		*[!0-9a-f]*) return 1 ;;
+	esac
+	return 0
+}
+case $# in
+	1)
+		is_plan_id "$1" || usage
+		;;
+	2)
+		case $1 in
+			ad-change|ad-build) ;;
+			*) usage ;;
+		esac
+		is_plan_id "$2" || usage
+		;;
+	3)
+		[ "$1" = ad-build-stage ] || usage
+		is_plan_id "$2" || usage
+		case $3 in
+			0|1|2|3|4|5|6|7|8|9|10) ;;
+			*) usage ;;
+		esac
+		;;
+	*)
+		usage
 		;;
 esac
 expected_uid=$(/usr/bin/id -u newton) || exit 1
@@ -1766,7 +1784,7 @@ Would ensure system user: $SYSTEM_USER (home $NEWTON_HOME, mode 0700; shell /usr
 Would install root-owned code: $CODE_ROOT/{scripts,mcp,device,profiles,SKILL.md}
 Would create/update virtual environment: $CODE_ROOT/venv
 Would install launcher: $LAUNCHER (root:root 0755; clean environment; newton user only; no arguments)
-Would install launcher: $APPROVE_LAUNCHER (root:root 0755; clean environment; newton user only; one 32-hex argument, or ad-change and one 32-hex argument)
+Would install launcher: $APPROVE_LAUNCHER (root:root 0755; clean environment; newton user only; one 32-hex argument, ad-change or ad-build and one 32-hex argument, or ad-build-stage, one 32-hex argument and a stage 0-10)
 Would install launcher: $SETUP_LAUNCHER (root:root 0755; clean environment; newton user only; arguments passed through to newton-router-setup)
 Would install launcher: $VANTAGE_SETUP_LAUNCHER (root:root 0755; clean environment; newton user only; arguments passed through to newton-vantage-setup)
 Would install launcher: $ENROL_LAUNCHER (root:root 0755; clean environment; newton user only; arguments passed through to newton-enrol)

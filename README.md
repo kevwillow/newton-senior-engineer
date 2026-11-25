@@ -43,7 +43,7 @@ undo is OpenWrt's own rpcd timer (in the router's RAM, 120 to 600 seconds, 180 b
 confirmed only when every mandatory check passes and the router's values read back as the staged ones.
 
 On Active Directory (see [Active Directory](#active-directory) and [Status](#status)) Newton audits Windows
-Server AD and Samba AD domains, read-only, with 48 checks, and makes a small set of account changes. Newton prints
+Server AD and Samba AD domains, read-only, with 52 checks, and makes a small set of account changes. Newton prints
 the setup scripts; you run them on each domain controller.
 
 ## What Newton puts on your router
@@ -181,7 +181,7 @@ what its prompt asks for, then update the bootstrap itself with `newton-bootstra
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![OpenWrt 25.12](https://img.shields.io/badge/OpenWrt-25.12-00B5E2)](#supported-devices)
-[![Status: 1.4.2](https://img.shields.io/badge/Status-1.4.2-2f9a54)](#status)
+[![Status: 1.5.0](https://img.shields.io/badge/Status-1.5.0-2f9a54)](#status)
 
 ## What it looks like
 
@@ -230,7 +230,7 @@ except the changes Newton always asks about.
 
 Everything Newton does, in one list.
 
-- ✓ = in the current release, 1.4.2.
+- ✓ = in the current release, 1.5.0.
 
 A ✓ line says so when the feature works in one mode only, was run only in the virtual lab, or is covered by tests
 with no recorded run on a real router.
@@ -274,7 +274,7 @@ with no recorded run on a real router.
 
 **Security**
 - ✓ The router keys belong to a separate `newton` account. The AI's user can't read them, and `newton-doctor` checks this. The launchers run only as `newton`, in a clean environment. Only `newton-mcp` runs without your password, and it takes no arguments; every other launcher asks for your sudo password each time, and the installer checks its sudoers file with `visudo`. The separation holds only if the AI's user has no passwordless sudo or other root path of its own: `newton-doctor` reports that, but cannot fix it.
-- ✓ An MCP server with twenty-four tools (`newton_list_devices`, `newton_read`, `newton_backup`, `newton_plan_change`, `newton_plan_undo`, `newton_apply_change`, `newton_change_status`, `newton_abort_change`, `newton_grant_off`, `newton_list_tiers`, `newton_plan_tier`, `newton_guided_recommend`, `newton_guided_audit`, `newton_plan_scan`, `newton_run_scan`, `newton_list_getters`, `newton_get_state`, `newton_confirm_change`, `newton_ad_list_checks`, `newton_ad_audit`, `newton_ad_plan_change`, `newton_ad_apply_change`, `newton_ad_change_status` and `newton_ad_abort_change`) and no tool that runs arbitrary commands, upgrades or installs packages; the only reboot is the RouterOS (CHR) undo. `newton_list_getters` and `newton_get_state` are experimental read-only reads of non-OpenWrt devices by fixed getter id (never command text). `newton_confirm_change` keeps a change applied with hold, and the six `newton_ad_*` tools are for Active Directory (see [Active Directory](#active-directory)).
+- ✓ An MCP server with twenty-eight tools (`newton_list_devices`, `newton_read`, `newton_backup`, `newton_plan_change`, `newton_plan_undo`, `newton_apply_change`, `newton_change_status`, `newton_abort_change`, `newton_grant_off`, `newton_list_tiers`, `newton_plan_tier`, `newton_plan_ad_forward`, `newton_guided_recommend`, `newton_guided_audit`, `newton_plan_scan`, `newton_run_scan`, `newton_list_getters`, `newton_get_state`, `newton_confirm_change`, `newton_ad_list_checks`, `newton_ad_audit`, `newton_ad_plan_change`, `newton_ad_apply_change`, `newton_ad_change_status`, `newton_ad_abort_change`, `newton_ad_build_plan`, `newton_ad_build_run` and `newton_ad_build_status`) and no tool that runs arbitrary commands, upgrades or installs packages; the only reboot is the RouterOS (CHR) undo. `newton_list_getters` and `newton_get_state` are experimental read-only reads of non-OpenWrt devices by fixed getter id (never command text). `newton_confirm_change` keeps a change applied with hold, and the nine `newton_ad_*` tools are for Active Directory (see [Active Directory](#active-directory)).
 - ✓ No Newton tool can run a shell command. Reads go through a fixed list, and the router program has a closed grammar of 25 subcommands, so a factory reset, a raw flash write, a bootloader change or a firewall flush cannot be expressed. The "never" and "ask first" lists in `SKILL.md` are instructions to the agent; the serial console script is the only Newton code with a command blocklist.
 - ✓ Wi-Fi keys and passwords in fields and values masked before they reach the AI. A secret written out as prose is not detected.
 - ✓ Device text (hostnames, Wi-Fi names, logs, scan results) marked as untrusted data, with prompt-injection tests. The marking tells the model the text is data; the model is still trusted to treat it that way.
@@ -317,7 +317,7 @@ with no recorded run on a real router.
 - ✓ **Experimental:** changes with undo on VyOS (`commit-confirm`, reload mode), Juniper Junos (`commit confirmed`) and MikroTik RouterOS. RouterOS has no native undo Newton uses: Newton schedules a restore of a binary backup, so the undo is a reboot that interrupts traffic. Writes are limited to 17 allow-listed menus on RouterOS (on `/ip/dns` only the servers and the cache size), to allow-listed hierarchies on Junos, and by a list of refused paths on VyOS (system login, config management, and the telnet, HTTP, HTTPS, SSH, SNMP, TFTP and FTP services). These platforms get backup, plan, apply, status and abort only: no hardening levels, audit, scans, client checks, grants or undo after confirm. Tested only on virtual images in the lab, never on real hardware.
 - ✓ **Highly experimental:** read-only reads of RouterOS (9 reads), VyOS (7), Junos (3: version, interfaces, routes), Arista EOS (3) and Cisco IOS XE (3). None has run on a real device: RouterOS, VyOS and Junos ran on lab virtual machines, and the EOS and IOS XE reads have never run anywhere. They never change anything. The running config read is disabled everywhere. FortiOS has a profile but no read enabled yet.
 - ✓ **Experimental:** a serial console script for recovery when SSH is gone (probe, login, run, push; refuses the bootloader). It is a script, not an MCP tool: it has no undo timer and no owner approval, and its rules for commands like `uci commit`, `reboot` and `passwd` pass on an `--approved` flag the agent sets itself. Covered by unit tests and an OpenWrt console scenario on a virtual machine's serial socket; not tested on a physical console cable or a router UART. `SKILL.md` notes a first-boot serial bootstrap of RouterOS and VyOS in the virtual lab (2026-10-03); no log of that run is kept in this repository.
-- ✓ **Experimental:** a Linux host timed-undo recipe in the skill, verified on ifupdown2, netplan and NetworkManager. Full Linux support is planned for 1.6.
+- ✓ **Experimental:** a Linux host timed-undo recipe in the skill, verified on ifupdown2, netplan and NetworkManager. Full Linux support is planned for 1.7.
 
 **Lab and test evidence**
 - ✓ A virtual lab: a virtual OpenWrt router, a virtual ISP with two upstreams and test clients, reset to a snapshot for every scenario.
@@ -343,7 +343,7 @@ back in more detail, a connection lost mid-apply is reported with the step that 
 aborted. All of these changes are covered by tests only. The lines below that say live refer to those runs and to the code that
 ran in them; the log of those runs is not kept in this repository.
 
-- ✓ A read-only audit of Windows Server AD and Samba AD domains: 48 checks (`newton_ad_list_checks`, `newton_ad_audit`) covering privileged groups, Kerberos and password policy, risky account flags, delegation, LDAP signing, channel binding and NTLM, stale accounts, ACLs, credentials left in SYSVOL, and backup keys. Every check runs on both kinds of domain. A check whose read failed is UNKNOWN, never PASS. The checks are tested against collector output measured on lab domain controllers; the audit tool was not part of the latest live runs. Covered by tests only.
+- ✓ A read-only audit of Windows Server AD and Samba AD domains: 52 checks (`newton_ad_list_checks`, `newton_ad_audit`) covering privileged groups, Kerberos and password policy, risky account flags, delegation, LDAP signing, channel binding and NTLM, stale accounts, ACLs, credentials left in SYSVOL, and backup keys. Every check runs on both kinds of domain. A check whose read failed is UNKNOWN, never PASS. 48 of the checks are tested against collector output measured on lab domain controllers; the four DNS checks are tested against fixtures built from the protocol specification, not yet measured on a lab DC, and whether the ordinary audit account can read the DNS partition is not confirmed. The audit tool was not part of the latest live runs. Covered by tests only. Four of the 52, the DNS checks (AD-A-68a, AD-A-68b, AD-A-69a, AD-A-69b), are covered by tests only and unmeasured on a lab DC.
 - ✓ How the audit reads: a key-only SSH login of an ordinary `newton-audit` account that can run one fixed command (`collector.ps1` on Windows, `newton-ad-samba` through sudoers on Samba). The collectors never return password hashes, LAPS or BitLocker secrets, gMSA passwords, KDS root keys, trust secrets, backup-key values or key credentials, and never return a SYSVOL `cpassword` value. Newton refuses a document from the wrong collector, from a collector whose query set is out of date, or from an audit login that turns out to be privileged. An earlier version of the collectors ran on lab domain controllers; the Windows collector's SYSVOL read has changed since and has not run live. Covered by tests only.
 - ✓ Setup scripts that Newton prints and you run as a Domain Admin: `scripts/newton-ad-setup windows|samba` for the audit, and `scripts/newton-ad-setup write windows|samba` for changes, from a source tree; on an installed Newton they are `/opt/newton/scripts/newton-ad-setup windows|samba` and `/opt/newton/scripts/newton-ad-setup write windows|samba` (see docs/INSTALL.md step 10), since `/usr/local/bin/newton-ad-setup` takes only `approval-key <device>`. The write setup creates the `newton-ops` account, which is never in a privileged group (the setup refuses one that is), and delegates on the PDC emulator only the rights the changes below need. It derives your approval key on the domain controller from the passphrase you type there. The Windows write setup also adds the "log on as a batch job" right to the Default Domain Controllers Policy, after a `Backup-GPO`, and edits `sshd_config`; run it over a password login, not a key login. A second domain controller is set up with `--domain-device` naming the first, so both hold the same approval key. The four write setups (two DCs of each kind) ran live; the audit setups are not part of those runs. The Samba write setup's sweep timer (`newton-ad-sweep.service` and `newton-ad-sweep.timer`) was added after those runs and is covered by tests only.
 - ✓ Disable and enable an account. A privileged account is never disabled, and neither is the built-in Administrator. Live for a user account on two-DC Windows Server 2025 and Samba 4.22 domains; computer accounts are covered by tests only.
@@ -354,7 +354,8 @@ ran in them; the log of those runs is not kept in this repository.
 - ✓ A change that names another device is refused by every domain controller. Tested live on a lab domain.
 - ✓ Two or more domain controllers: a plan reads every domain controller that has a write entry in the inventory, and a change is confirmed only when every one of them shows it; otherwise it is aborted. An inventory with only a second domain controller is refused. Newton does not list the domain controllers of the directory itself, so one without a write entry is never checked; every plan lists the domain controllers it reads and warns about this (covered by tests). Writes go to the PDC emulator only: if the PDC role moves to a domain controller without a write entry, every change is refused until the inventory follows. A move of the PDC role was not tested live.
 - ✓ Approval in your own terminal: `sudo -u newton /usr/local/bin/newton-ad-setup approval-key <device>` records your approval key's fingerprint, and `sudo -u newton /usr/local/bin/newton-approve ad-change <plan_id>` approves one change. It rebuilds the change from the plan itself, asks you to type `approve` and the first 8 characters of the plan id, then your passphrase, and gives a token valid for 30 minutes that the domain controller checks before it arms its undo. The Newton host keeps only the fingerprint, never the key; someone holding the fingerprint could still guess the passphrase offline, at the cost of 600,000 PBKDF2 rounds per guess. Passphrase only: no dialog and no authenticator code, and a HIGH AD change shows a warning but asks no second typed question. The approval logic ran live against real domain controllers from a source tree; the installed launchers have not been run live yet.
-- Newton does not change privileged groups, delete objects, reset passwords, reset krbtgt, or change trusts, functional levels or Group Policy. The write account and krbtgt are never a target or a member. Privileged accounts can be targeted only by the flag, encryption-type and unlock changes.
+- ✓ Active Directory build mode, opt-in (`newton_ad_build_plan`, `newton_ad_build_run`, `newton_ad_build_status`): a new domain with two domain controllers on two fresh Windows Server 2025 servers, in stages 0 to 10, from one plan you approve with `newton-approve`, a fresh approval before each stage that asks, a checkpoint before each write stage, and Newton's own audit as the acceptance. One full build passed on Proxmox lab VMs (2026-11-24); the Hyper-V checkpoints are covered by tests only. It builds a new domain only, never an existing one.
+- In its change mode Newton does not change privileged groups, delete objects, reset passwords, reset krbtgt, or change trusts, functional levels or Group Policy. The write account and krbtgt are never a target or a member. Privileged accounts can be targeted only by the flag, encryption-type and unlock changes. Build mode is the exception, on a new domain only: it puts your admin account in Domain Admins and Protected Users, creates the baseline GPOs and sets the functional level of the forest it builds.
 
 ## How a change works
 
@@ -455,14 +456,14 @@ upstreams and a test client on Proxmox, and runs the scenarios against them. [`d
 explains the method. [`docs/TESTING-FOR-REVIEWERS.md`](docs/TESTING-FOR-REVIEWERS.md) lists what to try first, and
 the things we most want broken.
 
-Test suites at the 1.4.2 release gate, run in the full development tree (this public tree leaves out some development-only tests, so its own counts are lower):
+Test suites at the 1.5.0 release gate, run in the full development tree (this public tree leaves out some development-only tests, so its own counts are lower):
 
 | Suite | Path | Passing |
 |---|---|---|
-| MCP server | `mcp/tests/` | 10,966 (15 skipped) |
+| MCP server | `mcp/tests/` | 13,193 (15 skipped) |
 | Router program | `device/openwrt/newton-router/tests/` | 3,361 |
 | Guard | `device/openwrt/newton-guard/tests/` | 186 |
-| Protocol | `tests/protocol/` | 3,656 (5 skipped) |
+| Protocol | `tests/protocol/` | 3,685 (5 skipped) |
 | Lab scenarios | `lab/tests/` + live runs | 1,289 |
 | Profiles | `tests/profiles/` | 112 |
 | Serial console | `tests/serial/` | 329 |
@@ -479,7 +480,7 @@ docs/                     install guide, roadmap, testing method, design package
 lab/                      the lab runner, its scenarios and the example lab files
 profiles/openwrt/         standard, hardened and lockdown profiles and their manifest
 device/openwrt/           on-router programs: newton-router and newton-guard
-mcp/newton_mcp/           the newton-mcp server (twenty-four tools)
+mcp/newton_mcp/           the newton-mcp server (twenty-eight tools)
 mcp/newton_mcp/ad/        the Active Directory audit and changes; collector/ holds the domain-controller programs
                           (collector.ps1, newton-ad-samba, write.ps1, newton-ad-samba-write)
 scripts/                  the change wrapper, the installer and bootstrap, and the setup (router and AD), doctor
@@ -498,37 +499,39 @@ See [`SECURITY.md`](SECURITY.md).
 
 ## Status
 
-**Released: 1.4.2.** OpenWrt in the installed and no-install modes (plus experimental VyOS, MikroTik and Junos), the
+**Released: 1.5.0.** OpenWrt in the installed and no-install modes (plus experimental VyOS, MikroTik and Junos), the
 one-line setup, in-client approvals, undo after confirm, client-side checks and receipts. 1.1 added the no-install
 mode: Newton puts nothing on the router but one limited web-interface user, applies DHCP reservations and DNS entries
 under OpenWrt's own undo timer, and hands every other change to you as a script you approve and run. 1.4.0 adds the
 Active Directory audit and the Active Directory changes, with the six `newton_ad_*` tools, `scripts/newton-ad-setup`, the
 `/usr/local/bin/newton-ad-setup` launcher and `newton-approve ad-change`; an apply that holds the confirm for a test
 you run from a client, with the `newton_confirm_change` tool (covered by tests only); and all the fixes since 1.1.3. It has
-twenty-four MCP tools. 1.4.1 is a fixes release (a fourth review round, no new tools; `CHANGELOG.md` lists the fixes), and 1.4.2 fixes two Active Directory bugs found on a Windows Server 2025 controller: the audit setup and the write setup no longer strip each other's read of the shared install folder, and a search root the audit account may not read is reported as access denied, not as an error. Active Directory changes are approved by you, with the undo armed on the domain controller until Newton confirms; once confirmed, Newton does not undo it (a known limit: if the PDC role moves while an earlier change of the same target is still armed on the old PDC, that domain controller's undo can write the earlier before-image over the new change): you plan the reverse change; an unlock has no undo and is written at once. The Active Directory work was tested live on two-DC Windows Server 2025 and Samba 4.22 lab
+twenty-four MCP tools. 1.4.1 and 1.4.2 are fixes releases (`CHANGELOG.md` lists the fixes). 1.5.0 adds a twenty-fifth tool, `newton_plan_ad_forward`, and Active Directory build mode with three tools (`newton_ad_build_plan`, `newton_ad_build_run` and `newton_ad_build_status`): twenty-eight tools in all. One full build passed stages 0 to 10 on Windows Server 2025 evaluation VMs on Proxmox (2026-11-24); the Hyper-V checkpoints are covered by tests only. Active Directory changes are approved by you, with the undo armed on the domain controller until Newton confirms; once confirmed, Newton does not undo it (a known limit: if the PDC role moves while an earlier change of the same target is still armed on the old PDC, that domain controller's undo can write the earlier before-image over the new change): you plan the reverse change; an unlock has no undo and is written at once. The Active Directory work was tested live on two-DC Windows Server 2025 and Samba 4.22 lab
 domains, on code from just before the latest helper changes: the write setups, disable and enable, the machine account
 quota, unlock, the rollback of a withheld confirm, the refusal of a request for another device, and confirmation on
-every domain controller. Covered by tests only: the 48 audit checks (against collector output measured on lab domain
-controllers), the other five changes, and the installed AD launchers. [`CHANGELOG.md`](CHANGELOG.md) lists them and
+every domain controller. Covered by tests only: the 52 audit checks (48 against collector output measured on lab domain
+controllers, the four DNS checks against fixtures built from the specification), the other five changes, and the installed AD launchers. [`CHANGELOG.md`](CHANGELOG.md) lists them and
 their limits.
 
 Planned, with no dates:
 
-- **1.2:** the rest of network rules (the store shipped in 1.1.3; planning does not read it yet, so the rules are not
-  re-checked on every change), reviewed recipes for common jobs, a blast-radius view, a recovery card and a network
-  map tool.
-- **Still to build from the Active Directory changes:** a reviewed
-  script you run yourself for the AD changes Newton will not make (deletes, password resets, krbtgt, trusts,
-  privileged groups), and Group Policy edits.
-- **1.5:** Active Directory build mode, opt-in: a whole domain from one plan you approve. Not on the main branch.
+There is no 1.2 or 1.3 release: those numbers were planning labels, and release numbers only go up.
+
 - **1.5.x:** the protocol contract: the change protocol written down as one contract every mode follows, a recovery
   line for each mode in the approval text, running settings made to match after the router's guard restores a change
   on its own (or a plain warning with the command that fixes it), and recorded runs that lose the controller in the
   middle of a change.
-- **1.6:** Linux and Windows 11 hosts, with a gaming performance advisor for Windows 11.
-- **1.7:** a security engineer persona that reads Wazuh alerts.
-- **1.8:** more vendors, limited to OpenWrt, Asus and GL.iNet routers and to what the lab can test safely; other
+- **1.6:** network rules and recipes: the rest of network rules (the store shipped in 1.1.3; planning does not read
+  it yet, so the rules are not re-checked on every change), reviewed recipes for common jobs, a blast-radius view, a recovery card and a network
+  map tool; Active Directory recipes (onboard and offboard a user, a new department OU, the two-round krbtgt reset) and a fix
+  for each audit finding.
+- **1.7:** Linux and Windows 11 hosts, with a gaming performance advisor for Windows 11.
+- **1.8:** a security engineer persona that reads Wazuh alerts.
+- **1.9:** more vendors, limited to OpenWrt, Asus and GL.iNet routers and to what the lab can test safely; other
   vendors later.
+- **Still to build from the Active Directory changes, not scheduled:** a reviewed
+  script you run yourself for the AD changes Newton will not make (deletes, password resets, krbtgt, trusts,
+  privileged groups), and Group Policy edits.
 - Parked at the end of the backlog: a read-only local dashboard, a generic policy engine, maintenance windows,
   orchestration across several systems and a kit for third-party adapters.
 

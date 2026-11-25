@@ -1,0 +1,29 @@
+task identity: bdc1\administrator | auth NTLM
+task start 2026-11-13T16:04:16.9867809Z
+cs: Name BDC1 | DomainRole 2 | PartOfDomain False | Workgroup WORKGROUP
+hostname: BDC1
+LastBootUpTime: 2026-11-13T16:04:01.5000000Z
+
+Name                  InstallState
+----                  ------------
+AD-Domain-Services       Installed
+DNS                      Available
+RSAT-AD-Tools            Installed
+RSAT-AD-PowerShell       Installed
+RSAT-ADDS                Installed
+RSAT-AD-AdminCenter      Installed
+RSAT-ADDS-Tools          Installed
+RSAT-ADLDS               Installed
+Windows-Server-Backup    Installed
+
+
+
+ip: 192.0.2.41/24 Manual gw 192.0.2.1
+dns client: 192.0.2.1
+w32tm source: Local CMOS Clock
+
+Type: NTP (Local)
+NtpServer: 192.0.2.1,0x8 (Local)
+task end 2026-11-13T16:04:20.4618449Z
+
+

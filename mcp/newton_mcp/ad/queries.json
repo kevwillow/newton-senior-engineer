@@ -429,6 +429,56 @@
       "sd": false,
       "limit": 5000,
       "presence_only": true
+    },
+    {
+      "id": "dns_zones",
+      "base": "CN=MicrosoftDNS,DC=DomainDnsZones,{domain}",
+      "scope": "sub",
+      "filter": "(objectClass=dnsZone)",
+      "attrs": [
+        "dNSProperty",
+        "distinguishedName"
+      ],
+      "binary": [
+        "dNSProperty"
+      ],
+      "ranged": [],
+      "sd": false,
+      "limit": 1000,
+      "presence_only": false
+    },
+    {
+      "id": "dns_ldap_srv",
+      "base": "CN=MicrosoftDNS,DC=DomainDnsZones,{domain}",
+      "scope": "sub",
+      "filter": "(&(objectClass=dnsNode)(name=_ldap))",
+      "attrs": [
+        "dnsRecord",
+        "distinguishedName"
+      ],
+      "binary": [
+        "dnsRecord"
+      ],
+      "ranged": [],
+      "sd": false,
+      "limit": 1000,
+      "presence_only": false
+    },
+    {
+      "id": "dc_hosts",
+      "base": "{domain}",
+      "scope": "sub",
+      "filter": "(&(objectCategory=computer)(|(primaryGroupID=516)(primaryGroupID=521)))",
+      "attrs": [
+        "dNSHostName",
+        "primaryGroupID",
+        "distinguishedName"
+      ],
+      "binary": [],
+      "ranged": [],
+      "sd": false,
+      "limit": 1000,
+      "presence_only": false
     }
   ]
 }

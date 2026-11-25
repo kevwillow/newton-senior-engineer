@@ -1,0 +1,21 @@
+task identity: bdc2\newton-build | auth NTLM
+task start 2026-11-15T19:45:30.5368456Z
+dns client before: 192.0.2.1
+dns client: 192.0.2.41
+resolve build.newton.test: 192.0.2.41
+srv: bdc1.build.newton.test
+blob: bytes 6532
+djoin /requestODJ exit 0 in 0 s, 10 lines:
+  [Loading provisioning data from the following file: [C:\NewtonBuild\s7-odj.txt].]
+  []
+  []
+  []
+  [The provisioning request completed successfully.]
+  []
+  [A reboot is required for changes to be applied.]
+  []
+  [The operation completed successfully.]
+  []
+blob deleted: True
+cs before the reboot: Name BDC2 | DomainRole 2 | PartOfDomain False | Domain WORKGROUP
+task end 2026-11-15T19:45:32.4424528Z

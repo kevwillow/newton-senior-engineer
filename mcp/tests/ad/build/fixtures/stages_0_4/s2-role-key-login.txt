@@ -1,0 +1,8 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-13T21:53:04.3041575Z
+cs: Name BDC1 | DomainRole 5 | PartOfDomain True | Domain build.newton.test | Workgroup 
+ProductType: LanmanNT
+NTDS Parameters: present | Root Domain DC=build,DC=newton,DC=test | Machine DN Name CN=NTDS Settings,CN=BDC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=build,DC=newton,DC=test
+NTDS service: Running, Automatic
+Get-ADDomain: DNSRoot build.newton.test | NetBIOSName NBUILD
+task end 2026-11-13T21:53:06.1293779Z

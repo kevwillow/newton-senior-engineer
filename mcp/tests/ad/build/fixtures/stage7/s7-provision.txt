@@ -1,0 +1,26 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-15T19:45:24.3528468Z
+before: no computer BDC2 (Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException)
+djoin /provision exit 0 in 0 s, 14 lines:
+  []
+  []
+  [Provisioning the computer...]
+  []
+  [Successfully provisioned [BDC2] in the domain [build.newton.test].]
+  []
+  [Provisioning data was saved successfully to [C:\NewtonBuild\out\s7-odj.txt].]
+  []
+  []
+  []
+  [Computer provisioning completed successfully.]
+  []
+  [The operation completed successfully.]
+  []
+blob: C:\NewtonBuild\out\s7-odj.txt, bytes 6532
+blob first two bytes: ff fe
+blob owner: BUILTIN\Administrators | protected False
+  ace: NT AUTHORITY\SYSTEM Allow FullControl inherited True
+  ace: BUILTIN\Administrators Allow FullControl inherited True
+computer: CN=BDC2,CN=Computers,DC=build,DC=newton,DC=test | userAccountControl 4096 | primaryGroupID 515 | pwdLastSet 134392455248383064 | dNSHostName BDC2.build.newton.test
+SPN: HOST/BDC2, HOST/BDC2.build.newton.test, RestrictedKrbHost/BDC2, RestrictedKrbHost/BDC2.build.newton.test
+task end 2026-11-15T19:45:25.0488472Z

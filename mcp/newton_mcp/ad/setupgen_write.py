@@ -576,17 +576,87 @@ def windows_write_script(
     pubkey = validate_public_key(pubkey)
     ous = validate_ous(ous, domain)
     helper = _read_helper(WRITE_HELPER_PATH)
+    return fill_windows_write(
+        windows_write_template(),
+        domain=domain,
+        device=device,
+        host=host,
+        ous=ous,
+        pubkey=pubkey,
+        helper=helper,
+        domain_device=domain_device,
+    )
 
+
+#: The path of K of the AD build helper (``bootstrap.KEY_FILE``): the build
+#: variant of the write setup reads K there instead of asking for the
+#: passphrase (the maintainer's decision R1; DESIGN-1.5 open point 37 of task 8).
+BUILD_KEY_FILE = r"C:\ProgramData\Newton\ad-build\key.hex"
+
+#: The placeholders a template of the Windows write setup leaves for its
+#: fill: the values of one domain controller.  Everything else of the
+#: script is filled in the template already.  The AD build helper fills
+#: the same placeholders from the plan bytes (``build.ps1``,
+#: ``Get-NewtonSetupFill``), so the two fills are one list.
+WRITE_FILL_FIELDS: tuple[str, ...] = (
+    "@@DOMAIN@@",
+    "@@DEVICE@@",
+    "@@DOMAIN_DEVICE@@",
+    "@@HOST@@",
+    "@@DOMAIN_DN@@",
+    "@@OUS@@",
+    "@@HELPER@@",
+    "@@HELPER_HASH@@",
+    "@@KEYLINE@@",
+    "@@KEYSHA@@",
+)
+
+#: The words of the write setup when the domain controller already holds a
+#: different approval key.  The owner's script asks for the passphrase and
+#: says so; the build variant types nothing at all, so it says what it is:
+#: the key of the build helper, and that the setup stopped with its earlier
+#: steps already run.  Both are the text of one PowerShell single-quoted
+#: string, pure ASCII.
+WIN_KEY_MISMATCH_OWNER = (
+    "this DC already holds a different approval key: the passphrase typed now "
+    "is not the one it was set up with. Nothing was changed. Run the setup "
+    "again with the domain''s approval passphrase. To change the passphrase "
+    "on purpose, remove ' + $ApprovalKeyPath + ' on every DC of the domain, "
+    "run the setup again on each, then run newton-ad-setup approval-key for "
+    "the domain on the Newton host."
+)
+WIN_KEY_MISMATCH_BUILD = (
+    "this DC already holds a different approval key: the key of the build "
+    "helper, derived from the passphrase typed at the bootstrap, is not the "
+    "one it was set up with. The key was not changed and the setup stopped; "
+    "its earlier steps may already have run. The passphrase of the build and "
+    "the approval passphrase of the domain must be the same one."
+)
+
+#: The placeholder of the key mismatch words in the template of the key
+#: step: the owner's or the build's words go in it.
+KEY_MISMATCH_FIELD = "@@KEY_MISMATCH@@"
+
+
+def windows_write_template(*, build: bool = False) -> str:
+    """The template of the Windows write setup: the script with the values
+    of one domain controller left as the placeholders of
+    ``WRITE_FILL_FIELDS``.
+
+    ``build`` is the variant the AD build's stage 8 runs (the maintainer's decision R1,
+    2026-11-15): K is read from the build helper's install root
+    (``BUILD_KEY_FILE``) instead of asked for, and there is no sshd restart
+    step (the build helper restarts sshd once, after both setups).
+    The words about a key that does not match are the build's own there:
+    nothing is typed in that variant, and the setup stops with its earlier
+    steps already run.  Everything else is the owner's script, byte for byte.
+    """
+    mismatch = WIN_KEY_MISMATCH_BUILD if build else WIN_KEY_MISMATCH_OWNER
+    key_write = _WIN_STEP_KEY_WRITE.replace(KEY_MISMATCH_FIELD, mismatch)
     parts = [
-        _WIN_HEADER.replace("@@DOMAIN@@", domain)
-        .replace("@@DEVICE@@", device)
-        .replace("@@DOMAIN_DEVICE@@", domain_device)
-        .replace("@@HOST@@", host)
+        _WIN_HEADER.replace("@@CREATOR_OWNER_SID@@", CREATOR_OWNER_SID)
         .replace("@@OPS_NAME@@", OPS_NAME)
-        .replace("@@AUDIT_NAME@@", AUDIT_NAME)
-        .replace("@@DOMAIN_DN@@", domain_dn(domain))
-        .replace("@@CREATOR_OWNER_SID@@", CREATOR_OWNER_SID)
-        .replace("@@OUS@@", _win_ous_block(ous)),
+        .replace("@@AUDIT_NAME@@", AUDIT_NAME),
         _WIN_FUNCTIONS.replace(
             "@@RESET_PASSWORD_RIGHT_CN@@", RESET_PASSWORD_RIGHT_CN
         )
@@ -599,20 +669,51 @@ def windows_write_script(
         )
         .replace("@@CHILDREN@@", _win_children_block())
         .replace("@@CREATOR@@", _win_creator_block()),
-        _WIN_STEP_KEY,
-        _WIN_STEP_FILES.replace(
-            "@@HELPER@@", _b64_literal("helperB64", helper)
-        ).replace("@@HELPER_HASH@@", _sha256(helper)),
-        _WIN_STEP_LOGIN.replace("@@KEYLINE@@", pubkey),
+        (_WIN_STEP_KEY_BUILD if build else _WIN_STEP_KEY_ASK) + key_write,
+        _WIN_STEP_FILES,
+        _WIN_STEP_LOGIN,
         _WIN_STEP_BATCH_LOGON,
-        _WIN_STEP_INVENTORY.replace("@@DEVICE@@", device)
-        .replace("@@DOMAIN_DEVICE@@", domain_device)
-        .replace("@@HOST@@", host)
-        .replace("@@DOMAIN@@", domain)
-        .replace("@@KEYSHA@@", _sha256(pubkey.encode("utf-8"))),
-        _WIN_STEP_RESTART,
+        _WIN_STEP_INVENTORY,
     ]
+    if not build:
+        parts.append(_WIN_STEP_RESTART)
     return "\n".join(parts)
+
+
+def fill_windows_write(
+    template: str,
+    *,
+    domain: str,
+    device: str,
+    host: str,
+    ous: Sequence[str],
+    pubkey: str,
+    helper: bytes,
+    domain_device: str | None = None,
+) -> str:
+    """A template of ``windows_write_template`` with the values of one
+    domain controller.  The caller has checked the values: none of them
+    can hold ``@@``, so the order of the replacements does not matter.
+    ``domain_device`` is the inventory name of the device that stands for
+    the domain; without it the entry names the device of ``device``."""
+    if domain_device is None:
+        domain_device = device
+    values = {
+        "@@DOMAIN@@": domain,
+        "@@DEVICE@@": device,
+        "@@DOMAIN_DEVICE@@": domain_device,
+        "@@HOST@@": host,
+        "@@DOMAIN_DN@@": domain_dn(domain),
+        "@@OUS@@": _win_ous_block(ous),
+        "@@HELPER@@": _b64_literal("helperB64", helper),
+        "@@HELPER_HASH@@": _sha256(helper),
+        "@@KEYLINE@@": pubkey,
+        "@@KEYSHA@@": _sha256(pubkey.encode("utf-8")),
+    }
+    text = template
+    for field in WRITE_FILL_FIELDS:
+        text = text.replace(field, values[field])
+    return text
 
 
 def _sha256(data: bytes) -> str:
@@ -1557,7 +1658,7 @@ function Get-ApprovalFingerprintHex([string]$KeyHex) {
 """
 
 
-_WIN_STEP_KEY = """
+_WIN_STEP_KEY_ASK = """
 Write-Host 'Step 3: the approval key'
 
 # The passphrase is asked here, on the domain controller, twice, and it
@@ -1591,7 +1692,32 @@ $fingerprint = Get-ApprovalFingerprintHex $keyHex
 $passphrase = $null
 $passphraseAgain = $null
 
-# The key is written with the access control list of SPEC-1.4 section
+"""
+
+
+_WIN_STEP_KEY_BUILD = """
+Write-Host 'Step 3: the approval key'
+
+# The build variant (the AD build's stage 8, the maintainer's decision R1): K is the
+# key of the build helper, which the bootstrap derived on this server from
+# the passphrase the owner typed there, for this device.  It is read from
+# the install root of the build helper and nothing is asked: the write
+# path and the build share K on this controller.  The key itself is never
+# printed: its fingerprint is.
+$BuildKeyPath = '@@BUILD_KEY_FILE@@'
+if (-not (Test-Path -LiteralPath $BuildKeyPath)) {
+    throw 'the key of the build helper is not in its install root'
+}
+$keyHex = ([System.IO.File]::ReadAllText($BuildKeyPath)).Trim()
+if ($keyHex -cnotmatch '\\A[0-9a-f]{64}\\z') {
+    throw 'the key of the build helper is not 64 lowercase hexadecimal'
+}
+$fingerprint = Get-ApprovalFingerprintHex $keyHex
+
+""".replace("@@BUILD_KEY_FILE@@", BUILD_KEY_FILE)
+
+
+_WIN_STEP_KEY_WRITE = """# The key is written with the access control list of SPEC-1.4 section
 # 8: SYSTEM and Administrators have full control and the write account
 # may read it.  The key itself is never printed.  A key already installed
 # is compared, never written over: the same passphrase changes nothing,
@@ -1604,7 +1730,7 @@ if (Test-Path -LiteralPath $ApprovalKeyPath) {
     if ($installedKey -ne $keyHex) {
         $keyHex = $null
         $installedKey = $null
-        throw ('this DC already holds a different approval key: the passphrase typed now is not the one it was set up with. Nothing was changed. Run the setup again with the domain''s approval passphrase. To change the passphrase on purpose, remove ' + $ApprovalKeyPath + ' on every DC of the domain, run the setup again on each, then run newton-ad-setup approval-key for the domain on the Newton host.')
+        throw ('@@KEY_MISMATCH@@')
     }
 }
 if ($null -eq $installedKey) {

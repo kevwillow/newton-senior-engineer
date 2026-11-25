@@ -1,0 +1,16 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-16T12:00:30.0000000Z
+sshd match newton-ops: 1
+sshd match newton-audit: 1
+sshd match newton-build: 1
+ops keys: restrict ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f
+audit keys: restrict ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEBBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5f
+write helper sha256: @@WRITE_SHA@@
+approval key is the build key: True
+sshd service: Running
+sshd banner: SSH-2.0-OpenSSH_for_Windows_9.5
+audit token groups: S-1-5-21-1000000001-1000000002-1000000003-513,S-1-5-32-585
+ops explicit aces: OU=IT,DC=build,DC=newton,DC=test | 13
+ops explicit aces: DC=build,DC=newton,DC=test | 1
+ops ace scan: 243 objects
+task end 2026-11-16T12:00:41.0000000Z

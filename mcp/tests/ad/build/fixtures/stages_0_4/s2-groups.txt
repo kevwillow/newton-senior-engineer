@@ -1,0 +1,8 @@
+task identity: nbuild\newton-build | auth Kerberos
+task start 2026-11-13T16:12:50.2390349Z
+token groups at task start: S-1-5-32-544
+Add-ADGroupMember 'Domain Admins' newton-build: ok
+Add-ADGroupMember 'Enterprise Admins' newton-build: ok
+Add-ADGroupMember 'Schema Admins' newton-build: ok
+Get-ADPrincipalGroupMembership: Administrators, Domain Admins, Domain Users, Enterprise Admins, Schema Admins
+task end 2026-11-13T16:12:54.2200652Z

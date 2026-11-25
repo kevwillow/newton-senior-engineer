@@ -89,7 +89,7 @@ def _plan_output(diff="dhcp.skilltest='host'"):
 
 def test_tool_names_has_exactly_nineteen_names_and_lists_the_read_tools():
     """TOOL_NAMES is the canonical source of truth for the MCP surface."""
-    assert len(server.TOOL_NAMES) == 24
+    assert len(server.TOOL_NAMES) == 28
     assert "newton_list_tiers" in server.TOOL_NAMES
     assert "newton_plan_tier" in server.TOOL_NAMES
     assert "newton_guided_recommend" in server.TOOL_NAMES
@@ -100,6 +100,8 @@ def test_tool_names_has_exactly_nineteen_names_and_lists_the_read_tools():
     assert "newton_run_scan" in server.TOOL_NAMES
     assert "newton_ad_audit" in server.TOOL_NAMES
     assert "newton_ad_list_checks" in server.TOOL_NAMES
+    # the AD build tools (PLAN-1.5 task 8): plan, run and status only
+    assert {"newton_ad_build_plan", "newton_ad_build_run", "newton_ad_build_status"} <= server.TOOL_NAMES
 
 
 def test_tool_names_never_named_approve_profile_or_break_glass():
