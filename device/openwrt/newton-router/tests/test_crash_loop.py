@@ -113,6 +113,9 @@ def prepare_confirm(router):
     ready_for_arm(router)
     res = router.apply(plan.sid, plan.t, "none", 0, 0)
     assert res.rc == 0, (res.rc, res.err)
+    # three passing verify rounds: they write the transaction's verify
+    # record, which a confirm needs
+    router.verified(plan.sid)
 
 
 def prepare_abort(router):

@@ -54,6 +54,50 @@ TRACE_CALLS = [
 
 Result = namedtuple("Result", "rc out err outb errb")
 
+# The helper stub that answers `health-check` as well: the real helper's
+# health check runs ucode and fw4, which the fake root does not have.
+# Stage and diff are the cases use_stub_helper writes; health-check
+# answers rc 0 (or the planted control/health-check.rc). Every other
+# subcommand goes to the real helper (@REAL@).
+VERIFY_STUB = (
+    "#!/usr/bin/busybox sh\n"
+    'root="$NEWTON_ROUTER_ROOT"\n'
+    'echo "helper $*" >> "$root/control/calls.log"\n'
+    'case "${1:-}" in\n'
+    "stage)\n"
+    '  cat > "$root/control/stage-stdin"\n'
+    '  if [ -f "$root/control/stage.rc" ]; then\n'
+    '    [ ! -f "$root/control/stage.err" ] || cat "$root/control/stage.err" >&2\n'
+    '    read -r rc < "$root/control/stage.rc"; exit "$rc"\n'
+    "  fi\n"
+    '  mkdir -p "$NEWTON_LOCK"\n'
+    '  read -r sid < "$root/control/next-sid"\n'
+    '  printf "%s\\n" "$sid" > "$NEWTON_LOCK/sid"\n'
+    '  printf "%s\\n" "$sid" >> "$root/control/sessions"\n'
+    '  printf "/var/run/rpcd/uci-%s\\n" "$sid" > "$NEWTON_LOCK/$sid.dir"\n'
+    '  [ ! -f "$root/control/stage-extra-line" ] || cat "$root/control/stage-extra-line"\n'
+    '  printf "%s\\n" "$sid"\n'
+    '  [ ! -f "$root/control/stage-trailing-line" ] || cat "$root/control/stage-trailing-line"\n'
+    "  ;;\n"
+    "diff)\n"
+    '  if [ -f "$root/control/diff.rc" ]; then\n'
+    '    read -r rc < "$root/control/diff.rc"; exit "$rc"\n'
+    "  fi\n"
+    '  cat "$root/control/diff.txt"\n'
+    "  ;;\n"
+    "health-check)\n"
+    '  if [ -f "$root/control/health-check.rc" ]; then\n'
+    '    [ ! -f "$root/control/health-check.err" ] || cat "$root/control/health-check.err" >&2\n'
+    '    read -r rc < "$root/control/health-check.rc"; exit "$rc"\n'
+    "  fi\n"
+    "  exit 0\n"
+    "  ;;\n"
+    "*)\n"
+    '  exec /usr/bin/busybox sh "@REAL@" "$@"\n'
+    "  ;;\n"
+    "esac\n"
+)
+
 SYSLOG_PREFIX = "logger -t newton-router -p daemon.info "
 
 
@@ -67,6 +111,19 @@ def _install_code(source, dest):
     """Copy a code file with its first line replaced for direct BusyBox exec."""
     body = Path(source).read_text().split("\n", 1)[1]
     _executable(dest, "#!/usr/bin/busybox sh\n" + body)
+
+
+def _use_verify_stub(router):
+    """Install VERIFY_STUB as the helper of the fake root.
+
+    The real helper's health check runs ucode and fw4, which the fake
+    root does not have; the stub answers it instead. The real helper
+    stays beside it, so every other subcommand still reaches it."""
+    helper = router.root / "usr/libexec/newton/newton-safe-apply"
+    real = helper.with_name("newton-safe-apply.real")
+    if not real.exists():
+        helper.replace(real)
+    _executable(helper, VERIFY_STUB.replace("@REAL@", str(real)))
 
 
 class Router:
@@ -250,6 +307,19 @@ class Router:
             "  ;;\n"
             "esac\n",
         )
+
+    def verified(self, sid=SID, need_dhcp=0, passes=3, timeout=60):
+        """Run `passes` verify rounds for the transaction; each must pass.
+
+        The rounds write the transaction's verify record
+        ($LOCK/<sid>.txn/verified: <boot id> <passes> <uptime of the last
+        pass>), which a confirm needs: it refuses a transaction that was
+        not verified three times on this boot."""
+        _use_verify_stub(self)
+        for _ in range(passes):
+            res = self.forced(f"verify {sid} {need_dhcp}", timeout=timeout)
+            assert res.rc == 0, (res.rc, res.out, res.err)
+        return res
 
     def stage(self, batch=b"set dhcp.cfg01.domain=lan\n", caller="agent-one", sid=SID,
               role="change"):

@@ -30,6 +30,16 @@ ERR=
 FROM_ADDR=-
 UP_NOW=0
 UP_STAMP=
+# the transaction's verify record: $LOCK/<sid>.txn/verified holds one
+# line, <boot id> <passes> <uptime of the last pass>.
+VERIFY_TXN=
+VR_REC_B=
+VR_REC_P=0
+VR_REC_U=0
+VR_REC_STATE=missing
+# the DHCP check the verify runs: the caller's word, or the value a
+# dnsmasq repair recorded in $LOCK/need-dhcp.
+NEED_DHCP_OUT=0
 UBUS_OUT=
 HELLO_MISSING=0
 CRASH_COUNT=0
@@ -1029,10 +1039,14 @@ sweep_scratch() {
 }
 
 # uptime_now: integer part of the first field of /proc/uptime (design 2.2).
+# The read is silenced (the way boot_id reads its file): a missing
+# /proc/uptime is a fact of the router, not a complaint the caller
+# should read. The uptime stays 0 and the callers decide what an
+# unknown uptime means.
 uptime_now() {
 	local up
 	UP_NOW=0
-	if IFS=' ' read -r up _ < "$R/proc/uptime"; then
+	if IFS=' ' read -r up _ 2>/dev/null < "$R/proc/uptime"; then
 		case "${up%%.*}" in
 			''|*[!0-9]*) ;;
 			*) UP_NOW=${up%%.*} ;;
@@ -1479,7 +1493,7 @@ cmd_hello() {
 		'') agentv=0 ;;
 		*) agentv=1 ;;
 	esac
-	printf 'hello %s api=1 version=1.3.3 mode=%s prog=%s helper=%s guard=%s init=%s device=%s profile=%s approval-key=%s guard-state=%s busy=%s caller=%s role=%s door=%s tty=%s agent=%s from=%s\n' \
+	printf 'hello %s api=1 version=1.3.4 mode=%s prog=%s helper=%s guard=%s init=%s device=%s profile=%s approval-key=%s guard-state=%s busy=%s caller=%s role=%s door=%s tty=%s agent=%s from=%s\n' \
 		"$nonce" "$MODE_STR" "$prog" "$helper" "$guard" "$init" "$device" "$profile" "$key" "$gstate" "$busy" "$CALLER" "$ROLE" "$DOOR" "$ttyv" "$agentv" "$FROM_ADDR"
 	if [ "$DOOR" = ssh ]; then
 		hello_record "$nonce"
@@ -2681,9 +2695,18 @@ cmd_confighash() {
 
 # cmd_health_snapshot: design 3.5; nothing on stdout, the helper's stderr
 # passes through, then the fw-loaded answer is kept with the snapshot.
+# A snapshot after the apply is refused: the snapshot is the baseline
+# the health check compares against, and a new one taken after the
+# change would compare the changed router with itself and lose the
+# health of the router before the change (the same already-applied
+# refusal cmd_apply gives). A snapshot while the apply runs is refused
+# the same way: the router is changing under the snapshot.
 cmd_health_snapshot() {
-	local sid="$1" v
+	local sid="$1" v tdir
 	lock_take 10
+	tdir="$LOCK/$sid.txn"
+	[ ! -e "$tdir/applying" ] || fail already-applied 1
+	[ ! -e "$tdir/applied" ] || fail already-applied 1
 	if run_helper health-snapshot "$sid" >/dev/null; then
 		[ -d "$LOCK/$sid.health" ] || fail internal 1 health-dir
 		v=0
@@ -2838,33 +2861,164 @@ cmd_apply() {
 	return 0
 }
 
+# verify_records_drop: remove the verify record of every transaction, so
+# that a change to the router (a firewall restart, a dnsmasq repair) starts
+# the count of the passing verify rounds again: the passes before the
+# repair say nothing about the router after it. There is one transaction
+# per router, so every record under the lock goes. The globbing is off in
+# this program (set -f), so it is turned on for the loop and off again
+# after it, the way sweep_scratch does.
+verify_records_drop() {
+	local f
+	set +f
+	for f in "$LOCK"/*.txn/verified "$LOCK"/*.txn/verified.new; do
+		[ -e "$f" ] || continue
+		rm -f "$f"
+	done
+	set -f
+}
+
+# need_dhcp_record D: the DHCP check the host asks for after a dnsmasq
+# repair, written to $LOCK/need-dhcp: 1 when dnsmasq had its DHCP
+# listener (d=1), 2 when it had none (d=0). These are the values the
+# host derives from the repair's dhcp= word (scripts/owrt-change.sh),
+# so the router keeps the check the repair made necessary even when
+# the caller asks for none. The check only ever gets stricter: a record
+# that holds 1 (the DHCP listener, the strong check) stays 1, even when
+# this repair would write 2. The write is atomic (a temp file and
+# mv -f), so a reader never sees half a line. A failed write is
+# ignored: the host still passes the value it derived.
+need_dhcp_record() {
+	local d="$1" v rec
+	case "$d" in
+		1) v=1 ;;
+		*) v=2 ;;
+	esac
+	rec=
+	IFS= read -r rec 2>/dev/null < "$LOCK/need-dhcp" || rec=
+	case "$rec" in
+		1) v=1 ;;
+	esac
+	if ! ( printf '%s\n' "$v" > "$LOCK/need-dhcp.new" ) 2>/dev/null; then
+		rm -f "$LOCK/need-dhcp.new" 2>/dev/null
+		return 0
+	fi
+	if ! mv -f "$LOCK/need-dhcp.new" "$LOCK/need-dhcp" 2>/dev/null; then
+		rm -f "$LOCK/need-dhcp.new" 2>/dev/null
+		return 0
+	fi
+	return 0
+}
+
+# need_dhcp_value ARG: the DHCP check a verify runs, in NEED_DHCP_OUT.
+# The stronger of the caller's word and the recorded value wins: 1 (the
+# DHCP listener) is stronger than 2 (dnsmasq running), and 2 is stronger
+# than 0 (no check). A caller must not weaken the check the repair made
+# necessary, and the repair must not weaken the check the caller asked
+# for. Without a record the caller's word stands.
+need_dhcp_value() {
+	local arg="$1" rec
+	NEED_DHCP_OUT=0
+	rec=
+	IFS= read -r rec 2>/dev/null < "$LOCK/need-dhcp" || rec=
+	case "$rec" in
+		1|2) NEED_DHCP_OUT=$rec ;;
+	esac
+	case "$arg" in
+		1) NEED_DHCP_OUT=1 ;;
+		2) [ "$NEED_DHCP_OUT" = 1 ] || NEED_DHCP_OUT=2 ;;
+	esac
+	return 0
+}
+
 # cmd_fwrestart: design 3.5 helper passthrough under the 60 s lock; the
 # helper's stdout, stderr and every status (0, 1, 2, 3, 98, 99) pass through.
 cmd_fwrestart() {
 	trap '' HUP PIPE
 	lock_take 60
+	verify_records_drop
 	run_helper fwrestart "$1"
 }
 
 # cmd_dnsmasq_repair: moved snippet I7 (design 3.5); its output is exactly
-# restarted rc=<n> dhcp=<0|1> or not-running.
+# restarted rc=<n> dhcp=<0|1> or not-running. The repair also records the
+# DHCP check it made necessary (need_dhcp_record), so a later verify
+# cannot be asked to skip the check the host would have asked for.
 cmd_dnsmasq_repair() {
-	local d
+	local d rc
 	lock_take 10
 	trap '' HUP PIPE
+	verify_records_drop
 	if "$R/etc/init.d/dnsmasq" running >/dev/null 2>&1; then
 		d=0
 		"$NETSTAT" -lnup 2>/dev/null | grep -q ':67 .*/dnsmasq' && d=1
 		"$R/etc/init.d/dnsmasq" restart >/dev/null 2>&1
-		echo "restarted rc=$? dhcp=$d"
+		rc=$?
+		need_dhcp_record "$d"
+		echo "restarted rc=$rc dhcp=$d"
 	else
 		echo not-running
 	fi
 }
 
+# verify_record WHAT: the verify record of the transaction in VERIFY_TXN:
+# $VERIFY_TXN/verified holds one line, <boot id> <passes> <uptime of the
+# last pass>, ending in LF.
+#   verify_record N  writes the record with N passes. The write is atomic
+#     (verified.new, then mv -f over verified), so a reader never sees half
+#     a line. A failed write removes both files: a missing record makes
+#     confirm refuse, which is the safe direction. The call ends as it
+#     would have ended anyway.
+#   verify_record read  reads the record and sets VR_REC_B (the boot id),
+#     VR_REC_P (the passes), VR_REC_U (the uptime) and VR_REC_STATE:
+#     missing, malformed or ok.
+verify_record() {
+	local what="$1" rec
+	[ -n "$VERIFY_TXN" ] || return 1
+	if [ "$what" = read ]; then
+		VR_REC_B=
+		VR_REC_P=0
+		VR_REC_U=0
+		VR_REC_STATE=missing
+		[ -f "$VERIFY_TXN/verified" ] && [ -r "$VERIFY_TXN/verified" ] || return 1
+		rec=
+		IFS= read -r rec 2>/dev/null < "$VERIFY_TXN/verified" || rec=
+		# shellcheck disable=SC2086  # word split for the three words of the record
+		set -- $rec
+		[ "$#" -eq 3 ] || { VR_REC_STATE=malformed; return 1; }
+		VR_REC_B=$1
+		VR_REC_P=$2
+		VR_REC_U=$3
+		# more than nine digits is out of range for the shell's comparison.
+		# A leading zero makes the word octal: 08 is not a number at
+		# all and 0100 is 64, so both are malformed. 0 alone is a
+		# number and stays valid.
+		case "$VR_REC_P" in ''|*[!0-9]*|0?*|??????????*) VR_REC_STATE=malformed; return 1 ;; esac
+		case "$VR_REC_U" in ''|*[!0-9]*|0?*|??????????*) VR_REC_STATE=malformed; return 1 ;; esac
+		VR_REC_STATE=ok
+		return 0
+	fi
+	uptime_now
+	# the write runs in a subshell: a redirection that fails (a directory
+	# in the way, a read-only directory) must not take the call with it
+	if ! ( printf '%s %s %s\n' "$BOOT_ID_OUT" "$what" "$UP_NOW" > "$VERIFY_TXN/verified.new" ) 2>/dev/null; then
+		rm -f "$VERIFY_TXN/verified.new" "$VERIFY_TXN/verified" 2>/dev/null
+		return 1
+	fi
+	if ! mv -f "$VERIFY_TXN/verified.new" "$VERIFY_TXN/verified" 2>/dev/null; then
+		rm -f "$VERIFY_TXN/verified.new" "$VERIFY_TXN/verified" 2>/dev/null
+		return 1
+	fi
+	[ -f "$VERIFY_TXN/verified" ] || return 1
+	return 0
+}
+
 # verify_fail [LINE]: print one plain stderr line (if given), set RC=1,
 # exit 1; design 3.5c keeps the EXIT trap able to log the call.
+# A failing step ends the round: the record goes back to zero passes, so
+# a failed verify never leaves a record that lets a confirm through.
 verify_fail() {
+	verify_record 0 || :
 	if [ -n "${1-}" ]; then
 		printf '%s\n' "$1" >&2
 	fi
@@ -2910,27 +3064,46 @@ verify_probe() {
 # cmd_verify: design 3.5c. Stdout is empty; the first failing step prints
 # one plain stderr line and the call exits 1 (design 3.7).
 cmd_verify() {
-	local sid="$1" need_dhcp="$2" txn applied boot_applied start_up n line
+	local sid="$1" need_dhcp="$2" txn applied boot_applied start_up n line old
 	lock_take 10
 	txn="$LOCK/$sid.txn"
+	VERIFY_TXN=$txn
+	boot_id
+	uptime_now
+	start_up=$UP_NOW
+	# the pass count of the record is read BEFORE the reset, so a round
+	# that passes can write old+1. The reset itself puts the count back
+	# to zero, so a round that never reaches its last step (a kill, a
+	# timeout, a refusal through fail) leaves no passes behind: the
+	# record counts the passes of the rounds that finished, nothing else.
+	old=0
+	verify_record read || :
+	if [ "$VR_REC_STATE" = ok ] && [ "$VR_REC_B" = "$BOOT_ID_OUT" ]; then
+		old=$VR_REC_P
+	fi
+	verify_record 0 || :
 	[ -e "$txn/applied" ] || fail not-applied 1
 	IFS= read -r applied 2>/dev/null < "$txn/applied" || applied=
 	# shellcheck disable=SC2086  # word split is the parse for the applied line
 	set -- $applied
 	boot_applied=${3-}
-	boot_id
 	[ "$BOOT_ID_OUT" = "$boot_applied" ] || fail not-applied 1
-	uptime_now
-	start_up=$UP_NOW
 	run_bounded 10 "$PING" -c1 -W3 1.1.1.1 || verify_fail 'verify: ping -c1 -W3 1.1.1.1 failed'
 	run_bounded 10 "$NSLOOKUP" openwrt.org 127.0.0.1 || verify_fail 'verify: nslookup openwrt.org 127.0.0.1 failed'
-	verify_dhcp "$need_dhcp"
+	need_dhcp_value "$need_dhcp"
+	verify_dhcp "$NEED_DHCP_OUT"
 	health_check_run "$sid" '' || verify_fail
+	# the sealed probes must be there and readable: without the file the
+	# loop below would run no probe at all and the round would count as
+	# a pass, and a file that cannot be read is the same case
+	[ -f "$txn/probes" ] && [ -r "$txn/probes" ] || verify_fail 'verify: the sealed probes are missing'
 	n=0
 	while IFS= read -r line; do
 		n=$((n + 1))
 		verify_probe "$line" "$n" "$start_up"
 	done < "$txn/probes"
+	# a full pass: the record counts the consecutive passes of this boot
+	verify_record "$(( old + 1 ))" || :
 }
 
 # cmd_confirm: design 6.3; rpcd confirm first, then the guard.
@@ -2948,6 +3121,30 @@ cmd_confirm() {
 	boot_id
 	[ "$BOOT_ID_OUT" = "$boot_applied" ] || fail not-applied 1
 	uptime_now
+	# the verify record: the transaction needs three passing verify
+	# rounds on this boot, and the last one must be recent. The 3
+	# matches PASSES=3 in scripts/owrt-change.sh:91.
+	VERIFY_TXN=$txn
+	verify_record read || :
+	if [ "$VR_REC_STATE" = missing ]; then
+		fail not-verified 3 no-record
+	fi
+	if [ "$VR_REC_STATE" != ok ]; then
+		fail not-verified 3 record-malformed
+	fi
+	if [ "$BOOT_ID_OUT" = '-' ] || [ "$VR_REC_B" != "$BOOT_ID_OUT" ]; then
+		fail not-verified 3 other-boot
+	fi
+	if [ "$VR_REC_P" -lt 3 ]; then
+		fail not-verified 3 "passes-$VR_REC_P"
+	fi
+	# kiss: 60 s fixed; raise it only if a measured verify round on Beryl takes longer
+	# an uptime of 0 means /proc/uptime could not be read: the age of the
+	# record is then unknown, and a record written at 0 would look 0 s
+	# old. The confirm refuses instead of believing it.
+	if [ "$UP_NOW" -eq 0 ] || [ "$VR_REC_U" -eq 0 ] || [ "$UP_NOW" -lt "$VR_REC_U" ] || [ "$(( UP_NOW - VR_REC_U ))" -gt 60 ]; then
+		fail not-verified 3 stale
+	fi
 	guard_status
 	# shellcheck disable=SC2086  # word split for the three words of guard status
 	set -- $G_LINE
@@ -3091,6 +3288,7 @@ status_rpcd_dl() {
 # cmd_status: section 6.5.
 cmd_status() {
 	local sid="$1" txn GL w1 w2 w3 g c b r word why line last pend_me rest_me applied_any rule8 aborted=
+	local running=
 	"$GUARD" tick </dev/null >/dev/null 2>&1 || :
 	guard_status
 	GL=$G_LINE
@@ -3266,11 +3464,63 @@ cmd_status() {
 	# them until the owner removes them; name the count so the host can say
 	# where they went. The field is there only when the count is not 0.
 	quarantine_count "$sid"
+	# The running field: what the router runs now, for a session the guard
+	# put back on its own (design 6.5). It is there only for a restore of
+	# THIS session: a restore at boot leaves the services started from the
+	# restored files (nothing to compare), and a restore at the deadline or
+	# after a reboot is compared with the health snapshot the apply took.
+	# A restore after a reboot is not a boot: the change was pending from
+	# an earlier boot, so the services had already started with the changed
+	# files and the restore only reloaded them (the snapshot of the apply
+	# is normally gone by then, so the answer is unproven).
+	# Every other guard label keeps the line as it was.
+	case "$g" in
+		restored:boot) running=boot ;;
+		restored:deadline|restored:reboot)
+			status_running "$sid"
+			running=$RUNNING_OUT
+			;;
+	esac
 	if [ "$QUARANTINE_N" -gt 0 ]; then
-		printf '%s sid=%s guard=%s rpcd=%s config=%s boot=%s quarantined=%s\n' "$word" "$sid" "$g" "$r" "$c" "$b" "$QUARANTINE_N"
+		printf '%s sid=%s guard=%s rpcd=%s config=%s boot=%s quarantined=%s' "$word" "$sid" "$g" "$r" "$c" "$b" "$QUARANTINE_N"
 	else
-		printf '%s sid=%s guard=%s rpcd=%s config=%s boot=%s\n' "$word" "$sid" "$g" "$r" "$c" "$b"
+		printf '%s sid=%s guard=%s rpcd=%s config=%s boot=%s' "$word" "$sid" "$g" "$r" "$c" "$b"
 	fi
+	[ -z "$running" ] || printf ' running=%s' "$running"
+	printf '\n'
+	return 0
+}
+
+# status_running SID: RUNNING_OUT = whether the router runs the settings the
+# guard put back, for a session the guard restored at its deadline
+# (design 6.5): match when the health check passes, differs when it does
+# not, and unproven when nothing can be said - no health snapshot, or
+# another command holds the program lock. The health check runs under the
+# program lock, so it does not race a change that is running now; a lock
+# another command holds is not an error here: the answer is unproven, the
+# status still answers, and it never waits longer than the lock bound.
+# The snapshot is checked twice: before the lock, so the common case does
+# not take it, and after the lock, because the command that holds the lock
+# may remove the snapshot while the status waits for it. Then there is
+# nothing left to compare, and the answer is unproven, not differs.
+status_running() {
+	local sid="$1" rc=0
+	RUNNING_OUT=unproven
+	[ -d "$LOCK/$sid.health" ] || return 0
+	(
+		# The lock timeout of lock_take ends this subshell, not the
+		# status: the lock is held only for the health check below.
+		fail() { exit 3; }
+		lock_take 10
+		[ -d "$LOCK/$sid.health" ] || exit 3
+		health_check_run "$sid" after-rollback
+	) >/dev/null 2>&1
+	rc=$?
+	case "$rc" in
+		0) RUNNING_OUT=match ;;
+		3) RUNNING_OUT=unproven ;;
+		*) RUNNING_OUT=differs ;;
+	esac
 	return 0
 }
 
@@ -3293,7 +3543,8 @@ quarantine_count() {
 # session, remove the rpcd uci dir, the txn dir, and $LOCK/<SID>.applied;
 # write last (unless the third argument is "keep", which leaves an
 # existing line for THIS SID in place - only the "gone" path uses it); then
-# remove $LOCK/sid only when its first line equals the SID being
+# remove $LOCK/sid and $LOCK/need-dhcp (the DHCP check a dnsmasq repair
+# recorded) only when $LOCK/sid's first line equals the SID being
 # aborted (a missing or unreadable file, or a name mismatch, is no
 # error - other readers, open_txn_sid, busy_value, stage_busy_gate and
 # cmd_confirm, already require the txn dir to exist or check the SID
@@ -3321,7 +3572,19 @@ abort_clean() {
 	[ "$keep_last" = keep ] || printf '%s\n' "aborted $sid $how" > "$R/tmp/newton/last"
 	crash_point
 	if IFS= read -r current_sid 2>/dev/null < "$LOCK/sid"; then
-		[ "$current_sid" = "$sid" ] && rm -f "$LOCK/sid"
+		if [ "$current_sid" = "$sid" ]; then
+			# the DHCP check a dnsmasq repair recorded belongs to the
+			# transaction that is ending: the next transaction starts
+			# without it (the confirm removes the whole lock dir, the
+			# abort of this transaction removes the file). The abort of
+			# another session must not touch it: the record is the open
+			# transaction's, and that transaction is still open. No
+			# crash point of its own: the file is a hint, and a crash
+			# that leaves it behind only makes the next verify
+			# stricter.
+			rm -f "$LOCK/need-dhcp"
+			rm -f "$LOCK/sid"
+		fi
 	fi
 	crash_point
 }
@@ -3546,7 +3809,16 @@ health_check_run() {
 }
 
 # cmd_health_check: design 3.5; 0 pass, 1 fail, nothing on stdout.
+# The check runs under the program lock (like the other commands that
+# touch the router's state), and it drops the verify record of the
+# session it names: the check re-reads the health of the router, so the
+# passes before it say nothing about the router after it. The record of
+# another session belongs to another owner and stays. The verify rounds
+# are not affected: cmd_verify runs the health check itself and never
+# comes through here.
 cmd_health_check() {
+	lock_take 10
+	rm -f "$LOCK/$1.txn/verified" "$LOCK/$1.txn/verified.new"
 	health_check_run "$1" "${2-}"
 }
 
@@ -3555,6 +3827,7 @@ cmd_health_check() {
 cmd_dnsmasq_ensure() {
 	lock_take 10
 	trap '' HUP PIPE
+	verify_records_drop
 	if "$R/etc/init.d/dnsmasq" running >/dev/null 2>&1; then
 		echo running
 	else

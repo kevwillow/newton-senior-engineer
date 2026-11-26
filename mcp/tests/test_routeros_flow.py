@@ -9,6 +9,7 @@ contacted.
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 import stat
@@ -24,7 +25,7 @@ import newton_mcp.server as server
 from newton_mcp.adapters import base, registry
 from newton_mcp.adapters.routeros_write import RouterosOps
 from newton_mcp.adapters.vendor_write import VyosOps
-from newton_mcp.plan import compute_plan_hash
+from newton_mcp.plan import PLAN_HASH_FIELDS, compute_plan_hash
 from newton_mcp.vendor_change import RunOut
 
 
@@ -196,19 +197,37 @@ def _record(lab: ChrLab, session_id: str) -> dict[str, Any]:
     )
 
 
-def _write_approval(lab: ChrLab, session_id: str, record: dict[str, Any]) -> Path:
+def _write_approval(
+    lab: ChrLab,
+    session_id: str,
+    record: dict[str, Any],
+    *,
+    plan_hash: str | None = None,
+    created: datetime | None = None,
+    expires: datetime | None = None,
+) -> Path:
+    """Write the approval of a plan.
+
+    The keyword arguments break one field of the approval, so a test can
+    write an approval for another plan hash or one whose window has
+    passed.  The window travels in the record the way newton-approve
+    writes it: the two integers are the floors of the two times.
+    """
     approvals = lab.state / "approvals"
     approvals.mkdir(mode=0o700, parents=True, exist_ok=True)
-    created = datetime.now(timezone.utc)
+    if created is None:
+        created = datetime.now(timezone.utc)
+    if expires is None:
+        expires = created + timedelta(minutes=10)
     value = {
         "plan_id": session_id,
-        "plan_hash": record["plan_hash"],
+        "plan_hash": record["plan_hash"] if plan_hash is None else plan_hash,
         "device": "chr1",
         "base_hash": record["base_hash"],
         "created_at": created.isoformat(),
-        "expires_at": (created + timedelta(minutes=10)).isoformat(),
+        "expires_at": expires.isoformat(),
         "not_before": int(created.timestamp()),
-        "not_after": int((created + timedelta(minutes=10)).timestamp()),
+        "not_after": int(expires.timestamp()),
         "token": "a" * 64,
     }
     path = approvals / f"{session_id}.json"
@@ -481,6 +500,8 @@ def test_the_apply_of_a_chr_confirms_through_the_own_operations(
     assert chr_lab.runner.scheduler == 0
     assert chr_lab.runner.backups == 0
     assert any("/system backup save" in call for call in chr_lab.runner.calls)
+    # the change line reached the device with the new name in it
+    assert any("lab-chr-shape-01" in call for call in chr_lab.runner.calls)
 
 
 # ---- the claims --------------------------------------------------------------------
@@ -637,3 +658,216 @@ def test_the_backup_of_a_chr_hides_the_secrets(
     assert "<redacted>" in text
     assert "password=" in text
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+# ---- the protocol rules of a CHR -------------------------------------------------
+#
+# The rules of the change protocol hold on a CHR as they hold on every
+# other platform, and each of them is proved here on the CHR fixture of
+# this file: the CHR speaks RouterOS, so a test that borrows the fixture
+# of another platform proves nothing about it.
+
+
+@pytest.mark.parametrize(
+    ("explanation", "owner_confirmed", "expected"),
+    [
+        (None, True, "explanation is required"),
+        (_explanation(), False, "owner_confirmed_in_chat must be true"),
+    ],
+)
+def test_a_chr_plan_without_the_explanation_or_the_owner_yes_calls_no_device(
+    chr_lab: ChrLab,
+    explanation: dict[str, Any] | None,
+    owner_confirmed: bool,
+    expected: str,
+) -> None:
+    """A CHR plan without the explanation or without the owner's chat yes
+    contacts no device.
+
+    The owner's yes in the chat and the explanation are asked for before
+    the device is read at all: a plan that cannot carry them never
+    reaches the export of the CHR.
+    """
+    with pytest.raises(server.NewtonError, match=expected):
+        chr_lab.service.plan(
+            "chr1",
+            CHANGE_TEXT,
+            150,
+            explanation=explanation,
+            owner_confirmed_in_chat=owner_confirmed,
+        )
+
+    assert chr_lab.runner.calls == []
+
+
+def test_the_explanation_and_the_owner_yes_are_fields_of_the_chr_plan_hash(
+    chr_lab: ChrLab,
+) -> None:
+    """The explanation and the owner's chat yes are sealed into the hash of
+    a RouterOS plan.
+
+    The hash of a CHR plan is the identity an approval binds, so an
+    explanation or an owner flag that is edited on the stored record moves
+    the hash and the record no longer is the plan the owner approved.
+    """
+    planned = _plan(chr_lab)
+    record = _record(chr_lab, planned["session_id"])
+
+    assert "explanation" in PLAN_HASH_FIELDS
+    assert "owner_confirmed_in_chat" in PLAN_HASH_FIELDS
+    assert record["plan_hash"] == compute_plan_hash(record)
+
+    explained = copy.deepcopy(record)
+    explained["explanation"]["risk"] = "A risk statement the owner never saw."
+    assert compute_plan_hash(explained) != record["plan_hash"]
+
+    unowned = copy.deepcopy(record)
+    unowned["owner_confirmed_in_chat"] = False
+    assert compute_plan_hash(unowned) != record["plan_hash"]
+
+
+def _tamper_batch(record: dict[str, Any]) -> None:
+    """Swap the batch of the stored record for another change."""
+    record["uci_batch"] = "/system identity set name=lab-chr-tampered"
+
+
+def _tamper_explanation(record: dict[str, Any]) -> None:
+    """Give the stored explanation a step count the batch cannot match."""
+    record["explanation"]["steps"] = [
+        "Set the identity name.",
+        "Also do something the plan never said.",
+    ]
+
+
+def _tamper_probes(record: dict[str, Any]) -> None:
+    """Swap the probes of the stored record for other probes."""
+    record["probes"] = [["ping", "10.109.0.99"]]
+
+
+@pytest.mark.parametrize(
+    ("tamper", "expected"),
+    [
+        (_tamper_batch, "approval plan hash mismatch"),
+        (_tamper_explanation, "invalid explanation"),
+        (_tamper_probes, "expect claims"),
+    ],
+)
+def test_an_edited_chr_record_is_refused_before_any_device_call(
+    chr_lab: ChrLab,
+    tamper: Any,
+    expected: str,
+) -> None:
+    """A CHR record edited after the plan is refused before any device call.
+
+    The batch, the explanation and the probes are fixed at plan time.  The
+    hash of the edited record is recomputed here, so the plan-hash check
+    alone cannot refuse it: the batch is caught by the approval, which
+    binds the hash of the plan, and the explanation and the probes by the
+    checks that read the record itself.
+    """
+    planned = _plan(chr_lab)
+    record = _record(chr_lab, planned["session_id"])
+    _write_approval(chr_lab, planned["session_id"], record)
+    tamper(record)
+    record["plan_hash"] = compute_plan_hash(record)
+    path = chr_lab.state / "plans" / f"{planned['session_id']}.json"
+    path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+    chr_lab.runner.calls.clear()
+
+    with pytest.raises(server.NewtonError, match=expected):
+        chr_lab.service.apply("chr1", planned["session_id"])
+
+    assert chr_lab.runner.calls == []
+
+
+def test_a_chr_record_whose_batch_was_edited_after_the_plan_does_not_verify(
+    chr_lab: ChrLab,
+) -> None:
+    """The batch of a CHR plan is sealed into its hash.
+
+    A record whose batch was edited on disk does not carry the hash of the
+    plan any more, so it never reaches the device.
+    """
+    planned = _plan(chr_lab)
+    record = _record(chr_lab, planned["session_id"])
+    _write_approval(chr_lab, planned["session_id"], record)
+    record["uci_batch"] = "/system identity set name=lab-chr-tampered"
+    path = chr_lab.state / "plans" / f"{planned['session_id']}.json"
+    path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+    chr_lab.runner.calls.clear()
+
+    with pytest.raises(server.NewtonError, match="modified or is invalid"):
+        chr_lab.service.apply("chr1", planned["session_id"])
+
+    assert chr_lab.runner.calls == []
+
+
+def test_a_chr_apply_with_an_approval_for_another_plan_hash_is_refused(
+    chr_lab: ChrLab,
+) -> None:
+    """An approval that names another plan hash never applies a CHR plan.
+
+    The approval is bound to the digest of the plan it was given for, so
+    the approval of another plan does not carry this one to the device.
+    """
+    planned = _plan(chr_lab)
+    other = _plan(chr_lab)
+    record = _record(chr_lab, planned["session_id"])
+    other_hash = _record(chr_lab, other["session_id"])["plan_hash"]
+    assert other_hash != record["plan_hash"]
+    _write_approval(chr_lab, planned["session_id"], record, plan_hash=other_hash)
+    chr_lab.runner.calls.clear()
+
+    with pytest.raises(server.NewtonError, match="approval plan hash mismatch"):
+        chr_lab.service.apply("chr1", planned["session_id"])
+
+    assert chr_lab.runner.calls == []
+
+
+def test_a_chr_apply_with_an_expired_approval_is_refused(
+    chr_lab: ChrLab,
+) -> None:
+    """An approval whose window has passed never applies a CHR plan.
+
+    The approval carries the window it was given for, so an approval that
+    is older than its window is refused before the device is read.
+    """
+    planned = _plan(chr_lab)
+    record = _record(chr_lab, planned["session_id"])
+    now = datetime.now(timezone.utc)
+    _write_approval(
+        chr_lab,
+        planned["session_id"],
+        record,
+        created=now - timedelta(minutes=20),
+        expires=now - timedelta(minutes=10),
+    )
+    chr_lab.runner.calls.clear()
+
+    with pytest.raises(server.NewtonError, match="approval expired"):
+        chr_lab.service.apply("chr1", planned["session_id"])
+
+    assert chr_lab.runner.calls == []
+
+
+def test_a_chr_whose_base_changed_since_the_plan_is_refused_before_any_change_line(
+    chr_lab: ChrLab,
+) -> None:
+    """A CHR whose configuration changed after the plan is refused before
+    any change line is sent.
+
+    The base hash of the plan is the hash of the export of the device: a
+    device that does not hold it any more is stale, and a stale plan
+    never runs a change line and never arms the revert.
+    """
+    planned = _plan(chr_lab)
+    record = _record(chr_lab, planned["session_id"])
+    _write_approval(chr_lab, planned["session_id"], record)
+    chr_lab.runner.config = CHR_CONFIG + "/system identity set name=lab-chr-other\n"
+    chr_lab.runner.calls.clear()
+
+    with pytest.raises(server.NewtonError, match="changed after the plan was staged"):
+        chr_lab.service.apply("chr1", planned["session_id"])
+
+    assert not any("lab-chr-shape-01" in call for call in chr_lab.runner.calls)
+    assert not any("/system backup save" in call for call in chr_lab.runner.calls)

@@ -78,20 +78,25 @@ def applied(router, sid=SID, t=90):
 def status(router, sid=SID):
     """Run `status <sid>` as a forced read-role caller. Returns
     (rc, word, fields_dict) where fields_dict carries sid, guard, rpcd,
-    config, boot in that order."""
+    config, boot in that order, and the running field too when the line
+    has one (the guard restored this session on its own)."""
     res = router.forced(f"status {sid}", role="read", timeout=30)
     assert res.rc == 0, (res.rc, res.out, res.err)
     lines = res.out.splitlines()
     assert len(lines) == 1, res.out
     line = lines[0]
     parts = line.split()
-    assert len(parts) == 6, line
-    word, sid_kv, guard_kv, rpcd_kv, config_kv, boot_kv = parts
+    assert len(parts) in (6, 7), line
+    word, sid_kv, guard_kv, rpcd_kv, config_kv, boot_kv = parts[:6]
     assert sid_kv == f"sid={sid}", line
     fields = {}
     for kv in (guard_kv, rpcd_kv, config_kv, boot_kv):
         key, _, value = kv.partition("=")
         fields[key] = value
+    if len(parts) == 7:
+        key, _, value = parts[6].partition("=")
+        assert key == "running", line
+        fields["running"] = value
     return res, word, fields
 
 
@@ -269,6 +274,10 @@ def test_status_rule_7_applied_guard_restored_rolled_back(router):
         "rpcd": "-",
         "config": "post",
         "boot": "same",
+        # the guard put the settings back on its own: the running network
+        # is compared with the health snapshot the apply took (the fake
+        # router cannot run the health check, so it differs).
+        "running": "differs",
     }, fields
     assert res.err == ""
 
@@ -488,7 +497,10 @@ def test_status_guard_deadline_with_rpcd_last_keeps_deadline(router):
     write_last(router, f"aborted {SID} rolled-back")
     res, word, fields = status(router, SID)
     assert fields["guard"] == "restored:deadline", fields
-    assert word == "rolled-back"
+    assert word == "rolled-back", (word, fields)
+    # the guard put the settings back on its own, but there is no health
+    # snapshot to compare the running network with.
+    assert fields["running"] == "unproven", fields
     assert res.err == ""
 
 
@@ -651,6 +663,10 @@ def test_status_ticks_guard_first_when_window_expired(router):
         "rpcd": "-",
         "config": "base",
         "boot": "same",
+        # the guard put the settings back on its own: the running network
+        # is compared with the health snapshot the apply took (the fake
+        # router cannot run the health check, so it differs).
+        "running": "differs",
     }, fields
     assert (router.root / "etc/config/dhcp").read_bytes() == (
         b"config dnsmasq\n\toption domainneeded '1'\n"
@@ -678,6 +694,9 @@ def test_status_after_reboot_guard_boot_restores(router):
         "rpcd": "-",
         "config": "base",
         "boot": "new",
+        # the guard put the settings back at boot: the services started
+        # from the restored files, so there is nothing to compare.
+        "running": "boot",
     }, fields
     assert (router.root / "etc/config/dhcp").read_bytes() == (
         b"config dnsmasq\n\toption domainneeded '1'\n"

@@ -363,19 +363,22 @@ def test_the_roadmap_plans_hosts_and_the_persona_before_more_vendors() -> None:
     """The maintainer's order (2026-11-19): AD build mode, the protocol
     contract, hosts, the security engineer persona, then more vendors;
     the read-only dashboard is parked at the end of the backlog.  AD
-    build mode shipped in 1.5.0, so it is a released row now."""
+    build mode shipped in 1.5.0 and the protocol contract in 1.5.2, so
+    they are released rows now."""
     rows = _planned_rows()
     path = PUBLIC_ROADMAP_SRC if PUBLIC_ROADMAP_SRC.exists() else PRIVATE_ROADMAP
     text = path.read_text(encoding="utf-8")
     released = text[text.index("## Released"):text.index("## Planned")]
     assert "| 1.5.0 | Active Directory build mode" in released
+    assert "| 1.5.2 | The protocol contract" in released
 
     def index(needle: str) -> int:
         found = [i for i, row in enumerate(rows) if needle in row]
         assert len(found) == 1, (needle, rows)
         return found[0]
 
-    order = [index(n) for n in ("protocol contract", "Hosts:", "security engineer persona", "More vendors")]
+    assert not any("protocol contract" in row for row in rows), rows
+    order = [index(n) for n in ("Hosts:", "security engineer persona", "More vendors")]
     assert order == sorted(order), order
     assert "dashboard" not in rows[index("Network rules")]
     backlog = rows[index("| Backlog |")]

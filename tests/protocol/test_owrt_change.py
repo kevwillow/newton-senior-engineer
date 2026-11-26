@@ -58,6 +58,7 @@ def protocol(tmp_path):
     (tmp_path / "timed-events.log").write_text("")
     (tmp_path / "seal-stdin.log").write_text("")
     (tmp_path / "ssh-argv.log").write_text("")
+    (tmp_path / "ssh-proc.log").write_text("")
     (tmp_path / "lc_all.log").write_text("")
     config_file = tmp_path / "network"
     config_file.write_text("config interface 'lan'\n")
@@ -151,6 +152,17 @@ def protocol(tmp_path):
                     return "missing"
                 return hashlib.sha256(path.read_bytes()).hexdigest()
 
+            def proc_start_ticks():
+                # The start time of this process in clock ticks.  Together
+                # with the pid it names one process: a pid the kernel
+                # reuses later comes with a different start time.
+                try:
+                    with open("/proc/self/stat") as stat_file:
+                        fields = stat_file.read().rsplit(") ", 1)[1].split()
+                    return int(fields[19])
+                except (OSError, IndexError, ValueError):
+                    return 0
+
             def firewall_ssh_mode():
                 state = read_state()
                 modes = state["fw_ssh"]
@@ -175,6 +187,13 @@ def protocol(tmp_path):
                 calls.write(json.dumps(cmd) + "\\n")
             with (root / "ssh-argv.log").open("a") as argv_log:
                 argv_log.write(json.dumps(sys.argv) + "\\n")
+            with (root / "ssh-proc.log").open("a") as proc_log:
+                proc_log.write(json.dumps({
+                    "pid": os.getpid(),
+                    "start": proc_start_ticks(),
+                    "argv": sys.argv,
+                    "cmd": cmd,
+                }) + "\\n")
             with (root / "timed-events.log").open("a") as events:
                 events.write(json.dumps({
                     "time": int(os.environ.get("NEWTON_VIRTUAL_SECONDS", "0")),
@@ -723,6 +742,7 @@ def protocol(tmp_path):
         "timed_events": tmp_path / "timed-events.log",
         "seal_stdin": tmp_path / "seal-stdin.log",
         "ssh_argv": tmp_path / "ssh-argv.log",
+        "ssh_proc": tmp_path / "ssh-proc.log",
         "env": env,
         "router": tmp_path / "router.json",
         "routerbin": routerbin,
@@ -5148,3 +5168,203 @@ def test_quarantine_note_only_for_a_whole_valid_field(protocol, field):
     result = run_script(protocol, ["status", "root@192.0.2.1", SID])
     assert result.returncode == 0, result.stdout
     assert "NOTE session" not in result.stdout
+
+
+# ---- the router's status line ends with the running field too ----
+
+RNOTE = (
+    "the router put the old settings back on its own, but Newton cannot show "
+    "the running network matches them; on the router run: reload_config; "
+    "/etc/init.d/firewall restart; wifi reload"
+)
+
+
+def test_the_quarantine_note_survives_the_running_field(protocol):
+    """The router prints quarantined=<n> running=<v>, in that order.
+
+    The quarantine NOTE is the only word the owner gets about the files the
+    guard moved aside, so the running field must not swallow it. The
+    running NOTE comes after it.
+    """
+    set_router_state(
+        protocol,
+        status=(
+            f"rolled-back sid={SID} guard=restored:deadline rpcd=- config=base "
+            "boot=same quarantined=2 running=differs"
+        ),
+    )
+    result = run_script(protocol, ["status", "root@192.0.2.1", SID])
+    assert result.returncode == 0, result.stdout
+    notes = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith(f"NOTE session={SID}: ")
+    ]
+    assert notes == [
+        f"NOTE session={SID}: {QNOTE}",
+        f"NOTE session={SID}: {RNOTE}",
+    ], result.stdout
+
+
+def test_the_quarantine_note_survives_a_matching_running_field(protocol):
+    """running=match says the running network is the restored one.
+
+    Then there is nothing to warn about, but the quarantine NOTE is still
+    the owner's word about the moved files.
+    """
+    set_router_state(
+        protocol,
+        status=(
+            f"rolled-back sid={SID} guard=restored:deadline rpcd=- config=base "
+            "boot=same quarantined=2 running=match"
+        ),
+    )
+    result = run_script(protocol, ["status", "root@192.0.2.1", SID])
+    assert result.returncode == 0, result.stdout
+    assert f"NOTE session={SID}: {QNOTE}" in result.stdout.splitlines()
+    assert RNOTE not in result.stdout
+
+
+def test_no_quarantine_note_for_a_running_field_the_router_never_prints(protocol):
+    """A running value the router never prints is not its status line.
+
+    Such a line is not one the router wrote, so no NOTE is drawn from it.
+    """
+    set_router_state(
+        protocol,
+        status=(
+            f"rolled-back sid={SID} guard=restored:deadline rpcd=- config=base "
+            "boot=same quarantined=2 running=bogus"
+        ),
+    )
+    result = run_script(protocol, ["status", "root@192.0.2.1", SID])
+    assert result.returncode == 0, result.stdout
+    assert "NOTE session" not in result.stdout
+
+
+# ---- the running field gets a machine line of its own --------------------
+
+
+QNOTE12 = (
+    "the guard moved 12 config file(s) that were not in the saved copy to "
+    f"/etc/newton/quarantine/{SID}/ on the router; they stay there until you remove them: "
+    "copy back into /etc/config any you want to keep"
+)
+
+
+def test_the_running_field_survives_the_cut_of_the_router_line(protocol):
+    """The router's line is longer than the 120 characters `oneline` keeps.
+
+    The running field is at the very end of the line, so the cut drops it
+    and the owner (and the MCP) read no answer at all.  The host prints the
+    value as a machine line of its own, next to the notes.
+    """
+    set_router_state(
+        protocol,
+        status=(
+            f"rolled-back sid={SID} guard=restored:deadline rpcd=- config=base "
+            "boot=same quarantined=12 running=differs"
+        ),
+    )
+    result = run_script(protocol, ["status", "root@192.0.2.1", SID])
+    assert result.returncode == 0, result.stdout
+    # the router's line is cut, the field is gone from it
+    assert " running=differs" not in result.stdout.splitlines()[0], result.stdout
+    assert f"RUNNING session={SID} differs" in result.stdout.splitlines(), result.stdout
+    # the notes are still there
+    assert f"NOTE session={SID}: {QNOTE12}" in result.stdout.splitlines(), result.stdout
+    assert f"NOTE session={SID}: {RNOTE}" in result.stdout.splitlines(), result.stdout
+
+
+def test_a_matching_running_field_gets_a_machine_line_and_no_note(protocol):
+    """`running=match` says the running network is the restored one.
+
+    There is nothing to warn about, but the machine line is still there:
+    the MCP reads the value from it.
+    """
+    set_router_state(
+        protocol,
+        status=(
+            f"rolled-back sid={SID} guard=restored:deadline rpcd=- config=base "
+            "boot=same quarantined=12 running=match"
+        ),
+    )
+    result = run_script(protocol, ["status", "root@192.0.2.1", SID])
+    assert result.returncode == 0, result.stdout
+    assert f"RUNNING session={SID} match" in result.stdout.splitlines(), result.stdout
+    assert RNOTE not in result.stdout
+
+
+def test_no_machine_line_without_a_running_field(protocol):
+    """A status line without the running field has no value to print.
+
+    The guard did not restore this session on its own: nothing is printed.
+    """
+    set_router_state(
+        protocol,
+        status=f"rolled-back sid={SID} guard=restored:abort rpcd=- config=- boot=-",
+    )
+    result = run_script(protocol, ["status", "root@192.0.2.1", SID])
+    assert result.returncode == 0, result.stdout
+    assert "RUNNING session" not in result.stdout
+
+
+def test_no_machine_line_for_a_running_field_the_router_never_prints(protocol):
+    """A running value the router never prints is not its status line.
+
+    Such a line is not one the router wrote, so no value is taken from it.
+    """
+    set_router_state(
+        protocol,
+        status=(
+            f"rolled-back sid={SID} guard=restored:deadline rpcd=- config=base "
+            "boot=same quarantined=12 running=bogus"
+        ),
+    )
+    result = run_script(protocol, ["status", "root@192.0.2.1", SID])
+    assert result.returncode == 0, result.stdout
+    assert "RUNNING session" not in result.stdout
+
+
+# ---- a router cannot forge the host's own RUNNING line -------------------
+
+
+def test_a_router_cannot_forge_the_hosts_running_line(protocol):
+    """The host's RUNNING line is the host's own answer, not the router's.
+
+    The host masks its own marker words (CONFIRMED, APPLIED, ...) so a router
+    cannot print them; RUNNING was missing from that list, so a router whose
+    status line is `RUNNING session=<sid> match` had that line echoed as-is
+    and the MCP read it as Newton's own answer.
+    """
+    set_router_state(protocol, status=f"RUNNING session={SID} match")
+    result = run_script(protocol, ["status", "root@192.0.2.1", SID])
+    assert result.returncode == 0, result.stdout
+    forged = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith(f"RUNNING session={SID} ")
+    ]
+    assert forged == [], result.stdout
+    # the router's line is still echoed, but it cannot be the host's line
+    assert f"running session={SID} match" in result.stdout.splitlines(), result.stdout
+
+
+def test_a_real_running_field_still_gives_exactly_one_running_line(protocol):
+    """The fix does not touch the host's own line: a real running field
+    still gives exactly one `RUNNING session=<sid> differs` line."""
+    set_router_state(
+        protocol,
+        status=(
+            f"rolled-back sid={SID} guard=restored:deadline rpcd=- config=base "
+            "boot=same quarantined=12 running=differs"
+        ),
+    )
+    result = run_script(protocol, ["status", "root@192.0.2.1", SID])
+    assert result.returncode == 0, result.stdout
+    machine_lines = [
+        line
+        for line in result.stdout.splitlines()
+        if line == f"RUNNING session={SID} differs"
+    ]
+    assert machine_lines == [f"RUNNING session={SID} differs"], result.stdout

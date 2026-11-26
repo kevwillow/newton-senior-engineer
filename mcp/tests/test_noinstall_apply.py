@@ -127,10 +127,17 @@ def _record(state: Path, sid: str) -> dict[str, Any]:
     )
 
 
-def _approve(state: Path, sid: str, record: dict[str, Any]) -> None:
+def _approve(
+    state: Path,
+    sid: str,
+    record: dict[str, Any],
+    *,
+    created: datetime | None = None,
+    expires: datetime | None = None,
+) -> None:
     """The approval the owner made in their own terminal."""
-    created = datetime.now(timezone.utc)
-    expires = created + timedelta(minutes=30)
+    created = created or datetime.now(timezone.utc)
+    expires = expires or (created + timedelta(minutes=30))
     payload = {
         "plan_id": sid,
         "plan_hash": record["plan_hash"],
@@ -322,6 +329,67 @@ def test_the_apply_without_an_approval_is_refused(
     message = _apply_error(tmp_path, monkeypatch, router, clock, sid)
 
     assert "approval" in message
+    assert router.count("uci", "apply") == 0
+
+
+# ---- the approval is bound to the plan and to its window -------------------
+
+
+def test_an_approval_for_another_plan_hash_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The approval of another plan does not apply this one.
+
+    The approval binds the plan it was made for: an approval of a
+    different plan hash says nothing about this change, so the apply
+    refuses it before the router is contacted at all.
+    """
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    record = _record(state, sid)
+    # another plan of the same device, and its hash
+    other = _plan(tmp_path, monkeypatch)
+    other_hash = _record(state, other["session_id"])["plan_hash"]
+    assert other_hash != record["plan_hash"]
+    _approve(state, sid, {**record, "plan_hash": other_hash})
+
+    router.calls.clear()
+    message = _apply_error(tmp_path, monkeypatch, router, clock, sid)
+
+    assert "approval plan hash mismatch" in message
+    assert router.calls == [], "the router must not be contacted at all"
+    assert router.count("uci", "apply") == 0
+
+
+def test_an_expired_approval_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An approval whose window has passed applies nothing.
+
+    The window of the approval is the owner's own: when it has passed,
+    the owner has to approve the plan again, and nothing is applied.
+    """
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    record = _record(state, sid)
+    created = datetime.now(timezone.utc) - timedelta(minutes=40)
+    _approve(
+        state,
+        sid,
+        record,
+        created=created,
+        expires=created + timedelta(minutes=30),
+    )
+
+    router.calls.clear()
+    message = _apply_error(tmp_path, monkeypatch, router, clock, sid)
+
+    assert "approval expired" in message
+    assert router.calls == [], "the router must not be contacted at all"
     assert router.count("uci", "apply") == 0
 
 
@@ -871,6 +939,187 @@ def test_a_record_with_a_malformed_explanation_is_refused(
 
     assert "explanation" in message, message
     assert router.count("uci", "apply") == 0, router.calls
+
+
+# ---- the explanation and the owner's yes are sealed into the hash -----------
+
+
+def _write_record(state: Path, sid: str, record: dict[str, Any]) -> None:
+    """Write a record back, with the hash it carries."""
+    (state / "plans" / f"{sid}.json").write_text(
+        json.dumps(record, sort_keys=True), encoding="utf-8"
+    )
+
+
+def test_a_record_whose_explanation_was_edited_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An explanation that was edited on disk does not verify.
+
+    The explanation is sealed into the plan hash, so a record whose
+    explanation was edited is refused before the router is contacted at
+    all: the owner never read that explanation.
+    """
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    record = _record(state, sid)
+    _approve(state, sid, record)
+
+    # the explanation is edited on disk; the plan hash still says the
+    # one the owner read
+    record["explanation"]["intent"] = "Something the owner never saw"
+    _write_record(state, sid, record)
+
+    router.calls.clear()
+    message = _apply_error(tmp_path, monkeypatch, router, clock, sid)
+
+    assert "plan record was modified or is invalid" in message, message
+    assert router.calls == [], "the router must not be contacted at all"
+    assert router.count("uci", "apply") == 0
+
+
+def test_a_record_whose_explanation_was_edited_and_hashed_again_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An explanation that was edited and hashed again is refused too.
+
+    The hash of the edited record verifies against itself, but the
+    approval of the owner is bound to the hash of the plan they read:
+    the edited plan is not the one they approved, so nothing is applied.
+    """
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    record = _record(state, sid)
+    _approve(state, sid, record)
+
+    # the explanation is edited and the hash is recomputed to match
+    record["explanation"]["intent"] = "Something the owner never saw"
+    record["plan_hash"] = _server.compute_plan_hash(record)
+    _write_record(state, sid, record)
+
+    router.calls.clear()
+    message = _apply_error(tmp_path, monkeypatch, router, clock, sid)
+
+    assert "approval plan hash mismatch" in message, message
+    assert router.calls == [], "the router must not be contacted at all"
+    assert router.count("uci", "apply") == 0
+
+
+def test_a_record_without_the_owner_yes_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The owner's chat yes is sealed into the plan hash.
+
+    A record whose chat yes was taken off, with the hash recomputed to
+    match, says the owner never said yes: it is refused before the
+    router is contacted at all.
+    """
+    router, clock, sid, state, _record = _edited_record(
+        tmp_path, monkeypatch, owner_confirmed_in_chat=False
+    )
+
+    router.calls.clear()
+    message = _apply_error(tmp_path, monkeypatch, router, clock, sid)
+
+    assert "owner_confirmed_in_chat" in message, message
+    assert router.calls == [], "the router must not be contacted at all"
+    assert router.count("uci", "apply") == 0
+
+
+# ---- the plan is sealed: the probes and the checks -------------------------
+
+
+def test_a_record_whose_explanation_claims_were_edited_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The claims of the explanation are the last sealed probes.
+
+    A record whose claims were swapped for other claims, with the hash
+    recomputed to match, no longer carries the claims the owner read as
+    its probes: it is refused before the router is contacted at all.
+    """
+    router, clock, sid, state, _record = _edited_record(
+        tmp_path,
+        monkeypatch,
+        explanation={
+            "intent": "change one setting of the router",
+            "steps": ["one change for the owner to read"] * 3,
+            "expect": [{"kind": "probe", "probe": ["ping", "127.0.0.2"]}],
+            "risk": "the router's own settings change",
+        },
+    )
+
+    router.calls.clear()
+    message = _apply_error(tmp_path, monkeypatch, router, clock, sid)
+
+    assert "expect claims" in message, message
+    assert router.calls == [], "the router must not be contacted at all"
+    assert router.count("uci", "apply") == 0
+
+
+def test_a_record_whose_probes_were_edited_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The probes of a record are sealed into its plan hash.
+
+    A record whose probe list was edited on disk says something else
+    than the owner read: it is refused before the router is contacted
+    at all.
+    """
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    record = _record(state, sid)
+    _approve(state, sid, record)
+
+    # the probes are edited on disk; the plan hash still says the ones
+    # the owner read
+    probes = [list(probe) for probe in record["probes"]]
+    probes[0] = ["uci-equals", "dhcp.laptop.ip", "10.109.0.99"]
+    record["probes"] = probes
+    _write_record(state, sid, record)
+    assert _server.compute_plan_hash(record) != record["plan_hash"]
+
+    router.calls.clear()
+    message = _apply_error(tmp_path, monkeypatch, router, clock, sid)
+
+    assert "plan record was modified or is invalid" in message, message
+    assert router.calls == [], "the router must not be contacted at all"
+    assert router.count("uci", "apply") == 0
+
+
+def test_a_record_whose_checks_were_edited_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The list of checks of a record is sealed into its plan hash.
+
+    A record whose checks were edited on disk no longer says what
+    Newton checks: it is refused before the router is contacted at all.
+    """
+    router, clock = _setup(tmp_path, monkeypatch)
+    plan = _plan(tmp_path, monkeypatch)
+    sid = plan["session_id"]
+    state = _state(tmp_path)
+    record = _record(state, sid)
+    _approve(state, sid, record)
+
+    # the checks are edited on disk; the plan hash still says the ones
+    # the owner read
+    record["checks"] = ["read-back"]
+    _write_record(state, sid, record)
+    assert _server.compute_plan_hash(record) != record["plan_hash"]
+
+    router.calls.clear()
+    message = _apply_error(tmp_path, monkeypatch, router, clock, sid)
+
+    assert "plan record was modified or is invalid" in message, message
+    assert router.calls == [], "the router must not be contacted at all"
+    assert router.count("uci", "apply") == 0
 
 
 # ---- the internet check ----------------------------------------------------

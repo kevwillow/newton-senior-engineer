@@ -445,6 +445,9 @@ def test_abort_gone_writes_last_when_there_is_none(router):
 
 def test_abort_of_a_confirmed_session_refuses_and_keeps_last(router):
     plan = applied(router)
+    # three passing verify rounds: they write the transaction's verify
+    # record, which a confirm needs
+    router.verified(plan.sid)
     res = router.forced(f"confirm {plan.sid}", caller="agent-one", timeout=30)
     assert (res.rc, res.out) == (0, f"confirmed {plan.sid}\n"), res.err
     assert read_last(router) == f"confirmed {plan.sid}\n"

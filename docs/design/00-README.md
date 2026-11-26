@@ -62,6 +62,7 @@ The design is ordered so that **no write path exists before the controls that ma
 | `09-LAB-AND-TEST-STRATEGY.md` | Lab topology, test pyramid, chaos tests, red-team corpus, NEWTON-Bench |
 | `11-ADRS.md` | Architecture decision records ADR-001…ADR-012 |
 | `12-VERIFICATION-LEDGER.md` | Every researched fact + source URL; LVR, assumption, and open-question registers |
+| `13-CHANGE-PROTOCOL.md` | The change protocol: one table of rule, mode and the tests that prove it |
 | `AGENTS.md` | Drop-in repo-root instructions for coding agents |
 
 ---

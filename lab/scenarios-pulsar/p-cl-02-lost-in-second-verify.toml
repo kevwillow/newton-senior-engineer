@@ -1,0 +1,19 @@
+# PORT of p-01-static-lease, with the controller lost at the second verify round. The lease has a name and a MAC of its own, so it never collides with p-01.
+name = "p-cl-02-lost-in-second-verify"
+description = "Lose the controller at the second verify round of a static DHCP lease: the runner kills the whole apply process group when the SECOND ssh child that runs 'newton-router verify' appears, and the router's own guard restores the old settings at its deadline. The run passes when the router says it rolled the session back and that the running network matches the restored files (rule 10 of docs/design/13-CHANGE-PROTOCOL.md: the device ends in the pre-change state, never in between), and the post check proves the lease is gone."
+target = "pulsar"
+reset = ["pulsar"]
+expect = "rolled_back"
+timeout = 60
+controller_loss = "verify-2"
+probes = [["conf-has", "dnsmasq", "substr", "present", "02:00:00:00:10:02"]]
+batch = """set dhcp.cl02=host
+set dhcp.cl02.name='cl02'
+set dhcp.cl02.mac='02:00:00:00:10:02'
+set dhcp.cl02.ip='192.168.1.202'"""
+
+[[post]]
+device = "pulsar"
+cmd = "uci -q get dhcp.cl02.ip"
+expect_rc = 1
+expect_stdout = "^$"

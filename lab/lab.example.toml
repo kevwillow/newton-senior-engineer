@@ -59,7 +59,7 @@ vmid = 9102
 vm_name = "lab-r1"
 host = "10.109.0.11"
 user = "root"
-snapshot = "baseline-newton-1-3-3"   # pve_snapshot_name of the router program's version (see newton-router-setup lab-snapshot)
+snapshot = "baseline-newton-1-3-4"   # pve_snapshot_name of the router program's version (see newton-router-setup lab-snapshot)
 settle_cmd = "{ ubus call service list; ubus call network.interface dump | jsonfilter -e '@.interface[*].interface' -e '@.interface[*].up'; } | md5sum"
 
 [devices.lab-client]

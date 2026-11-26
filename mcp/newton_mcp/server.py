@@ -1115,6 +1115,14 @@ STATUS_TIMEOUT_NEXT_STEP = (
     "newton_change_status again; unless the change was confirmed, the router rolls it back "
     "when its window ends."
 )
+# The next step for a status whose running field says the running network does not
+# match the settings the guard put back (design 6.5). It is the host's own NOTE
+# text, without its `NOTE session=...: ` prefix.
+RUNNING_MISMATCH_NEXT_STEP = (
+    "the router put the old settings back on its own, but Newton cannot show the running "
+    "network matches them; on the router run: reload_config; /etc/init.d/firewall restart; "
+    "wifi reload"
+)
 ABORT_TIMEOUT_NEXT_STEP = (
     "The abort did not finish in time, so whether it rolled the change back is not known "
     "from here. Call newton_change_status to see where it stands; unless the change was "
@@ -3575,8 +3583,21 @@ class NewtonService:
         self._record_held_rollback(device_name, session_id, cp)
         self._record_reconciled_confirm(device_name, session_id, cp)
         stdout, _hashes = _remove_config_hashes(cp.stdout or "")
-        return {"exit_code": cp.returncode,
-                "log": _envelope.envelope(f"{device_name}:status", stdout + (cp.stderr or ""))}
+        result = {"exit_code": cp.returncode,
+                  "log": _envelope.envelope(f"{device_name}:status", stdout + (cp.stderr or ""))}
+        # The host's machine line names what the router runs now, when the
+        # guard put this session's settings back on its own. The host
+        # prints the value on a line of its own, because the router's line
+        # is cut at 120 characters and the field stands at its end. The
+        # value is Newton's own answer, so it does not live in the
+        # untrusted envelope only: a warning that the running network may
+        # not match the files on the router belongs next to the result.
+        running = _status_running(stdout, session_id)
+        if running is not None:
+            result["running"] = running
+            if running in ("differs", "unproven"):
+                result["next_step"] = RUNNING_MISMATCH_NEXT_STEP
+        return result
 
     def _record_reconciled_confirm(
         self, device_name: str, session_id: str, cp: subprocess.CompletedProcess[str]
@@ -3940,6 +3961,30 @@ def _remove_config_hashes(stdout: str) -> tuple[str, str]:
             continue
         hashes.append(f"{match.group(1)} {match.group(2)}\n")
     return "\n".join(kept), "".join(hashes)
+
+
+# The host's machine line: what the router runs now, for a session the
+# guard put back on its own.  The host prints it, because the router's
+# status line is cut at 120 characters and the field stands at its end.
+def _status_running(stdout: str, session_id: str) -> str | None:
+    """The host's RUNNING line for this session, or None.
+
+    The host prints one machine line of its own, `RUNNING session=<sid>
+    <value>`, when the router's status line ends in the whole field
+    running=match|differs|unproven|boot.  The MCP trusts that line only:
+    the router's line is cut on the way and the field can be lost there.
+    The value is one of the four the router prints; no other text of any
+    line reaches the caller.
+    """
+    pattern = re.compile(
+        rf"^RUNNING session={re.escape(session_id)} (match|differs|unproven|boot)$"
+    )
+    for raw in (stdout or "").split("\n"):
+        line = raw.removesuffix("\r")
+        match = pattern.match(line)
+        if match is not None:
+            return match.group(1)
+    return None
 
 
 def classify_apply(returncode: int, stdout: str, session_id: str) -> str:

@@ -38,6 +38,10 @@ DF_OUT_LOW = (
 SERVICE_LIST = (
     '{"dnsmasq":{"instances":{"main":{"running":true,"pid":411}}}}\n'
 )
+SERVICE_LIST_TWO = (
+    '{"dnsmasq":{"instances":{"main":{"running":true,"pid":411}}},'
+    '"uhttpd":{"instances":{"main":{"running":true,"pid":412}}}}\n'
+)
 ORIGINAL_DHCP = b"config dnsmasq\n\toption domainneeded '1'\n"
 POST_DHCP = b"config dnsmasq\n\toption domainneeded '0'\n"
 ORIGINAL_BYTES = {
@@ -159,6 +163,21 @@ def apply_prod(router, plan):
     return router.apply(plan.sid, plan.t, token, nbf, exp)
 
 
+def verify_rounds(router, sid=SID, rounds=3):
+    """Three passing verify rounds (the program verify, not the helper).
+
+    They write the transaction's verify record, which a confirm needs: it
+    refuses a transaction that was not verified three times on this boot.
+    The real helper answers the health check here (the snapshot of step 11
+    is a real one), so the helper is not stubbed. Returns the Results."""
+    runs = []
+    for _ in range(rounds):
+        res = router.forced(f"verify {sid} 0", role="change", timeout=30)
+        assert (res.rc, res.out, res.err) == (0, "", "")
+        runs.append(res)
+    return runs
+
+
 def collect_call_lines(router):
     """calls.log with the `logger` echoes dropped (M-trap)."""
     path = router.root / "control/calls.log"
@@ -263,9 +282,9 @@ def test_happy_full_flow_through_real_guard_and_helper(router):
     res = router.forced("fwrestart 1", role="change", timeout=30)
     assert res.rc == 0
 
-    # 14. verify SID 0 (program verify, not the helper)
-    res = router.forced(f"verify {SID} 0", role="change", timeout=30)
-    assert (res.rc, res.out, res.err) == (0, "", "")
+    # 14. verify SID 0 (program verify, not the helper): three rounds,
+    #     which write the transaction's verify record
+    verify_rounds(router, SID)
 
     # 15. confirm SID
     res = router.forced(f"confirm {SID}", role="change", timeout=30)
@@ -476,6 +495,9 @@ def test_6_7_rpcd_timer_lost_confirmed_via_guard_only(router):
     res = apply_prod(router, plan)
     assert res.rc == 0, (res.rc, res.out, res.err)
     assert (router.root / "etc/config/dhcp").read_bytes() == POST_DHCP
+    # three passing verify rounds: they write the transaction's verify
+    # record, which a confirm needs
+    router.verified(plan.sid)
     # `control/confirm.rc=5` makes `ubus call uci confirm` exit 5
     router.write("control/confirm.rc", "5\n")
     # Swap the running program to a copy with RPCD_LOST='5 6' so the
@@ -562,6 +584,9 @@ def test_6_7_program_killed_between_rpcd_confirm_and_guard_confirm(router):
     cleared its in-RAM rollback). Past the deadline + tick: guard
     restores the LKG back over etc/config; cfg becomes ORIGINAL."""
     plan = _prep_apply(router)
+    # three passing verify rounds: they write the transaction's verify
+    # record, which a confirm needs
+    router.verified(plan.sid)
     res = router.forced(
         f"confirm {plan.sid}", caller="agent-one", role="change",
         env={"NEWTON_ROUTER_CRASH_AT": "1"}, timeout=30,
@@ -708,6 +733,9 @@ def test_output_contract_stdout_only_program_lines(router):
     assert res.out.count("\n") == 1
     assert "armed x" not in res.out and "confirmed y" not in res.out \
         and "restored z" not in res.out
+    # three passing verify rounds: they write the transaction's verify
+    # record, which a confirm needs
+    router.verified(plan.sid)
     # confirm: stdout is exactly `confirmed <sid>`
     res = router.forced(f"confirm {plan.sid}", role="change", timeout=30)
     assert res.rc == 0
@@ -787,7 +815,7 @@ def _drive_happy_commands(router):
     nbf, exp = router.window()
     runs.append(router.apply(SID, 90, router.token(digest, nbf, exp), nbf, exp))
     runs.append(router.forced("fwrestart 1", role="change", timeout=30))
-    runs.append(router.forced(f"verify {SID} 0", role="change", timeout=30))
+    runs.extend(verify_rounds(router, SID))
     runs.append(router.forced(f"confirm {SID}", role="change", timeout=30))
     runs.append(router.forced(f"status {SID}", role="read", timeout=30))
     return runs
@@ -850,3 +878,78 @@ def test_program_never_writes_2_1_files(router, rel):
     _drive_happy_commands(router)
     assert path.read_bytes() == before_bytes, (rel, path.read_bytes())
     assert path.stat().st_mtime == before_mtime, (rel, path.stat().st_mtime)
+
+
+# ---- 7. A health snapshot after the apply is refused ----------------------
+
+
+def health_dir_bytes(router, sid=SID):
+    """The bytes of every file of the session's health snapshot
+    directory (name -> bytes), so a replaced snapshot cannot pass for
+    the old one."""
+    health = router.root / "tmp/owrt-safe-apply.lock" / f"{sid}.health"
+    return {
+        str(p.relative_to(health)): p.read_bytes()
+        for p in sorted(health.rglob("*")) if p.is_file()
+    }
+
+
+def test_health_snapshot_after_the_apply_refuses(router):
+    """A health snapshot after the apply would re-baseline the health
+    check against the changed router: the verify rounds that follow
+    would compare the changed router with itself, and the health of
+    the router before the change would be lost. The program refuses
+    with `error already-applied`, exit 1, and the snapshot on disk is
+    byte-for-byte the one the apply used."""
+    router.write("etc/newton/profile", "lab\n")
+    router.use_stub_helper()
+    router.write("control/diff.txt", b"dhcp.cfg01.domain='lan'\n")
+    router.write("control/staged/dhcp", POST_DHCP)
+    res = router.stage(batch=b"set dhcp.cfg01.domain=lan\n")
+    assert res.rc == 0, (res.rc, res.out, res.err)
+    ready_for_health_snapshot(router)
+    res = router.forced(f"health-snapshot {SID}", role="change", timeout=30)
+    assert (res.rc, res.err) == (0, ""), (res.rc, res.out, res.err)
+    seal_res = router.seal(SID, 90)
+    assert seal_res.rc == 0, (seal_res.rc, seal_res.out, seal_res.err)
+    ready_for_arm(router)
+    res = router.apply(SID, 90, "none", 0, 0)
+    assert (res.rc, res.out.split()[0]) == (0, "applied"), (res.rc, res.out, res.err)
+    before = health_dir_bytes(router)
+    assert before, "the health snapshot is empty"
+    # another service list: a snapshot that ran would change the
+    # snapshot on disk
+    router.set_fake("ubus", out=SERVICE_LIST_TWO)
+    res = router.forced(f"health-snapshot {SID}", role="change", timeout=30)
+    assert (res.rc, res.err, res.out) == (1, "error already-applied\n", "")
+    assert health_dir_bytes(router) == before
+
+
+def test_health_snapshot_while_the_apply_runs_refuses(router):
+    """An apply that is running has an `applying` file and no `applied`
+    file yet: the health snapshot would be taken from a router that is
+    changing under it, and the change would be compared with itself.
+    The program refuses with `error already-applied`, exit 1, and the
+    snapshot on disk is byte-for-byte the one the apply used."""
+    router.write("etc/newton/profile", "lab\n")
+    router.use_stub_helper()
+    router.write("control/diff.txt", b"dhcp.cfg01.domain='lan'\n")
+    router.write("control/staged/dhcp", POST_DHCP)
+    res = router.stage(batch=b"set dhcp.cfg01.domain=lan\n")
+    assert res.rc == 0, (res.rc, res.out, res.err)
+    ready_for_health_snapshot(router)
+    res = router.forced(f"health-snapshot {SID}", role="change", timeout=30)
+    assert (res.rc, res.err) == (0, ""), (res.rc, res.out, res.err)
+    before = health_dir_bytes(router)
+    assert before, "the health snapshot is empty"
+    # an apply is running: the transaction has an `applying` file and
+    # no `applied` file
+    txn = router.root / "tmp/owrt-safe-apply.lock" / f"{SID}.txn"
+    (txn / "applying").write_text("100 boot-one\n")
+    assert not (txn / "applied").exists()
+    # another service list: a snapshot that ran would change the
+    # snapshot on disk
+    router.set_fake("ubus", out=SERVICE_LIST_TWO)
+    res = router.forced(f"health-snapshot {SID}", role="change", timeout=30)
+    assert (res.rc, res.err, res.out) == (1, "error already-applied\n", "")
+    assert health_dir_bytes(router) == before

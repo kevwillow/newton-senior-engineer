@@ -1,0 +1,14 @@
+# PORT of p-01-static-lease, with the controller lost at the confirm. The lease has a name and a MAC of its own, so it never collides with p-01.
+name = "p-cl-03-lost-in-confirm"
+description = "Lose the controller at the confirm of a static DHCP lease: the runner kills the whole apply process group when the ssh child that runs 'newton-router confirm' appears, so the confirm never reaches the router. The device then ends either in the pre-change state (the guard restores at its deadline) or in the confirmed state (the confirm got there first), and rule 10 of docs/design/13-CHANGE-PROTOCOL.md says both are allowed and the one in between is not: the run passes when the router's own status says rolled-back or confirmed with a guard that is not pending, and the record says which of the two it was. There is no post check, because the end state is one of two; the reset_after puts the router back to its baseline either way, so a confirmed change does not stay."
+target = "pulsar"
+reset = ["pulsar"]
+reset_after = ["pulsar"]
+expect = "rolled_back_or_confirmed"
+timeout = 60
+controller_loss = "confirm"
+probes = [["conf-has", "dnsmasq", "substr", "present", "02:00:00:00:10:03"]]
+batch = """set dhcp.cl03=host
+set dhcp.cl03.name='cl03'
+set dhcp.cl03.mac='02:00:00:00:10:03'
+set dhcp.cl03.ip='192.168.1.203'"""

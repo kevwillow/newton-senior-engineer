@@ -21,6 +21,7 @@ No router is contacted: the backup comes from the measured answers.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -123,6 +124,7 @@ def _run_plan(
     window_s: int = 180,
     owner_confirmed: Any = True,
     configs: dict[str, Any] | None = None,
+    explanation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The plan of a no-install device, over the fake router."""
     state = _state(tmp_path)
@@ -135,7 +137,9 @@ def _run_plan(
         "lab-r1",
         batch,
         window_s,
-        explanation=_explanation_for(batch),
+        explanation=(
+            explanation if explanation is not None else _explanation_for(batch)
+        ),
         owner_confirmed_in_chat=owner_confirmed,
         client_factory=noinstall_fakes.factory(router),
     )
@@ -181,6 +185,75 @@ def test_the_auto_plan_record_verifies_with_the_plan_hash(tmp_path: Path) -> Non
     result = _run_plan(tmp_path)
     record = _record(result["_service"].state, result["session_id"])
     assert _plan.compute_plan_hash(record) == record["plan_hash"]
+
+
+# ---- the seal of the plan ----------------------------------------------------
+
+
+def _explanation_with_steps(batch: str) -> dict[str, Any]:
+    """A valid explanation whose steps say which line they are for."""
+    lines = [line for line in batch.splitlines() if line.strip()]
+    return {
+        "intent": "change one setting of the router",
+        "steps": [f"change the line {index + 1}" for index, _ in enumerate(lines)],
+        "expect": [{"kind": "probe", "probe": ["ping", "127.0.0.1"]}],
+        "risk": "the router's own settings change",
+    }
+
+
+def _mutations():
+    """Every field of the explanation, and the owner's chat yes."""
+
+    def intent(r):
+        r["explanation"]["intent"] += "."
+
+    def step(r):
+        r["explanation"]["steps"][0] += "."
+
+    def swap(r):
+        r["explanation"]["steps"].reverse()
+
+    def risk(r):
+        r["explanation"]["risk"] += "."
+
+    def claim_value(r):
+        r["explanation"]["expect"][0] = {
+            "kind": "probe",
+            "probe": ["ping", "127.0.0.2"],
+        }
+
+    def claim_add(r):
+        r["explanation"]["expect"].append(
+            {"kind": "probe", "probe": ["iface-absent", "guesty"]}
+        )
+
+    def owner(r):
+        r["owner_confirmed_in_chat"] = False
+
+    return [intent, step, swap, risk, claim_value, claim_add, owner]
+
+
+@pytest.mark.parametrize("mutate", _mutations(), ids=lambda f: f.__name__)
+def test_changing_any_explanation_field_changes_the_no_install_plan_hash(
+    tmp_path: Path, mutate
+) -> None:
+    """The explanation and the owner's chat yes are fields of the plan hash.
+
+    The plan hash is what an approval binds to, so an explanation that
+    was edited after the plan must not verify against it: the no-install
+    plan seals the explanation and the owner's yes into its hash, as the
+    installed plan does.
+    """
+    result = _run_plan(
+        tmp_path, explanation=_explanation_with_steps(RESERVATION)
+    )
+    record = _record(result["_service"].state, result["session_id"])
+    before = record["plan_hash"]
+    changed = copy.deepcopy(record)
+    mutate(changed)
+
+    assert changed != record
+    assert _plan.compute_plan_hash(changed) != before
 
 
 def test_the_auto_plan_only_reads_the_router(tmp_path: Path) -> None:

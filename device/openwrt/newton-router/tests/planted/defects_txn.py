@@ -11,7 +11,7 @@ MUTANTS = [
     ('C04', 'RPCD_LOST shipped non-empty', "\nRPCD_LOST=''\n", "\nRPCD_LOST='5 6'\n", TC),
     ('C05', 'too-late: guard left boundary 4 instead of 5', '[ "$guard_left" -ge 5 ] || fail too-late 3 guard-window-short', '[ "$guard_left" -ge 4 ] || fail too-late 3 guard-window-short', TC),
     ('C06', 'too-late: rpcd deadline boundary 4 instead of 5', '[ "$(( rpcd_dl - UP_NOW ))" -ge 5 ] || fail too-late 3 rpcd-window-short', '[ "$(( rpcd_dl - UP_NOW ))" -ge 4 ] || fail too-late 3 rpcd-window-short', TC),
-    ('C07', 'not-applied: the boot id check is skipped', '[ "$BOOT_ID_OUT" = "$boot_applied" ] || fail not-applied 1\n\tuptime_now\n\tguard_status', 'uptime_now\n\tguard_status', TC),
+    ('C07', 'not-applied: the boot id check is skipped', '[ "$BOOT_ID_OUT" = "$boot_applied" ] || fail not-applied 1\n\tuptime_now\n\t# the verify record', 'uptime_now\n\t# the verify record', TC),
     ('C08', 'the program lock directory is not removed after confirm', 'if [ "$current_sid" = "$sid" ]; then\n\t\t\trm -rf "$LOCK"\n\t\tfi', 'if [ "$current_sid" = "$sid" ]; then\n\t\t\t:\n\t\tfi', TC),
     ('C09', 'last is not written by confirm', 'printf \'%s\\n\' "confirmed $sid" > "$R/tmp/newton/last"', ':', TC),
     ('C10', 'the rpcd save dir is not removed by confirm', '[ -n "$sdir" ] && rm -rf "$sdir"\n\tcrash_point\n\tprintf \'%s\\n\' "confirmed $sid"', 'crash_point\n\tprintf \'%s\\n\' "confirmed $sid"', TC),

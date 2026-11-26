@@ -32,6 +32,11 @@ PLAN_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 DEVICE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
+#: The prefix of the line that tells the owner what happens to the change
+#: when Newton loses contact in the middle of the apply.  It is Newton's
+#: own fact, so it never carries the agent marker.
+RECOVERY_PREFIX = "If Newton loses contact: "
+
 # Module-level seam so tests inject a fake reader instead of a real tty.
 _getpass = getpass.getpass
 
@@ -721,6 +726,9 @@ def _print_plan_head(
             for item in not_verified:
                 print(f"  - {_sanitize_terminal_value(item)}")
     print(f"Timeout: {_sanitize_terminal_value(plan['timeout_s'])}s")
+    recovery = recovery_line(plan)
+    if recovery is not None:
+        print(recovery)
     reboot = _reboot_line(plan)
     if reboot is not None:
         print(reboot)
@@ -769,6 +777,67 @@ def _reboot_line(plan: dict[str, Any]) -> str | None:
     from . import owner_flow
 
     return owner_flow.REBOOT_LINE.format(window)
+
+
+def recovery_line(plan: dict[str, Any]) -> str | None:
+    """The approval text's recovery line for a router or vendor plan, or None for an owner script or a platform with no undo.
+
+    The timeout is read before the platform: a plan whose timeout cannot
+    be read gets the "unknown" line, whatever its platform.
+
+    The line says what puts the old settings back when Newton loses
+    contact in the middle of the apply.  It is a fact of Newton's own, so
+    it never carries the agent marker, and it is computed from the plan's
+    own window: the owner reads the line the plan was made with.
+
+    A plan whose timeout cannot be read says so in the line itself, and a
+    platform Newton knows no undo for has no line at all.  An owner script
+    shows its own lines and never this one, the way ``_reboot_line`` does.
+    """
+    if owner_records.is_owner_record(plan):
+        return None
+    platform = plan.get("platform")
+    if not isinstance(platform, str) or not platform:
+        platform = "openwrt"
+    timeout = plan.get("timeout_s")
+    if isinstance(timeout, bool) or not isinstance(timeout, int):
+        return RECOVERY_PREFIX + "unknown (the plan's timeout cannot be read)"
+    if platform == "openwrt":
+        if plan.get("mode") == "auto":
+            return (
+                RECOVERY_PREFIX
+                + "the router puts the old settings back by itself "
+                + f"{timeout}s after the apply"
+            )
+        return (
+            RECOVERY_PREFIX
+            + "the router puts the old settings back by itself "
+            + f"{timeout}s after the apply; its guard does it too if that "
+            + "fails, and after a reboot"
+        )
+    if platform in ("vyos", "junos"):
+        from .adapters.vendor_write import minutes_for
+
+        try:
+            window = minutes_for(timeout) * 60
+        except (TypeError, ValueError):
+            return RECOVERY_PREFIX + "unknown (the plan's timeout cannot be read)"
+        return (
+            RECOVERY_PREFIX
+            + "the device's commit-confirm puts the old settings back "
+            + f"{window}s after the apply"
+        )
+    if platform == "routeros":
+        from .adapters.routeros_write import _window_s
+
+        window = _window_s(timeout)
+        return (
+            RECOVERY_PREFIX
+            + "the router REBOOTS into its backup "
+            + f"{window}s after the apply; traffic stops during the reboot"
+        )
+    return None
+
 
 def _print_plan_tail(
     plan: dict[str, Any],
@@ -1332,6 +1401,7 @@ def _print_ad_plan(plan: dict[str, Any]) -> None:
         # An unlock arms no undo; its window field is fixed and unused,
         # so no Window line suggests it could be put back.
         print("Undo: none, this stays written")
+        print(RECOVERY_PREFIX + "nothing is put back; an unlock stays written")
         return
     window = _sanitize_terminal_value(plan.get("window", ""))
     reverse = (
@@ -1341,6 +1411,7 @@ def _print_ad_plan(plan: dict[str, Any]) -> None:
         f"Undo: the PDC puts it back {window}s after the apply unless Newton "
         f"confirms; after a confirm only a reverse plan{reverse}"
     )
+    print(RECOVERY_PREFIX + f"the PDC puts it back {window}s after the apply")
     print(
         "The undo runs on the PDC only. A change made meanwhile on another DC, "
         "or a PDC role move while armed, is not covered. The undo time is "
@@ -2556,6 +2627,13 @@ def approve_ad_build_stage(
             "  Restore cost: "
             f"{_restore_cost(server['checkpoint'], stage)}"
         )
+
+    print(
+        RECOVERY_PREFIX
+        + "the stage stops where it is and nothing is put back by itself; "
+        + "a resume needs a new plan you approve, and the checkpoint above "
+        + "is the way back"
+    )
 
     expected = f"approve stage {stage} of {plan_id[:8]}"
     print(f"Type {expected!r} to approve: ", end="", flush=True)

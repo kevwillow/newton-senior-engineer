@@ -13,8 +13,10 @@ router facts ``reasons``, ``router_profile``, ``router_leash``,
 staged-config check result ``staged_check``.  It also covers
 ``consent_basis`` when the record carries it: the basis says
 WHO consented to the plan -- the owner in the chat, or a live grant --
-so it is part of what an approval binds.  Creation time and any
-non-listed bookkeeping are metadata.  Canonical JSON uses
+so it is part of what an approval binds.  It covers ``checks`` too
+when the record carries it: the list of checks says what Newton checks
+after the change, so it is part of the sealed plan.  Creation time and
+any non-listed bookkeeping are metadata.  Canonical JSON uses
 lexicographically sorted keys, no insignificant whitespace, UTF-8 text,
 and JSON's normal escaping rules with non-ASCII characters left
 unescaped.
@@ -84,6 +86,14 @@ def canonical_plan_json(record: Mapping[str, Any]) -> str:
     # would stop verifying.
     if "consent_basis" in record:
         payload["consent_basis"] = record["consent_basis"]
+    # The list of checks says what Newton checks after the change, and
+    # it is part of the sealed plan: a record whose checks were edited
+    # on disk says something else than the owner approved.  Only the
+    # no-install record carries the key (the installed and the vendor
+    # plans carry their own lists), so the payload of the other records
+    # must not grow either.
+    if "checks" in record:
+        payload["checks"] = record["checks"]
     return json.dumps(
         payload,
         ensure_ascii=False,

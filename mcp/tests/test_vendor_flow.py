@@ -6,6 +6,7 @@ Every device interaction is a scripted fake.
 from __future__ import annotations
 
 import ast
+import copy
 import hashlib
 import json
 import os
@@ -210,14 +211,27 @@ def _write_approval(
     lab: VendorLab,
     session_id: str,
     record: dict[str, Any],
+    *,
+    plan_hash: str | None = None,
+    created: datetime | None = None,
+    expires: datetime | None = None,
 ) -> Path:
+    """Write the approval of a plan.
+
+    The keyword arguments break one field of the approval, so a test can
+    write an approval for another plan hash or one whose window has
+    passed.  The window travels in the record the way newton-approve
+    writes it: the two integers are the floors of the two times.
+    """
     approvals = lab.state / "approvals"
     approvals.mkdir(mode=0o700, parents=True, exist_ok=True)
-    created = datetime.now(timezone.utc)
-    expires = created + timedelta(minutes=10)
+    if created is None:
+        created = datetime.now(timezone.utc)
+    if expires is None:
+        expires = created + timedelta(minutes=10)
     value = {
         "plan_id": session_id,
-        "plan_hash": record["plan_hash"],
+        "plan_hash": record["plan_hash"] if plan_hash is None else plan_hash,
         "device": "vy1",
         "base_hash": record["base_hash"],
         "created_at": created.isoformat(),
@@ -755,3 +769,86 @@ def test_two_backups_in_one_second_keep_both(
     assert sorted(p.name for p in backups.iterdir()) == sorted(
         [p.name for p in paths] + ["vy1-20261121T040506Z-3.txt"]
     )
+
+
+# ---- the protocol rules of a VyOS -------------------------------------------------
+#
+# The rules of the change protocol hold on a VyOS as they hold on every
+# other platform, and each of them is proved here on the VyOS fixture of
+# this file.
+
+
+def test_the_explanation_is_a_field_of_the_vyos_plan_hash(
+    vendor_lab: VendorLab,
+) -> None:
+    """The explanation of a VyOS plan is sealed into its hash.
+
+    The hash of the plan is the identity an approval binds, so an
+    explanation that is edited on the stored record moves the hash, and
+    the apply of the edited record is refused before any device call.
+    """
+    planned = _plan(vendor_lab)
+    record = _record(vendor_lab, planned["session_id"])
+
+    assert record["plan_hash"] == compute_plan_hash(record)
+
+    changed = copy.deepcopy(record)
+    changed["explanation"]["risk"] = "A risk statement the owner never saw."
+    assert compute_plan_hash(changed) != record["plan_hash"]
+
+    path = vendor_lab.state / "plans" / f"{planned['session_id']}.json"
+    path.write_text(json.dumps(changed, sort_keys=True), encoding="utf-8")
+    vendor_lab.runner.calls.clear()
+
+    with pytest.raises(server.NewtonError, match="modified or is invalid"):
+        vendor_lab.service.apply("vy1", planned["session_id"])
+
+    assert vendor_lab.runner.calls == []
+
+
+def test_a_vyos_apply_with_an_approval_for_another_plan_hash_is_refused(
+    vendor_lab: VendorLab,
+) -> None:
+    """An approval that names another plan hash never applies a VyOS plan.
+
+    The approval is bound to the digest of the plan it was given for, so
+    the approval of another plan does not carry this one to the device.
+    """
+    planned = _plan(vendor_lab)
+    other = _plan(vendor_lab)
+    record = _record(vendor_lab, planned["session_id"])
+    other_hash = _record(vendor_lab, other["session_id"])["plan_hash"]
+    assert other_hash != record["plan_hash"]
+    _write_approval(vendor_lab, planned["session_id"], record, plan_hash=other_hash)
+    vendor_lab.runner.calls.clear()
+
+    with pytest.raises(server.NewtonError, match="approval plan hash mismatch"):
+        vendor_lab.service.apply("vy1", planned["session_id"])
+
+    assert vendor_lab.runner.calls == []
+
+
+def test_a_vyos_apply_with_an_expired_approval_is_refused(
+    vendor_lab: VendorLab,
+) -> None:
+    """An approval whose window has passed never applies a VyOS plan.
+
+    The approval carries the window it was given for, so an approval that
+    is older than its window is refused before the device is read.
+    """
+    planned = _plan(vendor_lab)
+    record = _record(vendor_lab, planned["session_id"])
+    now = datetime.now(timezone.utc)
+    _write_approval(
+        vendor_lab,
+        planned["session_id"],
+        record,
+        created=now - timedelta(minutes=20),
+        expires=now - timedelta(minutes=10),
+    )
+    vendor_lab.runner.calls.clear()
+
+    with pytest.raises(server.NewtonError, match="approval expired"):
+        vendor_lab.service.apply("vy1", planned["session_id"])
+
+    assert vendor_lab.runner.calls == []

@@ -151,7 +151,7 @@ if [[ -n ${OWRT_SSH_PROXY:-} ]]; then
 fi
 
 log()  { printf '%s %s %s\n' "$(date -Is)" "$ROUTER" "$*" >> "$AUDIT"; echo "$*"; }
-mask() { sed 's/CONFIRMED/confirmed/g; s/ROLLBACK WINDOW PASSED/rollback window passed/g; s/OUTCOME UNKNOWN/outcome unknown/g; s/ALERT/alert/g; s/APPLIED/applied/g; s/HELD APPLY/held apply/g'; }
+mask() { sed 's/CONFIRMED/confirmed/g; s/ROLLBACK WINDOW PASSED/rollback window passed/g; s/OUTCOME UNKNOWN/outcome unknown/g; s/ALERT/alert/g; s/APPLIED/applied/g; s/HELD APPLY/held apply/g; s/RUNNING/running/g'; }
 oneline() {
 	if (( $# > 0 )); then printf '%s' "$1"; else cat; fi |
 		LC_ALL=C tr '\000-\037\177' ' ' |
@@ -173,11 +173,33 @@ setup_launcher() {
 # LINE ends with the whole field quarantined=<n> (the guard's restore moved
 # config entries that were not in the saved copy, such as a file a package
 # added during the window, to /etc/newton/quarantine/<SID>/ and keeps them
-# there); empty otherwise.
+# there); empty otherwise. The router prints one more field after it, the
+# running one (running=match|differs|unproven|boot), so that field may
+# follow the count; a running value the router does not print is not its
+# line, and no note is drawn from it.
 quarantine_note() {
 	QNOTE=
-	[[ $1 =~ \ quarantined=([1-9][0-9]{0,3})$ ]] || return 0
+	[[ $1 =~ \ quarantined=([1-9][0-9]{0,3})(\ running=(match|differs|unproven|boot))?$ ]] || return 0
 	QNOTE="the guard moved ${BASH_REMATCH[1]} config file(s) that were not in the saved copy to /etc/newton/quarantine/$SID/ on the router; they stay there until you remove them: copy back into /etc/config any you want to keep"
+}
+# running_note LINE: RNOTE = the owner's note when the router's status LINE
+# ends with the whole field running=differs or running=unproven (the guard
+# put the old settings back on its own, but Newton cannot show that the
+# running network matches them); empty otherwise. RVAL = the value of the
+# whole field running=match|differs|unproven|boot (empty when the line has
+# no such field): the host prints it as a machine line of its own, because
+# the router's line is cut at 120 characters and the field stands at its
+# end, so the cut drops it.
+running_note() {
+	RNOTE=
+	RVAL=
+	[[ $1 =~ \ running=(match|differs|unproven|boot)$ ]] || return 0
+	RVAL=${BASH_REMATCH[1]}
+	case "$RVAL" in
+		differs|unproven)
+			RNOTE="the router put the old settings back on its own, but Newton cannot show the running network matches them; on the router run: reload_config; /etc/init.d/firewall restart; wifi reload"
+			;;
+	esac
 }
 # refusal_next_step FIRST: the true next step for a router's exit-3 apply
 # refusal (its first stderr line, "error <code> [detail]"). Only the codes
@@ -1192,6 +1214,12 @@ status)
 	oneline "$out"
 	quarantine_note "${out%%$'\n'*}"
 	[[ -z $QNOTE ]] || echo "NOTE session=$SID: $QNOTE"
+	running_note "${out%%$'\n'*}"
+	[[ -z $RNOTE ]] || echo "NOTE session=$SID: $RNOTE"
+	# the value of the running field, on a line of the host's own: the
+	# router's line is cut at 120 characters and the field stands at its
+	# end, so the cut drops it
+	[[ -z $RVAL ]] || echo "RUNNING session=$SID $RVAL"
 	held_line=; [[ -r $PLANS/$SID.held ]] && { IFS= read -r held_line < "$PLANS/$SID.held" || true; }
 	if [[ $held_line =~ ^[0-2]\ [0-9]+\ ([0-9]+)$ ]] && (( $(date +%s) >= BASH_REMATCH[1] )); then
 		if router_says_confirmed "$out"; then

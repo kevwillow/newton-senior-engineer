@@ -156,6 +156,7 @@ import posixpath
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -223,7 +224,11 @@ PVE_CURL_MAX_ATTEMPTS = 4            # 1 initial + 3 retries
 PVE_CURL_RETRY_SLEEPS_S = (2, 5, 10) # pauses between consecutive attempts
 
 VALID_EXPECT = {"confirmed", "rolled_back", "rebooted_restored", "rejected",
-                "refused", "noop", "none"}
+                "refused", "noop", "none",
+                # the controller-loss outcome: the device ends in the
+                # pre-change state or in the confirmed state, and the
+                # scenario says which of the two it accepts
+                "rolled_back_or_confirmed"}
 VALID_APPROVAL = (True, "none", "wrong")
 LANES = ("key", "password")
 # The two access modes of an OpenWrt router (ADR-021 point 1): the
@@ -238,6 +243,39 @@ ACCESS_MODES = ("installed", "no-install")
 # the scenarios exercised and not from what a scenario declared.
 RECEIPT_ENV = "NEWTON_LAB_RECEIPT"
 RPCD_RECEIPT_PREFIX = "rpcd "
+
+# ---------- Controller loss ----------
+# The runner loses its own controller in the middle of a change: the apply
+# runs in its own process group and the runner kills the whole group when
+# the change reaches the point the scenario named.  The point is the words
+# an ssh child's argv holds: scripts/owrt-change.sh runs the router's own
+# program over ssh, so the child's argv carries "newton-router verify " or
+# "newton-router confirm " (the NUL-split argv joined with spaces).
+CONTROLLER_LOSS_POINTS = ("verify-1", "verify-2", "confirm")
+CONTROLLER_LOSS_MARKERS = {
+    "verify-1": "newton-router verify ",
+    "verify-2": "newton-router verify ",
+    "confirm": "newton-router confirm ",
+}
+#: How many distinct pids carry the marker before the group is killed.
+CONTROLLER_LOSS_WANTED = {"verify-1": 1, "verify-2": 2, "confirm": 1}
+#: How often the watcher looks at /proc.
+CONTROLLER_LOSS_POLL_S = 0.01
+#: The seconds the runner waits past the scenario timeout after the kill,
+#: so the guard's own deadline has surely passed.
+CONTROLLER_LOSS_WAIT_EXTRA_S = 30
+#: The words a router status line starts with (device/openwrt/newton-router,
+#: cmd_status).
+ROUTER_STATUS_WORDS = ("gone", "staged", "applied-pending-confirm",
+                       "rolled-back", "confirmed", "inconsistent")
+#: The failure reasons a controller-loss run records.
+CONTROLLER_LOSS_NOT_REACHED = "controller-loss-point-not-reached"
+CONTROLLER_LOSS_IN_BETWEEN = "controller-loss-in-between"
+CONTROLLER_LOSS_STATUS_FAILED = "controller-loss-status-failed"
+#: The prefix of the reason a controller-loss run records when the device
+#: was rolled back but the running network does not match the restored
+#: files; the value the host measured follows it.
+CONTROLLER_LOSS_RUNNING = "controller-loss-running-"
 
 # a lab device whose snapshot follows this naming rule is a Newton
 # router installed by `newton-router-setup lab-snapshot`; only those get
@@ -593,7 +631,7 @@ class Scenario:
                  "breaks_password",
                  "tier", "tier_values", "tier_batch_lines",
                  "tier_fail_probe", "tier_reboot", "client_checks",
-                 "expect_failed_claim", "access")
+                 "expect_failed_claim", "access", "controller_loss")
 
     def __init__(self, *, name: str, description: str, target: str,
                  reset: list[str], expect: str, timeout: int,
@@ -619,7 +657,8 @@ class Scenario:
                  tier_reboot: bool = True,
                  client_checks: "list[dict] | None" = None,
                  expect_failed_claim: str | None = None,
-                 access: str = "installed") -> None:
+                 access: str = "installed",
+                 controller_loss: str | None = None) -> None:
         self.name = name
         self.description = description
         self.target = target
@@ -654,6 +693,7 @@ class Scenario:
         self.tier_reboot = bool(tier_reboot)
         self.client_checks = list(client_checks) if client_checks else []
         self.expect_failed_claim = expect_failed_claim
+        self.controller_loss = controller_loss
 
     def effective_expect(self, lane: str) -> str:
         if lane == "password" and self.expect_password is not None:
@@ -1130,6 +1170,8 @@ def load_scenarios(directory: Path) -> list[Scenario]:
             expect_failed_claim=(None if "expect_failed_claim" not in data
                                  else str(data["expect_failed_claim"])),
             access=str(data.get("access", "installed")),
+            controller_loss=(None if "controller_loss" not in data
+                             else str(data["controller_loss"])),
         ))
     return out
 
@@ -1153,6 +1195,62 @@ def _is_local_or_device(lab: Lab, name: str) -> bool:
     return name == "local" or name in lab.devices
 
 
+def _validate_controller_loss(scen: Scenario) -> list[str]:
+    """The rules of the `controller_loss` field, checked at load time.
+
+    Every problem is refused before any device is touched.  The field names
+    the point at which the runner loses its own controller, and the point
+    decides what the run may end in: a verify point must end rolled back,
+    the confirm point may end rolled back or confirmed.
+
+    The rules read the expectation of the key lane and, when the scenario
+    sets one, the expectation of the password lane as well: the lane that
+    runs has to accept what the point allows."""
+    errors: list[str] = []
+    name = scen.path.name
+    point = scen.controller_loss
+    if point is not None and point not in CONTROLLER_LOSS_POINTS:
+        errors.append(
+            f"{name}: controller_loss {point!r} is not one of "
+            f"{list(CONTROLLER_LOSS_POINTS)}")
+        return errors
+    # the expectations the rules read: the one of the key lane and, when it
+    # is set, the one of the password lane
+    expects = [("expect", scen.expect)]
+    if scen.expect_password is not None:
+        expects.append(("expect_password", scen.expect_password))
+    if point is None:
+        for field, value in expects:
+            if value == "rolled_back_or_confirmed":
+                errors.append(
+                    f"{name}: {field} = 'rolled_back_or_confirmed' is only "
+                    "valid with controller_loss = 'confirm'")
+        return errors
+    if scen.access == "no-install":
+        errors.append(
+            f"{name}: controller_loss needs the installed transport "
+            "(access = 'installed'); a no-install device has no controller "
+            "to lose")
+    for field, value in expects:
+        if value in ("refused", "noop", "none"):
+            errors.append(
+                f"{name}: controller_loss cannot run a scenario that expects "
+                f"{value!r}: the change must reach the device first")
+        if point in ("verify-1", "verify-2") and value != "rolled_back":
+            errors.append(
+                f"{name}: controller_loss = {point!r} needs {field} = "
+                f"'rolled_back', got {value!r}")
+        if point == "confirm" and value != "rolled_back_or_confirmed":
+            errors.append(
+                f"{name}: controller_loss = 'confirm' needs {field} = "
+                f"'rolled_back_or_confirmed', got {value!r}")
+    if point == "confirm" and scen.post:
+        errors.append(
+            f"{name}: controller_loss = 'confirm' runs no [[post]] "
+            f"checks; the scenario file has {len(scen.post)}")
+    return errors
+
+
 def validate_scenarios(lab: Lab, scenarios: list[Scenario]) -> list[str]:
     """Return one human-readable error string per problem (empty list = valid).
     Each error names the scenario file it belongs to."""
@@ -1173,6 +1271,7 @@ def validate_scenarios(lab: Lab, scenarios: list[Scenario]) -> list[str]:
             errors.append(
                 f"{name}: expect_password {scen.expect_password!r} is not one "
                 f"of {sorted(VALID_EXPECT)}")
+        errors.extend(_validate_controller_loss(scen))
         if scen.client_checks:
             try:
                 explanation.Explanation.model_validate({
@@ -3175,6 +3274,402 @@ def abort_batch(lab: Lab, target: Device, sid: str,
     return proc.returncode, proc.stdout, proc.stderr
 
 
+# ---------- Controller loss ----------
+
+def _cl_sleep(seconds: float) -> None:
+    """The sleeper of the controller-loss watcher and of the wait after the
+    kill.  A test replaces it (the lab test conftest already neutralises
+    `time.sleep`); a live run sleeps for real."""
+    time.sleep(seconds)
+
+
+def _proc_cmdline(pid: int) -> str:
+    """The argv of a process: /proc/<pid>/cmdline, NUL-split and joined with
+    spaces.  Empty when the process is gone or has no argv."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return ""
+    if not raw:
+        return ""
+    parts = raw.split(b"\x00")
+    if parts and parts[-1] == b"":
+        parts.pop()
+    return " ".join(p.decode("utf-8", "replace") for p in parts)
+
+
+def _proc_pgid(pid: int) -> int | None:
+    """The process group of a pid, from /proc/<pid>/stat.  None when the
+    process is gone or the line cannot be read."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    try:
+        rest = data[data.rindex(b")") + 1:].split()
+    except ValueError:
+        return None
+    # after the comm field (which may hold spaces and parentheses) come the
+    # state, the parent pid and the process group
+    if len(rest) < 3:
+        return None
+    try:
+        return int(rest[2])
+    except ValueError:
+        return None
+
+
+def _group_processes(pgid: int) -> list[tuple[int, str]]:
+    """(pid, cmdline) of every live process in the group `pgid`."""
+    out: list[tuple[int, str]] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return out
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if _proc_pgid(pid) != pgid:
+            continue
+        cmd = _proc_cmdline(pid)
+        if cmd:
+            out.append((pid, cmd))
+    return out
+
+
+def _watch_for_loss_point(proc: subprocess.Popen, pgid: int, point: str,
+                          deadline: float,
+                          ) -> dict[str, Any]:
+    """Watch the apply's process group and kill it at the loss point.
+
+    The point is reached when a process of the group carries the point's
+    words in its argv; `verify-2` wants the SECOND such pid, so the pids
+    are counted and only distinct ones count.  The whole group is killed
+    (SIGKILL), so the controller and every child of it die together.
+
+    `deadline` is a `time.monotonic()` stamp the caller sets: a host that
+    hangs before the point (or blocks) must not keep this loop running for
+    ever.  Past the deadline the group is killed (SIGKILL) too, and the
+    record says the watcher timed out (`timed_out`).
+
+    Returns the record of what the watcher saw."""
+    marker = CONTROLLER_LOSS_MARKERS[point]
+    want = CONTROLLER_LOSS_WANTED[point]
+    seen: list[int] = []
+    while True:
+        for pid, cmd in _group_processes(pgid):
+            if marker not in cmd or pid in seen:
+                continue
+            seen.append(pid)
+            if len(seen) < want:
+                continue
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            return {"reached": True, "pid": pid, "cmd": cmd,
+                    "seen": list(seen), "killed_at": time.monotonic(),
+                    "timed_out": False}
+        if proc.poll() is not None:
+            # the apply ended before the point: the run failed, and the
+            # record says what the watcher saw
+            return {"reached": False, "pid": None, "cmd": "",
+                    "seen": list(seen), "killed_at": None,
+                    "timed_out": False}
+        if time.monotonic() >= deadline:
+            # the host hangs before the point: the group dies here, so the
+            # runner does not wait for ever, and the record says the
+            # watcher timed out
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            return {"reached": False, "pid": None, "cmd": "",
+                    "seen": list(seen), "killed_at": None,
+                    "timed_out": True}
+        _cl_sleep(CONTROLLER_LOSS_POLL_S)
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """Kill the whole process group of the apply, not only its leader.
+
+    The apply leads its own group (it starts a new session), so the group
+    is the leader's pid.  Killing the group kills the controller and every
+    child it left behind (the ssh it was running).  A group that is gone
+    already raises ProcessLookupError: there is nothing left to kill, which
+    is the normal case after the watcher killed the group itself.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def apply_batch_watched(lab: Lab, target: Device, sid: str, timeout_s: int,
+                         lane: str = "password",
+                         token: str | None = None,
+                         window: tuple[int, int] | None = None,
+                         extra_env: dict[str, str] | None = None,
+                         *, point: str = "verify-1") -> dict[str, Any]:
+    """Run the apply in its own process group and lose the controller at
+    `point`.
+
+    The env and the arguments are the ones `apply_batch` uses, unchanged:
+    the same wrapper, the same router, the same session and the same
+    timeout.  Only the process group is new: the apply runs with
+    `start_new_session=True`, so it leads its own group and the watcher
+    can kill the whole group (the controller and every ssh child of it)
+    from outside.  The host's output goes to two temp files, and the
+    watcher stops at its own deadline, so neither a chatty host nor a
+    host that hangs keeps this run waiting for ever.
+
+    Every path that cleans up kills the whole group, never the leader
+    alone: a child the controller started must not outlive it."""
+    env = build_env(lab, lane, target.name)
+    if extra_env:
+        env.update(extra_env)
+    if token is not None:
+        env["OWRT_APPROVAL_TOKEN"] = token
+        # the window the token was minted over: the router recomputes
+        # the HMAC over exactly these two numbers
+        not_before, not_after = window if window is not None else approval_window()
+        env["OWRT_APPROVAL_NBF"] = str(not_before)
+        env["OWRT_APPROVAL_EXP"] = str(not_after)
+    # the installed transport runs here: owrt-change.sh over SSH
+    _note_installed_transport()
+    args = [str(OWRT_CHANGE), "apply",
+            f"root@{target.host}", sid, str(timeout_s)]
+    # the watcher stops at this deadline: a host that hangs before the
+    # point must not keep the runner in the watcher's loop for ever
+    deadline = time.monotonic() + timeout_s + 300
+    # the host's output goes to two files, not to two pipes: a host that
+    # writes more than a pipe buffer would block there, before it ever
+    # reaches the point the watcher waits for
+    with tempfile.TemporaryFile() as out_file, \
+            tempfile.TemporaryFile() as err_file:
+        proc = subprocess.Popen(args, env=env, stdout=out_file,
+                                stderr=err_file,
+                                stdin=subprocess.DEVNULL,
+                                start_new_session=True)
+        try:
+            watch = _watch_for_loss_point(proc, proc.pid, point, deadline)
+            try:
+                proc.wait(timeout=timeout_s + 300)
+            except subprocess.TimeoutExpired:
+                _kill_group(proc)
+                proc.wait()
+        finally:
+            # the group dies here whatever happened: the leader, the ssh it
+            # was running and every other child of it
+            _kill_group(proc)
+            if proc.poll() is None:
+                proc.wait()
+        out_file.seek(0)
+        err_file.seek(0)
+        out = out_file.read().decode("utf-8", "replace")
+        err = err_file.read().decode("utf-8", "replace")
+    return {
+        "reached": watch["reached"],
+        "killed_pid": watch["pid"],
+        "killed_pid_cmd": watch["cmd"],
+        "seen": watch["seen"],
+        "killed_at": watch["killed_at"],
+        "host_rc": proc.returncode,
+        "timed_out": watch["timed_out"],
+        "stdout": out or "",
+        "stderr": err or "",
+    }
+
+
+def status_batch(lab: Lab, target: Device, sid: str,
+                 lane: str = "password") -> tuple[int, str, str]:
+    """Ask the router where a session stands, in a new process.
+
+    The same wrapper and the same env the apply used, and a new process:
+    the controller that was killed is gone, so the status is a fresh run of
+    scripts/owrt-change.sh."""
+    env = build_env(lab, lane, target.name)
+    proc = _run([str(OWRT_CHANGE), "status", f"root@{target.host}", sid],
+                env=env, timeout=120)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _router_status_line(stdout: str, sid: str) -> str:
+    """The router's own status line in the output of `owrt-change.sh status`:
+    the first line that starts with a status word and carries this session.
+    Empty when there is none."""
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if f" sid={sid} " not in line:
+            continue
+        for word in ROUTER_STATUS_WORDS:
+            if line.startswith(word + " "):
+                return line
+    return ""
+
+
+def _status_field(line: str, field: str) -> str:
+    """The value of a field of the router's status line ("" when the line
+    does not carry it)."""
+    m = re.search(rf"(?:^|\s){re.escape(field)}=(\S+)", line)
+    return m.group(1) if m else ""
+
+
+def _running_value(stdout: str, sid: str) -> str:
+    """The value of the host's own RUNNING line for this session ("none"
+    when the line is not there)."""
+    prefix = f"RUNNING session={sid} "
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if line.startswith(prefix):
+            return line[len(prefix):].strip() or "none"
+    return "none"
+
+
+def _running_line(stdout: str, sid: str) -> str:
+    """The host's own RUNNING line for this session ("" when there is
+    none)."""
+    prefix = f"RUNNING session={sid} "
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if line.startswith(prefix):
+            return line
+    return ""
+
+
+def _wait_for_guard_deadline(killed_at: float, wait_s: float) -> float:
+    """Wait until the guard's own deadline has surely passed: `wait_s` after
+    the kill.  Nothing else may touch the router meanwhile, so the wait is
+    a plain sleep and not a poll of anything.  Returns the seconds waited."""
+    if killed_at is None:
+        return 0.0
+    remaining = killed_at + wait_s - time.monotonic()
+    if remaining > 0:
+        _cl_sleep(remaining)
+        return remaining
+    return 0.0
+
+
+def _guard_fits(end: str, guard: str) -> bool:
+    """Whether the guard's label fits the end state the router reported.
+
+    A rolled-back device must have put the old settings back, so its label
+    starts with `restored:` (the deadline, a reboot, a boot, an abort).  A
+    confirmed device must have no guard left, so its label is `idle`.  Any
+    other label -- `pending`, `failed:...`, none at all -- means the device
+    is still in between the two ends the protocol allows.
+    """
+    if end == "rolled_back":
+        return guard.startswith("restored:")
+    if end == "confirmed":
+        return guard == "idle"
+    return False
+
+
+def run_controller_loss(lab: Lab, target: Device, sid: str, scen: Scenario,
+                        lane: str = "password",
+                        token: str | None = None,
+                        window: tuple[int, int] | None = None,
+                        extra_env: dict[str, str] | None = None,
+                        ) -> dict[str, Any]:
+    """Lose the controller at the scenario's point and read the device after.
+
+    The record carries the point, the argv of the process that was killed,
+    the return code of the killed controller, the full output of the status
+    run, the router's own status line, the RUNNING value and the end state
+    the device reached.  A run that failed carries a `reason`.
+
+    A device that was rolled back must run the settings that are back, so
+    its RUNNING value has to be `match`: another value fails the run with
+    the reason `controller-loss-running-<value>`.  That includes `boot`: the
+    scenarios test the restore at the guard's deadline, and a router that
+    rebooted in the window did not run that test.  A confirmed device needs
+    no running value."""
+    point = scen.controller_loss or "verify-1"
+    loss = apply_batch_watched(lab, target, sid, scen.timeout, lane=lane,
+                                token=token, window=window,
+                                extra_env=extra_env, point=point)
+    out: dict[str, Any] = {
+        "point": point,
+        "killed_pid_cmd": loss["killed_pid_cmd"],
+        "host_rc": loss["host_rc"],
+        "killed_pid": loss["killed_pid"],
+        "seen": loss["seen"],
+        "timed_out": loss["timed_out"],
+        "apply_stdout": loss["stdout"],
+        "apply_stderr": loss["stderr"],
+    }
+    if not loss["reached"]:
+        out["reason"] = CONTROLLER_LOSS_NOT_REACHED
+        out["detail"] = (
+            f"the apply ended before the {point} point was reached; the "
+            f"watcher saw {len(loss['seen'])} matching process(es)")
+        return out
+    # the guard on the router restores at its own deadline: wait past it
+    wait_s = scen.timeout + CONTROLLER_LOSS_WAIT_EXTRA_S
+    out["waited_s"] = _wait_for_guard_deadline(loss["killed_at"], wait_s)
+    # the status, in a new process: the controller that was killed is gone
+    rc, stdout, stderr = status_batch(lab, target, sid, lane=lane)
+    out["status_rc"] = rc
+    out["status_stdout"] = stdout
+    out["status_stderr"] = stderr
+    line = _router_status_line(stdout, sid)
+    out["router_line"] = line
+    out["running"] = _running_value(stdout, sid)
+    out["running_line"] = _running_line(stdout, sid)
+    guard = _status_field(line, "guard")
+    out["guard"] = guard
+    if rc != 0:
+        # the status run itself failed: the state of the device is unknown,
+        # so the run fails with the reason that says so
+        out["reason"] = CONTROLLER_LOSS_STATUS_FAILED
+        out["detail"] = (f"the status run failed (rc={rc}): "
+                         f"{_tail(stdout + stderr)}")
+        return out
+    end = ""
+    if line.startswith(f"rolled-back sid={sid} "):
+        end = "rolled_back"
+    elif line.startswith(f"confirmed sid={sid} "):
+        end = "confirmed"
+    if end:
+        out["end_state"] = end
+    # the point decides what the run may end in: a verify point must end
+    # rolled back, the confirm point may end rolled back or confirmed
+    accepted = ({"rolled_back"} if scen.expect == "rolled_back"
+                else {"rolled_back", "confirmed"})
+    # the guard's own label decides whether the end state is the one the
+    # scenario accepts: a rolled-back device must have restored the old
+    # settings and a confirmed one must have no guard left
+    out["guard_ok"] = _guard_fits(end, guard)
+    if end not in accepted or not out["guard_ok"]:
+        out["reason"] = CONTROLLER_LOSS_IN_BETWEEN
+        if end not in accepted:
+            out["detail"] = (
+                f"the router's status line is {line!r}" if line else
+                f"the status run (rc={rc}) answered no status line for "
+                f"session {sid}")
+        else:
+            out["detail"] = (
+                f"the router's status line is {line!r}: the guard label "
+                f"{guard!r} does not fit the {end} state")
+        return out
+    # A rolled-back device must also run the settings that are back: the
+    # host's own RUNNING line says whether the running network matches the
+    # health snapshot the apply took (rule 10: the device ends in the
+    # pre-change state, never in between).  A confirmed device needs no
+    # running value: the change is live, and there is nothing to compare.
+    if end == "rolled_back" and out["running"] != "match":
+        out["reason"] = f"{CONTROLLER_LOSS_RUNNING}{out['running']}"
+        out["detail"] = (
+            f"the router's status line is {line!r}: the running network is "
+            f"{out['running']!r}, not 'match'")
+        return out
+    return out
+
+
 # ---------- Outcome classification ----------
 
 def classify_apply(rc: int, stdout: str, stderr: str, sid: str) -> str:
@@ -3974,6 +4469,10 @@ def _run_scenario_inner(lab: Lab, scen: Scenario, rec: dict[str, Any],
         return
 
     # 5. plan / apply
+    # A controller-loss run whose end state is one of two runs no post
+    # check: the scenario file must have none (the load-time rules refuse
+    # one).  Every other run runs them.
+    run_posts = True
     if scen.tier is not None:
         _run_tier(lab, scen, rec, values, lane, k_cache)
         # When _run_tier leaves rec["error"] set, the tier run is
@@ -4079,66 +4578,100 @@ def _run_scenario_inner(lab: Lab, scen: Scenario, rec: dict[str, Any],
                         f"{type(exc).__name__}: {exc}")
                     rec["duration_s"] = round(time.monotonic() - t0, 3)
                     return
-            try:
-                rc, aout, aerr = apply_batch(
-                    lab, target, sid, scen.timeout, lane=lane, token=token,
-                    window=window, extra_env=extra_env)
-            finally:
-                if spec_path is not None:
-                    spec_path.unlink(missing_ok=True)
-            rec["apply_log"] = (aout + aerr)[-MAX_LOG:]
-            rec["outcome"] = classify_apply(rc, aout, aerr, sid)
-            if scen.client_checks:
-                failed = explanation.failed_claim(
-                    aout, sid, [], scen.client_checks)
-                rec["failed_claim"] = failed
-                if scen.expect_failed_claim is not None:
-                    failed_text = failed["text"] if failed is not None else ""
-                    if (rec["outcome"] != "rolled_back"
-                            or failed is None
-                            or re.search(scen.expect_failed_claim, failed_text)
-                            is None):
-                        rec["error"] = (
-                            "expect_failed_claim did not match: "
-                            f"outcome={rec['outcome']}, "
-                            f"failed_claim={failed_text or 'none'}")
-                if rec["outcome"] == "confirmed":
-                    rec["client_checks_confirmed"] = True
-            # Design 9.4 G3: the apply-time base equals the sealed base.
-            # Parse from the FULL apply/plan stdout (not the MAX_LOG-truncated
-            # apply_log); a confirmed/rolled_back apply with no APPLYBASE, or
-            # a BASEHASH/APPLYBASE mismatch, fails the scenario. Scenarios
-            # that never reach apply (rejected, noop, none) keep no rec["base"].
-            apply_base_m = APPLYBASE_RE.search(aout)
-            plan_base_m = BASEHASH_RE.search(pout)
-            if apply_base_m is not None and plan_base_m is not None:
-                plan_b = plan_base_m.group(1)
-                apply_b = apply_base_m.group(1)
-                rec["base"] = {"plan": plan_b, "apply": apply_b,
-                               "match": plan_b == apply_b}
-                if plan_b != apply_b:
-                    rec["error"] = (
-                        f"apply-time base {apply_b} != plan BASEHASH {plan_b}")
+            if scen.controller_loss:
+                # The controller is lost at the scenario's point: the apply
+                # runs in its own process group and the runner kills the
+                # whole group when the point is reached.  The device's own
+                # guard restores at its deadline; the runner waits past it
+                # and then asks the router where the session stands.
+                try:
+                    loss = run_controller_loss(
+                        lab, target, sid, scen, lane=lane, token=token,
+                        window=window, extra_env=extra_env)
+                    rec["controller_loss"] = loss
+                    rec["apply_log"] = (
+                        loss["apply_stdout"] + loss["apply_stderr"])[-MAX_LOG:]
+                finally:
+                    # the temp file of the client checks goes away with the
+                    # run, failed or not
+                    if spec_path is not None:
+                        spec_path.unlink(missing_ok=True)
+                if loss.get("reason"):
+                    # the run failed at the kill point: the device did not
+                    # end in a state this scenario accepts, so no AFTER
+                    # probe and no post check runs.
+                    rec["outcome"] = "unknown"
+                    rec["passed"] = False
                     rec["duration_s"] = round(time.monotonic() - t0, 3)
                     return
-            elif apply_base_m is None and rec["outcome"] in (
-                    "confirmed", "rolled_back", "rebooted_restored"):
-                rec["error"] = (
-                    f"outcome {rec['outcome']} but no APPLYBASE line in "
-                    f"apply stdout")
-                rec["duration_s"] = round(time.monotonic() - t0, 3)
-                return
-            if rec["outcome"] == "refused":
-                # the router left the session staged; clean it so the posts
-                # and the next scenario see a clean router
-                abort_batch(lab, target, sid, lane=lane)
-                if scen.refuse_match is not None:
-                    rec["refuse"] = {
-                        "pattern": scen.refuse_match,
-                        "matched": re.search(
-                            scen.refuse_match, aout + "\n" + aerr,
-                            re.MULTILINE) is not None,
-                    }
+                rec["outcome"] = ("rolled_back" if scen.expect == "rolled_back"
+                                  else "rolled_back_or_confirmed")
+                rec["end_state"] = loss["end_state"]
+                if scen.expect == "rolled_back_or_confirmed":
+                    # the end state is one of two, so no post check could
+                    # mean anything: the scenario file must have none.
+                    run_posts = False
+            else:
+                try:
+                    rc, aout, aerr = apply_batch(
+                        lab, target, sid, scen.timeout, lane=lane, token=token,
+                        window=window, extra_env=extra_env)
+                finally:
+                    if spec_path is not None:
+                        spec_path.unlink(missing_ok=True)
+                rec["apply_log"] = (aout + aerr)[-MAX_LOG:]
+                rec["outcome"] = classify_apply(rc, aout, aerr, sid)
+                if scen.client_checks:
+                    failed = explanation.failed_claim(
+                        aout, sid, [], scen.client_checks)
+                    rec["failed_claim"] = failed
+                    if scen.expect_failed_claim is not None:
+                        failed_text = failed["text"] if failed is not None else ""
+                        if (rec["outcome"] != "rolled_back"
+                                or failed is None
+                                or re.search(scen.expect_failed_claim, failed_text)
+                                is None):
+                            rec["error"] = (
+                                "expect_failed_claim did not match: "
+                                f"outcome={rec['outcome']}, "
+                                f"failed_claim={failed_text or 'none'}")
+                    if rec["outcome"] == "confirmed":
+                        rec["client_checks_confirmed"] = True
+                # Design 9.4 G3: the apply-time base equals the sealed base.
+                # Parse from the FULL apply/plan stdout (not the MAX_LOG-truncated
+                # apply_log); a confirmed/rolled_back apply with no APPLYBASE, or
+                # a BASEHASH/APPLYBASE mismatch, fails the scenario. Scenarios
+                # that never reach apply (rejected, noop, none) keep no rec["base"].
+                apply_base_m = APPLYBASE_RE.search(aout)
+                plan_base_m = BASEHASH_RE.search(pout)
+                if apply_base_m is not None and plan_base_m is not None:
+                    plan_b = plan_base_m.group(1)
+                    apply_b = apply_base_m.group(1)
+                    rec["base"] = {"plan": plan_b, "apply": apply_b,
+                                   "match": plan_b == apply_b}
+                    if plan_b != apply_b:
+                        rec["error"] = (
+                            f"apply-time base {apply_b} != plan BASEHASH {plan_b}")
+                        rec["duration_s"] = round(time.monotonic() - t0, 3)
+                        return
+                elif apply_base_m is None and rec["outcome"] in (
+                        "confirmed", "rolled_back", "rebooted_restored"):
+                    rec["error"] = (
+                        f"outcome {rec['outcome']} but no APPLYBASE line in "
+                        f"apply stdout")
+                    rec["duration_s"] = round(time.monotonic() - t0, 3)
+                    return
+                if rec["outcome"] == "refused":
+                    # the router left the session staged; clean it so the
+                    # posts and the next scenario see a clean router
+                    abort_batch(lab, target, sid, lane=lane)
+                    if scen.refuse_match is not None:
+                        rec["refuse"] = {
+                            "pattern": scen.refuse_match,
+                            "matched": re.search(
+                                scen.refuse_match, aout + "\n" + aerr,
+                                re.MULTILINE) is not None,
+                        }
 
     # 6. AFTER probes
     after_items = _build_after_probes(scen, lab, rec["outcome"],
@@ -4150,8 +4683,9 @@ def _run_scenario_inner(lab: Lab, scen: Scenario, rec: dict[str, Any],
     # 7. post — append each result as it completes so an exception mid-loop
     # leaves the completed records in rec["post"].
     rec["post"] = []
-    for p in posts:
-        rec["post"].append(run_post(lab, p))
+    if run_posts:
+        for p in posts:
+            rec["post"].append(run_post(lab, p))
     all_post_ok = all(pr["passed"] for pr in rec["post"])
 
     reject_ok = (rec["reject"] is None
@@ -4399,6 +4933,11 @@ def status_letter(rec: dict[str, Any]) -> str:
 def short_reason(rec: dict[str, Any]) -> str:
     if rec.get("error"):
         return str(rec["error"])
+    loss = rec.get("controller_loss")
+    if isinstance(loss, dict) and loss.get("reason"):
+        # the controller-loss run failed: the reason names the rule the
+        # device broke, and the router's own line says where it stood
+        return f"{loss['reason']}: {loss.get('detail', '')}".strip(": ")
     if rec.get("outcome") != rec.get("expected"):
         return f"outcome={rec.get('outcome')} expected={rec.get('expected')}"
     reject = rec.get("reject")

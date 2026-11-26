@@ -13,6 +13,46 @@ Two version numbers exist and are separate:
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-11-26
+
+### Added
+- The change protocol, written once: `docs/design/13-CHANGE-PROTOCOL.md` names the ten rules every change follows
+  (the owner's yes, the plan sealed at plan time, the approval bound to the plan's digest, the diff unchanged from plan
+  to apply, the undo armed before the write, the verify over fresh connections, the confirm only after a verified
+  record, a fixed set of outcomes, the running state shown after a restore, a lost controller) and, for each rule and each
+  mode (OpenWrt installed, OpenWrt no-install, VyOS/Junos, MikroTik CHR, AD write, AD build), the tests that prove it
+  or the reason it cannot apply. A checker test (`mcp/tests/test_protocol_contract.py`) fails when a cited test is
+  missing, a cell is empty, or a gap has no entry. Every gap is closed in this release.
+- The approval text has one "If Newton loses contact:" line for each mode, saying what the device does on its own.
+- Installed OpenWrt: after the router's guard put a change back on its own, `newton_change_status` says whether the
+  running network matches the restored settings (`running`: `match`, `differs`, `unproven` or `boot`). For `differs`
+  and `unproven` it adds a `next_step` with the command that makes them match
+  (`reload_config; /etc/init.d/firewall restart; wifi reload`). Newton reads only its own fixed line from the host
+  output, so a router cannot put words into these fields.
+- No-install OpenWrt: a change the router's rpcd timer rolled back says `running: unproven` and the same `next_step`.
+- The lab runner can kill its controller in the middle of a change (`controller_loss = "verify-1" | "verify-2" |
+  "confirm"`) and judges the router afterwards; three Pulsar-lab scenarios use it.
+
+### Changed
+- `newton-router` 1.3.4: `verify` records its passes, and `confirm` refuses (exit 3, `not-verified`) without three
+  recent passes on this boot. The health check and the verify round close five holes; among them, a health snapshot can no
+  longer be replaced after the apply or while it runs, a standalone health check drops only its own session's
+  record, and the DHCP check of a router only ever gets stricter. Re-run `newton-router-setup` to install it.
+- No-install OpenWrt: the list of checks is now part of the sealed plan hash. A no-install plan saved by an earlier
+  release no longer verifies: plan it again and approve it again.
+
+### Fixed
+- No-install OpenWrt: a plan record whose explanation claims were swapped (with the hash recomputed to match) was
+  applied. The apply now checks that the claims are the record's sealed probes, as the installed and vendor applies
+  already did, before the router is contacted.
+- No-install OpenWrt: a plan record whose list of checks was edited on disk was applied (see Changed).
+
+### Verified
+- Rule 10 on a real router, 2026-11-26: the lab router (GL.iNet GL-MT3000, OpenWrt 25.12.6, `newton-router` 1.3.4)
+  with the controller killed at the first verify, the second verify and the confirm. All three runs ended with the
+  guard restoring the base and `running=match`. No run showed `running=differs`, so the fix command was not exercised
+  on a router. Everything else in this release is covered by tests on fakes.
+
 ## [1.5.1] - 2026-11-25
 
 ### Fixed

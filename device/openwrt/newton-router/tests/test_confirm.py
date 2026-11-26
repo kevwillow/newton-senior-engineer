@@ -12,7 +12,7 @@ import subprocess
 
 import pytest
 
-from conftest import PROGRAM
+from conftest import PROGRAM, _use_verify_stub
 
 
 DF_OUT = (
@@ -45,7 +45,11 @@ def applied(router, t=90, **kw):
     Returns the same SimpleNamespace as `fresh_plan`. Asserts that the
     apply returned rc=0. The default T=90 and the fixture uptime of 100
     give the rpcd deadline 190, the guard deadline 221, and
-    `pending <sid> 121`."""
+    `pending <sid> 121`.
+
+    Three passing verify rounds run at the end: they write the
+    transaction's verify record, which a confirm needs (it refuses a
+    transaction that was not verified three times on this boot)."""
     plan = router.fresh_plan(t=t, **kw)
     ready_for_arm(router)
     profile = kw.get("profile", "lab")
@@ -60,6 +64,7 @@ def applied(router, t=90, **kw):
     assert res.rc == 0, (res.rc, res.out, res.err)
     rpcd_dir = router.root / "var/run/rpcd" / f"uci-{plan.sid}"
     rpcd_dir.mkdir(parents=True, exist_ok=True)
+    router.verified(plan.sid)
     return plan
 
 
@@ -126,6 +131,8 @@ def test_confirm_too_late_rpcd_deadline(router, uptime, expect_ok):
     refused runs. The refusal names the rpcd window as the cause."""
     plan = applied(router)
     router.set_uptime(uptime)
+    # one more verify round at this uptime: the record must be fresh
+    router.verified(plan.sid, passes=1)
     res = router.forced(f"confirm {plan.sid}")
     if expect_ok:
         assert (res.rc, res.out, res.err) == (0, f"confirmed {plan.sid}\n", "")
@@ -153,6 +160,8 @@ def test_confirm_too_late_guard_window(router, uptime, expect_ok):
     plan = applied(router)
     (plan.txn / "applied").write_text("100000 221 boot-one\n")
     router.set_uptime(uptime)
+    # one more verify round at this uptime: the record must be fresh
+    router.verified(plan.sid, passes=1)
     res = router.forced(f"confirm {plan.sid}")
     if expect_ok:
         assert (res.rc, res.out, res.err) == (0, f"confirmed {plan.sid}\n", "")
@@ -501,3 +510,56 @@ def test_confirm_sighup_is_ignored(router):
     assert (proc.returncode, out.decode(), err.decode()) == (0, f"confirmed {plan.sid}\n", "")
     assert router.guard_status() == "idle"
     assert not (router.root / "tmp/owrt-safe-apply.lock").exists()
+
+
+# ---- 10. an unreadable uptime ---------------------------------------------
+
+
+def test_confirm_with_an_unreadable_uptime_refuses_as_stale(router):
+    """An /proc/uptime that cannot be read: the uptime is 0, so the age
+    of the record cannot be checked (a record written at 0 and a
+    confirm at 0 are 0 s apart). The confirm refuses with `error
+    not-verified stale`, exit 3; the guard stays pending and nothing
+    was confirmed."""
+    plan = router.fresh_plan()
+    ready_for_arm(router)
+    res = router.apply(plan.sid, plan.t, "none", 0, 0)
+    assert res.rc == 0, (res.rc, res.out, res.err)
+    (router.root / "var/run/rpcd" / f"uci-{plan.sid}").mkdir(
+        parents=True, exist_ok=True)
+    router.write("proc/uptime", "garbage\n")
+    router.verified(plan.sid)
+    assert (plan.txn / "verified").read_text() == "boot-one 3 0\n"
+    res = router.forced(f"confirm {plan.sid}")
+    assert (res.rc, res.err, res.out) == (3, "error not-verified stale\n", "")
+    assert router.guard_status().startswith(f"pending {plan.sid} ")
+    assert not router.calls_matching("ubus uci-confirm")
+    assert lock_is_free(router)
+
+
+def test_confirm_with_a_missing_uptime_file_refuses_as_stale(router):
+    """An /proc/uptime that is gone: the uptime is 0, so the age of the
+    record cannot be checked, and the confirm refuses with `error
+    not-verified stale`, exit 3.
+
+    The shell complains about the file it cannot open. That complaint
+    is the program's business, not the caller's: stderr is exactly the
+    one line of the refusal, and the three verify rounds end the way
+    they do today (exit 0, no output of their own)."""
+    plan = router.fresh_plan()
+    ready_for_arm(router)
+    res = router.apply(plan.sid, plan.t, "none", 0, 0)
+    assert res.rc == 0, (res.rc, res.out, res.err)
+    (router.root / "var/run/rpcd" / f"uci-{plan.sid}").mkdir(
+        parents=True, exist_ok=True)
+    (router.root / "proc/uptime").unlink()
+    _use_verify_stub(router)
+    for _ in range(3):
+        res = router.forced(f"verify {plan.sid} 0")
+        assert (res.rc, res.out, res.err) == (0, "", "")
+    assert (plan.txn / "verified").read_text() == "boot-one 3 0\n"
+    res = router.forced(f"confirm {plan.sid}")
+    assert (res.rc, res.err, res.out) == (3, "error not-verified stale\n", "")
+    assert router.guard_status().startswith(f"pending {plan.sid} ")
+    assert not router.calls_matching("ubus uci-confirm")
+    assert lock_is_free(router)

@@ -80,6 +80,13 @@ VERDICT_RESULTS = {
 #: The first note of the status of an owner-script run that ended KEPT.
 KEPT_NOTE = "the change is on the router and stayed; Newton did not confirm it"
 
+#: The running state of a no-install router whose change the router's own
+#: rollback timer put back.  Newton has no program on the router and no
+#: snapshot of the services that ran before the change, so it cannot show
+#: that the running network matches the settings that are back: the same
+#: word the installed mode uses when it cannot prove it.
+RUNNING_UNPROVEN = "unproven"
+
 #: The receipt word of every state that has one.  A change that was
 #: never applied leaves no receipt, exactly as on an installed device.
 RECEIPT_OUTCOMES = {
@@ -459,7 +466,10 @@ def plan(
             "not_checked": [],
         },
         "platform": "openwrt",
-        # the no-install bookkeeping, which is not hash-bound
+        # the no-install bookkeeping; the checks say what Newton checks
+        # after the change and they are sealed into the plan hash, so a
+        # stored record whose checks were edited says something else than
+        # the owner approved
         "mode": AUTO_MODE,
         "ops": ops_out,
         "checks": checks,
@@ -708,7 +718,7 @@ def _check_record(record: Mapping[str, Any]) -> None:
             "the plan record does not need an approval: a change Newton "
             "applies itself always needs one; plan again"
         )
-    _check_explanation(record)
+    _check_sealed_probes(record, _check_explanation(record))
     timeout_s = record.get("timeout_s")
     if (
         isinstance(timeout_s, bool)
@@ -718,12 +728,23 @@ def _check_record(record: Mapping[str, Any]) -> None:
         raise NewtonError("plan record was modified or is invalid; plan again")
 
 
-def _check_explanation(record: Mapping[str, Any]) -> None:
+def _platform_of(record: Mapping[str, Any]) -> str:
+    """The platform of a record: its claims are read for that one."""
+    platform = record.get("platform")
+    if not isinstance(platform, str) or not platform:
+        platform = "openwrt"
+    return platform
+
+
+def _check_explanation(record: dict[str, Any]) -> dict[str, Any]:
     """The explanation of a record must be one Newton can read.
 
     A malformed explanation is refused here.  It used to be swallowed
     into an empty list of claims, which made an apply look verified
     when nothing had been checked.
+
+    The parsed explanation is returned: the sealed probe list of the
+    record is checked against its claims.
     """
     uci_batch = record.get("uci_batch")
     if not isinstance(uci_batch, str):
@@ -731,11 +752,9 @@ def _check_explanation(record: Mapping[str, Any]) -> None:
             "the plan record carries no change: the record was modified; "
             "plan again"
         )
-    platform = record.get("platform")
-    if not isinstance(platform, str) or not platform:
-        platform = "openwrt"
+    platform = _platform_of(record)
     try:
-        _explanation.parse_explanation(
+        return _explanation.parse_explanation(
             record.get("explanation"),
             change_lines=_explanation.change_lines(uci_batch),
             platform=platform,
@@ -746,6 +765,27 @@ def _check_explanation(record: Mapping[str, Any]) -> None:
             f"the plan record's explanation is not one Newton can read "
             f"({exc}); plan again"
         ) from None
+
+
+def _check_sealed_probes(
+    record: Mapping[str, Any], checked: Mapping[str, Any]
+) -> None:
+    """The claims of the explanation are the last sealed probes.
+
+    The plan is sealed: the batch, the explanation and the probes are
+    fixed at plan time.  A record whose claims were swapped for other
+    claims no longer carries the claims the owner read as its probes,
+    so it is refused here, before the router is contacted at all.
+
+    This is the check the installed and the vendor apply already make.
+    """
+    if not _explanation.claims_match_probes(
+        record.get("probes"), checked, _platform_of(record)
+    ):
+        raise NewtonError(
+            "plan record does not carry the explanation's expect claims as "
+            "its last probes; plan again"
+        )
 
 
 def _expected_ops(
@@ -1360,13 +1400,23 @@ def status(svc: Any, device_name: str, session_id: str) -> dict[str, Any]:
                 # KEPT is answered as unknown (Newton did not confirm
                 # it), but the router's state is known: it is said first
                 verdict_notes.insert(0, KEPT_NOTE)
-            return {
+            result: dict[str, Any] = {
                 "result": state,
                 "notes": verdict_notes,
                 "not_verified": _texts(verdict.get("not_verified")),
             }
+            if state == ROLLED_BACK and not record.get("restore_of"):
+                # The owner's script applied the change and the router's
+                # own rollback timer put it back: the running network is
+                # not proven (the same reason as the auto plan below).
+                # The restore of a change is the other way round: a
+                # rolled back restore means the change is still live, so
+                # nothing is said about the running state there.
+                result["running"] = RUNNING_UNPROVEN
+                result["next_step"] = _server.RUNNING_MISMATCH_NEXT_STEP
+            return result
     if outcome in (CONFIRMED, ROLLED_BACK, NOT_APPLIED, UNKNOWN):
-        return {
+        result: dict[str, Any] = {
             "result": outcome,
             "notes": [str(note) for note in notes] if isinstance(notes, list) else [],
             "not_verified": (
@@ -1375,6 +1425,17 @@ def status(svc: Any, device_name: str, session_id: str) -> dict[str, Any]:
                 else []
             ),
         }
+        if outcome == ROLLED_BACK:
+            # The rollback window of the router closed without a confirm:
+            # the router put the old settings back on its own.  Newton
+            # has no program on a no-install router and no snapshot of
+            # the services that ran before the change, so it cannot show
+            # that the running network matches the settings that are
+            # back.  It says so plainly and prints the fix, the way the
+            # installed mode says it (the same next step, not a copy).
+            result["running"] = RUNNING_UNPROVEN
+            result["next_step"] = _server.RUNNING_MISMATCH_NEXT_STEP
+        return result
     # A run that is in flight is not a change that was not applied: the
     # change may be on the router, and the router undoes it unless
     # Newton confirms it.  An approval that is claimed is such a run,

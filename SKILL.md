@@ -1,7 +1,7 @@
 ---
 name: newton
 description: "Newton, the network engineer. Configure, troubleshoot and design small-to-large networks from an AI agent over SSH or a serial console, with safety rails that make lockouts and destructive commands less likely. Primary platform: OpenWrt 25.12+ routers (uci, ubus, fw4/nftables, DSA VLANs, dnsmasq/odhcpd, wifi, apk), driven through a tested apply-with-automatic-rollback protocol. Ships as a skill and as an MCP server (newton-mcp) so any MCP client can use the same protocol. Also covers Linux host networking (Proxmox bridges, NetworkManager) and network design (subnetting, VLANs, DHCP/DNS, dual-WAN). Use when the user says 'configure the router', 'add a port forward', 'set up a VLAN', 'change the wifi', 'reserve an IP', 'why is the network slow' or 'how fast is my internet' on a network Newton manages, 'run a speed test', 'test the wifi speed', 'open a port', 'set up dual WAN', 'segment the network', or any task touching uci, ubus, nft, fw4, dnsmasq, odhcpd, wifi, iwinfo, apk/opkg on an OpenWrt device, or bridge or NetworkManager config on a Linux host. Primary use: the owner types /newton (or /network-engineer) to enter Network-engineer mode; every network request runs through that mode's flow."
-version: 1.5.1
+version: 1.5.2
 author: Kev
 license: MIT (scripts, SKILL.md); see references/README.md for reference-doc licenses
 platforms: [linux]
@@ -104,7 +104,7 @@ no-install login.
 
 **no-install:** Newton puts nothing on the router except one web-interface user. Every change uses OpenWrt's own undo timer. Limit: if the router reboots or its web service restarts while a change waits for confirmation, the change stays. Limit: whoever steals Newton's router password could take an interface down, restart Wi-Fi, kick a device off, or store files in /etc/luci-uploads, without your approval. Newton applies only DHCP static leases and DNS entries itself; every other change is a script you approve and run.
 
-**installed:** Newton puts a program on the router: a small set of shell scripts (6 files, about 220 KB), no packages and no compiled code. Newton's key can run that program and nothing else, so the agent never gets a root shell. If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck. More checks can run, and fewer changes need a script. uninstall removes Newton's program and key; it keeps the guard's saved settings and the rest of /etc/newton (its lock and log), the program directory, the WAN-health settings in /etc/config/newton_wanhealth, the keys from before swap-key and the sysupgrade file: the saved settings and the copy of your keys are what you restore by hand.
+**installed:** Newton puts a program on the router: a small set of shell scripts (6 files, about 231 KB), no packages and no compiled code. Newton's key can run that program and nothing else, so the agent never gets a root shell. If a Newton change is still waiting for confirmation at boot, the guard puts the last good settings back, so a reboot cannot leave that change stuck. More checks can run, and fewer changes need a script. uninstall removes Newton's program and key; it keeps the guard's saved settings and the rest of /etc/newton (its lock and log), the program directory, the WAN-health settings in /etc/config/newton_wanhealth, the keys from before swap-key and the sysupgrade file: the saved settings and the copy of your keys are what you restore by hand.
 
 The no-install mode is **not** as safe as the installed mode. Its rollback is OpenWrt's own, the
 same one LuCI uses, and Newton only applies the changes that are acceptable if they stay. Never
@@ -623,7 +623,7 @@ claude mcp add -s user newton -- sudo -n -u newton /usr/local/bin/newton-mcp
 ```
 Audit log: `~/.local/state/newton/mcp-audit.log`. Tests: `cd mcp && uv run --extra test pytest -q`.
 
-**What Newton puts on your router.** The OpenWrt install puts 6 files on the router: about 220 KB of small POSIX shell
+**What Newton puts on your router.** The OpenWrt install puts 6 files on the router: about 231 KB of small POSIX shell
 scripts. No packages are installed and nothing is compiled. It also writes the device name, the profile and the zones
 under `/etc/newton`, the WAN-health settings `/etc/config/newton_wanhealth`, the boot links `/etc/rc.d/S09newton-guard`,
 `/etc/rc.d/S95newton-wan-health` and `/etc/rc.d/K10newton-wan-health`, and 19 lines in `/etc/sysupgrade.conf`. It is there for the rollback that must

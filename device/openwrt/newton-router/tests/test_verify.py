@@ -12,6 +12,7 @@ and the assertion that nothing the fakes print ever reaches stdout
 and the helper `status|apply|confirm|abort` is never invoked.
 """
 
+import os
 import re
 import subprocess
 import threading
@@ -84,6 +85,17 @@ def upgrade_stub_for_verify(router):
 
 def ready_for_arm(router):
     router.set_fake("df", out=DF_OUT)
+
+
+def install_init_fakes(router):
+    """init.d/dnsmasq answers `running` and `restart` with rc 0, so a
+    `dnsmasq-repair` ends the way it ends on a router."""
+    initd = router.root / "etc/init.d"
+    _executable(
+        initd / "dnsmasq",
+        "#!/bin/sh\n"
+        'case "$1" in running) exit 0 ;; restart) exit 0 ;; *) exit 0 ;; esac\n',
+    )
 
 
 def applied(router, probes=b"", caller="agent-one"):
@@ -485,7 +497,60 @@ def test_verify_stdout_empty_on_happy_path(router):
     assert "Server:" not in res.out
 
 
-# ---- 8. the helper subcommands the program never calls during verify -----
+# ---- 8. the sealed probes file --------------------------------------------
+
+
+def test_verify_without_the_sealed_probes_file_fails(router):
+    """The transaction's sealed probes file is gone: the verify must not
+    skip the probes and count the round as a pass. It fails with
+    `verify: the sealed probes are missing`, exit 1, stdout empty, and
+    the record holds zero passes."""
+    plan = applied(router)
+    (plan.txn / "probes").unlink()
+    res = verify(router, plan.sid, 0)
+    assert (res.rc, res.err, res.out) == (
+        1, "verify: the sealed probes are missing\n", "",
+    )
+    assert (plan.txn / "verified").read_text() == "boot-one 0 100\n"
+
+
+def test_verify_with_an_empty_probes_file_passes(router):
+    """A transaction whose sealed probes file is empty: there is nothing
+    to re-check, so the round passes (exit 0, empty stdout and
+    stderr)."""
+    plan = applied(router)
+    probes = plan.txn / "probes"
+    assert probes.exists()
+    assert probes.read_text() == ""
+    res = verify(router, plan.sid, 0)
+    assert (res.rc, res.out, res.err) == (0, "", "")
+    assert (plan.txn / "verified").read_text() == "boot-one 1 100\n"
+
+
+def test_verify_with_an_unreadable_probes_file_fails(router):
+    """A sealed probes file that exists but cannot be read: the verify
+    must not skip the probes and count the round as a pass. It fails
+    with `verify: the sealed probes are missing`, exit 1, stdout empty,
+    and the record holds zero passes.
+
+    A mode-000 file is still readable when the suite runs as root, so
+    there the same line is covered by a directory planted at
+    `$txn/probes` (where `-f` is false)."""
+    plan = applied(router)
+    probes = plan.txn / "probes"
+    if os.geteuid() == 0:
+        probes.unlink()
+        probes.mkdir()
+    else:
+        probes.chmod(0o000)
+    res = verify(router, plan.sid, 0)
+    assert (res.rc, res.err, res.out) == (
+        1, "verify: the sealed probes are missing\n", "",
+    )
+    assert (plan.txn / "verified").read_text() == "boot-one 0 100\n"
+
+
+# ---- 9. the helper subcommands the program never calls during verify -----
 
 def test_verify_never_calls_helper_status_apply_confirm_abort_happy(router):
     """The verify path uses only `run_helper health-check`; calls.log
@@ -508,4 +573,124 @@ def test_verify_never_calls_helper_status_apply_confirm_abort_refused(router):
     for kind in ("status", "apply", "confirm", "abort"):
         banned.extend(router.calls_matching(f"helper {kind} "))
     assert banned == [], banned
+
+
+# ---- 10. the DHCP check a dnsmasq repair recorded --------------------------
+
+
+def test_verify_dhcp0_after_a_repair_uses_the_recorded_dhcp_check(router):
+    """A dnsmasq repair found that dnsmasq had its DHCP listener (d=1),
+    so the host would ask for the DHCP check (1). The caller asks for
+    no check (0), but the recorded value wins: the verify checks the
+    listener and fails with the DHCP-listener line, exit 1.
+
+    Without the record the caller could weaken the check the repair
+    made necessary, and a router that lost its DHCP listener would
+    still pass the verify rounds."""
+    plan = applied(router)
+    install_init_fakes(router)
+    router.set_fake("netstat", out=NETSTAT_DHCP_LINE)
+    res = router.forced("dnsmasq-repair")
+    assert (res.rc, res.out, res.err) == (0, "restarted rc=0 dhcp=1\n", "")
+    # dnsmasq has no DHCP listener any more
+    router.set_fake("netstat", out="udp 0 0 0.0.0.0:53 0.0.0.0:* 1/odhcpd\n")
+    res = verify(router, plan.sid, 0)
+    assert (res.rc, res.err, res.out) == (
+        1,
+        "verify: dnsmasq is not running with its DHCP listener "
+        "(udp 67) after Newton restarted it\n",
+        "",
+    )
+
+
+def test_verify_dhcp1_after_a_repair_runs_the_dhcp_check(router):
+    """The caller asks for the DHCP check (1) and the repair recorded
+    the same value (1): the check runs, so a router whose dnsmasq has
+    no DHCP listener fails the round with the DHCP-listener line."""
+    plan = applied(router)
+    install_init_fakes(router)
+    router.set_fake("netstat", out=NETSTAT_DHCP_LINE)
+    res = router.forced("dnsmasq-repair")
+    assert (res.rc, res.out, res.err) == (0, "restarted rc=0 dhcp=1\n", "")
+    # dnsmasq has no DHCP listener any more
+    router.set_fake("netstat", out="udp 0 0 0.0.0.0:53 0.0.0.0:* 1/odhcpd\n")
+    res = verify(router, plan.sid, 1)
+    assert (res.rc, res.err, res.out) == (
+        1,
+        "verify: dnsmasq is not running with its DHCP listener "
+        "(udp 67) after Newton restarted it\n",
+        "",
+    )
+
+
+def test_verify_dhcp0_without_a_repair_checks_nothing(router):
+    """No repair, so nothing is recorded: `verify <sid> 0` behaves as it
+    does today. The DHCP step is skipped and the round passes even
+    though dnsmasq has no DHCP listener."""
+    plan = applied(router)
+    router.set_fake("netstat", out="udp 0 0 0.0.0.0:53 0.0.0.0:* 1/odhcpd\n")
+    router.set_fake("pidof", rc=1)
+    res = verify(router, plan.sid, 0)
+    assert (res.rc, res.out, res.err) == (0, "", "")
+
+
+# ---- 11. the DHCP check only ever gets stricter ---------------------------
+
+
+def need_dhcp_file(router):
+    """The path of the recorded DHCP check ($LOCK/need-dhcp)."""
+    return router.root / "tmp/owrt-safe-apply.lock" / "need-dhcp"
+
+
+def test_verify_dhcp2_after_a_repair_keeps_the_stronger_recorded_check(router):
+    """A dnsmasq repair found that dnsmasq had its DHCP listener (d=1),
+    so the recorded check is the strong one (1). The caller asks for the
+    weaker check (2: dnsmasq running), but the check only ever gets
+    stricter: the recorded value wins, the verify checks the listener
+    and fails with the DHCP-listener line, exit 1.
+
+    With the caller's word alone, a router that lost its DHCP listener
+    would pass the verify rounds."""
+    plan = applied(router)
+    install_init_fakes(router)
+    router.set_fake("netstat", out=NETSTAT_DHCP_LINE)
+    res = router.forced("dnsmasq-repair")
+    assert (res.rc, res.out, res.err) == (0, "restarted rc=0 dhcp=1\n", "")
+    # dnsmasq has no DHCP listener any more
+    router.set_fake("netstat", out="udp 0 0 0.0.0.0:53 0.0.0.0:* 1/odhcpd\n")
+    res = verify(router, plan.sid, 2)
+    assert (res.rc, res.err, res.out) == (
+        1,
+        "verify: dnsmasq is not running with its DHCP listener "
+        "(udp 67) after Newton restarted it\n",
+        "",
+    )
+
+
+def test_a_repair_keeps_the_stronger_recorded_dhcp_check(router):
+    """A first repair found the DHCP listener (d=1) and recorded the
+    strong check (1). A second repair finds no listener (d=0) and would
+    record the weaker check (2): the record stays 1, so the check the
+    first repair made necessary is never weakened."""
+    plan = applied(router)
+    install_init_fakes(router)
+    router.set_fake("netstat", out=NETSTAT_DHCP_LINE)
+    res = router.forced("dnsmasq-repair")
+    assert (res.rc, res.out, res.err) == (0, "restarted rc=0 dhcp=1\n", "")
+    assert need_dhcp_file(router).read_text() == "1\n"
+    # the listener is gone: the second repair would record 2
+    router.set_fake("netstat", out="udp 0 0 0.0.0.0:53 0.0.0.0:* 1/odhcpd\n")
+    res = router.forced("dnsmasq-repair")
+    assert (res.rc, res.out, res.err) == (0, "restarted rc=0 dhcp=0\n", "")
+    assert need_dhcp_file(router).read_text() == "1\n"
+
+
+def test_verify_dhcp2_without_a_record_checks_only_dnsmasq(router):
+    """No repair, so nothing is recorded: `verify <sid> 2` checks that
+    dnsmasq runs and nothing more. The round passes even though dnsmasq
+    has no DHCP listener."""
+    plan = applied(router)
+    router.set_fake("netstat", out="udp 0 0 0.0.0.0:53 0.0.0.0:* 1/odhcpd\n")
+    res = verify(router, plan.sid, 2)
+    assert (res.rc, res.out, res.err) == (0, "", "")
 
