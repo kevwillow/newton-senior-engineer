@@ -81,6 +81,29 @@ A scenario TOML may additionally declare:
   [[post]] / [[effect]]  each may carry `lanes = ["key"] | ["password"] |
                        ["key","password"]`; an entry whose lanes exclude the
                        active lane is skipped (not run, not counted).
+  rules     = [ { id = "...", zone = "...", kind = "...", to = "...", label = "..." }, ... ]
+                         the owner's own network rules for the target: each
+                         one is a rules.toml [[rule]] without its device (the
+                         runner writes the device of the scenario's target).
+                         The runner writes them into a rules.toml the real
+                         loader reads (newton_mcp.net_rules), turns them into
+                         the client claims the vantage runs and appends those
+                         claims to the scenario's client_checks.
+  hold      = true          the apply confirms nothing: the router's rollback
+                         stays armed and the runner confirms the change
+                         itself, after the before_confirm steps.
+  before_confirm = ["step", ...]
+                         the steps that run between a held apply and its
+                         confirm (normal steps of lab.toml).
+  expect_confirm_refused = "regex"
+                         only with hold = true (the validation refuses it
+                         otherwise): the run fails unless the confirm was
+                         refused (the regex matches the confirm's output)
+                         AND the change was rolled back.  A refused confirm
+                         prints the wrapper's own words and no VERIFY
+                         DETAIL line, so the failed claim cannot name the
+                         rule that failed: this is how a scenario says what
+                         the refusal was.
 
 Per-scenario run order:
   1. reset (Proxmox rollback; retried at most RESET_MAX_ATTEMPTS times,
@@ -93,40 +116,52 @@ Per-scenario run order:
      and the cmds of every check and step the scenario references
   3. setup steps in order; first rc!=0 -> ERROR, stop, run cleanup
   4. BEFORE probes:
-        role "regression" / "breaks" / "effect" with want "pass"/"pass"/"fail"
-        any failure -> ERROR; skip plan/apply/after/post; run cleanup
-  5. plan/apply when a batch is present:
-        plan rc != 0 and "no changes staged" in plan stdout+stderr -> noop
-        plan rc != 0 and "staging rejected" (or a refused probe, or a staged firewall
-                            that fails fw4 check) in plan stdout+stderr -> rejected
-                            (then reject_match must match plan stdout+stderr)
-        plan rc != 0 otherwise -> ERROR plan failed (rc=N): <tail>
-        else apply + classify_apply (confirmed | rolled_back | rebooted_restored | unknown)
-        no batch -> outcome "none"
-  6. AFTER probes (depending on outcome):
-        confirmed: regression NOT in breaks want pass;
-                        breaks want fail; effects want pass
-        other: regression and breaks want pass; effects want fail
-  7. post checks
-  8. cleanup (try/finally once step 3 has begun; failure here only sets
+         role "regression" / "breaks" / "effect" with want "pass"/"pass"/"fail"
+         any failure -> ERROR; skip plan/apply/after/post; run cleanup
+  5. the owner's rules (when the scenario carries them): they are written
+     into a rules.toml the real loader reads (newton_mcp.net_rules) and
+     turned into the client claims the vantage runs; a rule the loader
+     refuses stops the run before anything is staged
+  6. plan/apply when a batch is present:
+         plan rc != 0 and "no changes staged" in plan stdout+stderr -> noop
+         plan rc != 0 and "staging rejected" (or a refused probe, or a staged firewall
+                             that fails fw4 check) in plan stdout+stderr -> rejected
+                             (then reject_match must match plan stdout+stderr)
+         plan rc != 0 otherwise -> ERROR plan failed (rc=N): <tail>
+         else apply + classify_apply (confirmed | rolled_back | rebooted_restored | unknown)
+         a held apply (hold = true) confirms nothing: the runner runs the
+         scenario's before_confirm steps and then confirms itself, with the
+         same client-check env; a refused confirm leaves the change armed,
+         so the runner waits past the guard's deadline and reads the status
+         an early error of a held apply (no held session, a step that failed
+         before the confirm, a status that cannot be read) leaves the change
+         armed too: the runner aborts it (owrt-change.sh abort, once, with
+         the env of the confirm) before it returns the error
+         no batch -> outcome "none"
+  7. AFTER probes (depending on outcome):
+         confirmed: regression NOT in breaks want pass;
+                         breaks want fail; effects want pass
+         other: regression and breaks want pass; effects want fail
+  8. post checks
+  9. cleanup (try/finally once step 3 has begun; failure here only sets
      rec["error"] if no earlier error exists)
-  9. reset_after: the same reset_device() the scenario got at the start,
-     per named device, in order (records land in rec["reset_after"]). It
-     runs even when the scenario failed or errored after changes were
-     applied; a failing reset_after fails the scenario (rec["passed"]
-     False and rec["error"] set) without hiding an earlier error, and a
-     physical post-restore fingerprint mismatch marks abort_run as it
-     does at the start. A scenario that was refused before it contacted
-     anything resets nothing.
- 10. after_reset: the named checks, in order, once the resets in step 9
-     have all finished OK (records land in rec["after_reset"], shaped
-     like the regression records: role/name/device/cmd/rc/stdout/stderr/
-     passed/want/ok/reason). None runs when a reset failed -- that already
-     fails the scenario and a check would read a device that is not the
-     baseline -- or when nothing was reset. A check that fails (rc or
-     expect_stdout mismatch) fails the scenario: rec["passed"] False and
-     rec["error"] set, never hiding an earlier error. This is the only
-     place a check sees the state the reset_after left behind.
+  10. reset_after: the same reset_device() the scenario got at the start,
+       per named device, in order (records land in rec["reset_after"]). It
+       runs even when the scenario failed or errored after changes were
+       applied; a failing reset_after fails the scenario (rec["passed"]
+       False and rec["error"] set) without hiding an earlier error, and a
+       physical post-restore fingerprint mismatch marks abort_run as it
+       does at the start. A scenario that was refused before it contacted
+       anything resets nothing.
+  11. after_reset: the named checks, in order, once the resets in step 10
+       have all finished OK (records land in rec["after_reset"], shaped
+       like the regression records: role/name/device/cmd/rc/stdout/stderr/
+       passed/want/ok/reason). None runs when a reset failed -- that already
+       fails the scenario and a check would read a device that is not the
+       baseline -- or when nothing was reset. A check that fails (rc or
+       expect_stdout mismatch) fails the scenario: rec["passed"] False and
+       rec["error"] set, never hiding an earlier error. This is the only
+       place a check sees the state the reset_after left behind.
 
 A [vars.NAME] table in lab.toml may set `secret = true`. The value is read
 like any other var and substituted into the scenario `batch` only, which
@@ -183,6 +218,7 @@ if str(MCP_DIR) not in sys.path:
 from newton_mcp import approve  # noqa: E402
 from newton_mcp import client_checks  # noqa: E402
 from newton_mcp import explanation  # noqa: E402
+from newton_mcp import net_rules  # noqa: E402
 from newton_mcp import probes as newton_probes  # noqa: E402
 from newton_mcp import scans  # noqa: E402
 from newton_mcp import tiers as newton_tiers  # noqa: E402
@@ -631,7 +667,8 @@ class Scenario:
                  "breaks_password",
                  "tier", "tier_values", "tier_batch_lines",
                  "tier_fail_probe", "tier_reboot", "client_checks",
-                 "expect_failed_claim", "access", "controller_loss")
+                 "expect_failed_claim", "access", "controller_loss",
+                 "rules", "hold", "before_confirm", "expect_confirm_refused")
 
     def __init__(self, *, name: str, description: str, target: str,
                  reset: list[str], expect: str, timeout: int,
@@ -658,7 +695,11 @@ class Scenario:
                  client_checks: "list[dict] | None" = None,
                  expect_failed_claim: str | None = None,
                  access: str = "installed",
-                 controller_loss: str | None = None) -> None:
+                 controller_loss: str | None = None,
+                 rules: "list[dict] | None" = None,
+                 hold: bool = False,
+                 before_confirm: "list[str] | None" = None,
+                 expect_confirm_refused: str | None = None) -> None:
         self.name = name
         self.description = description
         self.target = target
@@ -694,6 +735,10 @@ class Scenario:
         self.client_checks = list(client_checks) if client_checks else []
         self.expect_failed_claim = expect_failed_claim
         self.controller_loss = controller_loss
+        self.rules = list(rules) if rules else []
+        self.hold = bool(hold)
+        self.before_confirm = list(before_confirm) if before_confirm else []
+        self.expect_confirm_refused = expect_confirm_refused
 
     def effective_expect(self, lane: str) -> str:
         if lane == "password" and self.expect_password is not None:
@@ -1090,6 +1135,47 @@ def _parse_client_checks(path: Path, raw: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _parse_hold(path: Path, raw: Any) -> bool:
+    """The `hold` field: a boolean.  Anything else is refused by the load,
+    and the refusal names the file and the field."""
+    if not isinstance(raw, bool):
+        raise ValueError(
+            f"{path.name}: hold must be a boolean, got {type(raw).__name__}")
+    return raw
+
+
+def _parse_before_confirm(path: Path, raw: Any) -> list[str]:
+    """The `before_confirm` field: a list of step names.  A name that is
+    not a string is refused by the load, and the refusal names the file
+    and the field."""
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"{path.name}: before_confirm must be a list of step names, got "
+            f"{type(raw).__name__}")
+    out: list[str] = []
+    for i, name in enumerate(raw):
+        if not isinstance(name, str):
+            raise ValueError(
+                f"{path.name}: before_confirm[{i}] must be a string, got "
+                f"{type(name).__name__}")
+        out.append(name)
+    return out
+
+
+def _parse_rules(path: Path, raw: Any) -> list[dict[str, Any]]:
+    """The `rules` field: an array of tables, each one a rules.toml
+    [[rule]] without its device (the runner writes the device of the
+    scenario's target)."""
+    if not isinstance(raw, list):
+        raise ValueError(f"{path.name}: rules must be an array of tables")
+    out: list[dict[str, Any]] = []
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path.name}: rules[{index}] must be a table")
+        out.append(dict(entry))
+    return out
+
+
 def load_scenarios(directory: Path) -> list[Scenario]:
     out: list[Scenario] = []
     for path in sorted(directory.glob("*.toml")):
@@ -1172,6 +1258,13 @@ def load_scenarios(directory: Path) -> list[Scenario]:
             access=str(data.get("access", "installed")),
             controller_loss=(None if "controller_loss" not in data
                              else str(data["controller_loss"])),
+            rules=_parse_rules(path, data.get("rules", [])),
+            hold=_parse_hold(path, data.get("hold", False)),
+            before_confirm=_parse_before_confirm(
+                path, data.get("before_confirm", [])),
+            expect_confirm_refused=(
+                None if "expect_confirm_refused" not in data
+                else str(data["expect_confirm_refused"])),
         ))
     return out
 
@@ -1272,6 +1365,36 @@ def validate_scenarios(lab: Lab, scenarios: list[Scenario]) -> list[str]:
                 f"{name}: expect_password {scen.expect_password!r} is not one "
                 f"of {sorted(VALID_EXPECT)}")
         errors.extend(_validate_controller_loss(scen))
+        if scen.hold:
+            # a held apply and a lost controller are two different ways of
+            # ending a change: the runner drives one of them at a time
+            if scen.controller_loss:
+                errors.append(
+                    f"{name}: hold cannot be used with controller_loss "
+                    f"{scen.controller_loss!r}: the runner holds the change "
+                    "or loses its controller, not both")
+            if scen.tier is not None:
+                errors.append(
+                    f"{name}: hold cannot be used with tier {scen.tier!r}")
+        if scen.before_confirm and not scen.hold:
+            errors.append(
+                f"{name}: before_confirm needs hold = true: the steps run "
+                "between a held apply and its confirm")
+        if scen.expect_confirm_refused is not None:
+            if not scen.hold:
+                errors.append(
+                    f"{name}: expect_confirm_refused needs hold = true: the "
+                    "pin is about the confirm of a held apply")
+            if not scen.expect_confirm_refused:
+                errors.append(
+                    f"{name}: expect_confirm_refused must not be empty: an "
+                    "empty pattern matches every output")
+            try:
+                re.compile(scen.expect_confirm_refused)
+            except re.error as exc:
+                errors.append(
+                    f"{name}: expect_confirm_refused is not a valid regex: "
+                    f"{exc}")
         if scen.client_checks:
             try:
                 explanation.Explanation.model_validate({
@@ -1306,6 +1429,22 @@ def validate_scenarios(lab: Lab, scenarios: list[Scenario]) -> list[str]:
                 errors.append(
                     f"{name}: client_checks cannot be used with tier "
                     f"{scen.tier!r}")
+        if scen.rules:
+            # The rules of a scenario follow the same rules as its client
+            # checks.  What a rule says is not checked here: the rules are
+            # the owner's own statements, and the loader (newton_mcp.
+            # net_rules) is the one that says what a rule is.
+            if scen.timeout < client_checks.MIN_TIMEOUT_S:
+                errors.append(
+                    f"{name}: rules need timeout >= "
+                    f"{client_checks.MIN_TIMEOUT_S}, got {scen.timeout}")
+            if scen.target != "lab-r1":
+                errors.append(
+                    f"{name}: rules require target lab-r1, got "
+                    f"{scen.target!r}")
+            if scen.tier is not None:
+                errors.append(
+                    f"{name}: rules cannot be used with tier {scen.tier!r}")
         if scen.expect_failed_claim is not None:
             if scen.expect != "rolled_back":
                 errors.append(
@@ -1325,6 +1464,10 @@ def validate_scenarios(lab: Lab, scenarios: list[Scenario]) -> list[str]:
             if s not in lab.steps:
                 errors.append(
                     f"{name}: cleanup step {s!r} not defined in [steps]")
+        for s in scen.before_confirm:
+            if s not in lab.steps:
+                errors.append(
+                    f"{name}: before_confirm step {s!r} not defined in [steps]")
         # regression -> [checks] (or [regression].default)
         reg = scen.regression
         if isinstance(reg, str) and reg != "default":
@@ -1394,9 +1537,9 @@ def validate_scenarios(lab: Lab, scenarios: list[Scenario]) -> list[str]:
                 errors.append(
                     f"{name}: check {c!r} (from lab.toml) has unknown "
                     f"device '{lab.checks[c].device}'")
-        # referenced steps (setup + cleanup): device must be 'local' or in
-        # [devices]; only check names that exist in lab.toml.
-        for s in scen.setup + scen.cleanup:
+        # referenced steps (setup + cleanup + before_confirm): device must be
+        # 'local' or in [devices]; only check names that exist in lab.toml.
+        for s in scen.setup + scen.cleanup + scen.before_confirm:
             if s in lab.steps and not _is_local_or_device(lab, lab.steps[s].device):
                 errors.append(
                     f"{name}: step {s!r} (from lab.toml) has unknown "
@@ -1578,13 +1721,13 @@ def secret_scope_violations(lab: Lab, scen: Scenario,
 
     The batch reaches the router in a 0600 temp file whose PATH is what argv
     carries (plan_batch below), and owrt-change.sh pipes that file to
-    `newton-router stage` over ssh stdin. A step, cleanup, post, effect or
-    check cmd travels in ssh argv instead, where it is readable from
-    /proc/<pid>/cmdline for as long as the process lives, and its output is
-    recorded verbatim. So a secret var may be substituted into the batch
-    only, and a scenario that names one from any other cmd is refused before
-    it contacts a device. That covers an `after_reset` check too: it runs
-    from run_scenario's finally, long after step 0.
+    `newton-router stage` over ssh stdin. A step, cleanup, before_confirm
+    step, post, effect or check cmd travels in ssh argv instead, where it is
+    readable from /proc/<pid>/cmdline for as long as the process lives, and
+    its output is recorded verbatim. So a secret var may be substituted into
+    the batch only, and a scenario that names one from any other cmd is
+    refused before it contacts a device. That covers an `after_reset` check
+    too: it runs from run_scenario's finally, long after step 0.
 
     `lane` None (validate_scenarios, which runs before a lane is chosen) sees
     every post and effect; a run sees only the ones its lane runs. A
@@ -1612,6 +1755,9 @@ def secret_scope_violations(lab: Lab, scen: Scenario,
     for sn in scen.cleanup:
         if sn in lab.steps:
             scan(f"cleanup step {sn!r}", lab.steps[sn].cmd)
+    for sn in scen.before_confirm:
+        if sn in lab.steps:
+            scan(f"before_confirm step {sn!r}", lab.steps[sn].cmd)
     for i, p in enumerate(scen.post):
         if lane is None or p.runs_in_lane(lane):
             scan(f"[[post]] #{i}", p.cmd)
@@ -3223,7 +3369,16 @@ def approval_token_for(k_hex: str, digest: str,
     return approve.approval_token(k_hex, digest, not_before, not_after)
 
 
-def client_check_env(scen: Scenario, sid: str) -> tuple[dict[str, str], Path]:
+def client_check_env(scen: Scenario, sid: str,
+                     claims: "list[dict[str, Any]] | None" = None,
+                     ) -> tuple[dict[str, str], Path]:
+    """The env the apply and the confirm run the client checks with.
+
+    `claims` are the claims the vantage runs: the scenario's own client
+    checks and, when the scenario carries rules, the claims of those rules
+    after them.  The spec file the vantage runner reads is written here
+    and the caller removes it when the run is done.
+    """
     inventory = Path(os.environ.get(
         "NEWTON_LAB_VANTAGE_INVENTORY",
         "~/.config/newton/lab-vantage/inventory.toml",
@@ -3232,7 +3387,8 @@ def client_check_env(scen: Scenario, sid: str) -> tuple[dict[str, str], Path]:
     local_check = client_checks.local_check_string(
         OWRT_CHANGE.parent / "newton-vantage-run", sid)
     spec = client_checks.build_spec(
-        sid, scen.client_checks, vantages, scen.target)
+        sid, scen.client_checks if claims is None else claims, vantages,
+        scen.target)
     spec_path = client_checks.write_spec(RESULTS_DIR / "vantage-runs", spec)
     env = {
         "OWRT_LOCAL_CHECK": local_check,
@@ -3241,11 +3397,138 @@ def client_check_env(scen: Scenario, sid: str) -> tuple[dict[str, str], Path]:
     return env, spec_path
 
 
+# ---------- the owner's network rules ----------
+
+class RulesError(RuntimeError):
+    """The rules of a scenario could not be loaded."""
+
+
+#: A bare TOML key (no quoting needed).
+_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _toml_string(value: str) -> str:
+    """One value as a TOML basic string.
+
+    The rules of a scenario are strings (an id, a zone, a kind, a target, a
+    label); they are written the way TOML reads them back.  The loader
+    checks their shape anyway, so a value that is not a rule is refused
+    with the loader's own message.
+    """
+    escaped = (value.replace("\\", "\\\\")
+                    .replace('"', '\\"')
+                    .replace("\n", "\\n")
+                    .replace("\r", "\\r")
+                    .replace("\t", "\\t"))
+    return f'"{escaped}"'
+
+
+def _rules_file(directory: Path, rules: "list[dict[str, Any]]",
+                device: str) -> Path:
+    """The rules of a scenario as a rules.toml the real loader reads.
+
+    Every rule gets the scenario's target as its device: the rules of a
+    scenario are the rules of its target.  The file is 0600 in a directory
+    of its own, and the run removes that directory when it is done.
+    """
+    lines: list[str] = []
+    for rule in rules:
+        lines.append("[[rule]]")
+        for key, value in rule.items():
+            if key == "device":
+                continue
+            if isinstance(value, bool):
+                rendered = "true" if value else "false"
+            elif isinstance(value, int):
+                rendered = str(value)
+            elif isinstance(value, float):
+                rendered = repr(value)
+            elif isinstance(value, str):
+                rendered = _toml_string(value)
+            else:
+                rendered = _toml_string(str(value))
+            key_text = key if _BARE_KEY_RE.fullmatch(key) else _toml_string(key)
+            lines.append(f"{key_text} = {rendered}")
+        lines.append(f"device = {_toml_string(device)}")
+    path = directory / "rules.toml"
+    # the file is created with its mode, not chmod-ed afterwards: the rules
+    # are the owner's own and never world-readable, not even for a moment
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write("\n".join(lines) + "\n")
+    except BaseException:
+        os.unlink(path)
+        raise
+    return path
+
+
+def _load_rules(path: Path, device: str) -> tuple:
+    """The rules of one device, loaded by the real loader.
+
+    The loader is the one the server reads (newton_mcp.net_rules): a rule
+    that is not a rule is refused whole, and the runner says what the
+    loader said.
+    """
+    try:
+        loaded = net_rules.load_rules(path, {device})
+    except net_rules.NetRuleError as exc:
+        raise RulesError(f"rules could not be loaded: {exc}") from None
+    return loaded.get(device, ())
+
+
+def _router_interface_dump(lab: Lab, target: Device) -> dict[str, Any]:
+    """The router's own interface dump, read over the runner's ssh path.
+
+    The server reads the same dump to derive the addresses a blocked client
+    claim is checked against; the lab runner reads it the same way and
+    hands it to client_checks.fill_targets.
+    """
+    proc = _run(ssh_cmd(lab, target, "ubus call network.interface dump"),
+                timeout=120)
+    if proc.returncode != 0:
+        raise client_checks.ClientCheckError(
+            "the router's interface dump could not be read")
+    try:
+        dump = json.loads(proc.stdout)
+    except ValueError:
+        raise client_checks.ClientCheckError(
+            "the router's interface dump is not JSON") from None
+    if not isinstance(dump, dict):
+        raise client_checks.ClientCheckError(
+            "the router's interface dump is not an object")
+    return dump
+
+
+def _rules_claims(lab: Lab, target: Device,
+                  rules: "list[dict[str, Any]]",
+                  ) -> tuple[list[dict[str, Any]], Path]:
+    """The rules of a scenario as the client claims the vantage runs.
+
+    The claims are the loader's own (net_rules.rule_claims) and the targets
+    of a blocked claim are the ones the server derives
+    (client_checks.fill_targets).  The temp dir that holds the rules file
+    comes back with the claims: the run removes it when it is done.
+    """
+    directory = Path(tempfile.mkdtemp(prefix="newton-lab-rules-"))
+    try:
+        path = _rules_file(directory, rules, target.name)
+        claims = net_rules.rule_claims(_load_rules(path, target.name))
+        if claims:
+            claims = client_checks.fill_targets(
+                claims, lambda: _router_interface_dump(lab, target))
+        return claims, directory
+    except BaseException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+
+
 def apply_batch(lab: Lab, target: Device, sid: str, timeout_s: int,
                 lane: str = "password",
                 token: str | None = None,
                 window: tuple[int, int] | None = None,
-                extra_env: dict[str, str] | None = None) -> tuple[int, str, str]:
+                extra_env: dict[str, str] | None = None,
+                hold: bool = False) -> tuple[int, str, str]:
     env = build_env(lab, lane, target.name)
     if extra_env:
         env.update(extra_env)
@@ -3258,17 +3541,42 @@ def apply_batch(lab: Lab, target: Device, sid: str, timeout_s: int,
         env["OWRT_APPROVAL_EXP"] = str(not_after)
     # the installed transport runs here: owrt-change.sh over SSH
     _note_installed_transport()
-    proc = _run([str(OWRT_CHANGE), "apply",
-                 f"root@{target.host}", sid, str(timeout_s)],
+    args = [str(OWRT_CHANGE), "apply",
+            f"root@{target.host}", sid, str(timeout_s)]
+    if hold:
+        # a held apply runs the same rounds and confirms nothing: the
+        # router's rollback stays armed until the confirm
+        args.append("--hold")
+    proc = _run(args, env=env, timeout=timeout_s + 300)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def confirm_batch(lab: Lab, target: Device, sid: str,
+                  lane: str = "password",
+                  extra_env: dict[str, str] | None = None,
+                  timeout_s: int = 300) -> tuple[int, str, str]:
+    """Confirm a held apply.
+
+    The same wrapper and the same env the apply used, the client checks
+    included: the confirm checks the claims once more, so the vantage spec
+    file must still be there.
+    """
+    env = build_env(lab, lane, target.name)
+    if extra_env:
+        env.update(extra_env)
+    proc = _run([str(OWRT_CHANGE), "confirm", f"root@{target.host}", sid],
                 env=env, timeout=timeout_s + 300)
     return proc.returncode, proc.stdout, proc.stderr
 
 
 def abort_batch(lab: Lab, target: Device, sid: str,
-                lane: str = "password") -> tuple[int, str, str]:
+                lane: str = "password",
+                extra_env: "dict[str, str] | None" = None) -> tuple[int, str, str]:
     """Abort a session the router refused to apply, so the router is clean
     for the posts and the next scenario."""
     env = build_env(lab, lane, target.name)
+    if extra_env:
+        env.update(extra_env)
     proc = _run([str(OWRT_CHANGE), "abort", f"root@{target.host}", sid],
                 env=env, timeout=120)
     return proc.returncode, proc.stdout, proc.stderr
@@ -3667,6 +3975,218 @@ def run_controller_loss(lab: Lab, target: Device, sid: str, scen: Scenario,
             f"the router's status line is {line!r}: the running network is "
             f"{out['running']!r}, not 'match'")
         return out
+    return out
+
+
+# ---------- The held apply and its confirm ----------
+
+def _held_line(stdout: str, sid: str) -> str:
+    """The line a held apply prints: the rounds passed and the change is
+    held, not confirmed.  Empty when the output carries no such line."""
+    pattern = re.compile(rf"^HELD session={re.escape(sid)}(\s|$)")
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if pattern.match(line):
+            return line
+    return ""
+
+
+def _confirmed_line(stdout: str, sid: str) -> str:
+    """The line a confirmed change prints: the router confirmed this
+    session.  Empty when the output carries no such line."""
+    pattern = re.compile(rf"^CONFIRMED session={re.escape(sid)}(\s|$)")
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if pattern.match(line):
+            return line
+    return ""
+
+
+def _last_line(text: str) -> str:
+    """The last line of some output that carries something."""
+    for raw in reversed(text.splitlines()):
+        if raw.strip():
+            return raw.strip()
+    return ""
+
+
+def _hold_end_state(lab: Lab, target: Device, sid: str, scen: Scenario,
+                    lane: str = "password") -> dict[str, Any]:
+    """Where the device stands after a confirm that was refused.
+
+    A refused confirm leaves the change armed: the router rolls it back
+    when its window ends.  The runner waits past that deadline (the wait a
+    controller-loss run uses: the scenario's timeout plus 30 s) and then
+    reads the router's status the way a controller-loss run reads it: the
+    end state is the router's own status line, the guard's label says
+    whether the old settings are back, and a rolled-back device must also
+    run the settings that are back (`running` is `match`).
+    """
+    out: dict[str, Any] = {}
+    out["waited_s"] = _wait_for_guard_deadline(
+        time.monotonic(), scen.timeout + CONTROLLER_LOSS_WAIT_EXTRA_S)
+    rc, stdout, stderr = status_batch(lab, target, sid, lane=lane)
+    out["status_rc"] = rc
+    out["status_stdout"] = stdout
+    out["status_stderr"] = stderr
+    line = _router_status_line(stdout, sid)
+    out["router_line"] = line
+    running = _running_value(stdout, sid)
+    out["running"] = running
+    out["running_line"] = _running_line(stdout, sid)
+    guard = _status_field(line, "guard")
+    out["guard"] = guard
+    if rc != 0:
+        # the status run itself failed: the state of the device is unknown
+        out["reason"] = CONTROLLER_LOSS_STATUS_FAILED
+        out["detail"] = (f"the status run failed (rc={rc}): "
+                         f"{_tail(stdout + stderr)}")
+        return out
+    end = ""
+    if line.startswith(f"rolled-back sid={sid} "):
+        end = "rolled_back"
+    elif line.startswith(f"confirmed sid={sid} "):
+        end = "confirmed"
+    out["end_state"] = end
+    out["guard_ok"] = _guard_fits(end, guard)
+    if not end or not out["guard_ok"]:
+        out["reason"] = CONTROLLER_LOSS_IN_BETWEEN
+        out["detail"] = (
+            f"the router's status line is {line!r}: the guard label "
+            f"{guard!r} does not fit the {end or 'unknown'} state")
+        return out
+    if end == "rolled_back" and running != "match":
+        out["reason"] = f"{CONTROLLER_LOSS_RUNNING}{running}"
+        out["detail"] = (
+            f"the router's status line is {line!r}: the running network is "
+            f"{running!r}, not 'match'")
+        return out
+    return out
+
+
+def _hold_abort(lab: Lab, rec: dict[str, Any], target: Device, sid: str,
+                lane: str, extra_env: "dict[str, str] | None") -> None:
+    """Abort a held change that ended early, so the device is not left with
+    an armed change nobody confirmed.
+
+    An early error of the held apply (no held session, a step that failed
+    before the confirm, a status the runner could not read) leaves the
+    change armed: the router would roll it back at its own deadline, but the
+    runner does not wait for that.  The abort is the change wrapper's own,
+    an argv list with the same env the confirm had, and it runs once.  Its
+    rc and its last line land in the record; the error of the run stays the
+    early one.
+    """
+    try:
+        arc, aout, aerr = abort_batch(lab, target, sid, lane=lane,
+                                      extra_env=extra_env)
+    except Exception as e:
+        rec["hold_abort_rc"] = None
+        rec["hold_abort_line"] = f"{type(e).__name__}: {e}"
+        return
+    rec["hold_abort_rc"] = arc
+    rec["hold_abort_line"] = _last_line(aout + "\n" + aerr)
+
+
+def _hold_confirm(lab: Lab, scen: Scenario, rec: dict[str, Any],
+                  target: Device, sid: str, lane: str,
+                  values: dict[str, str],
+                  extra_env: dict[str, str] | None,
+                  apply_out: str) -> dict[str, Any]:
+    """The second half of a held apply: the steps before the confirm, then
+    the confirm.
+
+    A held apply that passed its rounds left the change armed: the router
+    rolls it back when its window ends.  The runner runs the scenario's
+    before_confirm steps, then confirms with the same client-check env the
+    apply used (the confirm checks the claims once more, so the vantage
+    spec file must still be there), and reads the router's status when the
+    confirm is refused.
+
+    An early error (no held session, a step that failed, a status that
+    cannot be read) leaves the change armed: the runner aborts it before it
+    returns the error.
+
+    The returned dict carries the outcome ("confirmed", "rolled_back" or
+    ""), the error that stops the run ("" when there is none) and the
+    output of the confirm.
+    """
+    out: dict[str, Any] = {"outcome": "", "error": "", "confirm_out": ""}
+    held = _held_line(apply_out, sid)
+    if not held:
+        out["error"] = ("the held apply reported no held session; nothing "
+                        "was confirmed")
+        _hold_abort(lab, rec, target, sid, lane, extra_env)
+        return out
+    rec["held_line"] = held
+    for name in scen.before_confirm:
+        step = lab.steps.get(name)
+        if step is None:
+            out["error"] = (f"before_confirm step {name!r} is not defined in "
+                            "[steps]")
+            _hold_abort(lab, rec, target, sid, lane, extra_env)
+            return out
+        try:
+            rc, cmd_sub, stderr = run_step(lab, step, values)
+        except Exception as exc:
+            # a step that raised leaves the change armed: the runner aborts
+            # it before it returns the error
+            out["error"] = (f"before_confirm step {name} raised: "
+                            f"{type(exc).__name__}: {exc}")
+            _hold_abort(lab, rec, target, sid, lane, extra_env)
+            return out
+        rec["before_confirm"].append({
+            "name": name,
+            "device": step.device,
+            "cmd": cmd_sub,
+            "rc": rc,
+            "stderr": stderr[-MAX_POST:],
+            "passed": rc == 0,
+        })
+        if rc != 0:
+            tail = (stderr or "").strip()[-200:]
+            out["error"] = (f"before_confirm step {name} failed (rc={rc}): "
+                            f"{tail}")
+            _hold_abort(lab, rec, target, sid, lane, extra_env)
+            return out
+    try:
+        crc, cout, cerr = confirm_batch(lab, target, sid, lane=lane,
+                                        extra_env=extra_env,
+                                        timeout_s=scen.timeout)
+    except Exception as exc:
+        # a confirm that raised leaves the change armed: the runner aborts
+        # it before it returns the error
+        out["error"] = (f"the confirm raised: {type(exc).__name__}: {exc}")
+        _hold_abort(lab, rec, target, sid, lane, extra_env)
+        return out
+    rec["hold_confirm_rc"] = crc
+    rec["hold_confirm_log"] = (cout + cerr)[-MAX_LOG:]
+    rec["hold_confirm_line"] = _last_line(cout)
+    out["confirm_out"] = cout + "\n" + cerr
+    if crc == 0 and _confirmed_line(cout, sid):
+        out["outcome"] = "confirmed"
+        return out
+    # the confirm was refused: the change is still armed and the router
+    # rolls it back at its own deadline
+    try:
+        state = _hold_end_state(lab, target, sid, scen, lane)
+    except Exception as exc:
+        # the status of the refused confirm cannot be read: the change is
+        # still armed, so the runner aborts it before it returns the error
+        out["error"] = ("the router's status could not be read: "
+                        f"{type(exc).__name__}: {exc}")
+        _hold_abort(lab, rec, target, sid, lane, extra_env)
+        return out
+    rec["hold_status"] = state
+    out["outcome"] = state.get("end_state") or ""
+    if state.get("reason"):
+        out["error"] = f"{state['reason']}: {state.get('detail', '')}"
+        _hold_abort(lab, rec, target, sid, lane, extra_env)
+        return out
+    if out["outcome"] not in ("rolled_back", "confirmed"):
+        out["error"] = ("the confirm was refused and the router's status "
+                        "does not say what happened to the session")
+        _hold_abort(lab, rec, target, sid, lane, extra_env)
     return out
 
 
@@ -4387,6 +4907,14 @@ def _run_scenario_inner(lab: Lab, scen: Scenario, rec: dict[str, Any],
         texts.append(lab.steps[sn].cmd)
     for sn in scen.cleanup:
         texts.append(lab.steps[sn].cmd)
+    # the steps of a held apply that run before the confirm: their
+    # placeholders are resolved like the ones of a setup or a cleanup step.
+    # A step that is not defined is left to the run that needs it (the
+    # held apply says which one it is).
+    for sn in scen.before_confirm:
+        step = lab.steps.get(sn)
+        if step is not None:
+            texts.append(step.cmd)
     used = used_placeholders(*texts)
     values, err = resolve_vars(lab, used)
     if err:
@@ -4468,7 +4996,34 @@ def _run_scenario_inner(lab: Lab, scen: Scenario, rec: dict[str, Any],
         rec["duration_s"] = round(time.monotonic() - t0, 3)
         return
 
-    # 5. plan / apply
+    # 5. the owner's rules.  They are loaded before the plan, so a rule the
+    # loader refuses stops the run before anything is staged on the router.
+    # The claims of the rules join the scenario's own client checks, and
+    # everything after this point runs them like any other client check.
+    rule_claims: list[dict[str, Any]] = []
+    claims: list[dict[str, Any]] = list(scen.client_checks)
+    if scen.rules:
+        rules_target = lab.devices.get(scen.target)
+        if rules_target is None:
+            rec["error"] = f"target {scen.target!r} is not a defined device"
+            rec["duration_s"] = round(time.monotonic() - t0, 3)
+            return
+        try:
+            rule_claims, rules_dir = _rules_claims(lab, rules_target,
+                                                    scen.rules)
+        except RulesError as exc:
+            rec["error"] = str(exc)
+            rec["duration_s"] = round(time.monotonic() - t0, 3)
+            return
+        except client_checks.ClientCheckError as exc:
+            rec["error"] = (f"the rules of the scenario could not be "
+                            f"checked: {exc}")
+            rec["duration_s"] = round(time.monotonic() - t0, 3)
+            return
+        state["rules_dir"] = rules_dir
+        claims = claims + rule_claims
+
+    # 6. plan / apply
     # A controller-loss run whose end state is one of two runs no post
     # check: the scenario file must have none (the load-time rules refuse
     # one).  Every other run runs them.
@@ -4569,9 +5124,9 @@ def _run_scenario_inner(lab: Lab, scen: Scenario, rec: dict[str, Any],
                     token = wrong_token(token)
             extra_env: dict[str, str] | None = None
             spec_path: Path | None = None
-            if scen.client_checks:
+            if claims:
                 try:
-                    extra_env, spec_path = client_check_env(scen, sid)
+                    extra_env, spec_path = client_check_env(scen, sid, claims)
                 except Exception as exc:
                     rec["error"] = (
                         f"client checks could not be prepared: "
@@ -4612,18 +5167,62 @@ def _run_scenario_inner(lab: Lab, scen: Scenario, rec: dict[str, Any],
                     # mean anything: the scenario file must have none.
                     run_posts = False
             else:
+                held: dict[str, Any] = {}
                 try:
                     rc, aout, aerr = apply_batch(
                         lab, target, sid, scen.timeout, lane=lane, token=token,
-                        window=window, extra_env=extra_env)
+                        window=window, extra_env=extra_env, hold=scen.hold)
+                    # the apply's own output is in the record on every path,
+                    # the early ones (a held apply that ended before its
+                    # confirm) included
+                    rec["apply_log"] = (aout + aerr)[-MAX_LOG:]
+                    if scen.hold and rc == 0:
+                        # The rounds of a held apply passed and nothing was
+                        # confirmed: the change is still armed.  The runner
+                        # runs the scenario's before_confirm steps and then
+                        # confirms, with the same client-check env (the
+                        # vantage spec file must still be there).
+                        held = _hold_confirm(lab, scen, rec, target, sid,
+                                             lane, values, extra_env, aout)
+                        if held.get("error"):
+                            rec["error"] = held["error"]
+                            rec["duration_s"] = round(time.monotonic() - t0, 3)
+                            return
                 finally:
+                    # the temp file of the client checks goes away with the
+                    # run, failed or not: after the confirm of a held apply,
+                    # or after an apply that failed
                     if spec_path is not None:
                         spec_path.unlink(missing_ok=True)
-                rec["apply_log"] = (aout + aerr)[-MAX_LOG:]
-                rec["outcome"] = classify_apply(rc, aout, aerr, sid)
-                if scen.client_checks:
+                if scen.hold and rc == 0:
+                    rec["outcome"] = held.get("outcome") or "unknown"
+                else:
+                    rec["outcome"] = classify_apply(rc, aout, aerr, sid)
+                if scen.expect_confirm_refused is not None:
+                    # The scenario pins the refusal of its confirm: the run
+                    # fails unless the confirm was refused (its rc is not
+                    # zero and the regex matches the confirm's output) and
+                    # the change was rolled back.
+                    confirm_out = held.get("confirm_out", "")
+                    matched = re.search(
+                        scen.expect_confirm_refused, confirm_out,
+                        re.MULTILINE) is not None
+                    refused = bool(rec["hold_confirm_rc"])
+                    rec["confirm_refused"] = {
+                        "pattern": scen.expect_confirm_refused,
+                        "matched": matched,
+                        "refused": refused,
+                    }
+                    if (rec["outcome"] != "rolled_back" or not matched
+                            or not refused):
+                        rec["error"] = (
+                            "expect_confirm_refused did not match: "
+                            f"outcome={rec['outcome']}, matched={matched}, "
+                            f"rc={rec['hold_confirm_rc']}")
+                if claims:
                     failed = explanation.failed_claim(
-                        aout, sid, [], scen.client_checks)
+                        aout + "\n" + held.get("confirm_out", ""),
+                        sid, [], claims)
                     rec["failed_claim"] = failed
                     if scen.expect_failed_claim is not None:
                         failed_text = failed["text"] if failed is not None else ""
@@ -4862,17 +5461,27 @@ def run_scenario(lab: Lab, scen: Scenario, lane: str = "password",
         "before": [],
         "after": [],
         "cleanup": [],
+        "before_confirm": [],
         "post": [],
         "reject": None,
         "refuse": None,
         "abort_run": False,
         "plan_log": "",
         "apply_log": "",
+        "held_line": "",
+        "hold_confirm_rc": None,
+        "hold_confirm_log": "",
+        "hold_confirm_line": "",
+        "hold_abort_rc": None,
+        "hold_abort_line": "",
+        "hold_status": None,
+        "confirm_refused": None,
         "vars": {},
         "duration_s": 0.0,
     }
     state: dict[str, Any] = {"setup_started": False,
                              "no_device_contact": False,
+                             "rules_dir": None,
                              "after_reset_checks": {}}
     evidence = AccessEvidence()
     previous = _EVIDENCE
@@ -4884,6 +5493,11 @@ def run_scenario(lab: Lab, scen: Scenario, lane: str = "password",
         rec["error"] = f"{type(e).__name__}: {e}"
         rec["duration_s"] = round(time.monotonic() - t0, 3)
     finally:
+        # the temp dir of the scenario's rules goes away with the run: the
+        # rules file is the owner's own and lives only as long as the run
+        rules_dir = state.get("rules_dir")
+        if rules_dir is not None:
+            shutil.rmtree(rules_dir, ignore_errors=True)
         if state["setup_started"]:
             _run_cleanup(lab, scen, rec)
         if not state["no_device_contact"]:

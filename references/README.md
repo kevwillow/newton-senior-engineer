@@ -31,6 +31,7 @@ On-demand reference docs for the network-engineer-agent skill (OpenWrt 25.12, fw
 | networking-concepts/index.md, glossary.md, patterns.md, cheatsheet.md | derived from Peterson & Davie, Computer Networks: A Systems Approach, 6th ed (github.com/SystemsApproach/book @ 5deec5e) | CC BY 4.0 | concepts, design rules, quick numbers |
 | networking-concepts/chapters/ch01..ch09-*.md | same book, per chapter | CC BY 4.0 | per-chapter mechanics and rules |
 | network-diagnostic.md | original Newton runguide, written from a live run on 2026-10-04 | MIT (same as SKILL.md) | speed, latency, LAN and Wi-Fi diagnostic: load-test script, run order, how to read the numbers |
+| network-rules.md | original Newton text (1.6.0) | MIT (same as SKILL.md) | the owner's network rules in a plan: what the agent may and may not do, when a plan is refused |
 
 ## Provenance and accuracy
 - nftables files: converted mechanically from the wiki's MediaWiki source (a few table cells may be imperfectly formatted).

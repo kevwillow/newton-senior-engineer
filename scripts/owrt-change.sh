@@ -152,6 +152,17 @@ fi
 
 log()  { printf '%s %s %s\n' "$(date -Is)" "$ROUTER" "$*" >> "$AUDIT"; echo "$*"; }
 mask() { sed 's/CONFIRMED/confirmed/g; s/ROLLBACK WINDOW PASSED/rollback window passed/g; s/OUTCOME UNKNOWN/outcome unknown/g; s/ALERT/alert/g; s/APPLIED/applied/g; s/HELD APPLY/held apply/g; s/RUNNING/running/g'; }
+# check_digest TEXT: the sha256 (64 hex) of the exact bytes of TEXT, the
+# tool the script already uses for the config hashes.  No newline of its
+# own is added, so the digest is of the string as it stands.  Fails when
+# the tool is gone or says something else, so a caller never writes a
+# digest it cannot trust.
+check_digest() {
+	local d
+	d=$(printf '%s' "$1" | sha256sum | cut -d' ' -f1) || return 1
+	[[ $d =~ ^[0-9a-f]{64}$ ]] || return 1
+	printf '%s' "$d"
+}
 oneline() {
 	if (( $# > 0 )); then printf '%s' "$1"; else cat; fi |
 		LC_ALL=C tr '\000-\037\177' ' ' |
@@ -861,9 +872,10 @@ apply)
 			msg=${out%%$'\n'*}
 			die "OWRT_LOCAL_CHECK is not valid bash: $(oneline "$msg"); nothing applied, session $SID is still staged"
 		fi
-		# the local check runs in every round of this run; a later confirm
-		# could not run it again, so a held apply would confirm without it
-		(( HOLD == 0 )) || die "--hold cannot be used with client checks (OWRT_LOCAL_CHECK): they would not run again before the confirm; nothing applied, session $SID is still staged"
+		# the local check runs in every round of this run, and the confirm
+		# of a held apply runs it once more, right before it asks the
+		# router to confirm: a held change is checked in every round and
+		# once more at the confirm
 	fi
 	handshake
 	# the diff fetch: its sha256 must equal the plan record's, then the masked DIFF audit lines (rows 261-263).
@@ -991,7 +1003,18 @@ apply)
 		# held: the rounds passed and nothing is confirmed. The router's
 		# rollback stays armed; `confirm` can confirm until held_until.
 		held_until=$(( $(date +%s) + deadline - SECONDS ))
-		printf '%s %s %s\n' "$NEED_DHCP" "$PROBE_N" "$held_until" > "$PLANS/$SID.held" || \
+		# The fourth field of the hold record is the digest of the client
+		# check this apply ran (0 when it ran none): the confirm of a
+		# held apply runs that check again, right before it asks the
+		# router to confirm, so a confirm that runs another check (or
+		# none) must not confirm the change.  A record with three fields
+		# is one of an older host: it ran no check.
+		local_check=0
+		if [[ -n ${OWRT_LOCAL_CHECK:-} ]]; then
+			local_check=$(check_digest "$OWRT_LOCAL_CHECK") \
+				|| die "cannot digest the client check of this apply; nothing is confirmed and the router rolls the change back when its ${T}s window ends"
+		fi
+		printf '%s %s %s %s\n' "$NEED_DHCP" "$PROBE_N" "$held_until" "$local_check" > "$PLANS/$SID.held" || \
 			die "cannot record the hold of session $SID; nothing is confirmed and the router rolls the change back when its ${T}s window ends"
 		(( DNSMASQ_TOUCHED == 0 )) || log "NOTE session=$SID: dnsmasq was restarted during the window; after an abort or the window end, check DNS and DHCP"
 		log "HELD session=$SID until=$held_until ($PASSES consecutive passes; NOT confirmed: the router rolls the change back when its window ends, at $(date -d "@$held_until" -Is), unless it is confirmed first) confirm: $0 confirm $ROUTER $SID abort: $0 abort $ROUTER $SID"
@@ -1221,7 +1244,7 @@ status)
 	# end, so the cut drops it
 	[[ -z $RVAL ]] || echo "RUNNING session=$SID $RVAL"
 	held_line=; [[ -r $PLANS/$SID.held ]] && { IFS= read -r held_line < "$PLANS/$SID.held" || true; }
-	if [[ $held_line =~ ^[0-2]\ [0-9]+\ ([0-9]+)$ ]] && (( $(date +%s) >= BASH_REMATCH[1] )); then
+	if [[ $held_line =~ ^[0-2]\ [0-9]+\ ([0-9]+)(\ 0|\ [0-9a-f]{64})?$ ]] && (( $(date +%s) >= BASH_REMATCH[1] )); then
 		if router_says_confirmed "$out"; then
 			echo "NOTE session=$SID: the window of its held apply has passed and $(confirmed_live)"
 		else
@@ -1250,8 +1273,25 @@ confirm)
 	held_next="to see where session $SID stands, run: $0 status $ROUTER $SID; to roll it back now: $0 abort $ROUTER $SID"
 	[[ -r $HELD_FILE ]] || die "no held apply of session $SID on this host; nothing confirmed (only an apply run with --hold is confirmed here); $held_next"
 	held_line=; IFS= read -r held_line < "$HELD_FILE" || true
-	[[ $held_line =~ ^([0-2])\ ([0-9]+)\ ([0-9]+)$ ]] || die "the hold record of session $SID is malformed; nothing confirmed; an armed change rolls back on its own when its window ends; $held_next"
+	[[ $held_line =~ ^([0-2])\ ([0-9]+)\ ([0-9]+)(\ 0|\ [0-9a-f]{64})?$ ]] || die "the hold record of session $SID is malformed; nothing confirmed; an armed change rolls back on its own when its window ends; $held_next"
 	NEED_DHCP=${BASH_REMATCH[1]}; PROBE_N=${BASH_REMATCH[2]}; held_until=${BASH_REMATCH[3]}
+	# The fourth field is the digest of the client check the held apply
+	# ran (0 when it ran none).  The confirm runs that check again, right
+	# before it asks the router to confirm, so a confirm without it, or
+	# with another one, would confirm a change nobody checked the way
+	# the apply checked it: it is refused before the router is asked.  A
+	# record with three fields is one of an older host: it ran no client
+	# check.  A fourth field of 1 is malformed: no such record ever
+	# shipped, so it is not read as a check of any kind.
+	local_check=${BASH_REMATCH[4]:-}
+	local_check=${local_check# }
+	if [[ -n $local_check && $local_check != 0 ]]; then
+		now_check=
+		[[ -n ${OWRT_LOCAL_CHECK:-} ]] && now_check=$(check_digest "$OWRT_LOCAL_CHECK")
+		if [[ -z $now_check || $now_check != "$local_check" ]]; then
+			die "the held apply of session $SID ran a client check; run the confirm with the same OWRT_LOCAL_CHECK as the apply; nothing confirmed; $held_next"
+		fi
+	fi
 	if (( $(date +%s) >= held_until )); then
 		# the window ended unconfirmed: ask the router what it did
 		handshake

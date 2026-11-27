@@ -13,6 +13,38 @@ Two version numbers exist and are separate:
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-27
+
+### Added
+- The owner's network rules join every change of an installed OpenWrt router. The rules live in `rules.toml` next to the
+  inventory and only the owner writes them (`scripts/newton-rules`, shipped in 1.1.3); until now the file was stored and
+  no change read it. Every rule of the device becomes a sealed client check, run from the registered inside vantage of
+  the rule's zone, in the same verify rounds as the agent's own client claims. The rule kinds are `dns`, `dhcp`,
+  `internet`, `blocked` (the router, the internet, or one address and port) and `reach` (one address and port). A rule
+  that fails means no confirm: the router rolls the change back at its deadline. A rule that cannot run refuses
+  the plan before anything is staged: no vantage for the zone, a broken `rules.toml`, a device whose mode cannot run them
+  (no-install, the vendor platforms), or a target the vantage may not probe (outside its `check_targets`). The reads still work.
+- The approval text lists the rules checked on the change: "Your network rules checked on this change:", one line per
+  rule with the rule's sentence and its label.
+- `hold` works with client checks. `newton_confirm_change` runs the sealed client checks again right before it confirms;
+  a failure refuses the confirm and the router rolls the change back. The confirm trusts only the sealed plan record: a
+  missing record or a hash mismatch refuses it.
+- The lab runner has four new scenario fields: `rules`, `hold`, `before_confirm` and `expect_confirm_refused`.
+
+### Changed
+- A plan with client checks takes a `timeout_s` of 150 when the caller names none; an explicit lower value is refused.
+  The rules' claims do not count against the agent's own eight claims, so a device may carry rules and agent claims in
+  the same plan. `newton_plan_undo` and `newton_plan_tier` work on a device with rules.
+- The router program is unchanged (1.3.4): no `newton-router-setup upgrade` is needed.
+
+### Verified
+- The network rules on the lab VM, 2026-11-27: lab-r1 (OpenWrt, router program 1.3.4) with the lab
+  runner's scenarios `lab/scenarios/everyday/ev-rules-01..04`. 01 confirmed with four rules checked (internet, dns, the
+  router blocked, reach); 02 a change without the guest-to-WAN forwarding rolled back on the internet rule; 03 a held
+  apply confirmed; 04 a held apply whose client lost its route before the confirm: the confirm was refused ("the local
+  check failed before the confirm") and the router rolled the change back. The live run found the gap of a target the
+  vantage may not probe; it was fixed before this release.
+
 ## [1.5.2] - 2026-11-26
 
 ### Added

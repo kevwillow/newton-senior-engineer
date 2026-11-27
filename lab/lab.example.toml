@@ -726,6 +726,20 @@ sudo modprobe -r 8021q 2>/dev/null || true
 '''
 description = "lab-client: remove namespace guest and the eth0.30 link (also after a failed run); fails if either is left."
 
+# The guest netns loses its default route: a client in the guest zone can no
+# longer reach the internet.  A scenario runs it before the confirm of a held
+# apply, to break the change after the apply's own rounds passed.  The
+# cleanup of that scenario (guest_ns_off) removes the namespace the step
+# broke, so the lab is clean afterwards.
+[steps.vantage_internet_break]
+device = "lab-client"
+cmd = '''
+set -e
+sudo ip netns exec guest ip route del default via 192.168.30.1 2>/dev/null || true
+! sudo ip netns exec guest ip -4 route show default | grep -q .
+'''
+description = "lab-client: take the default route away from the guest netns, so a client in the guest zone cannot reach the internet."
+
 [steps.iot_ns_on]
 device = "lab-client"
 cmd = '''
@@ -874,7 +888,7 @@ proxy_command = "$LAB_SSH_PROXY"
 role = "inside"
 devices = ["lab-r1"]
 admin_key = "$LAB_SSH_KEY"
-check_targets = ["10.109.0.0/24", "192.168.30.0/24", "192.168.150.0/24"]
+check_targets = ["10.109.0.0/24", "192.168.30.0/24", "192.168.150.0/24", "10.100.0.0/22", "10.101.0.0/22"]
 
 [[vantages.lab-client.zones]]
 name = "guest"

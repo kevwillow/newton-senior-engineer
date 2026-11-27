@@ -109,8 +109,8 @@ def test_lab_non_mgmt_interface_change_requires_no_approval():
     assert free("network.wan.proto='pppoe'", "set network.wan.proto='pppoe'")
     assert free("network.guest.ipaddr='192.168.30.1'", "set network.guest.ipaddr='192.168.30.1'")
     # an @device[N] section is bridge membership, which is now a leash
-    # operation. This line used to assert "free"; the stricter expectation is
-    # deliberate (review finding F6); the two lines above still hold.
+    # operation. This line used to assert "free"; the stricter expectation
+    # holds; the two lines above still hold.
     result = decide("network.@device[0].name='br-guest'", "set network.@device[0].name='br-guest'")
     assert result["requires_approval"] is True
     assert any("bridge/VLAN membership" in reason for reason in result["reasons"])

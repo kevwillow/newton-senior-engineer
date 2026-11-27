@@ -20,6 +20,7 @@ from typing import Any, Protocol
 
 from . import consequences as _consequences
 from . import explanation as _explanation
+from . import net_rules as _net_rules
 from . import owner_records
 from . import redact
 from . import scans as _scans
@@ -399,6 +400,72 @@ def _staged_check_lines(staged: Any) -> list[str]:
 
 EXPLANATION_HEADING = "Agent's explanation (unchecked claims)"
 
+#: The heading of the block that lists the owner's network rules.
+RULES_HEADING = "Your network rules checked on this change:"
+
+
+def _rule_claims(expect: Any) -> list[dict[str, Any]]:
+    """The rule claims of an expect list: the claims the server added.
+
+    A rule claim carries ``source: "rule"`` and the rule's id; the
+    agent may not write either (explanation.py refuses an explanation
+    that does), so every claim that carries them came from the owner's
+    rules file.
+    """
+    return [
+        claim
+        for claim in (expect if isinstance(expect, list) else [])
+        if isinstance(claim, dict) and claim.get("source") == "rule"
+    ]
+
+
+def _rule_labels(rule_ids: list[Any]) -> dict[str, str]:
+    """The labels of the rules, read from the rules file at approval time.
+
+    The label is the owner's own text and it is NOT in the claim: it is
+    read here, by rule id, from the rules file next to the inventory.  A
+    file that cannot be loaded (gone, broken, refused) or a rule that is
+    not in it gives no label: the rule is then shown without one.
+    """
+    wanted = {rule_id for rule_id in rule_ids if isinstance(rule_id, str)}
+    if not wanted:
+        return {}
+    try:
+        loaded = _net_rules.load_rules(_net_rules.rules_file())
+    except _net_rules.NetRuleError:
+        return {}
+    labels: dict[str, str] = {}
+    for rules in loaded.values():
+        for rule in rules:
+            if rule.id in wanted and rule.label:
+                labels[rule.id] = rule.label
+    return labels
+
+
+def _rule_lines(expect: Any) -> list[str]:
+    """One line per rule claim: ``- <rule id>: <sentence>`` and the label.
+
+    The sentence is built from the claim's own fields (never from a
+    device), and the label is read from the rules file at approval time.
+    A label is escaped the way approve.py escapes every other piece of
+    owner text, so no control byte ever reaches the terminal.
+    """
+    claims = _rule_claims(expect)
+    if not claims:
+        return []
+    labels = _rule_labels([claim.get("rule") for claim in claims])
+    lines: list[str] = []
+    for claim in claims:
+        rule = _net_rules.claim_rule(claim)
+        if rule is None:
+            continue
+        line = f"- {rule.id}: {_net_rules.rule_sentence(rule)}"
+        label = labels.get(rule.id)
+        if label:
+            line += f" ({_sanitize_terminal_value(label)})"
+        lines.append(line)
+    return lines
+
 
 def _canonical_claim_line(line: str, platform: str = "vyos") -> str:
     """The vendor claim line as it is sealed, not as the agent wrote it.
@@ -485,7 +552,16 @@ def _print_explanation(explanation: dict[str, Any], plan: dict[str, Any], masked
     if not isinstance(claim_platform, str) or not claim_platform:
         claim_platform = "vyos"
     for claim in explanation["expect"]:
+        if isinstance(claim, dict) and claim.get("source") == "rule":
+            # the owner's own rules are listed in their own block below,
+            # not as the agent's text
+            continue
         _print_agent(masked, "    - ", _claim_line(claim, claim_platform))
+    rule_lines = _rule_lines(explanation["expect"])
+    if rule_lines:
+        print(f"  {RULES_HEADING}")
+        for line in rule_lines:
+            print(f"    {line}")
     risk_lines = explanation["risk"].split("\n")
     _print_agent(masked, "  Risk: ", risk_lines[0])
     for extra in risk_lines[1:]:

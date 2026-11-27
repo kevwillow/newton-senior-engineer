@@ -1,7 +1,7 @@
 ---
 name: newton
 description: "Newton, the network engineer. Configure, troubleshoot and design small-to-large networks from an AI agent over SSH or a serial console, with safety rails that make lockouts and destructive commands less likely. Primary platform: OpenWrt 25.12+ routers (uci, ubus, fw4/nftables, DSA VLANs, dnsmasq/odhcpd, wifi, apk), driven through a tested apply-with-automatic-rollback protocol. Ships as a skill and as an MCP server (newton-mcp) so any MCP client can use the same protocol. Also covers Linux host networking (Proxmox bridges, NetworkManager) and network design (subnetting, VLANs, DHCP/DNS, dual-WAN). Use when the user says 'configure the router', 'add a port forward', 'set up a VLAN', 'change the wifi', 'reserve an IP', 'why is the network slow' or 'how fast is my internet' on a network Newton manages, 'run a speed test', 'test the wifi speed', 'open a port', 'set up dual WAN', 'segment the network', or any task touching uci, ubus, nft, fw4, dnsmasq, odhcpd, wifi, iwinfo, apk/opkg on an OpenWrt device, or bridge or NetworkManager config on a Linux host. Primary use: the owner types /newton (or /network-engineer) to enter Network-engineer mode; every network request runs through that mode's flow."
-version: 1.5.2
+version: 1.6.0
 author: Kev
 license: MIT (scripts, SKILL.md); see references/README.md for reference-doc licenses
 platforms: [linux]
@@ -236,13 +236,15 @@ then wait for their yes.
 3. **Expect**: up to eight things that will be true afterwards, each one a check Newton can run: a
    `uci_equals` claim (`firewall.fwd_8443.dest_port` equals `8443`) or one of the fixed probes. No prose
    goes in this list.
-   A claim can also be about what a CLIENT sees: `{"kind":"client_dns","zone":"guest"}`, `client_dhcp`,
+   A claim can be about what a CLIENT sees: `{"kind":"client_dns","zone":"guest"}`, `client_dhcp`,
    `client_internet`, or `{"kind":"client_blocked","zone":"guest","to":"router"}` (or `"to":"internet"`). You name
-   only the kind and the zone; Newton derives the addresses from the router's own interface list and refuses a
-   `targets` key. It needs an inside vantage registered for that zone (inventory `zones`), refuses the plan without one,
-   and needs `timeout_s` of at least 150. A client claim is checked from that vantage in every verify round: a claim
-   that fails, or that could not be tested (the vantage is down, or not in the zone, or answered nothing usable), blocks
-   the confirm and the router rolls back by itself. NOT TESTED is never a pass.
+   only the kind and the zone; Newton derives the addresses from the router's interfaces and refuses a
+   `targets` key. It needs an inside vantage for that zone (inventory `zones`), else the plan is refused,
+   and `timeout_s` >= 150 (the default). A client claim is checked from that vantage in every verify round: a claim
+   that fails, or that could not be tested (vantage down, wrong zone, no answer), blocks
+   the confirm; the router rolls back by itself. NOT TESTED is never a pass.
+
+**Network rules:** a device's rules join each installed-OpenWrt plan as client checks you cannot add, drop or edit: `references/network-rules.md`.
 4. **Risk**: one or two lines: what could break and how the owner would notice.
 
 Only after their yes, call the plan tool with `owner_confirmed_in_chat=true` and the same four things as
@@ -556,7 +558,7 @@ surface. It has **no tool that runs arbitrary commands**, reboots, upgrades or i
 | `newton_plan_change` | stage a `uci batch`; requires `owner_confirmed_in_chat=true` (the owner said yes in the conversation, see Step 0) and `explanation` (`intent`, `steps` one per change line, `expect` 1-8 claims, `risk`), both inside the plan hash; takes `probes: list[list[str]]` and optional `manifest_checks: list[str]` (host-expanded into probe lists before `seal`); returns diff, session id, router digest, profile, leash codes, `approval_required` + reasons |
 | `newton_plan_undo` | undo a CONFIRMED change by id; Newton builds the changes; give only `intent` and `risk` in `explanation`; conflicts with later changes REFUSE the whole undo and are listed; packages, passwords, reboots and client leases are not undone; needs the owner's yes in chat and `newton-approve` like any change |
 | `newton_apply_change` | apply with rollback + fresh-connection verification; consumes the approval record's router-checked HMAC token, which binds the approval window (the router enforces its expiry), and passes it as `OWRT_APPROVAL_TOKEN` with `OWRT_APPROVAL_NBF`/`OWRT_APPROVAL_EXP`; refuses without the token when the router requires approval |
-| `newton_confirm_change` | confirm a change `newton_apply_change` applied with `hold=true`, inside its window (`confirm_by`): one more verify round over a new connection first, no confirm when it fails; the router refuses a late confirm (installed OpenWrt routers only) |
+| `newton_confirm_change` | confirm a change `newton_apply_change` applied with `hold=true`, inside its window (`confirm_by`): one more verify round over a new connection first (client checks too), no confirm when it fails; the router refuses a late confirm (installed OpenWrt routers only) |
 | `newton_change_status`, `newton_abort_change` | transaction state / discard |
 | `newton_grant_off` | end the easy grant on a device; it can only end or narrow a grant, never open or widen one |
 | `newton_list_tiers`, `newton_plan_tier` | list the three hardening tiers and their non-skipped batches; plan ONE ordered batch through the same `plan()` path (so it needs the same `owner_confirmed_in_chat` and `explanation`; the steps count must equal the batch's change lines and the error names that count); each batch is its own plan, approval, apply, confirm cycle |

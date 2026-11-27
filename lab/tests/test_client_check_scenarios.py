@@ -103,6 +103,7 @@ known_hosts = "{known_hosts.as_posix()}"
 proxy_command = "ssh -W %h:%p root@lab-proxy"
 role = "inside"
 devices = ["lab-r1"]
+check_targets = ["192.0.2.0/24"]
 {zones}
 """,
         encoding="utf-8",
@@ -268,6 +269,37 @@ def test_vantage_check_steps_exist_and_carry_no_secret_material():
     off = steps["vantage_checks_off"]["cmd"]
     assert "authorized_keys" in off
     assert "newton-vantage-check" in off
+
+
+def _lab_check_targets(path: Path) -> list[str]:
+    """The ranges the lab's vantage may probe, as the step writes them."""
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    on = data["steps"]["vantage_checks_on"]["cmd"]
+    rows = [line for line in on.splitlines() if line.startswith("check_targets = ")]
+    assert len(rows) == 1, path.name
+    return list(tomllib.loads(rows[0] + "\n")["check_targets"])
+
+
+def test_the_vantage_may_probe_the_router_wan_range():
+    """A rule that blocks the router is checked against the router's own
+    addresses, and the router's two WAN addresses are in the lab-isp ranges (ISP-A
+    10.100.0.0/22, ISP-B 10.101.0.0/22): the
+    lab's vantage must be allowed to probe it, or the rule cannot run and
+    the plan is refused."""
+    live = LAB_DIR / "lab.toml"
+    example = LAB_DIR / "lab.example.toml"
+    for path in (live, example):
+        targets = _lab_check_targets(path)
+        for cidr in (
+            "10.109.0.0/24",
+            "192.168.30.0/24",
+            "192.168.150.0/24",
+            "10.100.0.0/22",
+            "10.101.0.0/22",
+        ):
+            assert cidr in targets, (path.name, cidr)
+    if live.is_file():
+        assert _lab_check_targets(live) == _lab_check_targets(example)
 
 
 def test_local_env_exposes_the_repository_to_local_steps(lab):

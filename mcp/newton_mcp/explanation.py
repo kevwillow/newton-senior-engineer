@@ -21,9 +21,13 @@ An ``expect`` claim is never free-form and never a command.  It is one of:
   name what a CLIENT sees, not what the router reports.  A client claim
   names a kind and a zone only; the addresses it is checked against are
   derived by Newton, never supplied by the agent.
+* ``client_reaches`` is the one client claim the agent may not write: it
+  is a network rule's check (the owner writes a rule that says the client
+  reaches an address), and only the server, from the owner's rules, sets
+  it.
 
 Which kinds a claim may use depends on the platform the change is for: an
-OpenWrt device carries the two router kinds (``uci_equals`` and ``probe``) and the four client kinds,
+OpenWrt device carries the two router kinds (``uci_equals`` and ``probe``) and the five client kinds,
 a VyOS device the two vendor kinds (``config_has`` and ``ping``), a Junos
 device the same two (its display-set output is read statement by statement,
 so a configuration line can be compared with it) and a RouterOS device the
@@ -63,6 +67,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from . import redact as _redact
 from .adapters import vendor_write
 from .client_checks import CLIENT_KINDS, MAX_TARGETS, is_client_claim
+from .net_rules import MAX_RULES_PER_DEVICE, RULE_ID_RE
 from .probes import PROBE_NAMES, validate_probes
 from .scans import ZONE_RE
 
@@ -72,6 +77,14 @@ MAX_RISK = 300
 MAX_STEPS = 64
 MIN_CLAIMS = 1
 MAX_CLAIMS = 8
+# The stored form carries the agent's claims AND the claims of the owner's
+# network rules.  The rule claims do NOT count toward the agent's cap
+# (MAX_CLAIMS stays the agent's): a device may have
+# ``net_rules.MAX_RULES_PER_DEVICE`` rules, and a device with rules must
+# still be plannable.  Every other cap (the router probes, the vantage
+# spec) still applies, and a plan that does not fit is refused, never
+# trimmed.
+STORED_MAX_CLAIMS = MAX_CLAIMS + MAX_RULES_PER_DEVICE
 # masking can lengthen a field by a placeholder; the stored text may use this much
 MASKED_SLACK = 2
 
@@ -91,6 +104,13 @@ ROUTEROS_PLATFORM = "routeros"
 # statement, so a configuration line can be compared with it: the Junos
 # carries the two vendor claims.
 JUNOS_PLATFORM = "junos"
+
+# The keys the server puts on a client's claim when the claim comes from
+# one of the owner's network rules (``net_rules.rule_claims``).  The
+# agent may NOT set them: the server alone decides which claims are
+# rules, so an agent cannot claim a rule the owner did not write, nor
+# drop one.
+RULE_MARKER_KEYS = ("source", "rule")
 
 # The platforms whose claims are read with a tokenizer of their own.  A
 # claim line of one of them is read with that tokenizer, so what the
@@ -259,6 +279,11 @@ class ProbeClaim(BaseModel):
 # carries no free text and no address: a kind and the zone the client is in.
 # The addresses a blocked claim is checked against are derived by Newton
 # (client_checks.fill_targets), and the agent may not supply them.
+#
+# A claim that comes from one of the owner's network rules carries two more
+# keys: ``source`` ("rule") and ``rule`` (the rule's id).  The server adds
+# them, after the agent's explanation is checked; the agent may not set
+# them (parse_explanation refuses an explanation that does).
 
 _TARGET_RE = re.compile(r"^([0-9]{1,3}(?:\.[0-9]{1,3}){3}):([1-9][0-9]{0,4})$")
 
@@ -284,10 +309,32 @@ def _target_ok(value: str) -> str:
     return value
 
 
-class ClientDnsClaim(BaseModel):
-    """A client in the zone resolves a name through the zone's router."""
+class ClientClaim(BaseModel):
+    """What every client's claim carries.
+
+    ``source`` and ``rule`` are the server's own marks of a claim that
+    comes from one of the owner's network rules.  They are set by the
+    server alone: the agent's explanation is refused when it carries
+    them (``parse_explanation``), so a plan can never claim a rule the
+    owner did not write.
+    """
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    source: Literal["rule"] | None = None
+    rule: str | None = None
+
+    @model_validator(mode="after")
+    def _rule_mark(self) -> "ClientClaim":
+        if (self.source is None) != (self.rule is None):
+            raise ValueError("a rule claim carries both source and rule")
+        if self.rule is not None and RULE_ID_RE.fullmatch(self.rule) is None:
+            raise ValueError("rule must be a rule id")
+        return self
+
+
+class ClientDnsClaim(ClientClaim):
+    """A client in the zone resolves a name through the zone's router."""
 
     kind: Literal["client_dns"]
     zone: str
@@ -298,10 +345,8 @@ class ClientDnsClaim(BaseModel):
         return _zone_ok(value)
 
 
-class ClientDhcpClaim(BaseModel):
+class ClientDhcpClaim(ClientClaim):
     """A client in the zone gets a DHCP offer from the zone's router."""
-
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     kind: Literal["client_dhcp"]
     zone: str
@@ -312,10 +357,8 @@ class ClientDhcpClaim(BaseModel):
         return _zone_ok(value)
 
 
-class ClientInternetClaim(BaseModel):
+class ClientInternetClaim(ClientClaim):
     """A client in the zone reaches the internet and resolves a name."""
-
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     kind: Literal["client_internet"]
     zone: str
@@ -326,25 +369,72 @@ class ClientInternetClaim(BaseModel):
         return _zone_ok(value)
 
 
-class ClientBlockedClaim(BaseModel):
+class ClientBlockedClaim(ClientClaim):
     """A client in the zone cannot reach a set of addresses.
 
     ``to`` is what the claim is about: the router's own addresses or the
-    internet.  ``targets`` is filled by Newton at plan time and carried by the
-    stored explanation; the agent may not supply it.
+    internet.  A network rule may also name one address of its own (its
+    ``to``), which the agent may not do.  ``targets`` is filled by
+    Newton at plan time and carried by the stored explanation; the agent
+    may not supply it.
     """
-
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     kind: Literal["client_blocked"]
     zone: str
-    to: Literal["router", "internet"]
+    to: str
     targets: Annotated[list[str], Field(min_length=1, max_length=MAX_TARGETS)] | None = None
 
     @field_validator("zone")
     @classmethod
     def _zone(cls, value: str) -> str:
         return _zone_ok(value)
+
+    @field_validator("to")
+    @classmethod
+    def _to(cls, value: str) -> str:
+        if value in ("router", "internet"):
+            return value
+        # an owner-written target (a network rule's ``to``).  The agent
+        # may not name one: parse_explanation refuses it in the agent's
+        # own form.
+        return _target_ok(value)
+
+    @field_validator("targets")
+    @classmethod
+    def _targets(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        return [_target_ok(item) for item in value]
+
+
+class ClientReachesClaim(ClientClaim):
+    """A client in the zone reaches one address and port.
+
+    This is a network RULE's check: the owner writes a rule that says the
+    client reaches an address ("the work laptop reaches the printer"), and
+    Newton carries it as a claim.  The agent may not write one:
+    ``parse_explanation`` refuses it, so a claim of this kind can only
+    come from a rule the owner wrote.
+
+    ``to`` is the address and the port the rule named; ``targets`` is
+    filled by Newton at plan time (the claim's own target) and carried by
+    the stored explanation; the agent may not supply it.
+    """
+
+    kind: Literal["client_reaches"]
+    zone: str
+    to: str
+    targets: Annotated[list[str], Field(min_length=1, max_length=MAX_TARGETS)] | None = None
+
+    @field_validator("zone")
+    @classmethod
+    def _zone(cls, value: str) -> str:
+        return _zone_ok(value)
+
+    @field_validator("to")
+    @classmethod
+    def _to(cls, value: str) -> str:
+        return _target_ok(value)
 
     @field_validator("targets")
     @classmethod
@@ -511,12 +601,19 @@ Claim = Annotated[
         ClientDhcpClaim,
         ClientInternetClaim,
         ClientBlockedClaim,
+        ClientReachesClaim,
     ],
     Field(discriminator="kind"),
 ]
 
 
 class Explanation(BaseModel):
+    """The agent's own explanation: at most ``MAX_CLAIMS`` claims.
+
+    This is the form the agent writes: the claims it may write are the
+    ones it may write, and the count is the agent's cap.
+    """
+
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     intent: str
@@ -544,6 +641,20 @@ class Explanation(BaseModel):
             except ValueError as exc:
                 raise ValueError(f"step {index + 1} {exc}") from None
         return cleaned
+
+
+class StoredExplanation(Explanation):
+    """The stored form: the agent's claims and the rules' claims.
+
+    The claims of the owner's network rules join the agent's own, and
+    they do not count toward the agent's cap: a device may have
+    ``MAX_RULES_PER_DEVICE`` rules.  Everything else (the shape of a
+    claim, the text rules) is the agent's own.
+    """
+
+    expect: Annotated[
+        list[Claim], Field(min_length=MIN_CLAIMS, max_length=STORED_MAX_CLAIMS)
+    ]
 
 
 def _safe_name(part: Any) -> str:
@@ -659,10 +770,20 @@ def parse_explanation(
     kinds (``config_has`` and ``ping``).  Raises ``ExplanationError``.
 
     ``allow_targets`` is for the STORED form (apply and the receipt re-parse
-    what the plan wrote): a stored ``client_blocked`` claim carries the
-    targets Newton derived, and they must be there.  The agent's own form may
-    not carry them at all -- Newton fills them at plan time, so a claim that
-    names its own addresses is refused.
+    what the plan wrote): a stored ``client_blocked`` or ``client_reaches``
+    claim carries the targets Newton derived, and they must be there.  The
+    agent's own form may not carry them at all -- Newton fills them at plan
+    time, so a claim that names its own addresses is refused.
+
+    The agent's own form may not carry the server's rule marks either
+    (``source`` and ``rule``): the server adds them to the claims of the
+    owner's network rules, after the agent's explanation is checked, so an
+    agent can neither claim a rule the owner did not write nor name one of
+    its own.  The stored form carries them.
+
+    The agent's own form may not write a ``client_reaches`` claim at all:
+    that kind is a network rule's check (the owner says the client reaches
+    an address), so only the server, from the owner's rules, may set it.
     """
     if not isinstance(raw, dict):
         raise ExplanationError(
@@ -674,16 +795,33 @@ def parse_explanation(
     if not allow_targets:
         expect = raw.get("expect")
         for index, claim in enumerate(expect if isinstance(expect, list) else []):
-            if (
-                isinstance(claim, dict)
-                and "targets" in claim
-                and claim.get("kind") in CLIENT_KINDS
-            ):
+            if not isinstance(claim, dict):
+                continue
+            if claim.get("kind") == "client_reaches":
                 raise ExplanationError(
-                    f"explanation.expect.{index}: targets are derived by Newton"
+                    f"explanation.expect[{index}]: client_reaches is a network "
+                    "rule's check; the agent may not set it"
                 )
+            marks = [key for key in RULE_MARKER_KEYS if key in claim]
+            if marks:
+                raise ExplanationError(
+                    f"explanation.expect[{index}]: {', '.join(marks)} is the server's "
+                    "own mark of a network rule; the agent may not set it"
+                )
+            if "targets" in claim and claim.get("kind") in CLIENT_KINDS:
+                raise ExplanationError(
+                    f"explanation.expect[{index}]: targets are derived by Newton"
+                )
+
+            if claim.get("kind") == "client_blocked":
+                to = claim.get("to")
+                if isinstance(to, str) and to not in ("router", "internet"):
+                    raise ExplanationError(
+                        f"explanation.expect[{index}]: a client_blocked claim is about "
+                        "the router or the internet; Newton derives the addresses"
+                    )
     try:
-        model = Explanation.model_validate(raw)
+        model = (StoredExplanation if allow_targets else Explanation).model_validate(raw)
     except ValidationError as exc:
         raise ExplanationError(_describe(exc)) from None
     if len(model.steps) != change_lines:
@@ -695,11 +833,14 @@ def parse_explanation(
     _platform_claim_lines(stored, platform)
     if allow_targets:
         for index, claim in enumerate(stored["expect"]):
-            if not isinstance(claim, dict) or claim.get("kind") != "client_blocked":
+            if not isinstance(claim, dict):
+                continue
+            kind = claim.get("kind")
+            if kind not in ("client_blocked", "client_reaches"):
                 continue
             if not claim.get("targets"):
                 raise ExplanationError(
-                    f"explanation.expect.{index}: a stored client_blocked claim must "
+                    f"explanation.expect.{index}: a stored {kind} claim must "
                     "carry the targets Newton derived"
                 )
     return stored
@@ -767,9 +908,17 @@ def _describe_client_claim(claim: dict[str, Any]) -> str:
         return f"client in zone {zone} gets a DHCP offer from the zone router"
     if kind == "client_internet":
         return f"client in zone {zone} reaches the internet"
+    if kind == "client_reaches":
+        # the claim is about one address: the rule that named it
+        return f"{claim.get('to')} reachable from {zone}"
+    to = claim.get("to")
+    if to not in ("router", "internet"):
+        # an owner-written target (a network rule's ``to``): the claim is
+        # about that address, not about the internet
+        return f"{to} blocked from {zone}"
     targets = claim.get("targets")
     count = len(targets) if isinstance(targets, list) else 0
-    where = "router addresses" if claim.get("to") == "router" else "the internet"
+    where = "router addresses" if to == "router" else "the internet"
     return f"client in zone {zone} cannot reach {where} ({count} targets)"
 
 

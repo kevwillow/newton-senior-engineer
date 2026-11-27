@@ -178,14 +178,20 @@ def test_a_confirm_refused_before_the_router_is_an_error(configured_lab, monkeyp
     assert _receipts(configured_lab) == []
 
 
-def test_hold_is_refused_for_a_plan_with_client_checks(configured_lab, monkeypatch):
+def test_a_held_apply_with_client_checks_is_not_refused_for_them(configured_lab, monkeypatch):
+    """A held apply runs the client checks in every round, and the confirm
+    runs them once more, so the hold is not refused for them.  (This plan's
+    claims are refused here for another reason: no vantage serves the
+    zone.  The held apply with a client claim is in
+    test_hold_client_checks.py.)"""
     _write_plan(configured_lab, _record())
     monkeypatch.setattr(server._client_checks, "client_claims",
                         lambda expect: [(0, {"zone": "lan"})])
     monkeypatch.setattr(server.NewtonService, "run_script",
                         lambda *a, **k: pytest.fail("must not run"))
     result = server.newton_apply_change("quasar", SID, hold=True)
-    assert "hold cannot be used for a plan with client checks" in result["error"]
+    assert "hold cannot be used" not in result["error"]
+    assert "client check vantage no longer registered" in result["error"]
 
 
 def test_router_text_cannot_pass_for_a_host_refusal(configured_lab, monkeypatch):

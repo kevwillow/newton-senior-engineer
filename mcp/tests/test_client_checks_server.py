@@ -59,6 +59,7 @@ def write_inventory(
     zones=(("guest", "192.0.2.50"),),
     role="inside",
     include_vantage=True,
+    check_targets=None,
 ):
     key = tmp_path / "scan.key"
     key.write_text("synthetic-key", encoding="utf-8")
@@ -72,7 +73,7 @@ def write_inventory(
         'host = "192.0.2.1"',
         'user = "root"',
         'profile = "lab"',
-        'lab = true',
+        "lab = true",
     ]
     if include_vantage:
         lines.extend(
@@ -93,6 +94,9 @@ def write_inventory(
                 f'  {{ name = "{name}", src = "{src}", canary = "192.0.2.1:53" }},'
             )
         lines.append("]")
+        if check_targets is not None:
+            rows = ", ".join(f'"{target}"' for target in check_targets)
+            lines.append(f"check_targets = [ {rows} ]")
     inventory.write_text("\n".join(lines) + "\n", encoding="utf-8")
     monkeypatch.setenv("NEWTON_INVENTORY", str(inventory))
     return inventory
@@ -553,3 +557,90 @@ def test_vc04_07_a_removed_vantage_is_refused_before_the_approval_is_consumed(
     assert approval.is_file()
     assert not (approval.parent / f"{SID}.claimed").exists()
     assert not (approval.parent / f"{SID}.used").exists()
+
+
+# ---- VC-21: a claim the zone's vantage may not probe refuses the plan ----------
+
+
+#: The ranges the vantage may probe: the guest zone of the router only.
+NARROW_TARGETS = ("192.168.30.0/24",)
+
+
+def test_vc21_01_an_agent_claim_the_vantage_may_not_probe_refuses_the_plan(
+    tmp_path, monkeypatch
+):
+    """A claim whose target the vantage may not probe refuses the plan.
+
+    The claim is blocked to the router, so its targets are the router's own
+    addresses: one of them is outside the ranges the vantage may probe, so
+    the check could not run and nothing is planned.
+    """
+    write_inventory(tmp_path, monkeypatch, check_targets=NARROW_TARGETS)
+    monkeypatch.setattr(
+        server.NewtonService,
+        "run_script",
+        lambda *args, **kwargs: pytest.fail("must not run the change script"),
+    )
+    monkeypatch.setattr(
+        server.NewtonService,
+        "read",
+        lambda self, device, command: dump_result(),
+    )
+    with pytest.raises(server.NewtonError) as err:
+        client_plan(server.NewtonService(), [C_BLOCKED])
+    assert str(err.value) == (
+        "client check 1 (the agent's claim) cannot run from vantage inside-a: "
+        "10.0.0.1:22 is outside its check_targets; nothing planned"
+    )
+    plans = tmp_path / "state" / "plans"
+    assert not plans.exists() or list(plans.glob("*.json")) == []
+
+
+def test_vc21_02_the_public_resolvers_on_443_still_plan_with_narrow_check_targets(
+    tmp_path, monkeypatch
+):
+    """The two public resolvers keep their fixed port list: a claim about
+    the internet runs even when the vantage may probe nothing else."""
+    write_inventory(tmp_path, monkeypatch, check_targets=NARROW_TARGETS)
+    monkeypatch.setattr(
+        server.NewtonService,
+        "run_script",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            [], 0, PLAN_OUTPUT, ""
+        ),
+    )
+    planned = client_plan(
+        server.NewtonService(),
+        [{"kind": "client_blocked", "zone": "guest", "to": "internet"}],
+    )
+    record = json.loads(
+        (tmp_path / "state" / "plans" / f"{SID}.json").read_text(encoding="utf-8")
+    )
+    assert record["explanation"]["expect"][0]["targets"] == [
+        "1.1.1.1:443",
+        "9.9.9.9:443",
+    ]
+    assert record["plan_hash"] == planned["plan_hash"]
+
+
+def test_vc21_03_the_apply_refuses_a_stored_claim_the_vantage_may_not_probe(
+    tmp_path, monkeypatch
+):
+    """The apply builds the vantage spec, and a claim the vantage may not
+    probe refuses it there too: the plan was made before the vantage's
+    ranges changed."""
+    write_inventory(tmp_path, monkeypatch, check_targets=NARROW_TARGETS)
+    write_script_directory(tmp_path, monkeypatch)
+    record = client_record(expect=[C_BLOCKED])
+    write_plan(tmp_path, record)
+    monkeypatch.setattr(
+        server.NewtonService,
+        "run_script",
+        lambda *args, **kwargs: pytest.fail("must not run the change script"),
+    )
+    with pytest.raises(server.NewtonError) as err:
+        server.NewtonService().apply("quasar", SID)
+    assert str(err.value) == (
+        "client check 1 (the agent's claim) cannot run from vantage inside-a: "
+        "10.0.0.1:22 is outside its check_targets; nothing planned"
+    )

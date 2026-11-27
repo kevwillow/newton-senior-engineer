@@ -199,8 +199,11 @@ def test_envelope_untrusted_device_data_note_exact_text_and_used_as_instructions
     )
     assert envelope_mod.UNTRUSTED_DEVICE_DATA_NOTE == expected
     assert server.mcp is not None
+    # the untrusted-data note leads the instructions; the network-rules
+    # note follows, said once for every plan (1.6.0)
     assert server.mcp.instructions == (
-        f"{envelope_mod.UNTRUSTED_DEVICE_DATA_NOTE} {server.ENVELOPE_REWRITE_NOTE}"
+        f"{envelope_mod.UNTRUSTED_DEVICE_DATA_NOTE} {server.ENVELOPE_REWRITE_NOTE} "
+        f"{server.NETWORK_RULES_NOTE}"
     )
 
 

@@ -181,7 +181,7 @@ what its prompt asks for, then update the bootstrap itself with `newton-bootstra
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![OpenWrt 25.12](https://img.shields.io/badge/OpenWrt-25.12-00B5E2)](#supported-devices)
-[![Status: 1.5.2](https://img.shields.io/badge/Status-1.5.2-2f9a54)](#status)
+[![Status: 1.6.0](https://img.shields.io/badge/Status-1.6.0-2f9a54)](#status)
 
 ## What it looks like
 
@@ -230,7 +230,7 @@ except the changes Newton always asks about.
 
 Everything Newton does, in one list.
 
-- ✓ = in the current release, 1.5.2.
+- ✓ = in the current release, 1.6.0.
 
 A ✓ line says so when the feature works in one mode only, was run only in the virtual lab, or is covered by tests
 with no recorded run on a real router.
@@ -250,12 +250,13 @@ with no recorded run on a real router.
 - ✓ Checks of the AI's claims: the AI writes down what should be true afterwards, as probes of 19 fixed types, and Newton checks them each round. In the installed mode a false claim triggers the undo. In the no-install mode a claim whose probe cannot run there, and every client claim, is listed as "not verified", and the change can still be confirmed. Covered by tests.
 - ✓ Live checks for each hardening setting a change touches, so a setting the router silently ignores is never kept (installed mode).
 - ✓ Checks from a client's point of view: DNS, DHCP and internet work, and anything meant to be blocked **is** blocked. They run from a client machine you register with `newton-vantage-setup` (`docs/INSTALL.md` step 11 shows how); a plan with a client check and no registered client for its zone is refused, and the window must be at least 150 s. A check that can't run is reported as "not tested", never as passed, and stops the confirm. Run in the virtual lab only, not on a real router. In the no-install mode client checks are listed as not verified.
+- ✓ Your own network rules, on every change of an installed OpenWrt router. The rules live in `rules.toml` next to the inventory and only you write them (`scripts/newton-rules`); every rule of the device joins every plan as a client check of the rule's zone, run from that zone's registered inside vantage. A rule that fails means no confirm, and the router rolls the change back at its deadline. A rule that cannot run refuses the plan before anything is staged (no vantage for the zone, a broken rules file, a mode that cannot run them, or a target the vantage may not probe); the reads still work. Run in the virtual lab only, not on a real router.
 - ✓ Undo after confirm ("undo yesterday's change"), as a new approved change, on installed OpenWrt routers only. If any later change or edit touched the same config, the whole undo is refused. It does not undo packages, passwords, reboots or client leases. Covered by tests; no lab scenario runs it.
 - ✓ A backup before every change, in both modes. A backup tool (`newton_backup`, installed mode). A restore drill passed on the real router; it restores the lab runner's `sysupgrade -b` archive, because Newton has no restore tool.
 - ✓ A receipt for every change: what changed, who approved it, what was checked, and how to undo it, plus a copy of the backup kept on the Newton host. A receipt that cannot be written never changes the result. Covered by tests.
 - ✓ An audit log with the masked diff. Under the MCP server it records the operator as `mcp`; who approved a change is in its receipt.
 - ✓ Around the apply and the rollback, Newton restarts the firewall when a change touches named nft objects, and restarts dnsmasq and checks DNS and DHCP when logd restarted.
-- ✓ Apply with hold, for a change only you can test from a client (installed OpenWrt routers only): `newton_apply_change` with `hold=true` (`owrt-change.sh apply ... --hold`) runs the same verify rounds and does not confirm, so the undo stays armed. `newton_confirm_change` (`owrt-change.sh confirm`) keeps the change after one more verify round; `newton_abort_change` rolls it back; if neither comes before the window ends, the router rolls it back. Refused for a change to named nft objects and for a plan with client checks. A held apply writes a receipt with outcome unknown; the confirm adds a confirmed one. Covered by tests only.
+- ✓ Apply with hold, for a change only you can test from a client (installed OpenWrt routers only): `newton_apply_change` with `hold=true` (`owrt-change.sh apply ... --hold`) runs the same verify rounds and does not confirm, so the undo stays armed. `newton_confirm_change` (`owrt-change.sh confirm`) keeps the change after one more verify round; `newton_abort_change` rolls it back; if neither comes before the window ends, the router rolls it back. Refused for a change to named nft objects. With client checks the confirm runs the sealed checks again right before it confirms: a failure refuses the confirm and the router rolls the change back. A held apply writes a receipt with outcome unknown; the confirm adds a confirmed one. The hold with client checks ran in the virtual lab, not on a real router.
 - ✓ An abort of a change that was already confirmed is refused and points to `newton_plan_undo`, instead of reporting success while the change stays live. When the router no longer knows the session, Newton asks for its status and records a rollback only when the router says it rolled back; otherwise it says the outcome is not known. Covered by tests only.
 
 **Approvals you control**
@@ -291,7 +292,7 @@ with no recorded run on a real router.
 - ✓ Setup helpers: `newton-router-setup` (check, install, no-install, offer-installed, approval-key, swap-key, add-key, revoke, profile lab or prod, upgrade, rollback, uninstall, lab-snapshot, owner-run, owner-finish), `newton-enrol` (totp, level passphrase or totp, rotate, grant-off), `newton-vantage-setup` (sets up the client machine for client checks and scans), `newton-doctor`, and `newton-bootstrap` for updates.
 - ✓ `newton-router-setup swap-key` warns that it removes the plain key from the router (after the swap that key no longer logs in as root) and asks before it does; `--remove-plain-key` skips the question. The no-install uninstall asks before it deletes the device's owner scripts and plan records. Covered by tests only.
 - ✓ A no-install mode for OpenWrt (`newton-router-setup DEVICE no-install`): nothing of Newton on the router but one limited web-interface user. Newton applies DHCP reservations and DNS entries itself under OpenWrt's own undo timer; every other change comes to you as a script you approve and run. Changes that could lock you out of management access or through the firewall are refused at plan time. It offers seven tools (list devices, read, plan, apply, status, abort, end an easy grant): no backup tool, undo after confirm, hardening levels, scans or guided audit. It cannot read the rpcd, uhttpd or dropbear config, files, cron, keys, passwords or packages, and every no-install plan says so.
-- ✓ `scripts/newton-rules` (`add`, `remove`, `list`) for the network rules file. Planning does not read the file yet, so a rule changes nothing in this release.
+- ✓ `scripts/newton-rules` (`add`, `remove`, `list`) for the network rules file. The rules join every plan of an installed OpenWrt router as client checks of their zone.
 
 **Hardening**
 - ✓ Three levels, Standard, Hardened and Lockdown, from a catalogue of 47 controls covering management access, firewall, zones, DNS, DHCP, NTP, Wi-Fi, services, updates, logging and IPv6. On a real router `newton_plan_tier` carries 10 controls in one batch for Standard, and 17 controls in two batches for Hardened and for Lockdown; Lockdown differs from Hardened in one line (dropbear `DirectInterface` instead of `Interface`). Controls that depend on the lab or on the router's own setup are skipped: OW-MGMT-02, OW-FW-06, OW-NTP-01, OW-ZONE-02, OW-DNS-06, OW-DHCP-01, OW-LOG-01, OW-DNS-07 and OW-DNS-08. No level applies a Wi-Fi control yet. The opt-in controls (guest network, DNSSEC, DoH, IPv6 off, SSH key-only, UPnP on) are not reachable through the levels. Of the 47 controls, 7 have no change written yet and 8 are audit-only.
@@ -321,7 +322,7 @@ with no recorded run on a real router.
 
 **Lab and test evidence**
 - ✓ A virtual lab: a virtual OpenWrt router, a virtual ISP with two upstreams and test clients, reset to a snapshot for every scenario.
-- ✓ 96 scenario files in [`lab/scenarios`](lab/scenarios) for the virtual router (no full run of them is recorded in this repository), and a separate real-router suite in [`lab/scenarios-pulsar`](lab/scenarios-pulsar) (Wi-Fi included, through a USB adapter on the test client); its README lists which scenarios are ported. Its full run passed 97 of 97 scenarios on the Asus RT-AX57M (2026-10-23).
+- ✓ 100 scenario files in [`lab/scenarios`](lab/scenarios) for the virtual router (no full run of them is recorded in this repository), and a separate real-router suite in [`lab/scenarios-pulsar`](lab/scenarios-pulsar) (Wi-Fi included, through a USB adapter on the test client); its README lists which scenarios are ported. Its full run passed 97 of 97 scenarios on the Asus RT-AX57M (2026-10-23).
 - ✓ A lab isolation check (`scripts/newton-lab-isolation`): it watches a home-network interface for DHCP server replies and IPv6 router adverts and fails on any from a source not on its allow list. Its allow list is by MAC address, so a lab device that spoofs an allowed address passes.
 - ✓ A support table generated from test results, with each device's undo method and what is untested.
 - ✓ Tested with Claude Code. Setup notes for Codex, OpenCode and other MCP clients that run on the Newton host are in [docs/SETUP-CLIENTS.md](docs/SETUP-CLIENTS.md) (not run; Claude Desktop is not supported: it has no Linux build).
@@ -456,15 +457,15 @@ upstreams and a test client on Proxmox, and runs the scenarios against them. [`d
 explains the method. [`docs/TESTING-FOR-REVIEWERS.md`](docs/TESTING-FOR-REVIEWERS.md) lists what to try first, and
 the things we most want broken.
 
-Test suites at the 1.5.2 release gate, run in the full development tree (this public tree leaves out some development-only tests, so its own counts are lower):
+Test suites at the 1.6.0 release gate, run in the full development tree (this public tree leaves out some development-only tests, so its own counts are lower):
 
 | Suite | Path | Passing |
-|---|---|---|
-| MCP server | `mcp/tests/` | 13,288 (15 skipped) |
+|---|---|---:|
+| MCP server | `mcp/tests/` | 13,334 (15 skipped) |
 | Router program | `device/openwrt/newton-router/tests/` | 3,419 |
 | Guard | `device/openwrt/newton-guard/tests/` | 186 |
-| Protocol | `tests/protocol/` | 3,702 (5 skipped) |
-| Lab scenarios | `lab/tests/` + live runs | 1,324 |
+| Protocol | `tests/protocol/` | 3,704 (6 skipped) |
+| Lab scenarios | `lab/tests/` + live runs | 1,375 |
 | Profiles | `tests/profiles/` | 112 |
 | Serial console | `tests/serial/` | 329 |
 
@@ -499,14 +500,14 @@ See [`SECURITY.md`](SECURITY.md).
 
 ## Status
 
-**Released: 1.5.2.** OpenWrt in the installed and no-install modes (plus experimental VyOS, MikroTik and Junos), the
+**Released: 1.6.0.** OpenWrt in the installed and no-install modes (plus experimental VyOS, MikroTik and Junos), the
 one-line setup, in-client approvals, undo after confirm, client-side checks and receipts. 1.1 added the no-install
 mode: Newton puts nothing on the router but one limited web-interface user, applies DHCP reservations and DNS entries
 under OpenWrt's own undo timer, and hands every other change to you as a script you approve and run. 1.4.0 adds the
 Active Directory audit and the Active Directory changes, with the six `newton_ad_*` tools, `scripts/newton-ad-setup`, the
 `/usr/local/bin/newton-ad-setup` launcher and `newton-approve ad-change`; an apply that holds the confirm for a test
 you run from a client, with the `newton_confirm_change` tool (covered by tests only); and all the fixes since 1.1.3. It has
-twenty-four MCP tools. 1.4.1 and 1.4.2 are fixes releases (`CHANGELOG.md` lists the fixes). 1.5.0 adds a twenty-fifth tool, `newton_plan_ad_forward`, and Active Directory build mode with three tools (`newton_ad_build_plan`, `newton_ad_build_run` and `newton_ad_build_status`): twenty-eight tools in all. One full build passed stages 0 to 10 on Windows Server 2025 evaluation VMs on Proxmox (2026-11-24); the Hyper-V checkpoints are covered by tests only. 1.5.1 fixes two bugs found in review: a full state directory now stops an AD build with a clear reason instead of an error, and the write setups no longer say nothing was changed after their first steps ran. 1.5.2 writes the change protocol down as one contract (`docs/design/13-CHANGE-PROTOCOL.md`) that names the tests proving each rule in each mode, says whether the running network matches after the router's guard put a change back on its own (and gives the command that fixes it when it cannot show that), and was run on a real router with the controller killed in the middle of a change. Active Directory changes are approved by you, with the undo armed on the domain controller until Newton confirms; once confirmed, Newton does not undo it (a known limit: if the PDC role moves while an earlier change of the same target is still armed on the old PDC, that domain controller's undo can write the earlier before-image over the new change): you plan the reverse change; an unlock has no undo and is written at once. The Active Directory work was tested live on two-DC Windows Server 2025 and Samba 4.22 lab
+twenty-four MCP tools. 1.4.1 and 1.4.2 are fixes releases (`CHANGELOG.md` lists the fixes). 1.5.0 adds a twenty-fifth tool, `newton_plan_ad_forward`, and Active Directory build mode with three tools (`newton_ad_build_plan`, `newton_ad_build_run` and `newton_ad_build_status`): twenty-eight tools in all. One full build passed stages 0 to 10 on Windows Server 2025 evaluation VMs on Proxmox (2026-11-24); the Hyper-V checkpoints are covered by tests only. 1.5.1 fixes two bugs found in review: a full state directory now stops an AD build with a clear reason instead of an error, and the write setups no longer say nothing was changed after their first steps ran. 1.5.2 writes the change protocol down as one contract (`docs/design/13-CHANGE-PROTOCOL.md`) that names the tests proving each rule in each mode, says whether the running network matches after the router's guard put a change back on its own (and gives the command that fixes it when it cannot show that), and was run on a real router with the controller killed in the middle of a change. 1.6.0 makes your own network rules part of every change: the rules of `rules.toml` (written with `newton-rules`, shipped in 1.1.3) join every plan of an installed OpenWrt router, each rule becomes a client check run from the registered inside vantage of its zone, and a rule that fails means no confirm (the router rolls the change back at its deadline); a rule that cannot run refuses the plan, before anything is staged, while the reads still work. The router program is unchanged (1.3.4), so no `newton-router-setup upgrade` is needed. Active Directory changes are approved by you, with the undo armed on the domain controller until Newton confirms; once confirmed, Newton does not undo it (a known limit: if the PDC role moves while an earlier change of the same target is still armed on the old PDC, that domain controller's undo can write the earlier before-image over the new change): you plan the reverse change; an unlock has no undo and is written at once. The Active Directory work was tested live on two-DC Windows Server 2025 and Samba 4.22 lab
 domains, on code from just before the latest helper changes: the write setups, disable and enable, the machine account
 quota, unlock, the rollback of a withheld confirm, the refusal of a request for another device, and confirmation on
 every domain controller. Covered by tests only: the 52 audit checks (48 against collector output measured on lab domain
@@ -521,8 +522,8 @@ There is no 1.2 or 1.3 release: those numbers were planning labels, and release 
   line for each mode in the approval text, running settings made to match after the router's guard restores a change
   on its own (or a plain warning with the command that fixes it), and recorded runs that lose the controller in the
   middle of a change.
-- **1.6:** network rules and recipes: the rest of network rules (the store shipped in 1.1.3; planning does not read
-  it yet, so the rules are not re-checked on every change), reviewed recipes for common jobs, a blast-radius view, a recovery card and a network
+- **1.6.1:** network rules and recipes, the rest: the network rules join every change of an installed OpenWrt router in
+  1.6.0, and what is left is the reviewed recipes for common jobs, a blast-radius view, a recovery card and a network
   map tool; Active Directory recipes (onboard and offboard a user, a new department OU, the two-round krbtgt reset) and a fix
   for each audit finding.
 - **1.7:** Linux and Windows 11 hosts, with a gaming performance advisor for Windows 11.

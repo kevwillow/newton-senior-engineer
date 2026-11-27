@@ -18,8 +18,10 @@ This module covers the host-side pieces only:
 * VC-11 a failed client claim is read from the local-check block of the log;
 * VC-12 the two new inventory keys (``zones``, ``check_targets``);
 * VC-13 the two places that print a claim in words.
-* VC-18 the second cold review: the default allow-list of the forced
-  command, the write of the spec and the verify budget.
+* VC-18 the allow-list of the forced command, the write of the spec and the
+  verify budget.
+* VC-21 a claim the zone's vantage may not probe refuses the plan (the
+  rule of the forced command's own allow-list).
 
 Nothing here reaches a device, a router or a vantage: no ssh, no network.
 """
@@ -123,8 +125,19 @@ def plan_record(expect):
     }
 
 
-def a_vantage(*, name="inside-a", role="inside", devices=("lab1",), zones=("guest",)):
-    """A Vantage built by hand (no inventory file, no key on disk)."""
+def a_vantage(
+    *,
+    name="inside-a",
+    role="inside",
+    devices=("lab1",),
+    zones=("guest",),
+    check_targets=scans.DEFAULT_CHECK_TARGETS,
+):
+    """A Vantage built by hand (no inventory file, no key on disk).
+
+    The ranges it may probe are the ones the loader fills in when the
+    inventory says nothing, so a hand-built vantage is the ordinary one.
+    """
     zone_rows = tuple(
         scans.VantageZone(
             name=zone,
@@ -146,6 +159,7 @@ def a_vantage(*, name="inside-a", role="inside", devices=("lab1",), zones=("gues
         role=role,
         devices=tuple(devices),
         zones=zone_rows,
+        check_targets=tuple(check_targets),
     )
 
 
@@ -947,7 +961,7 @@ def test_vc14_05_a_spec_without_a_usable_session_id_is_refused(tmp_path):
         cc.write_spec(tmp_path / "runs", {"version": 1, "sid": "../escape", "groups": []})
 
 
-# ---- VC-18: the second cold review ---------------------------------------------
+# ---- VC-18: the allow-list of the forced command --------------------------------
 
 
 def test_vc18_01_every_router_address_kind_is_inside_the_default_allow_list():
@@ -1162,3 +1176,191 @@ def test_vc19_08b_an_installed_repair_message_names_the_sudo_form(monkeypatch, t
 def test_vc19_09_the_repair_message_refuses_a_vantage_name_outside_the_grammar(bad):
     with pytest.raises(cc.ClientCheckError):
         cc.old_forced_command_message(bad)
+
+
+# ---- VC-21: a claim the zone's vantage may not probe refuses the plan ------------
+
+
+#: The ranges the lab's vantage may probe: the guest zone of the lab router
+#: only.
+NARROW = ("192.168.30.0/24",)
+
+#: A router behind CGNAT: its only address is in the CGNAT range.
+CGNAT_DUMP = {
+    "interface": [
+        {
+            "interface": "wan",
+            "up": True,
+            "ipv4-address": [{"address": "100.64.0.1", "mask": 10}],
+        }
+    ]
+}
+
+
+def test_vc21_01_a_target_outside_the_check_targets_refuses_the_spec():
+    """VC-21: a claim the vantage may not probe cannot run.
+
+    The forced command answers NOT-TESTED not-allowed for a target that is
+    outside its allow-list, and the change would then roll back after the
+    whole window.  A claim that cannot run refuses the plan instead.
+    """
+    vantages = {"inside-a": a_vantage(check_targets=NARROW)}
+    expect = stored_expect([C_DNS, C_BLOCKED_ROUTER])
+    with pytest.raises(cc.ClientCheckError) as err:
+        cc.build_spec(SID, expect, vantages, "lab1")
+    assert str(err.value) == (
+        "client check 2 (the agent's claim) cannot run from vantage inside-a: "
+        "10.0.0.1:22 is outside its check_targets; nothing planned"
+    )
+
+
+def test_vc21_02_a_rule_claim_names_its_rule_in_the_refusal():
+    """The refusal names the rule the owner wrote, so the owner knows
+    which rule cannot run."""
+    vantages = {"inside-a": a_vantage(check_targets=NARROW)}
+    expect = [
+        C_DNS,
+        {
+            "kind": "client_blocked",
+            "zone": "guest",
+            "to": "router",
+            "source": "rule",
+            "rule": "r-no-admin",
+            "targets": ["10.0.0.1:22"],
+        },
+    ]
+    with pytest.raises(cc.ClientCheckError) as err:
+        cc.build_spec(SID, expect, vantages, "lab1")
+    assert str(err.value) == (
+        "client check 2 (r-no-admin) cannot run from vantage inside-a: "
+        "10.0.0.1:22 is outside its check_targets; nothing planned"
+    )
+
+
+def test_vc21_03_the_public_resolvers_on_443_run_with_narrow_check_targets():
+    """The two public resolvers keep their fixed port list: a claim about
+    the internet runs even when the vantage may probe nothing else."""
+    vantages = {"inside-a": a_vantage(check_targets=NARROW)}
+    expect = stored_expect([C_BLOCKED_INTERNET])
+    spec = cc.build_spec(SID, expect, vantages, "lab1")
+    assert spec["groups"][0]["checks"] == [
+        {
+            "claim": 1,
+            "kind": "client_blocked",
+            "to": "internet",
+            "targets": ["1.1.1.1:443", "9.9.9.9:443"],
+        }
+    ]
+
+
+def test_vc21_04_a_resolver_on_another_port_is_refused():
+    """The forced command gives the resolvers ports 22, 53, 80 and 443
+    only, so a claim about another port of one cannot run."""
+    vantages = {"inside-a": a_vantage(check_targets=NARROW)}
+    expect = [
+        C_DNS,
+        {
+            "kind": "client_blocked",
+            "zone": "guest",
+            "to": "internet",
+            "targets": ["1.1.1.1:853"],
+        },
+    ]
+    with pytest.raises(cc.ClientCheckError) as err:
+        cc.build_spec(SID, expect, vantages, "lab1")
+    assert str(err.value) == (
+        "client check 2 (the agent's claim) cannot run from vantage inside-a: "
+        "1.1.1.1:853 is outside its check_targets; nothing planned"
+    )
+
+
+def test_vc21_05_a_reach_claim_to_a_resolver_is_refused():
+    """The forced command's reach check refuses every target that is not
+    inside the allow-list: the two public resolvers are never a reach
+    target."""
+    vantages = {"inside-a": a_vantage(check_targets=NARROW)}
+    expect = [
+        {
+            "kind": "client_reaches",
+            "zone": "guest",
+            "to": "1.1.1.1:443",
+            "targets": ["1.1.1.1:443"],
+        },
+    ]
+    with pytest.raises(cc.ClientCheckError) as err:
+        cc.build_spec(SID, expect, vantages, "lab1")
+    assert str(err.value) == (
+        "client check 1 (the agent's claim) cannot run from vantage inside-a: "
+        "1.1.1.1:443 is outside its check_targets; nothing planned"
+    )
+
+
+def test_vc21_06_a_cgnat_router_address_outside_the_check_targets_is_refused():
+    """A router behind CGNAT has an address in 100.64.0.0/10: a vantage
+    that may not probe that range cannot check the router's addresses."""
+    vantages = {"inside-a": a_vantage(check_targets=("10.0.0.0/8", "192.168.0.0/16"))}
+    targets = cc.derive_router_targets(CGNAT_DUMP)
+    assert targets == ["100.64.0.1:22", "100.64.0.1:443", "100.64.0.1:80"]
+    expect = [
+        {
+            "kind": "client_blocked",
+            "zone": "guest",
+            "to": "router",
+            "targets": targets,
+        },
+    ]
+    with pytest.raises(cc.ClientCheckError) as err:
+        cc.build_spec(SID, expect, vantages, "lab1")
+    assert str(err.value) == (
+        "client check 1 (the agent's claim) cannot run from vantage inside-a: "
+        "100.64.0.1:22 is outside its check_targets; nothing planned"
+    )
+
+
+def test_vc21_07_the_default_check_targets_cover_the_cgnat_range():
+    """The default allow-list is the private space, the CGNAT range
+    included: a router behind CGNAT is checked like any other router."""
+    vantages = {"inside-a": a_vantage()}
+    targets = cc.derive_router_targets(CGNAT_DUMP)
+    expect = [
+        {
+            "kind": "client_blocked",
+            "zone": "guest",
+            "to": "router",
+            "targets": targets,
+        },
+    ]
+    spec = cc.build_spec(SID, expect, vantages, "lab1")
+    assert spec["groups"][0]["checks"][0]["targets"] == targets
+
+
+def test_vc21_08_a_host_inside_the_check_targets_may_be_probed_on_any_port():
+    """A host inside the allow-list may be probed on any port the claim
+    names; the fixed port list belongs to the two public resolvers."""
+    vantages = {"inside-a": a_vantage(check_targets=NARROW)}
+    expect = [
+        {
+            "kind": "client_blocked",
+            "zone": "guest",
+            "to": "router",
+            "targets": ["192.168.30.1:853"],
+        },
+    ]
+    spec = cc.build_spec(SID, expect, vantages, "lab1")
+    assert spec["groups"][0]["checks"][0]["targets"] == ["192.168.30.1:853"]
+
+
+def test_vc21_09_the_check_targets_are_read_as_their_network():
+    """A check_targets entry that carries host bits is the network it
+    names, the way the loader reads it."""
+    vantages = {"inside-a": a_vantage(check_targets=("10.0.0.1/8",))}
+    expect = [
+        {
+            "kind": "client_blocked",
+            "zone": "guest",
+            "to": "router",
+            "targets": ["10.9.9.9:22"],
+        },
+    ]
+    spec = cc.build_spec(SID, expect, vantages, "lab1")
+    assert spec["groups"][0]["checks"][0]["targets"] == ["10.9.9.9:22"]

@@ -15,7 +15,10 @@ functions: no ssh, no device, no vantage.  It derives the addresses a blocked
 claim is checked against, it finds the vantage that serves a zone, it fills
 the targets Newton owns (the agent may not supply them), it builds the spec
 the vantage runner reads, and it builds the one string the router-side script
-runs the vantage runner with.
+runs the vantage runner with.  It also refuses a claim whose target the zone's
+vantage may not probe: the forced command would answer NOT-TESTED
+not-allowed, so such a check could never run and the plan is refused instead
+of rolling back after the whole window.
 
 The addresses used here are the router's own, read from
 ``ubus call network.interface dump``; only private ones (RFC1918 and the
@@ -53,6 +56,13 @@ ROUTER_PORTS = (22, 80, 443)
 
 # The two public resolvers an internet claim is checked against.
 INTERNET_TARGETS = ("1.1.1.1:443", "9.9.9.9:443")
+
+# The two public resolvers the forced command may probe without a target
+# line of its own, and the ports it may probe them on.  A host inside the
+# allow-list may be probed on any port the claim names; the two
+# resolvers keep this fixed list.
+PUBLIC_RESOLVERS = ("1.1.1.1", "9.9.9.9")
+RESOLVER_PORTS = (22, 53, 80, 443)
 
 # How many addresses a single blocked claim may carry.
 MAX_TARGETS = 24
@@ -277,6 +287,96 @@ def fill_targets(
     return filled
 
 
+def _in_check_targets(vantage: Vantage, address: ipaddress.IPv4Address) -> bool:
+    """True when the address is inside one of the vantage's check_targets.
+
+    The CIDRs are read the way the loader reads them: the host bits are
+    ignored, so ``10.0.0.1/8`` is the network ``10.0.0.0/8``.
+    """
+    for cidr in vantage.check_targets:
+        try:
+            network = ipaddress.IPv4Network(cidr, strict=False)
+        except ValueError:
+            continue
+        if address in network:
+            return True
+    return False
+
+
+def target_allowed(vantage: Vantage, target: str, kind: str) -> bool:
+    """True when the forced command may probe this target for this claim.
+
+    The rule is the forced command's own (``scripts/newton-vantage-check``):
+
+    * ``do_blocked`` refuses a target that is not inside the allow-list
+      (``in_targets``) and is not one of the two public resolvers, and
+      ``tcp_port_allowed`` then allows any port of a host inside the
+      allow-list but ports 22, 53, 80 and 443 of a resolver;
+    * ``do_reach`` refuses every target that is not inside the allow-list:
+      the two public resolvers are never a reach target.
+    """
+    address_text, _, port_text = target.rpartition(":")
+    try:
+        address = ipaddress.IPv4Address(address_text)
+        port = int(port_text)
+    except ValueError:
+        return False
+    inside = _in_check_targets(vantage, address)
+    if kind == "client_reaches":
+        # do_reach: the target must be inside the allow-list.
+        return inside
+    if inside:
+        # tcp_port_allowed: a host inside the allow-list, any port.
+        return True
+    # tcp_port_allowed: a public resolver, the fixed port list only.
+    return address_text in PUBLIC_RESOLVERS and port in RESOLVER_PORTS
+
+
+def check_targets_allowed(
+    expect: list[dict[str, Any]],
+    vantages: dict[str, Vantage],
+    device: str,
+) -> None:
+    """Refuse a claim whose target the zone's vantage may not probe.
+
+    A claim that cannot run must not be planned: the forced command
+    answers NOT-TESTED not-allowed for a target outside its allow-list,
+    and the change would roll back after the whole window instead of
+    being confirmed.  The rule is the forced command's own (see
+    ``target_allowed``).
+
+    The refusal names the claim, the rule it came from (when it came
+    from one) and the vantage that cannot run it.  A claim without
+    targets is left to the caller that derives them: this only judges
+    the targets that are there.
+    """
+    for number, claim in client_claims(expect):
+        targets = claim.get("targets")
+        if not isinstance(targets, list) or not targets:
+            continue
+        zone = claim.get("zone")
+        if not isinstance(zone, str) or not zone:
+            continue
+        vantage = vantage_for_zone(vantages, device, zone)
+        kind = claim.get("kind")
+        for target in targets:
+            if not isinstance(target, str):
+                continue
+            if target_allowed(vantage, target, kind):
+                continue
+            rule_id = claim.get("rule")
+            who = (
+                rule_id
+                if isinstance(rule_id, str) and rule_id
+                else "the agent's claim"
+            )
+            raise ClientCheckError(
+                f"client check {number} ({who}) cannot run from vantage "
+                f"{vantage.name}: {target} is outside its check_targets; "
+                "nothing planned"
+            )
+
+
 def local_check_string(run_path: Path, sid: str) -> str:
     """The value of ``OWRT_LOCAL_CHECK``.
 
@@ -305,9 +405,13 @@ def build_spec(
     One group per (vantage, zone), the checks of a group in claim order, and
     every check names the claim number it stands for.  The vantage's check
     key (not its scan key) is the one the forced command uses.
+
+    A claim whose target the vantage may not probe refuses the spec: the
+    check could not run, so the change could never be confirmed.
     """
     if not isinstance(sid, str) or not _SID_RE.fullmatch(sid):
         raise ClientCheckError("the session id has an unusable shape")
+    check_targets_allowed(expect, vantages, device)
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     order: list[tuple[str, str]] = []
     for number, claim in client_claims(expect):

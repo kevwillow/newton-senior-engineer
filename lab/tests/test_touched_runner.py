@@ -781,7 +781,7 @@ batch = "set system.x=whatever"
     assert argv1.count("abort") == 2  # original + the second session
 
 
-# ---------- end-to-end (mocked script): second cold review --------------------
+# ---------- end-to-end (mocked script): the restage path -------------------------
 
 
 def test_lab_runner_restage_still_disagrees_names_control_ids(

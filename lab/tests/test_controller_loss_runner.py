@@ -762,8 +762,11 @@ def test_the_spec_file_is_removed_when_the_loss_run_raises(lab, tmp_path,
     spec_path = tmp_path / "vantage-spec.json"
     spec_path.write_text("{}")
     scen.client_checks = [{"claim": "the option is set"}]
+    # the helper takes the claims the vantage runs as its third argument now
+    # (the scenario's own client checks and, when the scenario carries rules,
+    # the claims of those rules after them)
     monkeypatch.setattr(nl, "client_check_env",
-                        lambda s, sid: ({}, spec_path))
+                        lambda s, sid, claims=None: ({}, spec_path))
 
     def failing_loss(*args, **kwargs):
         raise RuntimeError("the loss run failed")

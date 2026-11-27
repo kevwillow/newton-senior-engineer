@@ -38,6 +38,7 @@ from . import envelope as _envelope
 from . import explanation as _explanation
 from . import grants as _grants
 from . import inventory_file as _inventory_file
+from . import net_rules as _net_rules
 from . import probes as _probes
 from . import redact as _redact
 from . import ad_forward as _ad_forward
@@ -1127,6 +1128,15 @@ ABORT_TIMEOUT_NEXT_STEP = (
     "The abort did not finish in time, so whether it rolled the change back is not known "
     "from here. Call newton_change_status to see where it stands; unless the change was "
     "confirmed, the router rolls it back when its window ends."
+)
+# The refusal of a confirm whose plan record cannot be read: the record of
+# this device and session is gone, or it is not the record that was sealed
+# (its hash does not match), or its explanation does not parse.  A confirm
+# that cannot say which claims the change was sealed with is not made
+# without them.
+PLAN_RECORD_UNREADABLE = (
+    "the plan record of this session cannot be read; the change was not "
+    "confirmed and the router puts it back at its deadline"
 )
 
 
@@ -2388,6 +2398,7 @@ class NewtonService:
         # no-install router has no program of Newton on it.
         device = self.device_for(_tool, device_name)
         if device.access == "no-install":
+            _refuse_rules_in_this_mode(device_name)
             from . import noinstall_flow
 
             return noinstall_flow.plan(
@@ -2398,9 +2409,14 @@ class NewtonService:
                 explanation=explanation,
                 owner_confirmed_in_chat=owner_confirmed_in_chat,
             )
+        # The timeout the caller named (None when it named none): a plan
+        # that carries client claims takes the minimum the vantage round
+        # needs, and a caller who named less is refused as before.
+        caller_timeout_s = timeout_s
         if timeout_s is None:
             timeout_s = 90
         if device.platform != "openwrt":
+            _refuse_rules_in_this_mode(device_name)
             return vendor_flow.plan(
                 self,
                 device,
@@ -2434,9 +2450,39 @@ class NewtonService:
             _explanation.change_lines(uci_batch),
             waived=waived,
         )
+        # The owner's network rules for this device join the plan.  Their
+        # claims are appended to the agent's, so the vantage check, the
+        # timeout minimum, the targets Newton derives, the sealing and
+        # the plan hash all treat them like the agent's own client
+        # claims.
+        rules = _load_network_rules(device_name)
+        rule_claims = _net_rules.rule_claims(rules)
+        if rule_claims:
+            # A rule claim that repeats one of the agent's claims (the
+            # same kind, zone and target) is NOT merged with it: both
+            # are kept.  The check then runs twice, which is harmless,
+            # and the rule keeps its own identity (its id), so the owner
+            # can see which rule was checked.
+            #
+            # The rule claims do NOT count toward the agent's claim cap
+            # (explanation.MAX_CLAIMS): a device may have
+            # net_rules.MAX_RULES_PER_DEVICE rules, and the agent's own
+            # claims were already checked against the cap.  The plan
+            # still needs the agent's own claims, and nothing is ever
+            # trimmed: every other cap (the router probes, the vantage
+            # spec) refuses the plan when it does not fit.
+            stored_explanation = {
+                **stored_explanation,
+                "expect": [*stored_explanation["expect"], *rule_claims],
+            }
         client_rows = _client_checks.client_claims(stored_explanation["expect"])
         if client_rows:
-            if timeout_s < _client_checks.MIN_TIMEOUT_S:
+            if caller_timeout_s is None:
+                # the caller gave no timeout of its own: a plan that
+                # carries client claims needs the time the vantage round
+                # takes, so it takes the minimum
+                timeout_s = _client_checks.MIN_TIMEOUT_S
+            elif timeout_s < _client_checks.MIN_TIMEOUT_S:
                 raise NewtonError(
                     f"timeout_s must be at least {_client_checks.MIN_TIMEOUT_S} "
                     "seconds for a client check"
@@ -2444,9 +2490,16 @@ class NewtonService:
             try:
                 vantages = self.scan_vantages()
                 for _, claim in client_rows:
-                    _client_checks.vantage_for_zone(
-                        vantages, device_name, claim["zone"]
-                    )
+                    try:
+                        _client_checks.vantage_for_zone(
+                            vantages, device_name, claim["zone"]
+                        )
+                    except _client_checks.ClientCheckError as exc:
+                        rule_id = claim.get("rule")
+                        if claim.get("source") == "rule" and isinstance(rule_id, str):
+                            # the refusal names the rule the owner wrote
+                            raise NewtonError(f"network rule {rule_id}: {exc}") from exc
+                        raise NewtonError(str(exc)) from exc
             except (_client_checks.ClientCheckError, _scans.ScanError) as exc:
                 raise NewtonError(str(exc)) from exc
 
@@ -2496,6 +2549,13 @@ class NewtonService:
             try:
                 filled_expect = _client_checks.fill_targets(
                     stored_explanation["expect"], _load_interface_dump
+                )
+                # A claim the zone's vantage may not probe cannot run: the
+                # forced command would answer NOT-TESTED not-allowed and the
+                # change would roll back after the whole window.  The plan is
+                # refused here, before anything is staged on the router.
+                _client_checks.check_targets_allowed(
+                    filled_expect, vantages, device_name
                 )
             except (_client_checks.ClientCheckError, _scans.ScanError) as exc:
                 raise NewtonError(str(exc)) from exc
@@ -2839,7 +2899,7 @@ class NewtonService:
         tier: str,
         batch_index: int = 0,
         values: dict[str, str] | None = None,
-        timeout_s: int = 90,
+        timeout_s: int | None = None,
         *,
         explanation: Any = None,
         owner_confirmed_in_chat: Any = None,
@@ -2858,6 +2918,10 @@ class NewtonService:
         payload, gathered with the existing read tool.  Fail closed: a
         missing / unknown / bad value name is refused BEFORE any device
         call (and the error message never echoes a rejected value).
+
+        ``timeout_s`` is the caller's own: None (the default) lets
+        ``plan()`` choose -- 90 s, or the 150 s a plan with client checks
+        needs.
         """
         device = self.device_for("newton_plan_tier", device_name)
         if tier not in _tiers.TIER_NAMES:
@@ -3112,6 +3176,124 @@ class NewtonService:
         suffix = "\n" if uci_batch.endswith("\n") else ""
         return "\n".join(out_lines) + suffix
 
+    def _client_check_env(
+        self, run_path: Path, session_id: str, spec_directory: Path
+    ) -> dict[str, str]:
+        """The environment the host needs to run the client checks.
+
+        This is the one place that builds ``OWRT_LOCAL_CHECK`` (the one
+        place ``client_checks.local_check_string`` is called), so the
+        apply and the confirm of a held apply run the same checks the
+        same way.  ``NEWTON_VANTAGE_SPEC_DIR`` points the vantage runner
+        at the sealed spec of the session.
+        """
+        extra_env: dict[str, str] = {}
+        try:
+            extra_env["OWRT_LOCAL_CHECK"] = _client_checks.local_check_string(run_path, session_id)
+        except _client_checks.ClientCheckError as exc:
+            raise NewtonError(str(exc)) from exc
+        extra_env["NEWTON_VANTAGE_SPEC_DIR"] = str(spec_directory)
+        return extra_env
+
+    def _confirm_client_check_env(
+        self, device: Device, device_name: str, session_id: str
+    ) -> dict[str, str] | None:
+        """The client-check environment of a confirm, or None.
+
+        A plan with client claims runs them again before the confirm, the
+        way the apply did: the inside vantage that serves each zone must
+        still be registered, and the sealed spec of the held apply is
+        what the vantage runner reads.  A plan with no client claims
+        needs none of it, and its confirm is what it was.
+
+        The confirm trusts only a sealed plan record: the record of this
+        device and session must be there, and its hash must be the one it
+        was sealed with (the same hash the apply path checks).  A record
+        that is gone, or one whose claims were changed on disk without the
+        hash being recomputed, cannot say what the change was sealed with,
+        so the confirm is refused rather than made without those checks.
+
+        The record must also be this session's record of this device: the
+        confirm compares the host of the record with the host of the device
+        and the session id of the record with this session; the device is
+        the one ``_plan_record_for`` read (it returns nothing for a record
+        of another device).  The apply refuses the same host and session id
+        the same way.  A record of another session (or of another host)
+        copied into this session's file is sealed and validly hashed, but
+        it says nothing about the change this confirm would confirm.
+        """
+        record = self._plan_record_for(device_name, session_id)
+        if record is None:
+            # no record of this device and session: the confirm cannot say
+            # which claims the change was sealed with, so it is refused
+            # rather than made without them
+            raise NewtonError(PLAN_RECORD_UNREADABLE)
+        if (
+            record.get("host") != device.host
+            or record.get("session_id") != session_id
+        ):
+            # the record on disk is not this session's record of this
+            # device: the apply refuses the same two the same way
+            raise NewtonError(PLAN_RECORD_UNREADABLE)
+        try:
+            actual_plan_hash = compute_plan_hash(record)
+        except (TypeError, ValueError) as exc:
+            # a record that cannot be hashed cannot be the sealed one
+            raise NewtonError(PLAN_RECORD_UNREADABLE) from exc
+        stored_plan_hash = record.get("plan_hash")
+        if not isinstance(stored_plan_hash, str) or not hmac.compare_digest(
+            stored_plan_hash, actual_plan_hash
+        ):
+            # the record on disk is not the one that was sealed: its claims
+            # may have been changed without the hash being recomputed
+            raise NewtonError(PLAN_RECORD_UNREADABLE)
+        try:
+            checked = _explanation.parse_explanation(
+                record.get("explanation"),
+                change_lines=_explanation.change_lines(str(record.get("uci_batch", ""))),
+                allow_targets=True,
+            )
+        except _explanation.ExplanationError as exc:
+            # a record whose explanation does not parse cannot say which
+            # claims it carries, so the checks it may carry are not run:
+            # the confirm is refused rather than made without them
+            raise NewtonError(PLAN_RECORD_UNREADABLE) from exc
+        client_rows = _client_checks.client_claims(checked["expect"])
+        if not client_rows:
+            return None
+        try:
+            vantages = self.scan_vantages()
+            for _, claim in client_rows:
+                _client_checks.vantage_for_zone(vantages, device_name, claim["zone"])
+        except (
+            NewtonError,
+            _scans.ScanError,
+            _client_checks.ClientCheckError,
+        ) as exc:
+            # the confirm is refused before the router is asked, so the spec
+            # of the held apply stays on disk: its window is still open, and
+            # the owner can register the vantage again and confirm before
+            # the deadline
+            raise NewtonError(
+                "the client check vantage is gone; the change was not confirmed "
+                "and the router puts it back at its deadline"
+            ) from exc
+        run_path = script_path().parent / "newton-vantage-run"
+        if not run_path.is_file() or not os.access(run_path, os.X_OK):
+            raise NewtonError("the vantage runner is missing")
+        return self._client_check_env(
+            run_path, session_id, self.state / "vantage-runs"
+        )
+
+    def _remove_vantage_spec(self, session_id: str) -> None:
+        """Remove the spec of a session's client checks, if it has one."""
+        try:
+            (self.state / "vantage-runs" / f"{session_id}.json").unlink(
+                missing_ok=True
+            )
+        except OSError:
+            pass
+
     def apply(
         self, device_name: str, session_id: str, hold: Any = False
     ) -> dict[str, Any]:
@@ -3203,13 +3385,6 @@ class NewtonService:
                 "this device requires approval for every change but the plan record says none is needed; plan again"
             )
         client_rows = _client_checks.client_claims(checked_explanation["expect"])
-        if hold and client_rows:
-            # the client checks run in every round of the apply, but a
-            # later confirm could not run them again
-            raise NewtonError(
-                "hold cannot be used for a plan with client checks: they would not run again "
-                "before the confirm; nothing applied"
-            )
         spec_path: Path | None = None
         spec: dict[str, Any] | None = None
         spec_directory = self.state / "vantage-runs"
@@ -3242,6 +3417,7 @@ class NewtonService:
         reached_router = False
         cp: subprocess.CompletedProcess[str] | None = None
         timed_out_log: str | None = None
+        kept_spec = False
         try:
             if client_rows:
                 try:
@@ -3273,11 +3449,9 @@ class NewtonService:
                     extra_env["OWRT_APPROVAL_NBF"] = str(approval_window[0])
                     extra_env["OWRT_APPROVAL_EXP"] = str(approval_window[1])
                 if client_rows:
-                    try:
-                        extra_env["OWRT_LOCAL_CHECK"] = _client_checks.local_check_string(run_path, session_id)
-                    except _client_checks.ClientCheckError as exc:
-                        raise NewtonError(str(exc)) from exc
-                    extra_env["NEWTON_VANTAGE_SPEC_DIR"] = str(spec_directory)
+                    extra_env.update(
+                        self._client_check_env(run_path, session_id, spec_directory)
+                    )
                 cp = self.run_script(
                     device,
                     "apply",
@@ -3339,6 +3513,9 @@ class NewtonService:
             if outcome["result"] == "held":
                 outcome["confirm_by"] = held_until
                 outcome["next_step"] = HELD_NEXT_STEP
+                # the change is armed and waits for its confirm: the spec
+                # of its client checks stays on disk until then
+                kept_spec = True
             # A receipt for every change that ended CONFIRMED, ROLLED BACK or UNKNOWN.  An
             # error after the APPLYING line means the request reached the router, so it is UNKNOWN.
             # A held change has not ended yet: its receipt says unknown, so the
@@ -3365,7 +3542,11 @@ class NewtonService:
                     outcome["failed_claim"] = failed
             return outcome
         finally:
-            if spec_path is not None:
+            # The rule of the held apply: the spec of a held apply stays on
+            # disk until the confirm, the abort or the session's end, because
+            # the confirm runs the same client checks again and reads this
+            # file.  Every other apply removes its spec here.
+            if spec_path is not None and not kept_spec:
                 try:
                     spec_path.unlink()
                 except Exception:
@@ -3583,6 +3764,26 @@ class NewtonService:
         self._record_held_rollback(device_name, session_id, cp)
         self._record_reconciled_confirm(device_name, session_id, cp)
         stdout, _hashes = _remove_config_hashes(cp.stdout or "")
+        # The session ended on its own (its window passed unconfirmed and the
+        # router put the change back): the spec of its client checks goes
+        # with it, like it does after a confirm or an abort.  The marker is
+        # the host's own line, never router text (the host masks it).
+        marker = f"HELD APPLY ROLLED BACK session={session_id}"
+        if any(
+            line == marker or line.startswith(marker + " (")
+            for line in stdout.split("\n")
+        ):
+            self._remove_vantage_spec(session_id)
+        # The router confirmed the session and this host learned it from the
+        # status (the reconciled confirm): the session is over too, so the
+        # spec of its client checks goes with it.  The line starts the line
+        # (router text is masked and never starts a line with it).
+        confirmed = re.compile(rf"^CONFIRMED session={re.escape(session_id)}(\s|$)")
+        if any(
+            confirmed.match(line.removesuffix("\r"))
+            for line in stdout.split("\n")
+        ):
+            self._remove_vantage_spec(session_id)
         result = {"exit_code": cp.returncode,
                   "log": _envelope.envelope(f"{device_name}:status", stdout + (cp.stderr or ""))}
         # The host's machine line names what the router runs now, when the
@@ -3659,12 +3860,38 @@ class NewtonService:
         apply, that its window is still open, runs one more verify round
         over a new connection and only then confirms; the router refuses
         a confirm after its window as well.
+
+        A plan with client claims runs them again here, the way the apply
+        did: the same inside vantage must still be registered, and the
+        sealed spec of the held apply is what the check reads.
         """
         device = self.device_for("newton_confirm_change", device_name)
         require_session(session_id)
+        # a plan with client claims runs them again before the confirm; a
+        # plan with none needs no environment at all
+        extra_env = self._confirm_client_check_env(device, device_name, session_id)
+        try:
+            return self._confirm_held(device, device_name, session_id, extra_env)
+        finally:
+            # The rule of the held apply: the spec of a held apply stays on
+            # disk until the confirm, the abort or the session's end.  The
+            # confirm has run, so it goes now, whatever its result: the
+            # change is confirmed, not confirmed or unknown, and in none of
+            # them does the client check run again.
+            self._remove_vantage_spec(session_id)
+
+    def _confirm_held(
+        self,
+        device: Device,
+        device_name: str,
+        session_id: str,
+        extra_env: dict[str, str] | None,
+    ) -> dict[str, Any]:
+        """The confirm of a held change: the wrapper's run and its answer."""
         try:
             cp = self.run_script(
-                device, "confirm", device.destination, session_id, timeout=180
+                device, "confirm", device.destination, session_id, timeout=180,
+                extra_env=extra_env,
             )
         except subprocess.TimeoutExpired as exc:
             # the run may have reached the router's confirm: not known
@@ -3748,6 +3975,17 @@ class NewtonService:
             from . import noinstall_flow
 
             return noinstall_flow.abort(self, device_name, session_id)
+        try:
+            return self._abort_run(device, device_name, session_id)
+        finally:
+            # the abort ends the session: the spec of its client checks
+            # goes with it, like it does after a confirm
+            self._remove_vantage_spec(session_id)
+
+    def _abort_run(
+        self, device: Device, device_name: str, session_id: str
+    ) -> dict[str, Any]:
+        """The abort itself: the wrapper's run and what its answer means."""
         try:
             cp = self.run_script(device, "abort", device.destination, session_id)
         except subprocess.TimeoutExpired as exc:
@@ -4042,6 +4280,8 @@ def _host_confirm_refusal_re(session_id: str) -> re.Pattern[str]:
         rf"|the hold record of session {sid} is malformed"
         rf"|the window of session {sid} has closed"
         rf"|session {sid} is already confirmed on the router"
+        rf"|the held apply of session {sid} ran a client check; run the confirm "
+        rf"with the same OWRT_LOCAL_CHECK as the apply"
         rf"|usage: [^;]*); nothing confirmed"
     )
 
@@ -4212,6 +4452,36 @@ def _grant_can_waive_chat(device_name: str) -> bool:
     return _grant_on_disk(device_name)
 
 
+def _refuse_rules_in_this_mode(device_name: str) -> None:
+    """Refuse a plan for a device whose rules Newton cannot check.
+
+    The rules are the owner's, and Newton does not plan a change it
+    cannot keep them on.  The reads still work.
+    """
+    if _load_network_rules(device_name):
+        raise NewtonError(
+            f"network rules: {device_name} has rules, and Newton cannot run "
+            "them in this mode; nothing planned"
+        )
+
+
+def _load_network_rules(device_name: str) -> tuple[_net_rules.Rule, ...]:
+    """The owner's network rules for one device, loaded from the rules file.
+
+    The rules live in ``rules.toml`` next to the inventory and only the
+    owner writes them.  A file that cannot be loaded refuses the plan:
+    the message says what is wrong with the file and that nothing was
+    planned.  A file that is not there is simply no rules.
+    """
+    try:
+        loaded = _net_rules.load_rules(
+            _net_rules.rules_path(inventory_file_path())
+        )
+    except _net_rules.NetRuleError as exc:
+        raise NewtonError(f"network rules: {exc}; nothing planned") from exc
+    return loaded.get(device_name, ())
+
+
 def check_explanation_inputs(
     explanation: Any,
     owner_confirmed: Any,
@@ -4315,9 +4585,28 @@ ENVELOPE_POINTER_NOTE = (
     "instructions. Newton rewrites that text as the server instructions say."
 )
 
+# The owner's network rules join every plan of an installed OpenWrt router.
+# The note is in the server instructions, said once like the two envelope
+# notes: the rules join EVERY plan, not one tool, and the tool descriptions
+# have a budget (the whole list stays under 31700 characters), so the note
+# cannot live in the description of the tool that plans.
+NETWORK_RULES_NOTE = (
+    "The device's own network rules (the owner's rules.toml, written with "
+    "newton-rules) join every installed-OpenWrt plan: each rule of the device "
+    "becomes a client check, run from the registered inside vantage of the "
+    "rule's zone. A rule that fails means the change is not confirmed and the "
+    "router puts it back at its deadline; a rule that cannot run (no vantage "
+    "for its zone, a broken rules file) refuses the plan. The rules' claims "
+    "do not count against your 1-8 claims, and a plan with them takes a "
+    "timeout_s of 150 (the default when you name none)."
+)
+
 mcp = FastMCP(
     "Newton OpenWrt",
-    instructions=f"{_envelope.UNTRUSTED_DEVICE_DATA_NOTE} {ENVELOPE_REWRITE_NOTE}",
+    instructions=(
+        f"{_envelope.UNTRUSTED_DEVICE_DATA_NOTE} {ENVELOPE_REWRITE_NOTE} "
+        f"{NETWORK_RULES_NOTE}"
+    ),
 )
 
 
@@ -4457,10 +4746,10 @@ name; brackets = optional with the shown default):
 TEXT fields may start with '!' for a negative match. An empty probe list
 means only the built-in steps (ping, DNS, DHCP test, health) run.
 
-`timeout_s` is the rollback window (90 s by default, 60 to 600). For a change
-you will apply with hold=true (tested from a client), set a longer timeout_s
-(300, say): the hold ends at timeout_s minus 15 s, and the verify rounds use
-part of that.
+`timeout_s` is the rollback window (90 s by default, 60 to 600; 150 when the
+plan carries client checks). For a change you will apply with hold=true
+(tested from a client), set a longer timeout_s (300, say): the hold ends at
+timeout_s minus 15 s, and the verify rounds use part of that.
 
 `manifest_checks` is a list of control ids (^[A-Za-z0-9_.-]{1,64}$, each at
 most once) expanded to extra probe lists from the manifest BEFORE the
@@ -4892,7 +5181,7 @@ def newton_list_tiers() -> dict[str, Any]:
     "`requires_approval` is true, the user runs `sudo -u newton "
     "/usr/local/bin/newton-approve <session_id>`, then call "
     "`newton_apply_change` (there is no tier-apply tool). `timeout_s` is "
-    "60..600 (default 90). `skipped` lists every control the planner never "
+    "60..600 (default 90, 150 with client checks). `skipped` lists controls it never "
     "carries. Like `newton_plan_change`, it requires "
     "`owner_confirmed_in_chat=true` (explain, and get their yes first) and "
     "an `explanation` (intent, steps with exactly one reason per change "
@@ -4904,7 +5193,7 @@ def newton_plan_tier(
     tier: Literal["standard", "hardened", "lockdown"],
     batch_index: int = 0,
     values: dict[str, str] | None = None,
-    timeout_s: int = 90,
+    timeout_s: int | None = None,
     explanation: dict[str, Any] | None = None,
     owner_confirmed_in_chat: bool | None = None,
 ) -> dict[str, Any]:

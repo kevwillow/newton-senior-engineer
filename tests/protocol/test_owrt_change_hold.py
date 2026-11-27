@@ -400,16 +400,17 @@ def test_router_text_cannot_forge_the_held_rollback_line(protocol):
     assert not any(l.startswith("HELD APPLY") for l in result.stdout.splitlines())
 
 
-def test_hold_is_refused_with_a_local_check(protocol):
-    """The client checks run in every round of the apply but would not run
-    again before a later confirm, so hold refuses a plan that has them."""
+def test_hold_is_not_refused_with_a_local_check(protocol):
+    """The client checks run in every round of a held apply, and the
+    confirm of a held apply runs them once more, so the hold is not
+    refused for them.  (The rounds and the confirm of a local check are
+    in test_owrt_change_hold_local_check.py.)"""
     _plan(protocol)
     result = run_script(protocol, ["apply", ROUTER, SID, "60", "--hold"],
                         extra_env={"OWRT_LOCAL_CHECK": "true"})
-    assert result.returncode == 1
-    assert "--hold cannot be used with client checks" in result.stdout
-    assert "nothing applied" in result.stdout
-    assert not any(c.startswith(f"{PROG} apply ") for c in remote_calls(protocol))
+    assert result.returncode == 0, result.stdout
+    assert "--hold cannot be used" not in result.stdout
+    assert _final(result).startswith(f"HELD session={SID} until=")
 
 
 def test_abort_of_a_held_apply_says_it_was_held(protocol):

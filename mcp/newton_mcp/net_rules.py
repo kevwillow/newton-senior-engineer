@@ -23,6 +23,7 @@ executed or sealed into a probe.
 
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from dataclasses import dataclass
@@ -35,6 +36,9 @@ from .scans import NAME_RE, ZONE_RE
 
 #: The file name of the rules, next to ``devices.toml``.
 RULES_FILE_NAME = "rules.toml"
+
+#: The inventory the server reads when ``NEWTON_INVENTORY`` says nothing.
+DEFAULT_INVENTORY = "~/.config/newton/devices.toml"
 
 RULE_ID_RE = re.compile(r"^[a-z0-9-]{1,32}$")
 LABEL_RE = re.compile(r"^[A-Za-z0-9 ,.'()-]{1,80}$")
@@ -50,6 +54,15 @@ KIND_TO_CLAIM = {
 
 #: Max rules per device; the 17th is refused at add time and at load.
 MAX_RULES_PER_DEVICE = 16
+
+#: The rule kind each client's claim kind came from.
+CLAIM_TO_KIND = {
+    "client_dns": "dns",
+    "client_dhcp": "dhcp",
+    "client_internet": "internet",
+    "client_blocked": "blocked",
+    "client_reaches": "reach",
+}
 
 RULE_KEYS = frozenset({"id", "device", "zone", "kind", "to", "label"})
 REQUIRED_KEYS = frozenset({"id", "device", "zone", "kind"})
@@ -74,6 +87,16 @@ class Rule:
 def rules_path(inventory: Path) -> Path:
     """``rules.toml`` lives next to ``devices.toml``, with the same owner."""
     return Path(inventory).parent / RULES_FILE_NAME
+
+
+def rules_file() -> Path:
+    """The rules file the server reads: next to the inventory it reads.
+
+    The inventory is the one ``NEWTON_INVENTORY`` names, or the default
+    one; the rules live in the same directory, with the same owner.
+    """
+    inventory = Path(os.environ.get("NEWTON_INVENTORY", DEFAULT_INVENTORY)).expanduser()
+    return rules_path(inventory)
 
 
 def _refuse(where: str, message: str) -> None:
@@ -209,6 +232,32 @@ def rule_claims(rules: Iterable[Rule]) -> list[dict[str, Any]]:
             claim["to"] = rule.to
         claims.append(claim)
     return claims
+
+
+def claim_rule(claim: dict[str, Any]) -> Rule | None:
+    """The rule a claim was built from, rebuilt from the claim's own fields.
+
+    A claim carries the rule's id, its zone, its kind and its target:
+    that is everything the words Newton shows need, and nothing is read
+    from a device.  The device is not in the claim and the sentence
+    never names it, so it stays empty here.  None when the claim is not
+    a rule claim.
+    """
+    if not isinstance(claim, dict) or claim.get("source") != "rule":
+        return None
+    kind = CLAIM_TO_KIND.get(claim.get("kind"))
+    zone = claim.get("zone")
+    rule_id = claim.get("rule")
+    if kind is None or not isinstance(zone, str) or not isinstance(rule_id, str):
+        return None
+    to = claim.get("to")
+    return Rule(
+        id=rule_id,
+        device="",
+        zone=zone,
+        kind=kind,
+        to=to if isinstance(to, str) else None,
+    )
 
 
 def rule_sentence(rule: Rule) -> str:
