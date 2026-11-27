@@ -288,7 +288,9 @@ def test_the_vantage_may_probe_the_router_wan_range():
     the plan is refused."""
     live = LAB_DIR / "lab.toml"
     example = LAB_DIR / "lab.example.toml"
-    for path in (live, example):
+    # lab.toml is the maintainer's own lab file: the public tree carries
+    # only lab.example.toml
+    for path in (p for p in (live, example) if p.is_file()):
         targets = _lab_check_targets(path)
         for cidr in (
             "10.109.0.0/24",
