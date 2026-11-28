@@ -1,0 +1,11 @@
+name = "rc-07-bufferbloat"
+description = "The bufferbloat recipe shapes lab-r1's internet traffic: the sqm queue runs on the wan device with 50000 kbit/s down and 10000 kbit/s up, and the recipe's own probes read the queue back from the router."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 300
+approval = true
+setup = ["portfwd_on", "recipe_pkgs_install"]
+regression = "default"
+recipe = "bufferbloat"
+recipe_values = { device = "{wan_device}", down = "50000", up = "10000" }

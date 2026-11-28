@@ -1,0 +1,29 @@
+id = "dns-host"
+title = "Local DNS name"
+summary = "One local name answers with one IPv4 address on your network."
+platform = "openwrt"
+version = 1
+risk = "LOW: one local name answers with one IPv4 address on your network."
+
+[params.name]
+kind = "name"
+help = "The UCI section name of the name, like nas."
+
+[params.host]
+kind = "hostname"
+help = "The name that answers, like nas."
+
+[params.ip]
+kind = "ipv4"
+help = "The IPv4 address the name answers with."
+
+[[steps]]
+kind = "uci"
+text = """
+set dhcp.{name}=domain
+set dhcp.{name}.name='{host}'
+set dhcp.{name}.ip='{ip}'
+"""
+
+[[checks]]
+probe = ["uci-equals", "dhcp.{name}.ip", "{ip}"]

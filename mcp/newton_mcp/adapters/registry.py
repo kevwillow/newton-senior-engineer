@@ -25,6 +25,8 @@ OPENWRT_TOOLS = frozenset(
         "newton_grant_off",
         "newton_list_tiers",
         "newton_plan_tier",
+        "newton_list_recipes",
+        "newton_plan_recipe",
         "newton_plan_ad_forward",
         "newton_guided_recommend",
         "newton_guided_audit",

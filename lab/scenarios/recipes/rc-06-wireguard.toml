@@ -1,0 +1,11 @@
+name = "rc-06-wireguard"
+description = "The wireguard recipe builds the tunnel on lab-r1: the wg0 interface takes 10.99.0.1/24, the peer rc_peer is allowed on 10.99.0.2, and the firewall opens the tunnel's UDP port on the internet side."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 300
+approval = true
+setup = ["portfwd_on", "recipe_pkgs_install", "wg_key_on"]
+regression = "default"
+recipe = "wireguard"
+recipe_values = { addr = "10.99.0.1/24", peer = "rc_peer", peer_key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", peer_ip = "10.99.0.2" }

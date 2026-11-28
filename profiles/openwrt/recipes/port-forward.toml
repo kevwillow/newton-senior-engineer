@@ -1,0 +1,51 @@
+id = "port-forward"
+title = "Port forward"
+summary = "A service inside your network answers on a port of the outside interface."
+platform = "openwrt"
+version = 1
+risk = "HIGH: a service inside your network becomes reachable from the internet on the outside port."
+
+[params.name]
+kind = "name"
+help = "The UCI section name of the redirect, like web."
+
+[params.proto]
+kind = "choice"
+values = ["tcp", "udp", "tcp udp"]
+help = "The protocol the outside port speaks."
+
+[params.outside_port]
+kind = "int"
+min = 1
+max = 65535
+help = "The port on the outside (wan) side of the router."
+
+[params.inside_ip]
+kind = "ipv4"
+help = "The address of the service inside your network."
+
+[params.inside_port]
+kind = "int"
+min = 1
+max = 65535
+help = "The port the service inside your network listens on."
+
+[[steps]]
+kind = "uci"
+text = """
+set firewall.{name}=redirect
+set firewall.{name}.name='{name}'
+set firewall.{name}.src='wan'
+set firewall.{name}.src_dport='{outside_port}'
+set firewall.{name}.dest='lan'
+set firewall.{name}.dest_ip='{inside_ip}'
+set firewall.{name}.dest_port='{inside_port}'
+set firewall.{name}.proto='{proto}'
+set firewall.{name}.target='DNAT'
+"""
+
+[[checks]]
+probe = ["uci-equals", "firewall.{name}.dest_ip", "{inside_ip}"]
+
+[[checks]]
+probe = ["uci-equals", "firewall.{name}.src_dport", "{outside_port}"]

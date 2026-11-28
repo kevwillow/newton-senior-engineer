@@ -58,6 +58,13 @@ A scenario TOML may additionally declare:
                               must carry a `reset_after` to run them after
   probes     = [[fields, ...], ...]  sealed probe file the plan reads
                                      (TAB-joined; see design 4.3/4.6)
+  recipe     = "guest-network"   the recipe the scenario plans, by its id;
+                                      the batch and the probes come from the
+                                      recipe file, never from the scenario
+  recipe_values = { name = "value", ... }
+                                      the values the recipe takes; a value
+                                      may be a {var} the lab resolves at run
+                                      time, the way tier_values do
   approval   = true | "none" | "wrong"   plan-and-apply token: true = mint a
                                          real token from the lab passphrase;
                                          "none" = send no token; "wrong" =
@@ -220,6 +227,7 @@ from newton_mcp import client_checks  # noqa: E402
 from newton_mcp import explanation  # noqa: E402
 from newton_mcp import net_rules  # noqa: E402
 from newton_mcp import probes as newton_probes  # noqa: E402
+from newton_mcp import recipes as newton_recipes  # noqa: E402
 from newton_mcp import scans  # noqa: E402
 from newton_mcp import tiers as newton_tiers  # noqa: E402
 from newton_mcp import touched as newton_touched  # noqa: E402
@@ -668,7 +676,8 @@ class Scenario:
                  "tier", "tier_values", "tier_batch_lines",
                  "tier_fail_probe", "tier_reboot", "client_checks",
                  "expect_failed_claim", "access", "controller_loss",
-                 "rules", "hold", "before_confirm", "expect_confirm_refused")
+                 "rules", "hold", "before_confirm", "expect_confirm_refused",
+                 "recipe", "recipe_values")
 
     def __init__(self, *, name: str, description: str, target: str,
                  reset: list[str], expect: str, timeout: int,
@@ -699,7 +708,9 @@ class Scenario:
                  rules: "list[dict] | None" = None,
                  hold: bool = False,
                  before_confirm: "list[str] | None" = None,
-                 expect_confirm_refused: str | None = None) -> None:
+                 expect_confirm_refused: str | None = None,
+                 recipe: str | None = None,
+                 recipe_values: "dict[str, str] | None" = None) -> None:
         self.name = name
         self.description = description
         self.target = target
@@ -739,6 +750,9 @@ class Scenario:
         self.hold = bool(hold)
         self.before_confirm = list(before_confirm) if before_confirm else []
         self.expect_confirm_refused = expect_confirm_refused
+        self.recipe = recipe
+        self.recipe_values = (dict(recipe_values)
+                              if recipe_values is not None else None)
 
     def effective_expect(self, lane: str) -> str:
         if lane == "password" and self.expect_password is not None:
@@ -1096,18 +1110,23 @@ def _parse_check_names(path: Path, raw: Any, what: str) -> list[str]:
     return out
 
 
-def _parse_tier_values(path: Path, raw: Any) -> dict[str, str]:
+def _parse_values_table(path: Path, raw: Any, what: str) -> dict[str, str]:
     """A table str -> str; both keys and values must be strings."""
     if not isinstance(raw, dict):
         raise ValueError(
-            f"{path.name}: tier_values must be a table of str -> str")
+            f"{path.name}: {what} must be a table of str -> str")
     out: dict[str, str] = {}
     for k, v in raw.items():
         if not isinstance(k, str) or not isinstance(v, str):
             raise ValueError(
-                f"{path.name}: tier_values entries must be str -> str")
+                f"{path.name}: {what} entries must be str -> str")
         out[k] = v
     return out
+
+
+def _parse_tier_values(path: Path, raw: Any) -> dict[str, str]:
+    """The tier's values: a table str -> str, both keys and values strings."""
+    return _parse_values_table(path, raw, "tier_values")
 
 
 def _parse_tier_fail_probe(path: Path, raw: Any) -> list[str]:
@@ -1265,6 +1284,10 @@ def load_scenarios(directory: Path) -> list[Scenario]:
             expect_confirm_refused=(
                 None if "expect_confirm_refused" not in data
                 else str(data["expect_confirm_refused"])),
+            recipe=(None if "recipe" not in data else str(data["recipe"])),
+            recipe_values=(None if "recipe_values" not in data
+                           else _parse_values_table(path, data["recipe_values"],
+                                                    "recipe_values")),
         ))
     return out
 
@@ -1544,9 +1567,26 @@ def validate_scenarios(lab: Lab, scenarios: list[Scenario]) -> list[str]:
                 errors.append(
                     f"{name}: step {s!r} (from lab.toml) has unknown "
                     f"device '{lab.steps[s].device}'")
+        # a recipe scenario names a recipe instead of carrying a batch: the
+        # batch, the probes and the tier are the recipe's, never the
+        # scenario's.  Each clash is refused by the name of the field.
+        if scen.recipe is not None:
+            if scen.batch.strip():
+                errors.append(
+                    f"{name}: a recipe scenario must not carry a batch: the "
+                    f"recipe {scen.recipe!r} brings its own")
+            if scen.probes:
+                errors.append(
+                    f"{name}: a recipe scenario must not carry probes: the "
+                    f"recipe {scen.recipe!r} brings its own")
+            if scen.tier is not None:
+                errors.append(
+                    f"{name}: a recipe scenario must not carry a tier: the "
+                    f"recipe {scen.recipe!r} brings its own")
         # batch <-> expect
         has_batch = bool(scen.batch.strip())
-        if not has_batch and scen.expect != "none" and scen.tier is None:
+        if (not has_batch and scen.expect != "none" and scen.tier is None
+                and scen.recipe is None):
             errors.append(
                 f"{name}: batch is empty/missing but expect is "
                 f"{scen.expect!r}, not 'none'")
@@ -1554,7 +1594,8 @@ def validate_scenarios(lab: Lab, scenarios: list[Scenario]) -> list[str]:
             errors.append(
                 f"{name}: batch is present but expect is 'none'")
         # target in [devices] when a batch is present
-        if has_batch and scen.target not in lab.devices:
+        if (has_batch or scen.recipe is not None) \
+                and scen.target not in lab.devices:
             errors.append(
                 f"{name}: target {scen.target!r} is not a defined device")
         # reject_match rules
@@ -4893,6 +4934,10 @@ def _run_scenario_inner(lab: Lab, scen: Scenario, rec: dict[str, Any],
     # machinery before the tier split substitutes the resolved values.
     for _vk, _vv in (scen.tier_values or {}).items():
         texts.append(_vv)
+    # recipe_values may reference [vars] placeholders too, and they resolve
+    # through the same [vars] machinery, the way tier_values do.
+    for _rk, _rv in (scen.recipe_values or {}).items():
+        texts.append(_rv)
     for p in posts_src:
         texts.append(p.cmd)
     for e in effects_src:
@@ -4935,6 +4980,27 @@ def _run_scenario_inner(lab: Lab, scen: Scenario, rec: dict[str, Any],
     batch = substitute(scen.batch, values)
     probes_sub = [[substitute(f, values) for f in probe]
                   for probe in scen.probes]
+    # A recipe scenario names a recipe instead of carrying a batch: the
+    # recipe file is loaded and resolved with the MCP server's own loader,
+    # and the resolved batch and the resolved probes are what the plan uses
+    # (so the rules, the client checks and the hold work unchanged).  A
+    # recipe the loader refuses is the scenario's error: nothing is staged.
+    if scen.recipe is not None:
+        recipe_values = {k: substitute(v, values)
+                         for k, v in (scen.recipe_values or {}).items()}
+        try:
+            recipe = newton_recipes.load_recipe(scen.recipe)
+            resolved = newton_recipes.resolve(recipe, recipe_values)
+        except newton_recipes.RecipeError as exc:
+            message = str(exc)
+            if not message.startswith("recipe "):
+                message = f"recipe {scen.recipe}: {message}"
+            rec["error"] = message
+            rec["duration_s"] = round(time.monotonic() - t0, 3)
+            return
+        batch = resolved["uci_batch"]
+        probes_sub = [list(probe) for probe in resolved["probes"]]
+        rec["recipe"] = {"id": scen.recipe, "values": recipe_values}
     posts = [Post(p.device, substitute(p.cmd, values),
                   p.expect_rc, p.expect_stdout, p.timeout) for p in posts_src]
     effects_sub = [Post(p.device, substitute(p.cmd, values),
@@ -5041,7 +5107,7 @@ def _run_scenario_inner(lab: Lab, scen: Scenario, rec: dict[str, Any],
         if rec.get("error"):
             rec["duration_s"] = round(time.monotonic() - t0, 3)
             return
-    elif not scen.batch.strip():
+    elif not batch.strip():
         rec["outcome"] = "none"
     else:
         target = lab.devices[scen.target]

@@ -735,6 +735,28 @@ def _print_plan_head(
     print(f"Device: {_sanitize_terminal_value(plan['device'])}")
     print(f"Host: {_sanitize_terminal_value(plan['host'])}")
     print(f"Profile: {_masked(profile) if isinstance(profile, str) else 'unknown'}")
+    # The recipe the plan came from: its title, its id and its version,
+    # and the risk sentence the recipe file carries.  Both are owner
+    # text (a file of the recipes dir), so they are masked and escaped
+    # like every other line of this display.
+    recipe = plan.get("recipe")
+    if isinstance(recipe, dict):
+        recipe_title = recipe.get("title")
+        recipe_id = recipe.get("id")
+        recipe_version = recipe.get("version")
+        if (
+            isinstance(recipe_title, str)
+            and isinstance(recipe_id, str)
+            and isinstance(recipe_version, int)
+            and not isinstance(recipe_version, bool)
+        ):
+            print(
+                f"Recipe: {_masked(recipe_title)} "
+                f"({_masked(recipe_id)} v{recipe_version})"
+            )
+        recipe_risk = recipe.get("risk")
+        if isinstance(recipe_risk, str):
+            print(f"Recipe risk: {_masked(recipe_risk)}")
     # The vendor header: what the undo of this platform is, and who checks
     # the approval.  Both are Newton's own facts, so they never carry the
     # agent marker.

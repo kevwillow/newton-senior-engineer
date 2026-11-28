@@ -13,6 +13,59 @@ Two version numbers exist and are separate:
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-11-27
+
+### Added
+- The recipes: a common router job asked for by name ("add a guest network") is planned from a reviewed recipe file,
+  `profiles/openwrt/recipes/<id>.toml`, instead of a hand-written UCI batch. The file holds a header, typed parameters,
+  the steps that write the change, the checks that prove it, the packages it needs and the risk the approval text
+  carries. It is not a device profile, no tool writes one, and a recipe never adds a network rule: only the owner
+  writes those (`newton-rules`), and a recipe may suggest one.
+- Two tools: `newton_list_recipes(device)` lists the recipes of the device's platform, each parameter with its kind,
+  its help and its default, and each step with its UCI lines and their placeholders (a read of the host's own files; it never contacts the device, and a recipe file that does
+  not load is listed with its error, never skipped), and `newton_plan_recipe(device, recipe, values, timeout_s,
+  explanation, owner_confirmed_in_chat)` plans one recipe by name. The server has thirty tools now.
+- Every value is checked by the kind of its parameter before any device call: `ipv4`, `cidr4`, `mac`, `hostname`,
+  `name`, `iface`, `wifi_ssid`, `wifi_key`, `wg_pubkey`, `choice` (a fixed list) and `int` (a range). A refusal names
+  the parameter and never the value. On an installed OpenWrt router the resolved batch and the resolved checks then go to the same `plan()`
+  every other change uses: the seal, the ADR-010 touched checks on the resolved lines, the network rules, the approval gate, the
+  leash, the hold and the undo all apply unchanged.
+- The seven recipes: `guest-network` (a separate network for guests or IoT devices, wired, Wi-Fi or
+  both), `dhcp-reservation` (one device always gets the same IPv4 address), `port-forward` (a service inside your
+  network answers on a port of the outside interface), `dns-host` (one local name answers with one IPv4 address),
+  `dns-upstream` (version 2: the router forwards every DNS question to the servers you name), `wireguard` (one peer reaches your
+  network through a tunnel on the internet side) and `bufferbloat` (the traffic of the WAN device is shaped to the
+  speeds you give).
+- The lab runner's recipe scenarios: a scenario may name a recipe instead of carrying a batch. `lab/scenarios/recipes/`
+  holds eight of them (rc-01 to rc-08), one per recipe plus a fresh router for the dns-upstream recipe. All eight
+  confirmed on lab-r1 on 2026-11-27, rc-01 with the owner's four rules about the guest zone (the zone
+  reaches the internet, names resolve through the zone router, the router's own addresses stay blocked, the zone
+  reaches the router's own DNS). `lab/scenarios` holds 108 scenario files.
+  The live runs found two faults in the dns-upstream recipe before release: a delete of a missing entry fails the whole
+  uci batch on a stock router, and a plain option (not a list) is skipped by dnsmasq's init. The recipe now writes a
+  list, and its checks read dnsmasq's generated conf, so a batch dnsmasq ignores cannot confirm.
+- The router program is unchanged (1.3.4): no `newton-router-setup upgrade` is needed.
+
+### Known limits
+- On a router Newton cannot install on (no-install mode) a recipe takes that mode's own path, which carries neither the
+  recipe's own checks nor its risk line, and reads no package and no set path (the plan says `preconditions_unchecked`).
+  There Newton applies the DHCP reservation and the local name itself; the port forward, the DNS servers and a wired
+  guest network become an owner script; a guest network with Wi-Fi and the WireGuard tunnel are refused, because a
+  script never carries a key; bufferbloat is refused, because that mode cannot read the `sqm` config.
+- The bufferbloat recipe writes the `sqm` config, which is not in the list of configs Newton knows: its plan on an
+  installed router carries an `unknown-package` reason.
+- Newton never installs a package. The owner runs the `apk add` line the refusal prints.
+- The WireGuard private key is made on the router by the owner's own command (`owner_command` in the recipe). Newton
+  never makes it.
+- The port-forward recipe does not check that the inside address is on the LAN.
+- The guest network's DHCP range starts at host 100 and holds 150 addresses, which fits a `/24` or a larger network:
+  give it one of those (a smaller network was not tested).
+- Give the guest network a wired port, a Wi-Fi name, or both: with neither, the plan builds a network nothing can join.
+- The guest network's wired port must be one no other bridge uses, like a VLAN device (`eth3.30`). On most routers
+  the LAN ports (`lan1` to `lan4`) are in `br-lan` already, and the recipe does not take a port out of `br-lan`: take
+  it out first, or use a VLAN device.
+- The recipes are OpenWrt only. The Active Directory recipes are 1.6.2.
+
 ## [1.6.0] - 2026-11-27
 
 ### Added

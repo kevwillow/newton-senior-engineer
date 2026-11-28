@@ -1,0 +1,42 @@
+id = "bufferbloat"
+title = "Bufferbloat control"
+summary = "Shapes the internet traffic of the WAN device to the speeds you give."
+platform = "openwrt"
+version = 1
+risk = "MEDIUM: shapes all internet traffic on the WAN device to the speeds you give; too low a number slows everything."
+packages = ["sqm-scripts"]
+
+[params.device]
+kind = "iface"
+help = "The WAN device the traffic is shaped on, like eth1."
+
+[params.down]
+kind = "int"
+min = 1000
+max = 10000000
+help = "The download speed in kbit/s."
+
+[params.up]
+kind = "int"
+min = 1000
+max = 10000000
+help = "The upload speed in kbit/s."
+
+[[steps]]
+kind = "uci"
+text = """
+set sqm.newton_wan=queue
+set sqm.newton_wan.enabled='1'
+set sqm.newton_wan.interface='{device}'
+set sqm.newton_wan.download='{down}'
+set sqm.newton_wan.upload='{up}'
+set sqm.newton_wan.qdisc='cake'
+set sqm.newton_wan.script='piece_of_cake.qos'
+set sqm.newton_wan.linklayer='none'
+"""
+
+[[checks]]
+probe = ["uci-equals", "sqm.newton_wan.enabled", "1"]
+
+[[checks]]
+probe = ["uci-equals", "sqm.newton_wan.interface", "{device}"]

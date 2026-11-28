@@ -58,6 +58,13 @@ def make_install_repo(tmp_path):
         "profiles/openwrt/hardened.uci",
         "profiles/openwrt/lockdown.uci",
         "profiles/openwrt/intents.toml",
+        "profiles/openwrt/recipes/bufferbloat.toml",
+        "profiles/openwrt/recipes/dhcp-reservation.toml",
+        "profiles/openwrt/recipes/dns-host.toml",
+        "profiles/openwrt/recipes/dns-upstream.toml",
+        "profiles/openwrt/recipes/guest-network.toml",
+        "profiles/openwrt/recipes/port-forward.toml",
+        "profiles/openwrt/recipes/wireguard.toml",
     ):
         path = repo / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -4197,6 +4204,13 @@ def run_install_code_root(
         "profiles/openwrt/hardened.uci",
         "profiles/openwrt/lockdown.uci",
         "profiles/openwrt/intents.toml",
+        "profiles/openwrt/recipes/bufferbloat.toml",
+        "profiles/openwrt/recipes/dhcp-reservation.toml",
+        "profiles/openwrt/recipes/dns-host.toml",
+        "profiles/openwrt/recipes/dns-upstream.toml",
+        "profiles/openwrt/recipes/guest-network.toml",
+        "profiles/openwrt/recipes/port-forward.toml",
+        "profiles/openwrt/recipes/wireguard.toml",
     ):
         path = snap / rel
         path.parent.mkdir(parents=True, exist_ok=True)

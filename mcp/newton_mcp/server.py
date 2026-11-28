@@ -41,6 +41,7 @@ from . import inventory_file as _inventory_file
 from . import net_rules as _net_rules
 from . import probes as _probes
 from . import redact as _redact
+from . import recipes as _recipes
 from . import ad_forward as _ad_forward
 from . import scans as _scans
 from . import ssh_path as _ssh_path
@@ -89,6 +90,8 @@ TOOL_NAMES = {
     "newton_grant_off",
     "newton_list_tiers",
     "newton_plan_tier",
+    "newton_list_recipes",
+    "newton_plan_recipe",
     "newton_plan_ad_forward",
     "newton_guided_recommend",
     "newton_guided_audit",
@@ -129,6 +132,12 @@ NO_INSTALL_TOOLS = frozenset(
         "newton_abort_change",
         # a grant covers no-install plans too, so the owner can end it here
         "newton_grant_off",
+        # the recipe tools: the listing is a read of the recipes dir (the
+        # host's own files), and the plan of a recipe on a router Newton
+        # cannot install on is planned by the no-install flow (an auto plan
+        # or an owner script), as any other change is.
+        "newton_list_recipes",
+        "newton_plan_recipe",
     }
 )
 
@@ -1061,6 +1070,21 @@ def validate_read(command: str) -> list[str]:
     if not all(READ_TOKEN_RE.fullmatch(token) for token in tokens):
         raise NewtonError("read command contains a token the router would refuse")
     return tokens
+
+
+def _read_text(value: Any) -> str:
+    """The text of one read's output.
+
+    A read returns its output in an untrusted-data envelope; a stand-in
+    (in a test) may return the plain text.  Both are read the same way,
+    and nothing else of the read is ever used.
+    """
+    if isinstance(value, dict):
+        text = value.get("text")
+        return text if isinstance(text, str) else ""
+    if isinstance(value, str):
+        return value
+    return ""
 
 
 def truncate(value: str | None, limit: int = 64 * 1024) -> tuple[str, bool]:
@@ -2390,6 +2414,7 @@ class NewtonService:
         owner_confirmed_in_chat: Any = None,
         _tool: str = "newton_plan_change",
         _deleted_values: Mapping[tuple[str, str, str], str | tuple[str, ...]] | None = None,
+        _recipe: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         # (ADR-021 point 4) a no-install device is planned by the
         # no-install flow, which decides between an auto plan and an
@@ -2745,6 +2770,12 @@ class NewtonService:
             # Not hash-bound: where the pre-change backup is, for the change receipt.
             "backup_path": parsed["backup_path"],
         }
+        if _recipe is not None:
+            # The recipe this plan came from: its id, its version, its
+            # title, its risk and the hash of the file it was read from.
+            # The plan hash binds it (see ``plan.canonical_plan_json``),
+            # so an edited recipe cannot be approved.
+            record["recipe"] = dict(_recipe)
         if waived:
             record["consent_basis"] = "grant"
         if final_auto_ids:
@@ -2983,6 +3014,172 @@ class NewtonService:
                     "confirm (for example `uci get`) to see them applied."
                 )
         return result
+
+    def list_recipes(self, device_name: str) -> dict[str, Any]:
+        """The recipes of the device's platform (1.6.1: OpenWrt only).
+
+        A recipe is a reviewed file in the recipes dir, next to the
+        manifest.  The listing is a read of the host's own files: it
+        never reaches the device.  A recipe file that does not load is
+        listed with its error, never skipped silently.
+
+        Every recipe carries its steps: each step's own text, with the
+        placeholders left in, and the param a step waits for.  The plan
+        of a recipe needs one explanation step per change line, so the
+        listing has to show the lines the plan will make.
+        """
+        device = self.device_for("newton_list_recipes", device_name)
+        listed: list[dict[str, Any]] = []
+        for entry in _recipes.list_recipes(device.platform):
+            if "error" in entry:
+                listed.append({"id": entry["id"], "error": entry["error"]})
+                continue
+            params: dict[str, Any] = {}
+            for name, spec in entry["params"].items():
+                shown: dict[str, Any] = {
+                    "kind": spec["kind"],
+                    "help": spec["help"],
+                    # a param with a default is optional; the default ""
+                    # means "not given"
+                    "required": "default" not in spec,
+                }
+                for key in ("default", "min", "max", "values"):
+                    if key in spec:
+                        shown[key] = spec[key]
+                params[name] = shown
+            listed.append({
+                "id": entry["id"],
+                "title": entry["title"],
+                "summary": entry["summary"],
+                "version": entry["version"],
+                "risk": entry["risk"],
+                "packages": list(entry["packages"]),
+                "params": params,
+                # the steps of the file, with their own text: the agent
+                # has to explain every change line of the plan, and the
+                # plan is built from these steps.  The text is the file's
+                # own text, so no value is ever in it.
+                "steps": [
+                    {"when": step.get("when", ""), "text": step["text"]}
+                    for step in entry["steps"]
+                ],
+                "suggest_rule": entry["suggest_rule"],
+            })
+        note = (
+            "A recipe is a reviewed file in the recipes dir; `newton_plan_recipe` "
+            "plans one by name and the values its params ask for. A recipe file "
+            "that does not load is listed with its error, never skipped."
+        )
+        return {"result": "ok", "recipes": listed, "note": note}
+
+    def plan_recipe(
+        self,
+        device_name: str,
+        recipe: str,
+        values: dict[str, str] | None = None,
+        timeout_s: int | None = None,
+        *,
+        explanation: Any = None,
+        owner_confirmed_in_chat: Any = None,
+    ) -> dict[str, Any]:
+        """Plan one recipe (1.6.1: the recipes of an OpenWrt router).
+
+        The recipe file is read and checked, and every value is checked
+        by the kind of its param, BEFORE any device call: a bad value is
+        refused by the name of its param and is never echoed.  The
+        resolved batch and the resolved checks then go to the same
+        ``plan()`` every other change uses, so the seal, the ADR-010
+        touched checks on the RESOLVED lines, the network rules, the
+        approval gate, the leash, the hold and the undo all apply
+        unchanged.
+
+        Two preconditions are checked on an installed router: the
+        packages the recipe needs (Newton installs none: a missing one
+        refuses the plan with the ``apk add`` line for the owner) and
+        the UCI paths the recipe needs to hold a value (a path that is
+        not set refuses the plan with the owner's own command).  A
+        router Newton cannot install on skips both: the result then says
+        which preconditions were not checked.
+        """
+        device = self.device_for("newton_plan_recipe", device_name)
+        try:
+            loaded = _recipes.load_recipe(recipe)
+            resolved = _recipes.resolve(loaded, values)
+        except _recipes.RecipeError as exc:
+            raise NewtonError(str(exc)) from exc
+        recipe_id = loaded["id"]
+        no_install = device.access == "no-install"
+        if not no_install:
+            self._check_recipe_preconditions(
+                device_name, recipe_id, loaded, resolved
+            )
+        planned = self.plan(
+            device_name,
+            resolved["uci_batch"],
+            timeout_s,
+            resolved["probes"],
+            _tool="newton_plan_recipe",
+            explanation=explanation,
+            owner_confirmed_in_chat=owner_confirmed_in_chat,
+            _recipe={
+                "id": recipe_id,
+                "version": loaded["version"],
+                "title": loaded["title"],
+                "risk": loaded["risk"],
+                "sha256": loaded["sha256"],
+            },
+        )
+        result: dict[str, Any] = {
+            **planned,
+            "recipe": recipe_id,
+            "recipe_version": loaded["version"],
+        }
+        if resolved["suggest_rule"]:
+            result["suggest_rule"] = resolved["suggest_rule"]
+        if no_install:
+            # the router was not read: the owner sees what was not checked
+            result["preconditions_unchecked"] = [
+                *loaded["packages"],
+                *resolved["requires_set"],
+            ]
+        return result
+
+    def _check_recipe_preconditions(
+        self,
+        device_name: str,
+        recipe_id: str,
+        loaded: dict[str, Any],
+        resolved: dict[str, Any],
+    ) -> None:
+        """The two preconditions of a recipe on an installed router.
+
+        The packages it needs, and the UCI paths that must hold a value.
+        The reads' output never reaches a result or a message: a refusal
+        names the package or the path and the command the owner runs.
+        """
+        missing: list[str] = []
+        for package in loaded["packages"]:
+            read = self.read(device_name, f"apk list -I {package}")
+            output = _read_text(read.get("stdout"))
+            if not any(
+                line.startswith(f"{package}-") for line in output.splitlines()
+            ):
+                missing.append(package)
+        if missing:
+            raise NewtonError(
+                f"recipe {recipe_id}: the router needs package(s) "
+                f"{', '.join(missing)}; the owner runs: apk add "
+                f"{' '.join(missing)}; nothing planned"
+            )
+        for path in resolved["requires_set"]:
+            read = self.read(device_name, f"uci get {path}")
+            if read.get("exit_code") != 0 or not _read_text(
+                read.get("stdout")
+            ).strip():
+                raise NewtonError(
+                    f"recipe {recipe_id}: {path} is not set; the owner runs on "
+                    f"the router: {resolved['owner_command']}; nothing planned"
+                )
 
     def plan_ad_forward(
         self,
@@ -5202,6 +5399,49 @@ def newton_plan_tier(
         device,
         lambda s: s.plan_tier(
             device, tier, batch_index, values, timeout_s,
+            explanation=explanation, owner_confirmed_in_chat=owner_confirmed_in_chat,
+        ),
+    )
+
+
+@_off_loop_tool(description=_envelope_pointer_docstring(
+    "List the recipes of the device's platform: id, title, summary, version, "
+    "risk, the packages they need, their params (kind, help, required), their "
+    "steps and the rule they suggest. The listing shows each step's UCI "
+    "lines with their placeholders; a step with a `when` is used only when "
+    "that param is given. A recipe file that does not load is listed with "
+    "its error, never skipped. Plan one with `newton_plan_recipe`."
+))
+def newton_list_recipes(device: str) -> dict[str, Any]:
+    return call_tool(
+        "newton_list_recipes", device, lambda s: s.list_recipes(device)
+    )
+
+
+@_off_loop_tool(description=_envelope_pointer_docstring(
+    "Plan one recipe by name: `values` fills its params, and every value is "
+    "checked by its kind before any device call (a rejected value is never "
+    "echoed). The plan takes the `newton_plan_change` path (seal, touched "
+    "checks on the resolved lines, network rules, approval, hold, undo), so "
+    "it needs `owner_confirmed_in_chat=true` and an `explanation` like "
+    "`newton_plan_change`. The plan's `explanation.steps` needs one entry "
+    "per change line of the steps that are used. Packages are never "
+    "installed: a missing one refuses the plan with the `apk add` line for "
+    "the owner to run."
+))
+def newton_plan_recipe(
+    device: str,
+    recipe: str,
+    values: dict[str, str] | None = None,
+    timeout_s: int | None = None,
+    explanation: dict[str, Any] | None = None,
+    owner_confirmed_in_chat: bool | None = None,
+) -> dict[str, Any]:
+    return call_tool(
+        "newton_plan_recipe",
+        device,
+        lambda s: s.plan_recipe(
+            device, recipe, values, timeout_s,
             explanation=explanation, owner_confirmed_in_chat=owner_confirmed_in_chat,
         ),
     )

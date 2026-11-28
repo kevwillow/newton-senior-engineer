@@ -173,6 +173,13 @@ DEVICE_SOURCE_ROWS = [
     ("profiles/openwrt/hardened.uci", "0o644"),
     ("profiles/openwrt/lockdown.uci", "0o644"),
     ("profiles/openwrt/intents.toml", "0o644"),
+    ("profiles/openwrt/recipes/bufferbloat.toml", "0o644"),
+    ("profiles/openwrt/recipes/dhcp-reservation.toml", "0o644"),
+    ("profiles/openwrt/recipes/dns-host.toml", "0o644"),
+    ("profiles/openwrt/recipes/dns-upstream.toml", "0o644"),
+    ("profiles/openwrt/recipes/guest-network.toml", "0o644"),
+    ("profiles/openwrt/recipes/port-forward.toml", "0o644"),
+    ("profiles/openwrt/recipes/wireguard.toml", "0o644"),
 ]
 
 SCRIPT_SOURCE_ROWS = [

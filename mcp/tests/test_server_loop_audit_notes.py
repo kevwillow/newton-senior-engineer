@@ -36,6 +36,8 @@ TOOL_ARGUMENTS: dict[str, dict[str, Any]] = {
     "newton_grant_off": {"device": "quasar"},
     "newton_list_tiers": {},
     "newton_plan_tier": {"device": "quasar", "tier": "standard"},
+    "newton_list_recipes": {"device": "quasar"},
+    "newton_plan_recipe": {"device": "quasar", "recipe": "dhcp-reservation"},
     "newton_plan_ad_forward": {"device": "quasar", "domain": "corp.example.com", "dc_addresses": ["192.0.2.10"]},
     "newton_guided_recommend": {},
     "newton_guided_audit": {"device": "quasar"},
@@ -332,13 +334,16 @@ def test_the_rewrite_note_is_whole_only_on_the_router_text_tools():
 
 def test_the_tool_descriptions_fit_their_budget():
     """With a whole copy of the notes in every description the tool list
-    came to about 35000 characters.  Ten of the twenty-eight tools return
-    router text verbatim and keep the whole note; seventeen more carry the
+    came to about 35000 characters.  Ten of the thirty tools return
+    router text verbatim and keep the whole note; nineteen more carry the
     short pointer to it; the last one carries neither.  newton_plan_ad_forward
-    keeps the whole note too, so its description grew and was not shortened;
-    the list stays under 31700."""
+    keeps the whole note too, so its description grew and was not shortened.
+    The two recipe tools (1.6.1) carry the short pointer: they moved the
+    ceiling to 32800.  They now say what their steps are (the listing shows
+    each step's lines, and the plan needs one explanation entry per change
+    line), so the ceiling moved to 33000."""
     total = sum(len(tool.description or "") for tool in _registered_tools().values())
-    assert total < 31_700, total
+    assert total < 33_000, total
 
 
 # ---- the AD audit collects the whole directory every call --------

@@ -117,11 +117,15 @@ def installed_venv(tmp_path_factory):
 
     # 3) the home layout with a populated ``profiles/openwrt/``.  We
     #    copy what the launcher ``newton-install`` actually drops in:
-    #    manifest + the three tier files.
+    #    manifest + the three tier files + the recipe files.
     profiles_dest = home / "profiles" / "openwrt"
     profiles_dest.mkdir(parents=True)
     for name in ("manifest.toml", "standard.uci", "hardened.uci", "lockdown.uci", "intents.toml"):
         shutil.copy(REPO_PROFILES / name, profiles_dest / name)
+    recipes_dest = profiles_dest / "recipes"
+    recipes_dest.mkdir()
+    for recipe in sorted((REPO_PROFILES / "recipes").glob("*.toml")):
+        shutil.copy(recipe, recipes_dest / recipe.name)
 
     # 4) tidy the copies the wheel build may have produced, so the
     #    repo's tracked tree stays untouched regardless.
@@ -342,6 +346,40 @@ def test_installed_guided_recommend_finds_intents_toml(installed_venv):
     ids2 = ids2_line.split() if ids2_line else []
     assert "OW-ZONE-01" in ids1, ids1
     assert "OW-ZONE-01" in ids2, ids2
+
+
+def test_installed_list_recipes_finds_the_seven_recipes(installed_venv):
+    """``newton_mcp.recipes.list_recipes`` (what the ``newton_list_recipes``
+    tool calls) reads the recipe files from ``NEWTON_HOME/profiles/openwrt/
+    recipes``; proving the launcher ships the seven recipe files next to
+    the manifest in a real install, and that every one of them loads
+    there.
+    """
+    base, venv, home = (
+        installed_venv["base"], installed_venv["venv"], installed_venv["home"],
+    )
+    env = _isolated_env(home)
+    proc = _run(venv, env, base, (
+        "from newton_mcp.recipes import list_recipes;"
+        " out = list_recipes('openwrt');"
+        " print(','.join(sorted(e['id'] for e in out)));"
+        " print(sum(1 for e in out if 'error' in e))"
+    ))
+    assert proc.returncode == 0, proc.stderr
+    ids_line, broken_line = proc.stdout.strip().splitlines()
+    assert ids_line.split(",") == [
+        "bufferbloat",
+        "dhcp-reservation",
+        "dns-host",
+        "dns-upstream",
+        "guest-network",
+        "port-forward",
+        "wireguard",
+    ], ids_line
+    assert int(broken_line) == 0, (
+        "an installed server found a recipe file that does not load: the "
+        "launcher did not ship the recipe files next to the manifest."
+    )
 
 
 # ---- Test 5: the guided-setup report end-to-end ----------------------------

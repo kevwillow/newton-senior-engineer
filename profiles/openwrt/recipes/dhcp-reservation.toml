@@ -1,0 +1,37 @@
+id = "dhcp-reservation"
+title = "DHCP reservation"
+summary = "One device always gets the same IPv4 address."
+platform = "openwrt"
+version = 1
+risk = "LOW: one device always gets the same IPv4 address; nothing else changes."
+
+[params.name]
+kind = "name"
+help = "The UCI section name of the reservation, like laptop."
+
+[params.host]
+kind = "hostname"
+help = "The name the device answers to, like laptop."
+
+[params.mac]
+kind = "mac"
+help = "The MAC address of the device."
+
+[params.ip]
+kind = "ipv4"
+help = "The IPv4 address the device always gets."
+
+[[steps]]
+kind = "uci"
+text = """
+set dhcp.{name}=host
+set dhcp.{name}.name='{host}'
+set dhcp.{name}.mac='{mac}'
+set dhcp.{name}.ip='{ip}'
+"""
+
+[[checks]]
+probe = ["uci-equals", "dhcp.{name}.mac", "{mac}"]
+
+[[checks]]
+probe = ["uci-equals", "dhcp.{name}.ip", "{ip}"]

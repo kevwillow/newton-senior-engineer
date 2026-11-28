@@ -181,7 +181,7 @@ what its prompt asks for, then update the bootstrap itself with `newton-bootstra
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![OpenWrt 25.12](https://img.shields.io/badge/OpenWrt-25.12-00B5E2)](#supported-devices)
-[![Status: 1.6.0](https://img.shields.io/badge/Status-1.6.0-2f9a54)](#status)
+[![Status: 1.6.1](https://img.shields.io/badge/Status-1.6.1-2f9a54)](#status)
 
 ## What it looks like
 
@@ -230,7 +230,7 @@ except the changes Newton always asks about.
 
 Everything Newton does, in one list.
 
-- ✓ = in the current release, 1.6.0.
+- ✓ = in the current release, 1.6.1.
 
 A ✓ line says so when the feature works in one mode only, was run only in the virtual lab, or is covered by tests
 with no recorded run on a real router.
@@ -275,7 +275,7 @@ with no recorded run on a real router.
 
 **Security**
 - ✓ The router keys belong to a separate `newton` account. The AI's user can't read them, and `newton-doctor` checks this. The launchers run only as `newton`, in a clean environment. Only `newton-mcp` runs without your password, and it takes no arguments; every other launcher asks for your sudo password each time, and the installer checks its sudoers file with `visudo`. The separation holds only if the AI's user has no passwordless sudo or other root path of its own: `newton-doctor` reports that, but cannot fix it.
-- ✓ An MCP server with twenty-eight tools (`newton_list_devices`, `newton_read`, `newton_backup`, `newton_plan_change`, `newton_plan_undo`, `newton_apply_change`, `newton_change_status`, `newton_abort_change`, `newton_grant_off`, `newton_list_tiers`, `newton_plan_tier`, `newton_plan_ad_forward`, `newton_guided_recommend`, `newton_guided_audit`, `newton_plan_scan`, `newton_run_scan`, `newton_list_getters`, `newton_get_state`, `newton_confirm_change`, `newton_ad_list_checks`, `newton_ad_audit`, `newton_ad_plan_change`, `newton_ad_apply_change`, `newton_ad_change_status`, `newton_ad_abort_change`, `newton_ad_build_plan`, `newton_ad_build_run` and `newton_ad_build_status`) and no tool that runs arbitrary commands, upgrades or installs packages; the only reboot is the RouterOS (CHR) undo. `newton_list_getters` and `newton_get_state` are experimental read-only reads of non-OpenWrt devices by fixed getter id (never command text). `newton_confirm_change` keeps a change applied with hold, and the nine `newton_ad_*` tools are for Active Directory (see [Active Directory](#active-directory)).
+- ✓ An MCP server with thirty tools (`newton_list_devices`, `newton_read`, `newton_backup`, `newton_plan_change`, `newton_plan_undo`, `newton_apply_change`, `newton_change_status`, `newton_abort_change`, `newton_grant_off`, `newton_list_tiers`, `newton_plan_tier`, `newton_list_recipes`, `newton_plan_recipe`, `newton_plan_ad_forward`, `newton_guided_recommend`, `newton_guided_audit`, `newton_plan_scan`, `newton_run_scan`, `newton_list_getters`, `newton_get_state`, `newton_confirm_change`, `newton_ad_list_checks`, `newton_ad_audit`, `newton_ad_plan_change`, `newton_ad_apply_change`, `newton_ad_change_status`, `newton_ad_abort_change`, `newton_ad_build_plan`, `newton_ad_build_run` and `newton_ad_build_status`) and no tool that runs arbitrary commands, upgrades or installs packages; the only reboot is the RouterOS (CHR) undo. `newton_list_getters` and `newton_get_state` are experimental read-only reads of non-OpenWrt devices by fixed getter id (never command text). `newton_list_recipes` and `newton_plan_recipe` list the reviewed recipe files and plan one of them by name, through the same approval and undo as any other change. `newton_confirm_change` keeps a change applied with hold, and the nine `newton_ad_*` tools are for Active Directory (see [Active Directory](#active-directory)).
 - ✓ No Newton tool can run a shell command. Reads go through a fixed list, and the router program has a closed grammar of 25 subcommands, so a factory reset, a raw flash write, a bootloader change or a firewall flush cannot be expressed. The "never" and "ask first" lists in `SKILL.md` are instructions to the agent; the serial console script is the only Newton code with a command blocklist.
 - ✓ Wi-Fi keys and passwords in fields and values masked before they reach the AI. A secret written out as prose is not detected.
 - ✓ Device text (hostnames, Wi-Fi names, logs, scan results) marked as untrusted data, with prompt-injection tests. The marking tells the model the text is data; the model is still trusted to treat it that way.
@@ -308,6 +308,7 @@ with no recorded run on a real router.
 
 **Everyday changes, each a tested scenario**
 - ✓ Fixed addresses (DHCP reservations), port forwards (add, change, remove), local DNS records, DNS upstreams, firewall allow and block rules, VLANs and zones, Wi-Fi settings, diagnostics. Each one passed as a scenario on the real router. Each change is the agent's own `uci batch`; there is no separate tool per kind of change. The guest and IoT zone scenarios ran on a wired VLAN; a guest Wi-Fi tied to its own zone has not been run as one scenario.
+- ✓ Seven reviewed recipes for the common jobs: a guest network, a DHCP reservation, a port forward, a local DNS name, DNS upstream servers, a WireGuard tunnel and bufferbloat control. `newton_list_recipes` lists them and `newton_plan_recipe` plans one by name; every value is checked by the kind of its parameter before anything is sent to the router, and the plan goes through the same approval and undo as any other change. Each recipe passed as a scenario in the virtual lab, not on a real router.
 - ✓ Wi-Fi proven on a real radio (the Asus RT-AX57M): WPA3 with management-frame protection, WPA2/WPA3 mixed, hidden networks, client isolation. WPS is off on that router only because its Wi-Fi build has no WPS; a WPS on/off control is not built.
 - ✓ Dual-WAN failover and failback, run by a health check on the router (failover measured at 13 s, failback at 3 s in one lab run; the log of that run is not kept in this repository), including a second WAN on a VLAN. Run in the virtual lab and on the Asus, the only real hardware it has run on. It uses netifd route metrics and Newton's health script, not mwan3.
 
@@ -322,7 +323,7 @@ with no recorded run on a real router.
 
 **Lab and test evidence**
 - ✓ A virtual lab: a virtual OpenWrt router, a virtual ISP with two upstreams and test clients, reset to a snapshot for every scenario.
-- ✓ 100 scenario files in [`lab/scenarios`](lab/scenarios) for the virtual router (no full run of them is recorded in this repository), and a separate real-router suite in [`lab/scenarios-pulsar`](lab/scenarios-pulsar) (Wi-Fi included, through a USB adapter on the test client); its README lists which scenarios are ported. Its full run passed 97 of 97 scenarios on the Asus RT-AX57M (2026-10-23).
+- ✓ 108 scenario files in [`lab/scenarios`](lab/scenarios) for the virtual router (no full run of them is recorded in this repository), and a separate real-router suite in [`lab/scenarios-pulsar`](lab/scenarios-pulsar) (Wi-Fi included, through a USB adapter on the test client); its README lists which scenarios are ported. Its full run passed 97 of 97 scenarios on the Asus RT-AX57M (2026-10-23).
 - ✓ A lab isolation check (`scripts/newton-lab-isolation`): it watches a home-network interface for DHCP server replies and IPv6 router adverts and fails on any from a source not on its allow list. Its allow list is by MAC address, so a lab device that spoofs an allowed address passes.
 - ✓ A support table generated from test results, with each device's undo method and what is untested.
 - ✓ Tested with Claude Code. Setup notes for Codex, OpenCode and other MCP clients that run on the Newton host are in [docs/SETUP-CLIENTS.md](docs/SETUP-CLIENTS.md) (not run; Claude Desktop is not supported: it has no Linux build).
@@ -481,7 +482,7 @@ docs/                     install guide, roadmap, testing method, design package
 lab/                      the lab runner, its scenarios and the example lab files
 profiles/openwrt/         standard, hardened and lockdown profiles and their manifest
 device/openwrt/           on-router programs: newton-router and newton-guard
-mcp/newton_mcp/           the newton-mcp server (twenty-eight tools)
+mcp/newton_mcp/           the newton-mcp server (thirty tools)
 mcp/newton_mcp/ad/        the Active Directory audit and changes; collector/ holds the domain-controller programs
                           (collector.ps1, newton-ad-samba, write.ps1, newton-ad-samba-write)
 scripts/                  the change wrapper, the installer and bootstrap, and the setup (router and AD), doctor
@@ -500,14 +501,14 @@ See [`SECURITY.md`](SECURITY.md).
 
 ## Status
 
-**Released: 1.6.0.** OpenWrt in the installed and no-install modes (plus experimental VyOS, MikroTik and Junos), the
+**Released: 1.6.1.** OpenWrt in the installed and no-install modes (plus experimental VyOS, MikroTik and Junos), the
 one-line setup, in-client approvals, undo after confirm, client-side checks and receipts. 1.1 added the no-install
 mode: Newton puts nothing on the router but one limited web-interface user, applies DHCP reservations and DNS entries
 under OpenWrt's own undo timer, and hands every other change to you as a script you approve and run. 1.4.0 adds the
 Active Directory audit and the Active Directory changes, with the six `newton_ad_*` tools, `scripts/newton-ad-setup`, the
 `/usr/local/bin/newton-ad-setup` launcher and `newton-approve ad-change`; an apply that holds the confirm for a test
 you run from a client, with the `newton_confirm_change` tool (covered by tests only); and all the fixes since 1.1.3. It has
-twenty-four MCP tools. 1.4.1 and 1.4.2 are fixes releases (`CHANGELOG.md` lists the fixes). 1.5.0 adds a twenty-fifth tool, `newton_plan_ad_forward`, and Active Directory build mode with three tools (`newton_ad_build_plan`, `newton_ad_build_run` and `newton_ad_build_status`): twenty-eight tools in all. One full build passed stages 0 to 10 on Windows Server 2025 evaluation VMs on Proxmox (2026-11-24); the Hyper-V checkpoints are covered by tests only. 1.5.1 fixes two bugs found in review: a full state directory now stops an AD build with a clear reason instead of an error, and the write setups no longer say nothing was changed after their first steps ran. 1.5.2 writes the change protocol down as one contract (`docs/design/13-CHANGE-PROTOCOL.md`) that names the tests proving each rule in each mode, says whether the running network matches after the router's guard put a change back on its own (and gives the command that fixes it when it cannot show that), and was run on a real router with the controller killed in the middle of a change. 1.6.0 makes your own network rules part of every change: the rules of `rules.toml` (written with `newton-rules`, shipped in 1.1.3) join every plan of an installed OpenWrt router, each rule becomes a client check run from the registered inside vantage of its zone, and a rule that fails means no confirm (the router rolls the change back at its deadline); a rule that cannot run refuses the plan, before anything is staged, while the reads still work. The router program is unchanged (1.3.4), so no `newton-router-setup upgrade` is needed. Active Directory changes are approved by you, with the undo armed on the domain controller until Newton confirms; once confirmed, Newton does not undo it (a known limit: if the PDC role moves while an earlier change of the same target is still armed on the old PDC, that domain controller's undo can write the earlier before-image over the new change): you plan the reverse change; an unlock has no undo and is written at once. The Active Directory work was tested live on two-DC Windows Server 2025 and Samba 4.22 lab
+twenty-four MCP tools. 1.4.1 and 1.4.2 are fixes releases (`CHANGELOG.md` lists the fixes). 1.5.0 adds a twenty-fifth tool, `newton_plan_ad_forward`, and Active Directory build mode with three tools (`newton_ad_build_plan`, `newton_ad_build_run` and `newton_ad_build_status`): twenty-eight tools in all. One full build passed stages 0 to 10 on Windows Server 2025 evaluation VMs on Proxmox (2026-11-24); the Hyper-V checkpoints are covered by tests only. 1.5.1 fixes two bugs found in review: a full state directory now stops an AD build with a clear reason instead of an error, and the write setups no longer say nothing was changed after their first steps ran. 1.5.2 writes the change protocol down as one contract (`docs/design/13-CHANGE-PROTOCOL.md`) that names the tests proving each rule in each mode, says whether the running network matches after the router's guard put a change back on its own (and gives the command that fixes it when it cannot show that), and was run on a real router with the controller killed in the middle of a change. 1.6.0 makes your own network rules part of every change: the rules of `rules.toml` (written with `newton-rules`, shipped in 1.1.3) join every plan of an installed OpenWrt router, each rule becomes a client check run from the registered inside vantage of its zone, and a rule that fails means no confirm (the router rolls the change back at its deadline); a rule that cannot run refuses the plan, before anything is staged, while the reads still work. The router program is unchanged (1.3.4), so no `newton-router-setup upgrade` is needed. 1.6.1 adds the recipes: seven reviewed recipe files (a guest network, a DHCP reservation, a port forward, a local DNS name, DNS upstream servers, a WireGuard tunnel and bufferbloat control) and two tools, `newton_list_recipes` and `newton_plan_recipe`: thirty tools in all. Every value is checked by the kind of its parameter before anything is sent to the router, and the plan goes through the same approval and undo as any other change. Active Directory changes are approved by you, with the undo armed on the domain controller until Newton confirms; once confirmed, Newton does not undo it (a known limit: if the PDC role moves while an earlier change of the same target is still armed on the old PDC, that domain controller's undo can write the earlier before-image over the new change): you plan the reverse change; an unlock has no undo and is written at once. The Active Directory work was tested live on two-DC Windows Server 2025 and Samba 4.22 lab
 domains, on code from just before the latest helper changes: the write setups, disable and enable, the machine account
 quota, unlock, the rollback of a withheld confirm, the refusal of a request for another device, and confirmation on
 every domain controller. Covered by tests only: the 52 audit checks (48 against collector output measured on lab domain
@@ -522,10 +523,10 @@ There is no 1.2 or 1.3 release: those numbers were planning labels, and release 
   line for each mode in the approval text, running settings made to match after the router's guard restores a change
   on its own (or a plain warning with the command that fixes it), and recorded runs that lose the controller in the
   middle of a change.
-- **1.6.1:** network rules and recipes, the rest: the network rules join every change of an installed OpenWrt router in
-  1.6.0, and what is left is the reviewed recipes for common jobs, a blast-radius view, a recovery card and a network
-  map tool; Active Directory recipes (onboard and offboard a user, a new department OU, the two-round krbtgt reset) and a fix
-  for each audit finding.
+- **1.6.2:** Active Directory recipes (onboard and offboard a user, a new department OU, the two-round krbtgt reset)
+  and a fix for each audit finding.
+- **1.6.3:** the blast radius before approval, and a recovery card before a risky change.
+- **1.6.4:** a generated network map and read-only report pages written as local files.
 - **1.7:** Linux and Windows 11 hosts, with a gaming performance advisor for Windows 11.
 - **1.8:** a security engineer persona that reads Wazuh alerts.
 - **1.9:** more vendors, limited to OpenWrt, Asus and GL.iNet routers and to what the lab can test safely; other

@@ -1,0 +1,115 @@
+id = "guest-network"
+title = "Guest network"
+summary = "Adds a separate network for guests or IoT devices, with its own Wi-Fi name."
+platform = "openwrt"
+version = 1
+risk = "MEDIUM: adds a separate network that reaches the internet but not your LAN or the router's admin pages; with a Wi-Fi name it also adds a Wi-Fi network."
+suggest_rule = "newton-rules add <device> {purpose}-no-admin {purpose} blocked router --label 'the {purpose} network cannot reach the router admin'"
+
+[params.purpose]
+kind = "choice"
+values = ["guest", "iot"]
+help = "What the network is for: guests, or IoT devices that talk to each other."
+
+[params.addr]
+kind = "cidr4"
+help = "The router's own address on the new network, like 192.168.50.1/24."
+
+[params.port]
+kind = "iface"
+default = ""
+help = "a wired port or VLAN device that no other bridge uses, like eth3.30 (a LAN port such as lan4 is in br-lan already, and the recipe does not move it)"
+
+[params.radio]
+kind = "name"
+default = ""
+help = "The radio the Wi-Fi network goes on, like radio0."
+
+[params.net_ssid]
+kind = "wifi_ssid"
+default = ""
+help = "The Wi-Fi name of the new network; without it the network is wired only."
+
+[params.net_key]
+kind = "wifi_key"
+default = ""
+help = "The passphrase of the Wi-Fi network."
+
+[params.isolate]
+kind = "choice"
+values = ["0", "1"]
+default = "1"
+help = "1 keeps Wi-Fi clients apart, right for guests; 0 for IoT devices that talk to each other."
+
+[[steps]]
+kind = "uci"
+text = """
+set network.{purpose}_dev=device
+set network.{purpose}_dev.type='bridge'
+set network.{purpose}_dev.name='br-{purpose}'
+set network.{purpose}_dev.bridge_empty='1'
+set network.{purpose}=interface
+set network.{purpose}.proto='static'
+set network.{purpose}.device='br-{purpose}'
+set network.{purpose}.ipaddr='{addr}'
+set dhcp.{purpose}=dhcp
+set dhcp.{purpose}.interface='{purpose}'
+set dhcp.{purpose}.start='100'
+set dhcp.{purpose}.limit='150'
+set dhcp.{purpose}.leasetime='12h'
+set firewall.{purpose}_zone=zone
+set firewall.{purpose}_zone.name='{purpose}'
+add_list firewall.{purpose}_zone.network='{purpose}'
+set firewall.{purpose}_zone.input='REJECT'
+set firewall.{purpose}_zone.output='ACCEPT'
+set firewall.{purpose}_zone.forward='REJECT'
+set firewall.{purpose}_fwd=forwarding
+set firewall.{purpose}_fwd.src='{purpose}'
+set firewall.{purpose}_fwd.dest='wan'
+set firewall.{purpose}_dhcp=rule
+set firewall.{purpose}_dhcp.name='Allow-{purpose}-DHCP'
+set firewall.{purpose}_dhcp.src='{purpose}'
+set firewall.{purpose}_dhcp.proto='udp'
+set firewall.{purpose}_dhcp.dest_port='67'
+set firewall.{purpose}_dhcp.target='ACCEPT'
+set firewall.{purpose}_dns=rule
+set firewall.{purpose}_dns.name='Allow-{purpose}-DNS'
+set firewall.{purpose}_dns.src='{purpose}'
+set firewall.{purpose}_dns.proto='tcp udp'
+set firewall.{purpose}_dns.dest_port='53'
+set firewall.{purpose}_dns.target='ACCEPT'
+"""
+
+[[steps]]
+kind = "uci"
+when = "port"
+text = """
+add_list network.{purpose}_dev.ports='{port}'
+"""
+
+[[steps]]
+kind = "uci"
+when = "net_ssid"
+text = """
+set wireless.{purpose}_wifi=wifi-iface
+set wireless.{purpose}_wifi.device='{radio}'
+set wireless.{purpose}_wifi.mode='ap'
+set wireless.{purpose}_wifi.network='{purpose}'
+set wireless.{purpose}_wifi.ssid='{net_ssid}'
+set wireless.{purpose}_wifi.encryption='sae-mixed'
+set wireless.{purpose}_wifi.key='{net_key}'
+set wireless.{purpose}_wifi.isolate='{isolate}'
+"""
+
+[[checks]]
+probe = ["uci-equals", "network.{purpose}.proto", "static"]
+
+[[checks]]
+probe = ["uci-equals", "firewall.{purpose}_zone.input", "REJECT"]
+
+[[checks]]
+probe = ["uci-equals", "firewall.{purpose}_zone.forward", "REJECT"]
+
+[[checks]]
+when = "net_ssid"
+probe = ["uci-equals", "wireless.{purpose}_wifi.network", "{purpose}"]

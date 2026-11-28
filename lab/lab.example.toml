@@ -213,6 +213,15 @@ n=$(uci show firewall | sed -n "s/^firewall\.\(@rule\[[0-9]*\]\)\.name='Allow-Pi
 [ "$(echo "$n" | grep -c .)" = 1 ] && echo "$n"
 '''
 
+# The device of lab-r1's wan interface, the one the traffic is shaped on. It is resolved by name at run
+# time, so a scenario never depends on today's index. Each prints exactly one token or fails.
+[vars.wan_device]
+device = "lab-r1"
+cmd = '''
+d=$(uci -q get network.wan.device)
+[ -n "$d" ] && [ "$(echo "$d" | wc -w)" = 1 ] && echo "$d"
+'''
+
 # Baseline checks and steps shared by the OpenWrt profile scenarios (lab/scenarios/openwrt/).
 # "mgmt side" = lab-r1 `lan` (br-lan, 10.109.0.0/24); "client side" = lab-r1 `lab` (eth3, 192.168.150.0/24).
 # Every cmd runs over ssh on its device, like a [[post]] cmd; device = "local" runs it on this host instead, with
@@ -690,6 +699,44 @@ apk info -e miniupnpd-nftables >/dev/null 2>&1 || { echo "miniupnpd_install: min
 if netstat -lun | grep -q ':1900 '; then echo "miniupnpd_install: something already listens on udp 1900" >&2; exit 1; fi
 '''
 description = "Install miniupnpd-nftables (fw4 build) on lab-r1 with apk; checks the package, /etc/config/upnpd, the shipped enabled=0 and that nothing listens on udp 1900."
+
+# The packages the wireguard and the bufferbloat recipes need. Newton's rollback does not cover a
+# package: only the next reset of lab-r1 removes it. The step below fails loudly (rc 1 and a message on stderr, which the
+# runner shows as "setup <step> failed") if the install did not give the state the scenarios rely on.
+[steps.recipe_pkgs_install]
+device = "lab-r1"
+timeout = 240
+cmd = '''
+apk update >/dev/null 2>&1 || { echo "recipe_pkgs_install: apk update failed (no internet on lab-r1?)" >&2; exit 1; }
+apk add wireguard-tools kmod-wireguard sqm-scripts >/dev/null 2>&1 || { echo "recipe_pkgs_install: apk add wireguard-tools kmod-wireguard sqm-scripts failed" >&2; exit 1; }
+apk info -e wireguard-tools >/dev/null 2>&1 || { echo "recipe_pkgs_install: wireguard-tools is not installed after apk add" >&2; exit 1; }
+apk info -e kmod-wireguard >/dev/null 2>&1 || { echo "recipe_pkgs_install: kmod-wireguard is not installed after apk add" >&2; exit 1; }
+apk info -e sqm-scripts >/dev/null 2>&1 || { echo "recipe_pkgs_install: sqm-scripts is not installed after apk add" >&2; exit 1; }
+'''
+description = "Install wireguard-tools, kmod-wireguard and sqm-scripts on lab-r1 with apk; checks every package with apk info -e."
+
+# The wireguard recipe's own owner_command: the owner runs it on the router and the private key never
+# leaves the router. The step runs that text exactly, then checks that the key is there without
+# printing it.
+[steps.wg_key_on]
+device = "lab-r1"
+cmd = '''
+uci set network.wg0=interface && uci set network.wg0.proto=wireguard && uci set network.wg0.private_key="$(wg genkey)" && uci commit network || { echo "wg_key_on: the wireguard recipe's owner_command failed" >&2; exit 1; }
+[ -n "$(uci -q get network.wg0.private_key)" ] || { echo "wg_key_on: network.wg0.private_key is empty after the owner_command" >&2; exit 1; }
+'''
+description = "lab-r1: run the wireguard recipe's owner_command (the key is made on the router and never leaves it) and check that network.wg0.private_key is set, without printing it."
+
+# The dns-upstream recipe's upstream server, as a LIST of two entries. A router that was never
+# configured has no server option at all, and the recipe's set replaces a list as well as it
+# creates a missing option: the step gives lab-r1 the list, so the scenario proves the
+# replace-a-list path and not only the missing-option one.
+[steps.dns_server_list_on]
+device = "lab-r1"
+cmd = '''
+uci -q delete dhcp.@dnsmasq[0].server; uci add_list dhcp.@dnsmasq[0].server='10.101.0.1' && uci add_list dhcp.@dnsmasq[0].server='10.100.0.1' && uci commit dhcp || { echo "dns_server_list_on: the two upstream servers were not committed" >&2; exit 1; }
+[ "$(uci -q get dhcp.@dnsmasq[0].server)" = "10.101.0.1 10.100.0.1" ] || { echo "dns_server_list_on: dhcp.@dnsmasq[0].server is not '10.101.0.1 10.100.0.1'" >&2; exit 1; }
+'''
+description = "lab-r1: dnsmasq's server option holds a LIST of two upstream servers (10.101.0.1 10.100.0.1), set directly and committed; checked by read-back."
 
 # Zone clients on lab-client (ZONE-01 guest, ZONE-02 IoT). A zone client is a network namespace holding one 802.1Q
 # sub-interface of eth0 (apollo's vmbr102 is a plain bridge, so tagged frames pass between lab-client and lab-r1's eth3,

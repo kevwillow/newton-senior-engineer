@@ -56,6 +56,8 @@ TOOL_CALLS: dict[str, tuple] = {
     "newton_run_scan": ("lab-r1", "0" * 32),
     "newton_plan_tier": ("lab-r1", "standard", 0),
     "newton_plan_ad_forward": ("lab-r1", "corp.example.com", ["192.0.2.10"]),
+    "newton_list_recipes": ("lab-r1",),
+    "newton_plan_recipe": ("lab-r1", "dhcp-reservation"),
     "newton_guided_audit": ("lab-r1",),
     "newton_list_getters": ("lab-r1",),
     "newton_get_state": ("lab-r1", "running_config"),

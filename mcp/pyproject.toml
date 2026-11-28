@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "newton-mcp"
-version = "1.6.0"
+version = "1.6.1"
 description = "Safe OpenWrt change-protocol MCP server"
 requires-python = ">=3.11"
 dependencies = ["mcp>=1.0,<2", "dnspython>=2.6,<3"]

@@ -1,0 +1,21 @@
+name = "rc-01-guest-network"
+description = "The guest-network recipe builds the guest zone on lab-r1, and the owner's four rules about that zone hold across the change: the guest zone reaches the internet, names resolve through the zone router, the router's own addresses stay blocked, and the zone reaches the router's own DNS."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 300
+approval = true
+setup = ["portfwd_on", "zone_probe_on", "guest_ns_on", "vantage_checks_on"]
+cleanup = ["vantage_checks_off", "guest_ns_off", "zone_probe_off"]
+regression = "default"
+recipe = "guest-network"
+recipe_values = { purpose = "guest", addr = "192.168.30.1/24", port = "eth3.30" }
+
+# The owner's rules for the guest zone, as rules.toml would carry them (the
+# device is the scenario's target; the runner writes it).
+rules = [
+  { id = "guest-internet", zone = "guest", kind = "internet", label = "the guest zone reaches the internet" },
+  { id = "guest-dns", zone = "guest", kind = "dns", label = "names resolve through the zone router" },
+  { id = "guest-router-blocked", zone = "guest", kind = "blocked", to = "router", label = "the router admin stays blocked" },
+  { id = "guest-reaches-router-dns", zone = "guest", kind = "reach", to = "192.168.30.1:53", label = "the guest zone reaches the router's DNS" },
+]

@@ -29,7 +29,10 @@ Open `docs/ROADMAP.md`: it names the released and planned releases. Do not start
 5. **Forbidden MCP tools:** anything that approves, changes profiles, edits inventory/policy, rotates
    credentials, installs the guard, or exposes a raw shell. `newton_list_tiers` and `newton_plan_tier`
    are allowed because a tier is a hardening level, not a device profile, and `newton_plan_tier`
-   only plans (apply stays on the existing plan/approve/apply flow). (The only exception is the lab-only,
+   only plans (apply stays on the existing plan/approve/apply flow). `newton_list_recipes` and
+   `newton_plan_recipe` are allowed because a recipe is a reviewed file shipped with Newton, not a
+   device profile, and `newton_plan_recipe` only plans (apply stays on the existing plan/approve/apply
+   flow; it never installs a package). (The only exception is the lab-only,
    feature-flagged `newton_raw_command`, read-only allowlist by default.)
 6. **Every write path arms device-side rollback first** and has a test proving the device reverts when
    confirm is withheld.

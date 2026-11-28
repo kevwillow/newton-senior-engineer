@@ -1,0 +1,50 @@
+id = "dns-upstream"
+title = "DNS upstream servers"
+summary = "The router forwards every DNS question to the servers you name."
+platform = "openwrt"
+version = 2
+risk = "MEDIUM: the router forwards every DNS question to these servers instead of the ones your ISP gives."
+
+[params.server1]
+kind = "ipv4"
+help = "The first DNS server every question goes to."
+
+[params.server2]
+kind = "ipv4"
+default = ""
+help = "The second DNS server every question goes to; without it the router asks one server only."
+
+# The upstream servers are a LIST: OpenWrt's dnsmasq init reads `server`
+# with config_list_foreach, which skips a plain option, so the step ends on
+# an add_list; the set before it makes sure the delete cannot hit a missing
+# entry (a delete of a missing entry fails the whole uci batch, measured on
+# lab-r1).
+
+[[steps]]
+kind = "uci"
+text = """
+set dhcp.@dnsmasq[0].server='{server1}'
+delete dhcp.@dnsmasq[0].server
+add_list dhcp.@dnsmasq[0].server='{server1}'
+set dhcp.@dnsmasq[0].noresolv='1'
+"""
+
+[[steps]]
+kind = "uci"
+when = "server2"
+text = """
+add_list dhcp.@dnsmasq[0].server='{server2}'
+"""
+
+[[checks]]
+probe = ["uci-equals", "dhcp.@dnsmasq[0].noresolv", "1"]
+
+# The checks below read dnsmasq's own generated conf, so a batch dnsmasq
+# ignores (a plain option instead of a list) can no longer confirm.
+
+[[checks]]
+probe = ["conf-has", "dnsmasq", "line", "present", "server={server1}"]
+
+[[checks]]
+when = "server2"
+probe = ["conf-has", "dnsmasq", "line", "present", "server={server2}"]

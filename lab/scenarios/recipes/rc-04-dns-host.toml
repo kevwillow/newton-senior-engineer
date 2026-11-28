@@ -1,0 +1,10 @@
+name = "rc-04-dns-host"
+description = "The dns-host recipe gives one local name an address on lab-r1: rc-host.lan answers with 10.109.0.61, and the recipe's own probe reads the address back from the router."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 300
+setup = ["portfwd_on"]
+regression = "default"
+recipe = "dns-host"
+recipe_values = { name = "rc_dns", host = "rc-host.lan", ip = "10.109.0.61" }

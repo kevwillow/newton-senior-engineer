@@ -1,0 +1,11 @@
+name = "rc-03-port-forward"
+description = "The port-forward recipe opens one port on the internet side of lab-r1: wan tcp 8061 is redirected to 10.109.0.61 port 80 on the LAN, and the recipe's own probes read the destination and the outside port back from the router."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 300
+approval = true
+setup = ["portfwd_on"]
+regression = "default"
+recipe = "port-forward"
+recipe_values = { name = "rc_fwd", proto = "tcp", outside_port = "8061", inside_ip = "10.109.0.61", inside_port = "80" }

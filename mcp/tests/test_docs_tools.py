@@ -21,6 +21,10 @@ PRIVATE_LAYOUT = RELEASE_README.exists()
 
 _BACKTICKED_NAME = re.compile(r"`(newton_[A-Za-z0-9_]+)`")
 
+# The recipe tools (1.6.1) are named in the owner docs from this release on:
+# the release packet ships the README and SKILL.md text of the two tools.
+TOOLS_TEXT_PENDING = frozenset()
+
 # The tools the server has and SKILL.md does not name yet.  The newton-ad
 # part of SKILL.md is written by the maintainer, not with the code
 # (SPEC-1.3 section 9), so the two AD tools are the exception until
@@ -113,21 +117,27 @@ AD_TOOL_NAMES = frozenset(name for name in server.TOOL_NAMES if name.startswith(
 
 
 def test_the_release_readme_counts_the_tools() -> None:
-    """The public README names all twenty-eight tools on its feature line and
-    says twenty-eight tools on its layout line."""
+    """The public README names all thirty tools it documents on its
+    feature line and says thirty tools on its layout line.
+
+    The two recipe tools (1.6.1) are named in the owner docs from this
+    release on (TOOLS_TEXT_PENDING is empty).
+    """
     text = _release_readme().read_text(encoding="utf-8")
-    assert len(server.TOOL_NAMES) == 28 and len(AD_TOOL_NAMES) == 9
+    assert len(server.TOOL_NAMES) == 30 and len(AD_TOOL_NAMES) == 9
+    documented = set(server.TOOL_NAMES) - TOOLS_TEXT_PENDING
+    assert len(documented) == 30, sorted(TOOLS_TEXT_PENDING)
     feature = [
         line
         for line in text.splitlines()
         if "newton_list_devices" in line and "newton_read" in line
     ]
     assert feature, "the release README has no feature line listing newton tools"
-    assert "twenty-eight tools" in feature[0]
-    for name in sorted(server.TOOL_NAMES):
+    assert "thirty tools" in feature[0]
+    for name in sorted(documented):
         assert name in feature[0], f"the feature line does not list {name}"
     layout = [line for line in text.splitlines() if line.startswith("mcp/newton_mcp/ ")]
-    assert layout and "(twenty-eight tools)" in layout[0]
+    assert layout and "(thirty tools)" in layout[0]
 
 
 @pytest.mark.skipif(
@@ -135,14 +145,19 @@ def test_the_release_readme_counts_the_tools() -> None:
     reason="README.md is the release README in the public tree; the test above covers it",
 )
 def test_readme_counts_and_tools() -> None:
-    """README lists twenty-eight tools and every tool name."""
+    """README lists the thirty tools it documents and every tool name.
+
+    The two recipe tools (1.6.1) are named in the owner docs from this
+    release on (TOOLS_TEXT_PENDING is empty).
+    """
     readme_text = README_MD.read_text(encoding="utf-8")
     # The word "eleven tools" must not appear anywhere.
     assert "eleven tools" not in readme_text, (
         "README.md still says 'eleven tools' after the tool count grew"
     )
+    documented = set(server.TOOL_NAMES) - TOOLS_TEXT_PENDING
 
-    # The MCP server feature line mentions 'twenty-eight tools' and every tool name.
+    # The MCP server feature line mentions 'thirty tools' and every tool name.
     feature_lines = [
         line
         for line in readme_text.splitlines()
@@ -150,15 +165,15 @@ def test_readme_counts_and_tools() -> None:
     ]
     assert feature_lines, "README.md has no feature line listing newton tools"
     feature_line = feature_lines[0]
-    assert "twenty-eight tools" in feature_line, (
-        f"Feature line does not say 'twenty-eight tools': {feature_line[:120]!r}"
+    assert "thirty tools" in feature_line, (
+        f"Feature line does not say 'thirty tools': {feature_line[:120]!r}"
     )
-    for tool_name in sorted(server.TOOL_NAMES):
+    for tool_name in sorted(documented):
         assert tool_name in feature_line, (
             f"Feature line does not list {tool_name}"
         )
 
-    # The repository-layout line for mcp/newton_mcp/ says "(twenty-eight tools)".
+    # The repository-layout line for mcp/newton_mcp/ says "(thirty tools)".
     layout_lines = [
         line
         for line in readme_text.splitlines()
@@ -168,8 +183,8 @@ def test_readme_counts_and_tools() -> None:
         "README.md has no repository-layout line for mcp/newton_mcp/"
     )
     layout_line = layout_lines[0]
-    assert "(twenty-eight tools)" in layout_line, (
-        f"Layout line does not say '(twenty-eight tools)': {layout_line!r}"
+    assert "(thirty tools)" in layout_line, (
+        f"Layout line does not say '(thirty tools)': {layout_line!r}"
     )
 
 
@@ -226,12 +241,18 @@ _NUMBER_WORD_TOOLS = re.compile(
 
 
 def test_setup_clients_tool_count_matches_the_server() -> None:
-    """docs/SETUP-CLIENTS.md names no tool count but the server's own."""
-    assert len(server.TOOL_NAMES) == 28
+    """docs/SETUP-CLIENTS.md names no tool count but the server's own.
+
+    The server has thirty tools and the two recipe tools (1.6.1) are
+    named in the owner docs from this release on (TOOLS_TEXT_PENDING is
+    empty), so the document names the thirty tools of this release.
+    """
+    assert len(server.TOOL_NAMES) == 30
     text = SETUP_CLIENTS_MD.read_text(encoding="utf-8")
     counts = {match.group(1).lower() for match in _NUMBER_WORD_TOOLS.finditer(text)}
-    assert counts <= {"twenty-eight"}, (
-        f"docs/SETUP-CLIENTS.md says {sorted(counts)} tools; the server has twenty-eight"
+    assert counts <= {"thirty"}, (
+        f"docs/SETUP-CLIENTS.md says {sorted(counts)} tools; the server has "
+        f"{len(server.TOOL_NAMES) - len(TOOLS_TEXT_PENDING)} documented tools"
     )
 
 
@@ -380,7 +401,14 @@ def test_the_roadmap_plans_hosts_and_the_persona_before_more_vendors() -> None:
     assert not any("protocol contract" in row for row in rows), rows
     order = [index(n) for n in ("Hosts:", "security engineer persona", "More vendors")]
     assert order == sorted(order), order
-    assert "dashboard" not in rows[index("Network rules")]
+    # The recipes shipped in 1.6.1 (a released row now): that row, and the
+    # planned rows that carry the rest of the old 1.6.1 row, name no
+    # dashboard. The dashboard is parked at the end of the backlog.
+    recipe_rows = [row for row in released.splitlines() if row.startswith("| 1.6.1 |")]
+    assert len(recipe_rows) == 1, released
+    assert "dashboard" not in recipe_rows[0]
+    for needle in ("blast radius", "recovery card", "network map"):
+        assert any(needle in row for row in rows), needle
     backlog = rows[index("| Backlog |")]
     for needle in ("read-only local dashboard", "policy engine", "maintenance windows"):
         assert needle in backlog, needle

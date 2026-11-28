@@ -1,0 +1,15 @@
+name = "rc-05-dns-upstream"
+description = "The dns-upstream recipe replaces lab-r1's list of two upstream servers with the one resolver 10.100.0.1, and the recipe's own probe reads the no-resolv flag back from the router."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 300
+setup = ["portfwd_on", "dns_server_list_on"]
+regression = "default"
+recipe = "dns-upstream"
+recipe_values = { server1 = "10.100.0.1" }
+
+[[post]]
+device = "lab-r1"
+cmd = "uci -q get dhcp.@dnsmasq[0].server"
+expect_stdout = '^10\.100\.0\.1$'

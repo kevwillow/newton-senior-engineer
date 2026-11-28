@@ -1,0 +1,10 @@
+name = "rc-02-dhcp-reservation"
+description = "The dhcp-reservation recipe gives one device its own address on lab-r1: the router's dhcp host section for rc-host (MAC 02:00:00:00:00:61) says 10.109.0.61, and the recipe's own probes read the MAC and the address back from the router."
+target = "lab-r1"
+reset = ["lab-r1"]
+expect = "confirmed"
+timeout = 300
+setup = ["portfwd_on"]
+regression = "default"
+recipe = "dhcp-reservation"
+recipe_values = { name = "rc_host", host = "rc-host", mac = "02:00:00:00:00:61", ip = "10.109.0.61" }

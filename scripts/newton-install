@@ -917,6 +917,13 @@ DEVICE_SOURCE_FILES=(
 	"profiles/openwrt/hardened.uci|profiles/openwrt/hardened.uci|0644"
 	"profiles/openwrt/lockdown.uci|profiles/openwrt/lockdown.uci|0644"
 	"profiles/openwrt/intents.toml|profiles/openwrt/intents.toml|0644"
+	"profiles/openwrt/recipes/bufferbloat.toml|profiles/openwrt/recipes/bufferbloat.toml|0644"
+	"profiles/openwrt/recipes/dhcp-reservation.toml|profiles/openwrt/recipes/dhcp-reservation.toml|0644"
+	"profiles/openwrt/recipes/dns-host.toml|profiles/openwrt/recipes/dns-host.toml|0644"
+	"profiles/openwrt/recipes/dns-upstream.toml|profiles/openwrt/recipes/dns-upstream.toml|0644"
+	"profiles/openwrt/recipes/guest-network.toml|profiles/openwrt/recipes/guest-network.toml|0644"
+	"profiles/openwrt/recipes/port-forward.toml|profiles/openwrt/recipes/port-forward.toml|0644"
+	"profiles/openwrt/recipes/wireguard.toml|profiles/openwrt/recipes/wireguard.toml|0644"
 )
 
 # install the router sources from the verified snapshot into
@@ -981,7 +988,11 @@ required_snapshot_paths() {
 		device/openwrt/newton-router/grammar.tsv device/openwrt/newton-guard/newton-guard \
 		device/openwrt/newton-guard/newton-guard.init profiles/openwrt/manifest.toml \
 		profiles/openwrt/standard.uci profiles/openwrt/hardened.uci profiles/openwrt/lockdown.uci \
-		profiles/openwrt/intents.toml
+		profiles/openwrt/intents.toml \
+		profiles/openwrt/recipes/bufferbloat.toml profiles/openwrt/recipes/dhcp-reservation.toml \
+		profiles/openwrt/recipes/dns-host.toml profiles/openwrt/recipes/dns-upstream.toml \
+		profiles/openwrt/recipes/guest-network.toml profiles/openwrt/recipes/port-forward.toml \
+		profiles/openwrt/recipes/wireguard.toml
 }
 
 # Refuse a dirty environment. The bootstrap re-execs this

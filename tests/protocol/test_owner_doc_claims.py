@@ -146,7 +146,8 @@ def test_the_router_expiry_check_is_scoped_to_the_installed_router():
 
 
 LAB_GROUPS = ["lab/scenarios", "lab/scenarios/openwrt", "lab/scenarios/everyday",
-              "lab/scenarios/dualwan", "lab/scenarios/tiers"]
+              "lab/scenarios/dualwan", "lab/scenarios/tiers",
+              "lab/scenarios/recipes"]
 
 
 @dev_only

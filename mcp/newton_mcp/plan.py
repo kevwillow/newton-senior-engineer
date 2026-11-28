@@ -15,7 +15,9 @@ staged-config check result ``staged_check``.  It also covers
 WHO consented to the plan -- the owner in the chat, or a live grant --
 so it is part of what an approval binds.  It covers ``checks`` too
 when the record carries it: the list of checks says what Newton checks
-after the change, so it is part of the sealed plan.  Creation time and
+after the change, so it is part of the sealed plan.  It covers ``recipe``
+too when the record carries it: the recipe says which file the plan came
+from, and the owner approved that recipe.  Creation time and
 any non-listed bookkeeping are metadata.  Canonical JSON uses
 lexicographically sorted keys, no insignificant whitespace, UTF-8 text,
 and JSON's normal escaping rules with non-ASCII characters left
@@ -94,6 +96,14 @@ def canonical_plan_json(record: Mapping[str, Any]) -> str:
     # must not grow either.
     if "checks" in record:
         payload["checks"] = record["checks"]
+    # The recipe a plan came from: its id, its version, its title, its
+    # risk and the hash of the file it was read from.  An approval binds
+    # to the recipe the owner saw, so a stored record whose recipe was
+    # edited must not verify.  A record WITHOUT the key is an old-style
+    # record: its canonical payload must not grow, or every plan already
+    # on disk would stop verifying.
+    if "recipe" in record:
+        payload["recipe"] = record["recipe"]
     return json.dumps(
         payload,
         ensure_ascii=False,

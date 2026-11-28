@@ -1,0 +1,68 @@
+id = "wireguard"
+title = "WireGuard tunnel"
+summary = "One peer reaches your network through a WireGuard tunnel on the internet side."
+platform = "openwrt"
+version = 1
+risk = "HIGH: opens a UDP port on the internet side for WireGuard, and the peer reaches your LAN."
+packages = ["wireguard-tools", "kmod-wireguard"]
+requires_set = ["network.wg0.private_key"]
+owner_command = 'uci set network.wg0=interface && uci set network.wg0.proto=wireguard && uci set network.wg0.private_key="$(wg genkey)" && uci commit network'
+
+[params.addr]
+kind = "cidr4"
+help = "The router's own address on the tunnel, like 10.99.0.1/24."
+
+[params.port]
+kind = "int"
+min = 1024
+max = 65535
+default = "51820"
+help = "The UDP port the tunnel listens on, on the internet side."
+
+[params.peer]
+kind = "name"
+help = "The UCI section name of the peer, like wg_peer."
+
+[params.peer_key]
+kind = "wg_pubkey"
+help = "The public key of the peer."
+
+[params.peer_ip]
+kind = "ipv4"
+help = "The address of the peer on the tunnel."
+
+[[steps]]
+kind = "uci"
+text = """
+set network.wg0=interface
+set network.wg0.proto='wireguard'
+set network.wg0.listen_port='{port}'
+set network.wg0.addresses='{addr}'
+set network.{peer}=wireguard_wg0
+set network.{peer}.public_key='{peer_key}'
+set network.{peer}.allowed_ips='{peer_ip}/32'
+set firewall.wg_zone=zone
+set firewall.wg_zone.name='wg'
+set firewall.wg_zone.network='wg0'
+set firewall.wg_zone.input='ACCEPT'
+set firewall.wg_zone.output='ACCEPT'
+set firewall.wg_zone.forward='REJECT'
+set firewall.wg_lan=forwarding
+set firewall.wg_lan.src='wg'
+set firewall.wg_lan.dest='lan'
+set firewall.wg_in=rule
+set firewall.wg_in.name='Allow-WireGuard'
+set firewall.wg_in.src='wan'
+set firewall.wg_in.proto='udp'
+set firewall.wg_in.dest_port='{port}'
+set firewall.wg_in.target='ACCEPT'
+"""
+
+[[checks]]
+probe = ["uci-equals", "network.wg0.proto", "wireguard"]
+
+[[checks]]
+probe = ["uci-equals", "firewall.wg_in.dest_port", "{port}"]
+
+[[checks]]
+probe = ["uci-equals", "network.{peer}.allowed_ips", "{peer_ip}/32"]
